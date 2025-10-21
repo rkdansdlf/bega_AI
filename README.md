@@ -69,13 +69,13 @@ python chatbot.py
 python main.py
 
 # 방법 2: uvicorn 명령어 사용
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8001
 ```
 
 서버가 실행되면:
-- API: http://localhost:8000
-- Swagger 문서: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+- API: http://localhost:8001
+- Swagger 문서: http://localhost:8001/docs
+- ReDoc: http://localhost:8001/redoc
 
 ## 📡 API 엔드포인트
 
@@ -165,10 +165,10 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ```bash
 # 헬스 체크
-curl http://localhost:8000/health
+curl http://localhost:8001/health
 
 # 챗봇 질문
-curl -X POST "http://localhost:8000/api/chatbot/simple" \
+curl -X POST "http://localhost:8001/api/chatbot/simple" \
   -H "Content-Type: application/json" \
   -d '{"question": "오늘 경기 일정"}'
 ```
@@ -180,7 +180,7 @@ import requests
 
 # 챗봇 질문
 response = requests.post(
-    "http://localhost:8000/api/chatbot/simple",
+    "http://localhost:8001/api/chatbot/simple",
     json={"question": "팀 순위 알려줘"}
 )
 print(response.json())
@@ -225,7 +225,7 @@ print(response.json())
 | `MYSQL_DATABASE` | MySQL 데이터베이스 | api_test_data |
 | `MYSQL_PORT` | MySQL 포트 | 3306 |
 | `API_HOST` | API 서버 호스트 | 0.0.0.0 |
-| `API_PORT` | API 서버 포트 | 8000 |
+| `API_PORT` | API 서버 포트 | 8001 |
 | `API_RELOAD` | 자동 재시작 | True |
 
 ## 💡 사용 예시
@@ -259,7 +259,7 @@ SHOW GRANTS FOR 'user1'@'localhost';
 
 ```bash
 # 8000번 포트 사용 확인
-lsof -i :8000
+lsof -i :8001
 
 # 다른 포트로 실행
 API_PORT=8080 python main.py
@@ -274,10 +274,3 @@ API_PORT=8080 python main.py
 - `mysql-connector-python`: MySQL 드라이버
 - `pydantic`: 데이터 검증
 
-## 📄 라이센스
-
-MIT License
-
-## 👨‍💻 개발자
-
-KBO Chatbot Development Team
