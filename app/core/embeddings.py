@@ -5,6 +5,8 @@ from __future__ import annotations
 Supported providers:
     - `gemini`: Google Gemini embeddings via batchEmbedContents
     - `hf`: HuggingFace Sentence-Transformers models
+    - `openai`: OpenAI embeddings API (direct)
+    - `openrouter`: OpenRouter embeddings endpoint
     - `local`: Deterministic sine-based embeddings for tests
 """
 
@@ -236,6 +238,130 @@ async def _embed_gemini(
     return results
 
 
+async def _embed_openai(
+    texts: Sequence[str],
+    settings: Settings,
+    *,
+    max_concurrency: int,
+) -> List[List[float]]:
+    """Embed using OpenAI API directly."""
+    if not settings.openai_api_key:
+        raise EmbeddingError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
+
+    model = settings.openai_embed_model or settings.embed_model or "text-embedding-3-small"
+    url = "https://api.openai.com/v1/embeddings"
+    headers = {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": model,
+        "input": list(texts),
+    }
+
+    timeout = httpx.Timeout(60.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(url, json=payload, headers=headers)
+
+    if response.status_code != 200:
+        snippet = (response.text or "")[:300]
+        raise EmbeddingError(
+            f"OpenAI API 오류 {response.status_code}: {snippet}"
+        )
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        snippet = (response.text or "")[:300]
+        raise EmbeddingError(f"OpenAI JSON 파싱 실패: {snippet}") from exc
+
+    embeddings: List[List[float]] = []
+    for item in data.get("data", []):
+        vec = item.get("embedding")
+        if vec:
+            embeddings.append(list(map(float, vec)))
+
+    if not embeddings:
+        raise EmbeddingError(f"OpenAI가 임베딩을 반환하지 않았습니다: {data}")
+
+    env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
+    expected_dim = int(env_dim) if env_dim else None
+    _ensure_dimension(embeddings, expected_dim)
+    return embeddings
+
+
+async def _embed_openrouter(
+    texts: Sequence[str],
+    settings: Settings,
+    *,
+    max_concurrency: int,
+) -> List[List[float]]:
+    """Embed using OpenRouter embeddings API."""
+    if not settings.openrouter_api_key:
+        raise EmbeddingError("OPENROUTER_API_KEY가 설정되어 있지 않습니다.")
+
+    model = (
+        settings.openrouter_embed_model
+        or settings.embed_model
+        or "openai/text-embedding-3-small"
+    )
+    base_url = settings.openrouter_base_url.rstrip("/")
+    url = f"{base_url}/embeddings"
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if settings.openrouter_referer:
+        headers["HTTP-Referer"] = settings.openrouter_referer
+    if settings.openrouter_app_title:
+        headers["X-Title"] = settings.openrouter_app_title
+    else:
+        headers.setdefault("X-Title", "KBO-Embedding")
+
+    payload = {
+        "model": model,
+        "input": list(texts),
+    }
+
+    timeout = httpx.Timeout(30.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        response = await client.post(url, json=payload, headers=headers)
+
+    content_type = response.headers.get("content-type", "")
+    if response.status_code != 200:
+        snippet = (response.text or "")[:300]
+        raise EmbeddingError(
+            f"OpenRouter {response.status_code} {content_type}: {snippet}"
+        )
+    if "application/json" not in content_type:
+        snippet = (response.text or "")[:300]
+        raise EmbeddingError(
+            f"OpenRouter 비JSON 응답: {content_type}: {snippet}"
+        )
+
+    try:
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
+        snippet = (response.text or "")[:300]
+        raise EmbeddingError(f"OpenRouter JSON 파싱 실패: {snippet}") from exc
+
+    embeddings: List[List[float]] = []
+    for item in data.get("data", []):
+        vec = item.get("embedding")
+        if vec:
+            embeddings.append(list(map(float, vec)))
+
+    if not embeddings:
+        raise EmbeddingError(f"OpenRouter가 임베딩을 반환하지 않았습니다: {data}")
+
+    env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
+    expected_dim = int(env_dim) if env_dim else None
+    _ensure_dimension(embeddings, expected_dim)
+    return embeddings
+
+
 async def async_embed_texts(
     texts: Sequence[str],
     settings: Settings,
@@ -256,6 +382,10 @@ async def async_embed_texts(
         return vectors
     if provider == "gemini":
         return await _embed_gemini(texts, settings, max_concurrency=max_concurrency)
+    if provider == "openai":
+        return await _embed_openai(texts, settings, max_concurrency=max_concurrency)
+    if provider == "openrouter":
+        return await _embed_openrouter(texts, settings, max_concurrency=max_concurrency)
 
     raise EmbeddingError(f"Unsupported provider: {provider}")
 
