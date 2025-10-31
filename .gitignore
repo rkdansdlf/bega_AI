@@ -1,4 +1,13 @@
 **/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
 .env
-venv
+.env.*
+venv/
+.venv/
+.DS_Store
+.idea/
+.vscode/
 config.py
