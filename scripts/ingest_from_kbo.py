@@ -7,9 +7,10 @@ manual rewrites.
 
 Usage (from repository root, assuming virtualenv at .venv):
 
-    cd AI
-    source ../.venv/bin/activate
-    python -m scripts.ingest_from_kbo --tables player_season_batting
+    source .venv/bin/activate
+    python -m AI.scripts.ingest_from_kbo --tables player_season_batting
+
+Docker/compose 환경에서는 `working_dir=/app` 상태에서 동일한 명령을 실행한다.
 
 위 명령을 실행하면 Supabase에서 데이터를 읽어와 벡터 임베딩과 함께 `rag_chunks`
 테이블에 업서트한다.
