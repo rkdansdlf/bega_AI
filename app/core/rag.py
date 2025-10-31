@@ -6,6 +6,8 @@ import asyncio
 from typing import Any, Dict, List, Optional, Sequence
 from psycopg2.extensions import connection as PgConnection
 
+import httpx
+
 from ..config import Settings
 from .embeddings import async_embed_texts
 from .prompts import FOLLOWUP_PROMPT, SYSTEM_PROMPT
@@ -80,10 +82,59 @@ class RAGPipeline:
             raise RuntimeError("Gemini returned an empty response.")
         return answer
 
+    async def _generate_with_openrouter(
+        self, messages: Sequence[Dict[str, str]]
+    ) -> str:
+        if not self.settings.openrouter_api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is required when using OpenRouter.")
+
+        base_url = self.settings.openrouter_base_url.rstrip("/")
+        url = f"{base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+        if self.settings.openrouter_referer:
+            headers["HTTP-Referer"] = self.settings.openrouter_referer
+        if self.settings.openrouter_app_title:
+            headers["X-Title"] = self.settings.openrouter_app_title
+
+        payload: Dict[str, Any] = {
+            "model": self.settings.openrouter_model,
+            "messages": list(messages),
+        }
+        if self.settings.max_output_tokens:
+            payload["max_tokens"] = self.settings.max_output_tokens
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+
+        try:
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:  # noqa: BLE001
+            snippet = response.text[:200]
+            raise RuntimeError(f"OpenRouter 요청 실패: {snippet}") from exc
+
+        choices = data.get("choices", [])
+        if not choices:
+            raise RuntimeError(f"OpenRouter가 응답을 반환하지 않았습니다: {data}")
+
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if not content:
+            raise RuntimeError("OpenRouter 응답이 비어 있습니다.")
+        return content
+
     async def _generate(
         self, messages: Sequence[Dict[str, str]]
     ) -> str:
-        return await self._generate_with_gemini(messages)
+        provider = self.settings.llm_provider
+        if provider == "gemini":
+            return await self._generate_with_gemini(messages)
+        if provider == "openrouter":
+            return await self._generate_with_openrouter(messages)
+        raise RuntimeError(f"Unsupported LLM provider: {provider}")
 
     async def run(
         self,
