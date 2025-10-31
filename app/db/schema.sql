@@ -13,7 +13,7 @@ create table if not exists rag_chunks (
   title text,
   content text not null,
   content_tsv tsvector generated always as (to_tsvector('simple', coalesce(content, ''))) stored,
-  embedding vector(768),
+  embedding vector(1536),
   meta jsonb default '{}'::jsonb,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
