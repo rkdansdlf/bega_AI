@@ -1,6 +1,6 @@
 # ⚾ KBO AI Service
 
-Vector-enabled RAG service that layers Google Gemini on top of the existing KBO database. The design follows `chatbot_system.md` with pgvector storage, SSE streaming chat, and a lightweight intent router.
+Vector-enabled RAG service that layers modern LLM providers (OpenRouter 또는 Google Gemini) on top of the existing KBO database. The design follows `chatbot_system.md` with pgvector storage, SSE streaming chat, and a lightweight intent router.
 
 ## 📦 Project layout
 
@@ -8,11 +8,11 @@ Vector-enabled RAG service that layers Google Gemini on top of the existing KBO 
 AI/
 ├── app/
 │   ├── main.py                 # FastAPI factory
-│   ├── config.py               # Settings (Gemini, DB, embeddings)
+│   ├── config.py               # Settings (LLM/embeddings, DB)
 │   ├── deps.py                 # Dependency helpers (lifespan, DB pool)
 │   ├── core/                   # RAG building blocks
 │   │   ├── chunking.py
-│   │   ├── embeddings.py       # Gemini or local embeddings
+│   │   ├── embeddings.py       # Gemini / OpenRouter / HF / local embeddings
 │   │   ├── prompts.py
 │   │   ├── rag.py              # retrieve → augment → generate
 │   │   ├── retrieval.py        # pgvector + FTS
@@ -37,11 +37,25 @@ AI/
 Copy `.env.example` and fill in real values:
 
 ```
-GEMINI_API_KEY=...
-GEMINI_MODEL=gemini-1.5-flash
-GEMINI_EMBED_MODEL=text-embedding-004
-EMBED_PROVIDER=gemini           # or local
-LLM_PROVIDER=gemini
+# OpenRouter (기본 예시)
+LLM_PROVIDER=openrouter
+EMBED_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=openai/gpt-5
+EMBED_MODEL=openai/text-embedding-3-small
+# OPENROUTER_EMBED_MODEL=openai/text-embedding-3-small
+# OPENROUTER_REFERER=https://your.domain
+# OPENROUTER_APP_TITLE=KBO Chatbot
+
+# Gemini (선택)
+# LLM_PROVIDER=gemini
+# EMBED_PROVIDER=gemini
+# GEMINI_API_KEY=...
+# GEMINI_MODEL=gemini-1.5-flash
+# GEMINI_EMBED_MODEL=text-embedding-004
+
+# 공통
 SUPABASE_DB_URL=postgresql://user:pass@host:5432/db
 DEFAULT_SEARCH_LIMIT=6
 MAX_OUTPUT_TOKENS=1024
@@ -97,7 +111,7 @@ source.addEventListener("done", () => source.close());
 1. **Intent routing** – rule-based (stats/explanatory/freeform) with optional SVM model (`app/ml/intent_router.joblib`).
 2. **Retrieval** – pgvector similarity + optional FTS boost (`app/core/retrieval.py`). Filters can include `season_year`, `team_id`, etc.
 3. **Direct SQL tools** – some stat queries bypass LLM via SQL (`app/core/tools.py`).
-4. **Generation** – OpenRouter chat completion with citations assembled from retrieved chunks.
+4. **Generation** – 선택한 LLM(OpenRouter/Gemini)으로 답변을 생성하고, 검색한 청크의 citation을 함께 제공합니다.
 
 ## 🗄️ Vector schema
 
@@ -115,7 +129,7 @@ psql $SUPABASE_DB_URL -f app/db/schema.sql
 
 ## 📝 Notes
 
-- The legacy Gemini-based implementation is commented out; `chatbot.py` now wraps the new pipeline for backward compatibility.
+- `chatbot.py`는 기존 인터페이스와의 호환성을 위해 RAG 파이프라인을 감싸는 래퍼입니다.
 - For large ingests use `scripts/ingest_from_kbo.py` as a template—it demonstrates how to serialize stats rows, chunk them, embed, and upsert into `rag_chunks`.
 - Set `EMBED_PROVIDER=local` for offline development; embeddings fall back to deterministic pseudo vectors.
 - Streaming is powered by `sse-starlette`; remember to handle heartbeat/timeout rules when deploying behind proxies.
