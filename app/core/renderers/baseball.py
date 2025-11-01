@@ -1,4 +1,4 @@
-"""Baseball-specific chunk renderers for KBO season data."""
+"""KBO 시즌 데이터를 위한 야구 전용 청크 렌더"""
 
 from __future__ import annotations
 
