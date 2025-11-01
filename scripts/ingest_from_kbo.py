@@ -1,15 +1,31 @@
 """
-Flexible ingestion script that converts core KBO relational tables into
-`rag_chunks` entries for the RAG pipeline. The script introspects table
-metadata, formats records into readable passages, and batches embedding
-requests so additional datasets (pitching, 경기 일정 등) can be layered without
-manual rewrites.
-
-Usage (from repository root, assuming virtualenv at .venv):
+Supabase(Postgres)에서 KBO 관련 테이블을 읽어 사람이 읽기 쉬운 텍스트로 변환→(선택) 임베딩 생성→rag_chunks 테이블에 UPSERT 하는 배치 인젝션 파이프라인입니다.
+ - 테이블별 선택/제목/하이라이트/렌더링 규칙을 프로필로 정의해 공통 로직으로 처리할 수 있습니다.
 
     source .venv/bin/activate
-    python -m AI.scripts.ingest_from_kbo --tables player_season_batting
+    예시) python ingest_from_kbo.py --tables player_season_batting player_season_pitching --season-year 2025 --read-batch-size 500 --embed-batch-size 32 --max-concurrency 2
 
+    --read-batch-size 500
+     - DB에서 한 번에 끌어올(row fetch) 레코드 묶음 크기.
+    --embed-batch-size 32
+     - 임베딩 API 한 요청에 넣는 텍스트 개수.
+     - 32는 보통 임베딩 엔드포인트에서 안전하게 처리되는 중간값이어서 처리량/안정성 균형이 좋음.
+    --max-concurrency 2
+     - embed-batch를 몇개를 쌓아서 보낼지 정하는 명령어
+     - 동시에 날리는 임베딩 요청 수.
+
+    외부 api 사용 명령어 표준
+    python ingest_from_kbo.py \
+        --tables player_season_batting player_season_pitching \
+        --season-year 2025 \
+        --read-batch-size 500 \
+        --embed-batch-size 24 \
+        --max-concurrency 2 \
+        --commit-interval 1000
+
+    --commit-interval 1000 = 업서트한 레코드를 1000개 처리할 때마다 DB 트랜잭션을 커밋하라는 뜻.
+
+     
 Docker/compose 환경에서는 `working_dir=/app` 상태에서 동일한 명령을 실행한다.
 
 위 명령을 실행하면 Supabase에서 데이터를 읽어와 벡터 임베딩과 함께 `rag_chunks`
@@ -30,6 +46,7 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
+# get_settings().database_url로 Postgres 연결을 열고 쿼리 타임아웃을 막기 위해 SET statement_timeout TO 0; 적용. 각 테이블을 순서대로 처리.
 from app.config import get_settings
 from datetime import datetime
 
@@ -53,7 +70,7 @@ class ChunkPayload:
     team_id: Optional[str]
     player_id: Optional[str]
 
-
+# TABLE_PROFILES에 테이블별 메타가 있음: 설명, select_sql, 제목 구성용 필드(title_fields), 본문 하이라이트(highlights), 기본키 힌트(pk_hint), 전용 렌더러(renderer).
 TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
     "player_season_batting": {
         "description": "KBO 타자 시즌 기록 요약",
@@ -493,7 +510,7 @@ def build_content(
     lines.append(f"출처: {table}#{source_row_id}")
     return "\n".join(str(line) for line in lines)
 
-
+# build_select_query가 프로필의 select_sql이 있으면 그 SQL에 season_year 등 필터를 주입하고 ORDER BY/ LIMIT를 붙임. 커스텀 SQL이 없으면 SELECT * FROM <table> + PK 순 정렬.
 def build_select_query(
     table: str,
     profile: Dict[str, Any],
@@ -639,7 +656,7 @@ def ingest_table(
     stats: Dict[str, Any],
 ) -> int:
     if table == "rag_chunks":
-        print("⚠️  rag_chunks 테이블은 대상에서 제외합니다.")
+        print("경고: rag_chunks 테이블은 처리 대상에서 제외됩니다.")
         return 0
 
     profile = TABLE_PROFILES.get(table, {})
@@ -675,7 +692,7 @@ def ingest_table(
                 break
             fetched_rows += len(rows)
             print(
-                f"      fetched {fetched_rows} rows from {table}...",
+                f"      테이블 '{table}'에서 {fetched_rows}개 행을 가져왔습니다...",
                 flush=True,
             )
             for raw_row in rows:
@@ -719,6 +736,7 @@ def ingest_table(
                 )
                 player_id = first_value(row, ["player_id"])
 
+                # 긴 본문은 smart_chunks로 분할. 분할되면 #part{n} 접미어와 “(분할 n)”를 제목에 추가.
                 chunks = smart_chunks(content)
                 if not chunks:
                     continue
@@ -768,7 +786,7 @@ def ingest_table(
                     total_chunks += flushed
                     processed_chunks += flushed
                     print(
-                        f"      processed {processed_chunks} chunks so far...",
+                        f"      현재까지 {processed_chunks}개 청크를 처리했습니다...",
                         flush=True,
                     )
 
@@ -785,13 +803,13 @@ def ingest_table(
         processed_chunks += flushed
         if flushed:
             print(
-                f"      processed {processed_chunks} chunks so far...",
+                f"      현재까지 {processed_chunks}개 청크를 처리했습니다...",
                 flush=True,
             )
         conn.commit()
 
     if processed_chunks:
-        print(f"      processed {processed_chunks} chunks total", flush=True)
+        print(f"      총 {processed_chunks}개 청크를 처리했습니다.", flush=True)
 
     return total_chunks
 
@@ -819,7 +837,7 @@ def ingest(
     ingested_total = 0
     try:
         for table in tables:
-            print(f"🚚 Ingesting '{table}' ...")
+            print(f" 테이블 '{table}'을(를) 수집 중입니다 ...")
             stats = {
                 "embedding_calls": 0,
                 "sleep_seconds": 0.0,
@@ -842,12 +860,12 @@ def ingest(
             )
             ingested_total += chunks
             print(
-                f"   ↳ {chunks} chunks written from {table} "
-                f"(batches={stats['batches']}, embed_calls={stats['embedding_calls']}, sleep_s={stats['sleep_seconds']:.2f})"
+                f"   -> 테이블 '{table}'에서 {chunks}개 청크를 작성했습니다 "
+                f"(배치={stats['batches']}, 임베딩 호출={stats['embedding_calls']}, 대기 시간={stats['sleep_seconds']:.2f}초)"
             )
     finally:
         conn.close()
-    print(f"✅ Completed ingestion ({ingested_total} chunks total)")
+    print(f"총 {ingested_total}개 청크 수집을 완료했습니다.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -866,6 +884,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="테이블당 최대 처리 행. 지정하지 않으면 전체 행을 사용합니다.",
     )
+    # 배치 버퍼가 --embed-batch-size를 채우면 embed_texts 호출(동시성 --max-concurrency) → 벡터 리터럴 문자열로 변환 → 아래 UPSERT 실행.
     parser.add_argument(
         "--embed-batch-size",
         type=int,
@@ -914,6 +933,7 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+# 우선순위로 안전 변환(coerce_int/first_value).
 
 if __name__ == "__main__":
     args = parse_args()
