@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-"""Embedding provider selection module for the KBO RAG system.
+"""KBO RAG 시스템을 위한 임베딩 프로바이더 선택 모듈입니다.
 
-Supported providers:
-    - `gemini`: Google Gemini embeddings via batchEmbedContents
-    - `hf`: HuggingFace Sentence-Transformers models
-    - `openai`: OpenAI embeddings API (direct)
-    - `openrouter`: OpenRouter embeddings endpoint
-    - `local`: Deterministic sine-based embeddings for tests
+이 모듈은 다양한 임베딩 생성 API 또는 라이브러리를 추상화하여 일관된 인터페이스를 제공합니다.
+이를 통해 필요에 따라 임베딩 모델을 쉽게 교체할 수 있습니다.
+
+지원되는 프로바이더:
+    - `gemini`: Google Gemini (batchEmbedContents API 사용)
+    - `openai`: OpenAI 임베딩 API
+    - `openrouter`: OpenRouter 임베딩 엔드포인트
+    - `hf`: HuggingFace Sentence-Transformers 라이브러리 (로컬 모델)
+    - `local`: 테스트용 로컬 임베딩 (결정론적 사인파 기반)
 """
 
 import asyncio
@@ -26,27 +29,27 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingError(RuntimeError):
-    """Raised when embedding generation fails."""
+    """임베딩 생성 과정에서 오류가 발생했을 때 사용하는 예외 클래스."""
 
 
 def _ensure_dimension(
     vectors: Sequence[Sequence[float]],
     expected: Optional[int],
 ) -> None:
-    """Warn if vector dimensions mismatch the configured expectation."""
+    """생성된 벡터의 차원이 설정된 기대값과 일치하는지 확인하고, 다를 경우 경고를 로깅합니다."""
     if not vectors or not expected:
         return
     mismatched = {len(vec) for vec in vectors if len(vec) != expected}
     if mismatched:
         logger.warning(
-            "Embedding dimension mismatch detected. expected=%s, observed=%s",
+            "임베딩 차원 불일치 감지. 기대값=%s, 실제값=%s",
             expected,
             sorted(list(mismatched))[:3],
         )
 
 
 async def _embed_local(texts: Sequence[str]) -> List[List[float]]:
-    """Generate deterministic sine-based vectors (64d) for local testing."""
+    """로컬 테스트를 위해 결정론적인 사인파 기반 벡터(64차원)를 생성합니다."""
     vectors: List[List[float]] = []
     for text in texts:
         seed = hash(text) % 1000
@@ -61,7 +64,7 @@ async def _embed_hf(
     *,
     max_concurrency: int,
 ) -> List[List[float]]:
-    """Embed using a Sentence-Transformers model."""
+    """HuggingFace의 Sentence-Transformers 모델을 사용하여 텍스트를 임베딩합니다."""
     try:
         from sentence_transformers import SentenceTransformer
     except ModuleNotFoundError as exc:  # pragma: no cover
@@ -69,6 +72,7 @@ async def _embed_hf(
             "sentence-transformers 패키지가 필요합니다. `pip install sentence-transformers` 후 다시 시도하세요."
         ) from exc
 
+    # 설정 또는 환경 변수에서 모델 이름과 배치 크기를 가져옵니다.
     env_model = getattr(settings, "hf_embed_model", None) or os.getenv("HF_EMBED_MODEL")
     model_name = settings.embed_model or env_model or "intfloat/multilingual-e5-large"
     env_batch = getattr(settings, "hf_embed_batch", None) or os.getenv("HF_BATCH")
@@ -76,6 +80,7 @@ async def _embed_hf(
     if batch_size <= 0:
         batch_size = len(texts) or 1
 
+    # 모델을 로드하고 임베딩을 생성합니다.
     model = SentenceTransformer(model_name)
     embeddings = await asyncio.to_thread(
         model.encode,
@@ -96,10 +101,11 @@ async def _embed_gemini(
     *,
     max_concurrency: int,
 ) -> List[List[float]]:
-    """Embed with Gemini batchEmbedContents API."""
+    """Google Gemini의 `batchEmbedContents` API를 사용하여 텍스트를 임베딩합니다."""
     if not settings.gemini_api_key:
         raise EmbeddingError("GEMINI_API_KEY가 설정되어 있지 않습니다.")
 
+    # API 요청에 필요한 파라미터를 설정합니다.
     raw_model = settings.gemini_embed_model or "text-embedding-004"
     model_path = raw_model if raw_model.startswith("models/") else f"models/{raw_model}"
     env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
@@ -110,7 +116,7 @@ async def _embed_gemini(
         batch_size = len(texts) or 1
     env_token_limit = os.getenv("GEMINI_MAX_TOKENS")
     max_tokens = int(env_token_limit) if env_token_limit else 3072
-    rpm = int(os.getenv("GEMINI_RPM") or 60)
+    rpm = int(os.getenv("GEMINI_RPM") or 60)  # 분당 요청 수 제한
     min_delay = 60.0 / rpm if rpm > 0 else 0.0
     max_retries = 5
 
@@ -121,6 +127,7 @@ async def _embed_gemini(
         "X-Goog-Api-Key": settings.gemini_api_key,
     }
 
+    # 동시성 제어를 위한 HTTP 클라이언트 설정을 구성합니다.
     effective_concurrency = max(max_concurrency, 1)
     limits = httpx.Limits(
         max_connections=effective_concurrency,
@@ -128,12 +135,14 @@ async def _embed_gemini(
     )
 
     async def post_chunk(chunk: Sequence[str]) -> List[List[float]]:
+        """텍스트 청크를 API에 전송하고 임베딩 결과를 받습니다."""
         prepared_texts: List[str] = []
         for text in chunk:
+            # 텍스트가 토큰 제한을 초과하지 않도록 자릅니다.
             trimmed_text, trimmed = _ensure_token_limit(text, max_tokens)
             if trimmed:
                 logger.debug(
-                    "Trimmed text to respect token limit (approx %s tokens -> %s)",
+                    "토큰 제한을 위해 텍스트를 잘랐습니다 (약 %s 토큰 -> %s 토큰)",
                     _estimate_tokens(text),
                     _estimate_tokens(trimmed_text),
                 )
@@ -160,7 +169,7 @@ async def _embed_gemini(
         try:
             response.raise_for_status()
             data = response.json()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             snippet = response.text[:200]
             raise EmbeddingError(f"Gemini 응답 파싱 실패: {snippet}") from exc
 
@@ -168,6 +177,7 @@ async def _embed_gemini(
             raise EmbeddingError(f"Gemini 오류: {data['error']}")
 
         embeddings: List[List[float]] = []
+        # API 응답에서 임베딩 값을 추출합니다.
         if "responses" in data:
             for item in data.get("responses", []):
                 values = item.get("embedding", {}).get("values")
@@ -183,16 +193,20 @@ async def _embed_gemini(
             raise EmbeddingError(f"Gemini가 임베딩을 반환하지 않았습니다: {data}")
         return embeddings
 
+    # 전체 텍스트를 배치 크기만큼 나누어 처리합니다.
     batches = [list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)]
     results: List[List[float]] = []
     last_request_at = 0.0
 
+    # 각 배치를 순회하며 API 요청을 보냅니다.
     for idx, chunk in enumerate(batches):
+        # RPM 제한을 준수하기 위해 필요한 경우 대기합니다.
         if min_delay > 0 and idx > 0:
             elapsed = time.perf_counter() - last_request_at
             if elapsed < min_delay:
                 await asyncio.sleep(min_delay - elapsed)
 
+        # API 요청 실패 시 재시도 로직 (지수 백오프 사용)
         attempt = 0
         backoff = 1.0
         while True:
@@ -207,7 +221,7 @@ async def _embed_gemini(
                     raise
                 sleep_for = backoff + (0.1 * attempt)
                 logger.warning(
-                    "Gemini embedding retry %s/%s due to %s; sleeping %.1fs",
+                    "Gemini 임베딩 재시도 %s/%s. 원인: %s. %.1fs 후 재시도합니다.",
                     attempt,
                     max_retries,
                     exc,
@@ -221,18 +235,18 @@ async def _embed_gemini(
                     raise EmbeddingError(f"Gemini HTTP 오류: {exc}") from exc
                 sleep_for = backoff + (0.1 * attempt)
                 logger.warning(
-                    "Gemini HTTP 오류 재시도 %s/%s (%s); %.1fs 후 재시도",
+                    "Gemini HTTP 오류 발생. %s/%s 재시도. %.1fs 후 재시도합니다. (%s)",
                     attempt,
                     max_retries,
-                    exc,
                     sleep_for,
+                    exc,
                 )
                 await asyncio.sleep(sleep_for)
                 backoff = min(backoff * 2, 30.0)
 
     if len(results) != len(texts):
         raise EmbeddingError(
-            f"Gemini 응답 수가 입력 수와 일치하지 않습니다. input={len(texts)} output={len(results)}"
+            f"Gemini 응답 수가 입력 수와 일치하지 않습니다. 입력={len(texts)}, 출력={len(results)}"
         )
     _ensure_dimension(results, embed_dim)
     return results
@@ -244,7 +258,7 @@ async def _embed_openai(
     *,
     max_concurrency: int,
 ) -> List[List[float]]:
-    """Embed using OpenAI API directly."""
+    """OpenAI의 임베딩 API를 직접 사용하여 텍스트를 임베딩합니다."""
     if not settings.openai_api_key:
         raise EmbeddingError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
 
@@ -297,7 +311,7 @@ async def _embed_openrouter(
     *,
     max_concurrency: int,
 ) -> List[List[float]]:
-    """Embed using OpenRouter embeddings API."""
+    """OpenRouter의 임베딩 API를 사용하여 텍스트를 임베딩합니다."""
     if not settings.openrouter_api_key:
         raise EmbeddingError("OPENROUTER_API_KEY가 설정되어 있지 않습니다.")
 
@@ -333,17 +347,17 @@ async def _embed_openrouter(
     if response.status_code != 200:
         snippet = (response.text or "")[:300]
         raise EmbeddingError(
-            f"OpenRouter {response.status_code} {content_type}: {snippet}"
+            f"OpenRouter 오류 {response.status_code} ({content_type}): {snippet}"
         )
     if "application/json" not in content_type:
         snippet = (response.text or "")[:300]
         raise EmbeddingError(
-            f"OpenRouter 비JSON 응답: {content_type}: {snippet}"
+            f"OpenRouter가 JSON이 아닌 응답을 반환했습니다: {content_type}: {snippet}"
         )
 
     try:
         data = response.json()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         snippet = (response.text or "")[:300]
         raise EmbeddingError(f"OpenRouter JSON 파싱 실패: {snippet}") from exc
 
@@ -367,7 +381,7 @@ async def async_embed_texts(
     settings: Settings,
     max_concurrency: int = 1,
 ) -> List[List[float]]:
-    """Asynchronously embed texts according to the configured provider."""
+    """설정된 프로바이더에 따라 비동기적으로 텍스트 임베딩을 수행합니다."""
     if not texts:
         return []
 
@@ -387,7 +401,7 @@ async def async_embed_texts(
     if provider == "openrouter":
         return await _embed_openrouter(texts, settings, max_concurrency=max_concurrency)
 
-    raise EmbeddingError(f"Unsupported provider: {provider}")
+    raise EmbeddingError(f"지원되지 않는 프로바이더입니다: {provider}")
 
 
 def embed_texts(
@@ -396,23 +410,24 @@ def embed_texts(
     *,
     max_concurrency: int = 1,
 ) -> List[List[float]]:
-    """Synchronous wrapper for async_embed_texts()."""
+    """`async_embed_texts` 함수의 동기적 래퍼(wrapper)입니다."""
     return asyncio.run(async_embed_texts(texts, settings, max_concurrency=max_concurrency))
+
 def _estimate_tokens(text: str) -> int:
-    """Rudimentary token approximation (4 chars ≈ 1 token)."""
+    """간단한 토큰 수 추정 (4 글자 ≈ 1 토큰)."""
     if not text:
         return 0
     return max(1, len(text) // 4)
 
 
 def _ensure_token_limit(text: str, max_tokens: int) -> Tuple[str, bool]:
-    """Trim text to stay under max token budget, returns (trimmed_text, trimmed?)."""
+    """텍스트가 최대 토큰 예산을 초과하지 않도록 자릅니다. (잘린 텍스트, 잘림 여부)를 반환합니다."""
     if max_tokens <= 0:
         return text, False
     approx = _estimate_tokens(text)
     if approx <= max_tokens:
         return text, False
-    # Rough trimming: keep proportional characters.
+    # 대략적인 자르기: 비율에 맞춰 글자 수를 유지합니다.
     target_chars = max_tokens * 4
     trimmed = text[:target_chars]
     return trimmed, True
