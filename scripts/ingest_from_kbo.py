@@ -257,6 +257,53 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["team_id", "season_year", "season"],
     },
+    "hitter_record": {
+        "description": "경기별 타자 기록",
+        "title_fields": [
+            ["game_id"],
+            ["player_name"],
+            ["team_id"],
+        ],
+        "highlights": [
+            ("경기", ["game_id"]),
+            ("선수", ["player_name"]),
+            ("팀", ["team_id"]),
+            ("타순", ["batting_order"]),
+            ("포지션", ["position"]),
+            ("타수", ["at_bats"]),
+            ("안타", ["hits"]),
+            ("타점", ["rbis"]),
+            ("득점", ["runs"]),
+            ("타율", ["batting_average"]),
+        ],
+        "pk_hint": ["id", "game_id", "team_id", "player_name"],
+    },
+    "pitcher_record": {
+    "description": "경기별 투수 기록",
+    "kind": "pitching_game",
+    "title_fields": [
+        ["game_id"],
+        ["player_name"],
+        ["team_id"],
+    ],
+    "highlights": [
+        ("경기", ["game_id"]),
+        ("선수", ["player_name"]),
+        ("팀", ["team_id"]),
+        ("등판", ["appearance"]),
+        ("결과", ["result"]),
+        ("승", ["wins"]),
+        ("패", ["losses"]),
+        ("세이브", ["saves"]),
+        ("이닝", ["innings"]),
+        ("피안타", ["hits_allowed"]),
+        ("탈삼진", ["strikeouts"]),
+        ("실점", ["runs_allowed"]),
+        ("자책", ["earned_runs"]),
+        ("ERA", ["era"]),
+    ],
+    "pk_hint": ["id", "game_id", "team_id", "player_name"],
+},
 }
 
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
@@ -270,6 +317,8 @@ DEFAULT_TABLES = [
     "stadiums",
     "teams",
     "team_history",
+    "hitter_record",
+    "pitcher_record",
 ]
 
 TARGET_RPM = 10
