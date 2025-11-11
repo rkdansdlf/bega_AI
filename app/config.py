@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = Field(None, env="GEMINI_API_KEY")
     gemini_model: str = Field("gemini-1.5-flash", env="GEMINI_MODEL")
     gemini_embed_model: str = Field("text-embedding-004", env="GEMINI_EMBED_MODEL")
+    gemini_base_url: str = Field(
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        env="GEMINI_BASE_URL",
+    )
 
     # --- OpenAI 설정 ---
     openai_api_key: Optional[str] = Field(None, env="OPENAI_API_KEY")
@@ -56,6 +60,9 @@ class Settings(BaseSettings):
     openrouter_referer: Optional[str] = Field(None, env="OPENROUTER_REFERER")
     openrouter_app_title: Optional[str] = Field(None, env="OPENROUTER_APP_TITLE")
     openrouter_embed_model: Optional[str] = Field(None, env="OPENROUTER_EMBED_MODEL")
+
+    # --- Function Calling / Chatbot 설정 ---
+    chatbot_model_name: Optional[str] = Field(None, env="CHATBOT_MODEL_NAME")
 
     # --- 검색(Retrieval) 관련 설정 ---
     default_search_limit: int = Field(6, env="DEFAULT_SEARCH_LIMIT")
@@ -90,6 +97,33 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         """데이터베이스 연결 URL을 반환합니다."""
         return self.supabase_db_url
+
+    @property
+    def function_calling_model(self) -> str:
+        """Function Calling 전용 모델명이 지정되면 사용하고, 그렇지 않으면 기본 LLM 모델을 사용합니다."""
+        if self.chatbot_model_name:
+            return self.chatbot_model_name
+        if self.llm_provider == "gemini":
+            return self.gemini_model
+        return self.openrouter_model
+
+    @property
+    def function_calling_base_url(self) -> str:
+        """Function Calling 클라이언트가 사용할 기본 Base URL."""
+        return (
+            self.gemini_base_url
+            if self.llm_provider == "gemini"
+            else self.openrouter_base_url
+        )
+
+    @property
+    def function_calling_api_key(self) -> Optional[str]:
+        """Function Calling에 사용할 API 키."""
+        if self.llm_provider == "gemini":
+            return self.gemini_api_key
+        if self.llm_provider == "openrouter":
+            return self.openrouter_api_key
+        return None
 
 
 @lru_cache(maxsize=1)

@@ -69,6 +69,7 @@ class ChunkPayload:
     league_type_code: Optional[int]
     team_id: Optional[str]
     player_id: Optional[str]
+    meta: Optional[Dict[str, Any]]
 
 # TABLE_PROFILES에 테이블별 메타가 있음: 설명, select_sql, 제목 구성용 필드(title_fields), 본문 하이라이트(highlights), 기본키 힌트(pk_hint), 전용 렌더러(renderer).
 TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -76,25 +77,31 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 타자 시즌 기록 요약",
         "kind": "batting_season",
         "title_fields": [
-            ["season_year", "season"],
-            ["team_name", "team_id"],
+            ["season", "season_year"],
+            ["team_name", "team_code"],
             ["player_name", "player_id"],
         ],
         "select_sql": """
-            SELECT bs.*, ks.season_id AS season_lookup_id, ks.league_type_code
+            SELECT
+                bs.*,
+                ks.season_year,
+                COALESCE(bs.season_id, ks.season_id) AS season_lookup_id,
+                ks.league_type_code,
+                pb.name AS player_name,
+                t.team_name
             FROM player_season_batting bs
             LEFT JOIN kbo_seasons ks
               ON ks.season_year = bs.season
-              AND (
-                (bs.league = 'REGULAR' AND ks.league_type_code = 0)
-                OR (bs.league = 'PLAYOFF' AND ks.league_type_code = 4)
-                OR (bs.league NOT IN ('REGULAR', 'PLAYOFF') AND ks.league_type_code = 0)
-              )
+             AND ks.league_type_code = CASE WHEN bs.league = 'PLAYOFF' THEN 4 ELSE 0 END
+            LEFT JOIN player_basic pb
+              ON pb.player_id = bs.player_id
+            LEFT JOIN teams t
+              ON t.team_id = bs.team_code
             ORDER BY bs.season DESC, bs.team_code, bs.player_id
         """,
         "highlights": [
             ("시즌", ["season_year", "season"]),
-            ("팀", ["team_name", "team_id"]),
+            ("팀", ["team_name", "team_code"]),
             ("선수", ["player_name", "player_id"]),
             ("AVG", ["avg", "batting_avg"]),
             ("OPS", ["ops"]),
@@ -102,214 +109,407 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
             ("SLG", ["slg"]),
             ("HR", ["hr", "home_runs"]),
             ("RBI", ["rbi"]),
-            ("경기", ["g", "games"]),
-            ("타석", ["pa"]),
+            ("경기", ["games", "g"]),
+            ("타석", ["plate_appearances", "pa"]),
+            ("도루", ["stolen_bases"]),
         ],
-        "pk_hint": ["player_id", "season_year", "season", "league"],
+        "pk_hint": ["player_id", "season_id", "season", "league", "level"],
         "renderer": render_batting_season,
+        "season_filter_column": "ks.season_year",
     },
     "player_season_pitching": {
         "description": "KBO 투수 시즌 기록 요약",
         "kind": "pitching_season",
         "title_fields": [
-            ["season_year", "season"],
-            ["team_name", "team_id"],
+            ["season", "season_year"],
+            ["team_name", "team_code"],
             ["player_name", "player_id"],
         ],
         "select_sql": """
-            SELECT ps.*, ks.season_id AS season_lookup_id, ks.league_type_code
+            SELECT
+                ps.*,
+                ks.season_year,
+                COALESCE(ps.season_id, ks.season_id) AS season_lookup_id,
+                ks.league_type_code,
+                pb.name AS player_name,
+                t.team_name
             FROM player_season_pitching ps
             LEFT JOIN kbo_seasons ks
               ON ks.season_year = ps.season
-              AND (
-                (ps.league = 'REGULAR' AND ks.league_type_code = 0)
-                OR (ps.league = 'PLAYOFF' AND ks.league_type_code = 4)
-                OR (ps.league NOT IN ('REGULAR', 'PLAYOFF') AND ks.league_type_code = 0)
-              )
+             AND ks.league_type_code = CASE WHEN ps.league = 'PLAYOFF' THEN 4 ELSE 0 END
+            LEFT JOIN player_basic pb
+              ON pb.player_id = ps.player_id
+            LEFT JOIN teams t
+              ON t.team_id = ps.team_code
             ORDER BY ps.season DESC, ps.team_code, ps.player_id
         """,
         "highlights": [
             ("시즌", ["season_year", "season"]),
-            ("팀", ["team_name", "team_id"]),
+            ("팀", ["team_name", "team_code"]),
             ("선수", ["player_name", "player_id"]),
             ("ERA", ["era"]),
-            ("승-패-세", ["wins_losses_saves", "record_summary"]),
-            ("승", ["win", "wins"]),
-            ("패", ["loss", "losses"]),
-            ("세이브", ["save", "saves"]),
-            ("홀드", ["hold", "holds"]),
-            ("이닝", ["ip", "innings_pitched"]),
-            ("탈삼진", ["so", "strikeouts"]),
+            ("승", ["wins", "win"]),
+            ("패", ["losses", "loss"]),
+            ("세이브", ["saves", "save"]),
+            ("홀드", ["holds", "hold"]),
+            ("이닝", ["innings_pitched", "ip"]),
+            ("탈삼진", ["strikeouts", "so"]),
             ("WHIP", ["whip"]),
+            ("FIP", ["fip"]),
+            ("K/9", ["k_per_nine"]),
+            ("BB/9", ["bb_per_nine"]),
         ],
-        "pk_hint": ["player_id", "season_year", "season", "league"],
+        "pk_hint": ["player_id", "season_id", "season", "league", "level"],
         "renderer": render_pitching_season,
+        "season_filter_column": "ks.season_year",
     },
     "game": {
         "description": "KBO 경기 기본 정보",
         "title_fields": [
             ["game_date", "date"],
-            ["home_team_id", "home_team"],
-            ["away_team_id", "away_team"],
+            ["home_team_name", "home_team"],
+            ["away_team_name", "away_team"],
         ],
+        "select_sql": """
+            SELECT
+                g.*,
+                ks.season_year,
+                ks.league_type_code,
+                s.stadium_name,
+                ht.team_name AS home_team_name,
+                at.team_name AS away_team_name
+            FROM game g
+            LEFT JOIN kbo_seasons ks
+              ON ks.season_id = g.season_id
+            LEFT JOIN stadiums s
+              ON s.stadium_id = g.stadium_id
+            LEFT JOIN teams ht
+              ON ht.team_id = g.home_team
+            LEFT JOIN teams at
+              ON at.team_id = g.away_team
+            ORDER BY g.game_date DESC, g.game_id
+        """,
         "highlights": [
             ("경기일", ["game_date", "date"]),
             ("경기 ID", ["game_id", "id"]),
-            ("리그", ["league"]),
-            ("구장", ["stadium_name", "stadium_id"]),
-            ("홈팀", ["home_team_name", "home_team_id"]),
-            ("원정팀", ["away_team_name", "away_team_id"]),
-            ("스코어", ["score_summary", "score"]),
+            ("구장", ["stadium", "stadium_name", "stadium_id"]),
+            ("홈팀", ["home_team_name", "home_team"]),
+            ("원정팀", ["away_team_name", "away_team"]),
+            ("홈팀 점수", ["home_score"]),
+            ("원정팀 점수", ["away_score"]),
+            ("승리팀", ["winning_team"]),
+            ("경기 상태", ["game_status"]),
+            ("시작 시간", ["start_time"]),
         ],
         "pk_hint": ["id", "game_id"],
+        "season_filter_column": "ks.season_year",
     },
     "box_score": {
-        "description": "경기별 선수별 박스스코어",
+        "description": "경기별 팀 박스 스코어 요약",
         "title_fields": [
+            ["game_date"],
             ["game_id"],
-            ["team_id"],
-            ["player_name", "player_id"],
+            ["stadium", "stadium_name"],
         ],
+        "select_sql": """
+            SELECT
+                bs.*,
+                g.game_date,
+                g.home_team,
+                g.away_team,
+                g.home_score,
+                g.away_score,
+                g.season_id,
+                ks.season_year,
+                ks.league_type_code,
+                s.stadium_name
+            FROM box_score bs
+            LEFT JOIN game g
+              ON g.game_id = bs.game_id
+            LEFT JOIN kbo_seasons ks
+              ON ks.season_id = g.season_id
+            LEFT JOIN stadiums s
+              ON s.stadium_id = bs.stadium_id
+            ORDER BY g.game_date DESC NULLS LAST, bs.game_id
+        """,
         "highlights": [
             ("경기", ["game_id"]),
-            ("팀", ["team_id"]),
-            ("선수", ["player_name", "player_id"]),
-            ("포지션", ["position"]),
-            ("타석", ["pa"]),
-            ("안타", ["h", "hits"]),
-            ("타점", ["rbi"]),
-            ("득점", ["r"]),
-            ("투구이닝", ["ip"]),
-            ("ERA", ["era"]),
+            ("경기일", ["game_date"]),
+            ("구장", ["stadium", "stadium_name", "stadium_id"]),
+            ("관중", ["crowd"]),
+            ("경기 시간", ["game_time"]),
+            ("홈팀 성적", ["home_record"]),
+            ("원정팀 성적", ["away_record"]),
+            ("홈팀 득점", ["home_r"]),
+            ("원정팀 득점", ["away_r"]),
+            ("홈팀 안타", ["home_h"]),
+            ("원정팀 안타", ["away_h"]),
+            ("홈팀 실책", ["home_e"]),
+            ("원정팀 실책", ["away_e"]),
         ],
-        "pk_hint": ["game_id", "team_id", "player_id"],
+        "pk_hint": ["id", "game_id"],
+        "season_filter_column": "ks.season_year",
     },
     "game_summary": {
         "description": "경기 텍스트 요약 및 주요 이슈",
         "title_fields": [
             ["game_id"],
-            ["headline", "summary_title"],
+            ["summary_type"],
+            ["player_name"],
         ],
+        "select_sql": """
+            SELECT
+                gs.*,
+                g.game_date,
+                g.home_team,
+                g.away_team,
+                ht.team_name AS home_team_name,
+                at.team_name AS away_team_name,
+                ks.season_year,
+                ks.league_type_code,
+                g.season_id
+            FROM game_summary gs
+            LEFT JOIN game g
+              ON g.game_id = gs.game_id
+            LEFT JOIN teams ht
+              ON ht.team_id = g.home_team
+            LEFT JOIN teams at
+              ON at.team_id = g.away_team
+            LEFT JOIN kbo_seasons ks
+              ON ks.season_id = g.season_id
+            ORDER BY g.game_date DESC NULLS LAST, gs.id
+        """,
         "highlights": [
             ("경기", ["game_id"]),
-            ("요약", ["headline", "summary_title"]),
-            ("하이라이트", ["highlight", "key_moment"]),
+            ("경기일", ["game_date"]),
+            ("요약 종류", ["summary_type"]),
+            ("관련 선수", ["player_name"]),
+            ("요약", ["detail_text"]),
         ],
-        "pk_hint": ["game_id"],
+        "pk_hint": ["game_id", "id"],
+        "season_filter_column": "ks.season_year",
     },
     "kbo_seasons": {
         "description": "연도별 KBO 시즌 정보",
         "title_fields": [
-            ["season_year", "season", "year"],
-            ["league"],
+            ["season_year"],
+            ["league_type_name"],
         ],
         "highlights": [
-            ("시즌", ["season_year", "season", "year"]),
-            ("리그", ["league"]),
-            ("팀 수", ["team_count"]),
-            ("경기 수", ["game_count"]),
-            ("설명", ["description"]),
+            ("시즌", ["season_year"]),
+            ("리그 코드", ["league_type_code"]),
+            ("리그 명", ["league_type_name"]),
+            ("시작일", ["start_date"]),
+            ("종료일", ["end_date"]),
         ],
-        "pk_hint": ["season_year", "season"],
+        "pk_hint": ["season_year", "season_id"],
     },
     "stadiums": {
         "description": "KBO 구장 정보",
         "title_fields": [
-            ["stadium_name", "name"],
+            ["stadium_name"],
             ["city"],
         ],
         "highlights": [
             ("구장", ["stadium_name", "name"]),
             ("도시", ["city"]),
-            ("팀", ["team_name", "team_id"]),
-            ("수용 인원", ["capacity"]),
-            ("개장", ["opened_at", "opening_year"]),
+            ("팀", ["team"]),
+            ("수용 인원", ["capacity", "seating_capacity"]),
+            ("개장 연도", ["open_year"]),
         ],
-        "pk_hint": ["id", "stadium_id"],
+        "pk_hint": ["stadium_id"],
+        "season_filter_column": None,
     },
     "teams": {
         "description": "KBO 구단 기본 정보",
         "title_fields": [
-            ["team_name", "name"],
+            ["team_name"],
             ["team_id"],
         ],
         "highlights": [
-            ("구단", ["team_name", "name"]),
+            ("구단", ["team_name"]),
             ("코드", ["team_id"]),
-            ("창단", ["founded", "founded_year"]),
-            ("연고지", ["home_city"]),
-            ("리그", ["league"]),
+            ("약칭", ["team_short_name"]),
+            ("연고지", ["city"]),
+            ("구장", ["stadium_name"]),
+            ("창단 연도", ["founded_year"]),
+            ("팀 색상", ["color"]),
         ],
-        "pk_hint": ["team_id", "id"],
+        "pk_hint": ["team_id"],
+        "season_filter_column": None,
     },
     "team_history": {
         "description": "KBO 구단 변천사",
         "title_fields": [
-            ["team_id"],
-            ["season_year", "season", "year"],
+            ["team_name", "team_code"],
+            ["start_season"],
         ],
+        "select_sql": """
+            SELECT
+                th.*,
+                th.start_season AS season_year,
+                s.stadium_name,
+                t.team_name AS current_team_name
+            FROM team_history th
+            LEFT JOIN stadiums s
+              ON s.stadium_id = th.stadium_id
+            LEFT JOIN teams t
+              ON t.team_id = th.team_code
+            ORDER BY th.team_code, th.start_season
+        """,
         "highlights": [
-            ("구단", ["team_name", "team_id"]),
-            ("시즌", ["season_year", "season", "year"]),
-            ("명칭", ["name"]),
-            ("소속 리그", ["league"]),
-            ("비고", ["notes", "description"]),
+            ("구단", ["team_name", "team_code"]),
+            ("시작 시즌", ["start_season"]),
+            ("종료 시즌", ["end_season"]),
+            ("도시", ["city"]),
+            ("주경기장", ["stadium_name"]),
+            ("현재 여부", ["is_current"]),
         ],
-        "pk_hint": ["team_id", "season_year", "season"],
+        "pk_hint": ["team_code", "start_season"],
+        "season_filter_column": "th.start_season",
     },
     "hitter_record": {
         "description": "경기별 타자 기록",
         "title_fields": [
             ["game_id"],
-            ["player_name"],
             ["team_id"],
+            ["player_name", "player_id"],
         ],
+        "select_sql": """
+            SELECT
+                hr.*,
+                ks.season_year,
+                ks.league_type_code,
+                t.team_name
+            FROM hitter_record hr
+            LEFT JOIN kbo_seasons ks
+              ON ks.season_id = hr.season_id
+            LEFT JOIN teams t
+              ON t.team_id = hr.team_id
+            ORDER BY hr.game_id DESC, hr.team_id, hr.batting_order
+        """,
         "highlights": [
             ("경기", ["game_id"]),
+            ("팀", ["team_name", "team_id"]),
             ("선수", ["player_name"]),
-            ("팀", ["team_id"]),
             ("타순", ["batting_order"]),
             ("포지션", ["position"]),
             ("타수", ["at_bats"]),
             ("안타", ["hits"]),
-            ("타점", ["rbis"]),
             ("득점", ["runs"]),
+            ("타점", ["rbis"]),
             ("타율", ["batting_average"]),
         ],
-        "pk_hint": ["id", "game_id", "team_id", "player_name"],
+        "pk_hint": ["game_id", "team_id", "player_name"],
+        "season_filter_column": "ks.season_year",
     },
     "pitcher_record": {
-    "description": "경기별 투수 기록",
-    "kind": "pitching_game",
-    "title_fields": [
-        ["game_id"],
-        ["player_name"],
-        ["team_id"],
-    ],
-    "highlights": [
-        ("경기", ["game_id"]),
-        ("선수", ["player_name"]),
-        ("팀", ["team_id"]),
-        ("등판", ["appearance"]),
-        ("결과", ["result"]),
-        ("승", ["wins"]),
-        ("패", ["losses"]),
-        ("세이브", ["saves"]),
-        ("이닝", ["innings"]),
-        ("피안타", ["hits_allowed"]),
-        ("탈삼진", ["strikeouts"]),
-        ("실점", ["runs_allowed"]),
-        ("자책", ["earned_runs"]),
-        ("ERA", ["era"]),
-    ],
-    "pk_hint": ["id", "game_id", "team_id", "player_name"],
-},
+        "description": "경기별 투수 기록",
+        "title_fields": [
+            ["game_id"],
+            ["team_id"],
+            ["player_name"],
+        ],
+        "select_sql": """
+            SELECT
+                pr.*,
+                ks.season_year,
+                ks.league_type_code,
+                t.team_name
+            FROM pitcher_record pr
+            LEFT JOIN kbo_seasons ks
+              ON ks.season_id = pr.season_id
+            LEFT JOIN teams t
+              ON t.team_id = pr.team_id
+            ORDER BY pr.game_id DESC, pr.team_id, pr.id
+        """,
+        "highlights": [
+            ("경기", ["game_id"]),
+            ("팀", ["team_name", "team_id"]),
+            ("선수", ["player_name"]),
+            ("등판", ["appearance"]),
+            ("결과", ["result"]),
+            ("승", ["wins"]),
+            ("패", ["losses"]),
+            ("세이브", ["saves"]),
+            ("이닝", ["innings", "innings_display"]),
+            ("탈삼진", ["strikeouts"]),
+            ("실점", ["runs_allowed"]),
+        ],
+        "pk_hint": ["game_id", "team_id", "player_name"],
+        "season_filter_column": "ks.season_year",
+    },
+    "player_basic": {
+        "description": "선수 기본 정보",
+        "title_fields": [
+            ["name"],
+            ["player_id"],
+        ],
+        "select_sql": """
+            SELECT
+                pb.*,
+                t.team_name
+            FROM player_basic pb
+            LEFT JOIN teams t
+              ON t.team_id = pb.team_id
+            ORDER BY pb.player_id
+        """,
+        "highlights": [
+            ("선수", ["name"]),
+            ("등번호", ["uniform_no"]),
+            ("포지션", ["position"]),
+            ("생년월일", ["birth_date"]),
+            ("신체", ["height_cm", "weight_kg"]),
+            ("소속팀", ["team_name", "team_id"]),
+        ],
+        "pk_hint": ["player_id"],
+        "season_filter_column": None,
+    },
+    "team_name_mapping": {
+        "description": "풀네임-코드 매핑",
+        "title_fields": [
+            ["full_name"],
+            ["team_id"],
+        ],
+        "select_sql": """
+            SELECT * FROM team_name_mapping ORDER BY full_name
+        """,
+        "highlights": [
+            ("풀네임", ["full_name"]),
+            ("팀 코드", ["team_id"]),
+        ],
+        "pk_hint": ["full_name"],
+        "season_filter_column": None,
+    },
+    "team_profiles": {
+        "description": "구단 프로필",
+        "title_fields": [
+            ["team_id"],
+        ],
+        "select_sql": """
+            SELECT
+                tp.*,
+                t.team_name
+            FROM team_profiles tp
+            LEFT JOIN teams t
+              ON t.team_id = tp.team_id
+            ORDER BY tp.team_id
+        """,
+        "highlights": [
+            ("팀", ["team_name", "team_id"]),
+            ("프로필", ["profile"]),
+        ],
+        "pk_hint": ["team_id", "id"],
+        "season_filter_column": None,
+    },
 }
 
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
 DEFAULT_TABLES = [
     "player_season_batting",
     "player_season_pitching",
+    "hitter_record",
+    "pitcher_record",
     "game",
     "box_score",
     "game_summary",
@@ -317,8 +517,9 @@ DEFAULT_TABLES = [
     "stadiums",
     "teams",
     "team_history",
-    "hitter_record",
-    "pitcher_record",
+    "player_basic",
+    "team_profiles",
+    "team_name_mapping",
 ]
 
 TARGET_RPM = 10
@@ -327,6 +528,7 @@ MIN_DELAY_SECONDS = 60 / TARGET_RPM
 
 UPSERT_SQL = """
 INSERT INTO rag_chunks (
+    meta,
     season_year,
     season_id,
     league_type_code,
@@ -337,9 +539,10 @@ INSERT INTO rag_chunks (
     title,
     content,
     embedding
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
 ON CONFLICT (source_table, source_row_id)
 DO UPDATE SET
+    meta = EXCLUDED.meta,
     content = EXCLUDED.content,
     embedding = EXCLUDED.embedding,
     season_year = COALESCE(EXCLUDED.season_year, rag_chunks.season_year),
@@ -569,6 +772,7 @@ def build_select_query(
     since: Optional[datetime],
 ):
     custom_sql = profile.get("select_sql")
+    season_filter_column = profile.get("season_filter_column", "season_year")
     params: List[Any] = []
     if custom_sql:
         stripped = custom_sql.strip()
@@ -582,8 +786,8 @@ def build_select_query(
             base_sql = stripped
 
         where_clauses = []
-        if season_year is not None:
-            where_clauses.append("season_year = %s")
+        if season_year is not None and season_filter_column:
+            where_clauses.append(f"{season_filter_column} = %s")
             params.append(season_year)
         if where_clauses:
             upper_base = base_sql.upper()
@@ -603,8 +807,10 @@ def build_select_query(
 
     query = sql.SQL("SELECT * FROM {}").format(sql.Identifier(table))
     where_parts: List[sql.SQL] = []
-    if season_year is not None:
-        where_parts.append(sql.SQL("season_year = %s"))
+    if season_year is not None and season_filter_column:
+        where_parts.append(
+            sql.SQL("{} = %s").format(sql.Identifier(season_filter_column))
+        )
         params.append(season_year)
     if since is not None:
         where_parts.append(sql.SQL("updated_at >= %s"))
@@ -663,6 +869,7 @@ def flush_chunks(
         cur.execute(
             UPSERT_SQL,
             (
+                json.dumps(item.meta, default=str) if item.meta else None,
                 item.season_year,
                 item.season_id,
                 item.league_type_code,
@@ -767,12 +974,18 @@ def ingest_table(
                 season_year = coerce_int(
                     first_value(row, ["season_year", "season", "year"])
                 )
+                if season_year is None:
+                    season_year = 0
+
                 season_id = coerce_int(
                     first_value(row, ["season_id", "season_lookup_id"])
                 )
                 league_type_code = coerce_int(
                     first_value(row, ["league_type_code", "league_type", "league"])
                 )
+                if league_type_code is None:
+                    league_type_code = 0
+
                 team_id = first_value(
                     row,
                     [
@@ -802,6 +1015,7 @@ def ingest_table(
                             league_type_code=league_type_code,
                             team_id=str(team_id) if team_id is not None else None,
                             player_id=str(player_id) if player_id is not None else None,
+                            meta=row,
                         )
                     )
                 else:
@@ -819,6 +1033,7 @@ def ingest_table(
                                 player_id=str(player_id)
                                 if player_id is not None
                                 else None,
+                                meta=row,
                             )
                         )
 
@@ -925,7 +1140,7 @@ def parse_args() -> argparse.Namespace:
         "--tables",
         nargs="+",
         default=DEFAULT_TABLES,
-        help="인덱싱할 테이블 리스트 (기본: 주요 8개 테이블).",
+        help="인덱싱할 테이블 리스트 (기본: 주요 14개 테이블).",
     )
     parser.add_argument(
         "--limit",

@@ -41,15 +41,21 @@ def similarity_search(
         유사도 순으로 정렬된 문서 리스트. 각 문서는 사전(dict) 형태로 반환됩니다.
     """
     filter_clauses: List[str] = ["embedding IS NOT NULL"]  # 임베딩이 없는 문서는 제외
-    params: List[Any] = []
+    filter_params: List[Any] = []
 
     # 제공된 필터 조건을 SQL WHERE 절로 변환합니다.
     if filters:
         for key, value in filters.items():
             if value is None:
                 continue
-            filter_clauses.append(f"{key} = %s")
-            params.append(value)
+            # JSON field filtering support (e.g., "meta.league")
+            if "." in key:
+                json_field, json_key = key.rsplit(".", 1)
+                filter_clauses.append(f"{json_field}->>%s = %s")
+                filter_params.extend([json_key, value])
+            else:
+                filter_clauses.append(f"{key} = %s")
+                filter_params.append(value)
 
     where_clause = " AND ".join(filter_clauses)
     
@@ -58,9 +64,10 @@ def similarity_search(
     
     # 키워드 검색이 요청된 경우, 텍스트 검색 순위(ts_rank)를 계산하는 부분을 추가합니다.
     ts_part = ""
+    keyword_param: List[str] = []
     if keyword:
         ts_part = ", ts_rank(content_tsv, plainto_tsquery('simple', %s)) as keyword_rank"
-        params.append(keyword)
+        keyword_param.append(keyword)
 
     # 최종 SQL 쿼리를 구성합니다.
     # <=> 연산자: pgvector에서 코사인 거리(1 - 코사인 유사도)를 계산합니다.
@@ -81,8 +88,8 @@ def similarity_search(
     LIMIT %s
     """
     # SQL 쿼리에 사용될 파라미터를 최종적으로 조합합니다.
-    # 순서: [벡터 문자열, ...필터 값, (키워드), LIMIT 값]
-    final_params = [vector_str] + params + [limit]
+    # 순서: [벡터 문자열, (키워드), ...필터 값, LIMIT 값]
+    final_params = [vector_str] + keyword_param + filter_params + [limit]
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, final_params)
