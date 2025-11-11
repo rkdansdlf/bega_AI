@@ -8,3 +8,5 @@ sse-starlette==1.6.1
 joblib==1.4.2
 google-generativeai==0.8.5
 httpx>=0.25
+openai>=1.14.0
+sentence-transformers
