@@ -268,41 +268,88 @@ async def _embed_openai(
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
     }
-
-    payload = {
-        "model": model,
-        "input": list(texts),
-    }
-
+    
+    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv("EMBED_BATCH_SIZE")
+    batch_size = int(env_batch) if env_batch else 32
+    if batch_size <= 0:
+        batch_size = len(texts) or 1
+    
+    max_retries = 5
+    
+    effective_concurrency = max(max_concurrency, 1)
+    limits = httpx.Limits(
+        max_connections=effective_concurrency,
+        max_keepalive_connections=1,
+    )
     timeout = httpx.Timeout(60.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+
+    async def post_chunk(chunk: Sequence[str], client: httpx.AsyncClient) -> List[List[float]]:
+        payload = {
+            "model": model,
+            "input": list(chunk),
+        }
         response = await client.post(url, json=payload, headers=headers)
 
-    if response.status_code != 200:
-        snippet = (response.text or "")[:300]
+        if response.status_code != 200:
+            snippet = (response.text or "")[:300]
+            raise EmbeddingError(
+                f"OpenAI API 오류 {response.status_code}: {snippet}"
+            )
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            snippet = (response.text or "")[:300]
+            raise EmbeddingError(f"OpenAI JSON 파싱 실패: {snippet}") from exc
+
+        embeddings: List[List[float]] = []
+        for item in data.get("data", []):
+            vec = item.get("embedding")
+            if vec:
+                embeddings.append(list(map(float, vec)))
+
+        if not embeddings:
+            raise EmbeddingError(f"OpenAI가 임베딩을 반환하지 않았습니다: {data}")
+        
+        return embeddings
+
+    batches = [list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)]
+    results: List[List[float]] = []
+    
+    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+        for chunk in batches:
+            attempt = 0
+            backoff = 1.0
+            while True:
+                try:
+                    chunk_vectors = await post_chunk(chunk, client)
+                    results.extend(chunk_vectors)
+                    break
+                except (EmbeddingError, httpx.HTTPError) as exc:
+                    attempt += 1
+                    if attempt >= max_retries:
+                        raise EmbeddingError(f"OpenAI 임베딩 실패 후 최대 재시도 도달: {exc}") from exc
+                    
+                    sleep_for = backoff + (0.1 * attempt)
+                    logger.warning(
+                        "OpenAI 임베딩 재시도 %s/%s. 원인: %s. %.1fs 후 재시도합니다.",
+                        attempt,
+                        max_retries,
+                        exc,
+                        sleep_for,
+                    )
+                    await asyncio.sleep(sleep_for)
+                    backoff = min(backoff * 2, 30.0)
+
+    if len(results) != len(texts):
         raise EmbeddingError(
-            f"OpenAI API 오류 {response.status_code}: {snippet}"
+            f"OpenAI 응답 수가 입력 수와 일치하지 않습니다. 입력={len(texts)}, 출력={len(results)}"
         )
-
-    try:
-        data = response.json()
-    except Exception as exc:
-        snippet = (response.text or "")[:300]
-        raise EmbeddingError(f"OpenAI JSON 파싱 실패: {snippet}") from exc
-
-    embeddings: List[List[float]] = []
-    for item in data.get("data", []):
-        vec = item.get("embedding")
-        if vec:
-            embeddings.append(list(map(float, vec)))
-
-    if not embeddings:
-        raise EmbeddingError(f"OpenAI가 임베딩을 반환하지 않았습니다: {data}")
 
     env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
     expected_dim = int(env_dim) if env_dim else None
-    _ensure_dimension(embeddings, expected_dim)
-    return embeddings
+    _ensure_dimension(results, expected_dim)
+    return results
 
 
 async def _embed_openrouter(

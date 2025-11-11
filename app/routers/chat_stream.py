@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+import re
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -21,6 +24,78 @@ from ..deps import get_intent_router, get_rag_pipeline
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
+
+
+def _infer_filters_from_question(
+    question: str,
+    base_filters: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    질문에 포함된 연도 표현을 분석해 season_year 필터를 자동으로 지정합니다.
+    base_filters에 season_year가 이미 있으면 그대로 반환합니다.
+    """
+    if base_filters and base_filters.get("season_year"):
+        return base_filters
+
+    match = re.search(r"(\d{2,4})\s*년", question)
+    token: Optional[str] = None
+    if match:
+        token = match.group(1)
+    else:
+        match = re.search(r"(19|20)\d{2}", question)
+        if match:
+            token = match.group(0)
+
+    year: Optional[int] = None
+    if token:
+        if len(token) == 4:
+            year = int(token)
+        elif len(token) == 2:
+            short = int(token)
+            year = 1900 + short if short >= 82 else 2000 + short
+
+    if year and 1900 <= year <= 2100:
+        merged = dict(base_filters) if base_filters else {}
+        merged["season_year"] = year
+        return merged
+
+    return base_filters
+
+
+def _decode_history_payload(payload: Any) -> Optional[List[Dict[str, str]]]:
+    """클라이언트에서 전달된 history 데이터를 정규화합니다."""
+    if not payload:
+        return None
+
+    items: Optional[List[Dict[str, Any]]] = None
+
+    if isinstance(payload, list):
+        items = payload  # 이미 파싱된 리스트
+    elif isinstance(payload, str):
+        try:
+            decoded = base64.b64decode(payload).decode("utf-8")
+            items = json.loads(decoded)
+        except Exception:  # noqa: BLE001
+            logger.warning("대화 history 디코딩에 실패했습니다.")
+            return None
+
+    if not items:
+        return None
+
+    normalized: List[Dict[str, str]] = []
+    for item in items[-MAX_HISTORY_MESSAGES:]:
+        role = item.get("role")
+        content = item.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text:
+            continue
+        normalized.append({"role": role, "content": text})
+
+    return normalized or None
 
 
 async def _render_answer(result: Dict[str, Any], style: str) -> str:
@@ -40,6 +115,7 @@ async def _stream_response(
     *,
     filters: Optional[Dict[str, Any]],
     style: str,
+    history: Optional[List[Dict[str, str]]],
     pipeline: RAGPipeline,
     intent_router,
 ):
@@ -52,8 +128,14 @@ async def _stream_response(
     result: Optional[Dict[str, Any]] = None
     error_payload: Optional[Dict[str, Any]] = None
     try:
+        filters = _infer_filters_from_question(question, filters)
         # RAG 파이프라인을 실행하여 결과를 생성합니다.
-        result = await pipeline.run(question, intent=intent, filters=filters)
+        result = await pipeline.run(
+            question,
+            intent=intent,
+            filters=filters,
+            history=history,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("chat_stream에서 오류가 발생했습니다.")
         error_payload = {"message": "internal_error", "detail": str(exc)}
@@ -111,9 +193,15 @@ async def chat_completion(
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
-    filters = payload.get("filters")
+    filters = _infer_filters_from_question(question, payload.get("filters"))
+    history = _decode_history_payload(payload.get("history"))
     intent = intent_router(question)
-    result = await pipeline.run(question, intent=intent, filters=filters)
+    result = await pipeline.run(
+        question,
+        intent=intent,
+        filters=filters,
+        history=history,
+    )
     return JSONResponse(result)
 
 
@@ -129,6 +217,7 @@ async def chat_stream_post(
     """POST 요청을 통해 질문을 받고, 답변을 SSE 스트림으로 반환합니다."""
     question = payload.get("question", "")
     filters = payload.get("filters")
+    history = _decode_history_payload(payload.get("history"))
     
     # payload에 style이 지정된 경우, 쿼리 파라미터보다 우선 적용합니다.
     style_override = payload.get("style")
@@ -140,6 +229,7 @@ async def chat_stream_post(
         question,
         filters=filters,
         style=style,
+        history=history,
         pipeline=pipeline,
         intent_router=intent_router,
     )
@@ -155,11 +245,18 @@ async def chat_stream_get(
     request: Request = None,
 ):
     """GET 요청을 통해 질문을 받고, 답변을 SSE 스트림으로 반환합니다."""
+    history_param = None
+    if request is not None:
+        history_param = request.query_params.get("history")
+
+    history = _decode_history_payload(history_param)
+
     return await _stream_response(
         request,
         q,
         filters=None,
         style=style,
+        history=history,
         pipeline=pipeline,
         intent_router=intent_router,
     )
