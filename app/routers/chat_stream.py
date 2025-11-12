@@ -9,11 +9,13 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import openai
+import os
 from typing import Any, Dict, List, Optional
 
 import re
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
@@ -260,3 +262,28 @@ async def chat_stream_get(
         pipeline=pipeline,
         intent_router=intent_router,
     )
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+@router.post("/voice")
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    _: None = Depends(rate_limit_dependency),
+    ):
+    try :
+        contents = await file.read()
+        import io
+        audio_file = io.BytesIO(contents)
+        audio_file.name = "audio.webm"
+
+        response = await openai.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            language="ko"
+        )
+        return {"text": response.text}
+    except Exception as e:
+        logger.exception("음성 변환 중 오류 발생")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
