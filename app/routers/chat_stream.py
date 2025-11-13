@@ -12,6 +12,7 @@ import logging
 import openai
 import os
 from typing import Any, Dict, List, Optional
+from dotenv import load_dotenv
 
 import re
 
@@ -24,7 +25,7 @@ from ..core.ratelimit import rate_limit_dependency
 from ..deps import get_intent_router, get_rag_pipeline
 
 logger = logging.getLogger(__name__)
-
+load_dotenv()
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
@@ -263,27 +264,40 @@ async def chat_stream_get(
         intent_router=intent_router,
     )
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+whisper_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY2"))
 
 @router.post("/voice")
 async def transcribe_audio(
     file: UploadFile = File(...),
     _: None = Depends(rate_limit_dependency),
-    ):
-    try :
+):
+    logger.info(f"===== 음성 변환 시작 =====")
+    logger.info(f"파일명: {file.filename}, 타입: {file.content_type}")
+    
+    try:
         contents = await file.read()
+        logger.info(f"파일 크기: {len(contents)} bytes")
+        
         import io
         audio_file = io.BytesIO(contents)
         audio_file.name = "audio.webm"
-
-        response = await openai.audio.transcriptions.create(
+        
+        logger.info("OpenAI Whisper API 호출 중...")
+        
+        # 동기 호출인지 확인
+        response = whisper_client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
             language="ko"
         )
+        
+        logger.info(f"✅ 변환 성공! 텍스트 길이: {len(response.text)}")
+        logger.info(f"변환된 텍스트: {response.text}")
+        
         return {"text": response.text}
+        
     except Exception as e:
-        logger.exception("음성 변환 중 오류 발생")
+        logger.exception(f"❌ 음성 변환 중 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
