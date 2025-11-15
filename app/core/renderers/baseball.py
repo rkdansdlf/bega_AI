@@ -59,8 +59,10 @@ def _format_percentage(value: Any, digits: int = 1) -> Optional[str]:
 
 
 def _format_count(value: Any, suffix: str = "") -> Optional[str]:
-    if value in NUMBER_SENTINELS:
+    if value is None or value == "null" or value == "None":
         return None
+    if value == "":
+        value = 0
     try:
         number = int(float(value))
     except (TypeError, ValueError):
@@ -140,6 +142,7 @@ def render_pitching_season(
     ip = _format_ip(row.get("innings_pitched") or row.get("ip"))
     era = _format_float(row.get("era"), 2)
     whip = _format_float(row.get("whip"), 2)
+    fip = _format_float(row.get("fip"), 2)
     wins = _format_count(row.get("win") or row.get("wins"), "승")
     losses = _format_count(row.get("loss") or row.get("losses"), "패")
     saves = _format_count(row.get("save") or row.get("saves"), "세이브")
@@ -153,6 +156,8 @@ def render_pitching_season(
         main_stats.append(f"평균자책점 {era}")
     if whip:
         main_stats.append(f"WHIP {whip}")
+    if fip:
+        main_stats.append(f"FIP {fip}")
     if wins or losses or saves:
         wl = " ".join(filter(None, [wins, losses, saves]))
         main_stats.append(wl.strip())
@@ -229,6 +234,7 @@ def render_batting_season(
     plate = _format_count(row.get("pa") or row.get("plate_appearances"), "타석")
     home_runs = _format_count(row.get("hr") or row.get("home_runs"), "홈런")
     rbi = _format_count(row.get("rbi"), "타점")
+    steals = _format_count(row.get("stolen_bases"), "도루")
 
     headline = [header_text, subject]
     main = []
@@ -242,6 +248,8 @@ def render_batting_season(
         main.append(home_runs)
     if rbi:
         main.append(rbi)
+    if steals:
+        main.append(steals)
     tl_dr = _tl_dr(main if main else ["주요 기록이 제공되지 않았습니다."])
 
     first_sentence = [header_text, subject]
