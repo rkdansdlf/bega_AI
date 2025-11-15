@@ -19,8 +19,11 @@ from ..config import Settings
 from .embeddings import async_embed_texts
 from .prompts import FOLLOWUP_PROMPT, SYSTEM_PROMPT, HYDE_PROMPT
 from .retrieval import similarity_search
-from .tools import try_answer_with_sql
 from . import kbo_metrics
+from .entity_extractor import enhance_search_strategy
+from .query_transformer import QueryTransformer, multi_query_retrieval
+from .context_formatter import ContextFormatter
+from ..agents.baseball_agent import BaseballStatisticsAgent
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,10 @@ class RAGPipeline:
     ) -> None:
         self.settings = settings
         self.connection = connection
+        self.query_transformer = QueryTransformer(self._generate)
+        self.context_formatter = ContextFormatter()
+        # 야구 통계 전용 에이전트 초기화
+        self.baseball_agent = BaseballStatisticsAgent(connection, self._generate)
 
     async def _process_and_enrich_docs(
         self, docs: List[Dict[str, Any]], year: int
@@ -327,6 +334,42 @@ class RAGPipeline:
         )
         return docs
 
+    async def retrieve_with_multi_query(
+        self,
+        query: str,
+        entity_filter,
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+        use_llm_expansion: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Multi-query retrieval을 사용하여 검색 품질을 향상시킵니다.
+        여러 쿼리 변형으로 검색하고 결과를 결합합니다.
+        """
+        logger.info(f"[RAG] Multi-query retrieval for: {query}")
+        
+        # 규칙 기반 쿼리 확장
+        query_variations = self.query_transformer.expand_query_with_rules(query, entity_filter)
+        
+        # LLM 기반 쿼리 확장 (선택적)
+        if use_llm_expansion and len(query_variations) < 3:
+            try:
+                llm_variations = await self.query_transformer.llm_expand_query(query)
+                query_variations.extend(llm_variations)
+            except Exception as e:
+                logger.warning(f"[RAG] LLM query expansion failed: {e}")
+        
+        # Multi-query retrieval 수행
+        docs = await multi_query_retrieval(
+            query_variations,
+            self.retrieve,
+            filters or {},
+            limit_per_query=8
+        )
+        
+        logger.info(f"[RAG] Multi-query retrieval returned {len(docs)} documents")
+        return docs
+
     async def _generate(self, messages: Sequence[Dict[str, str]]) -> str:
         provider = self.settings.llm_provider
         if provider == "gemini":
@@ -366,6 +409,213 @@ class RAGPipeline:
             raise RuntimeError("OpenRouter 응답이 비어 있습니다.")
         return content
 
+    def _is_statistical_query(self, query: str, entity_filter) -> bool:
+        """
+        질문이 구체적인 통계 조회인지 판단합니다.
+        통계 질문인 경우 야구 에이전트를 우선 사용해야 합니다.
+        """
+        # 일반 대화 키워드 (이런 질문들은 통계 질문이 아님)
+        chitchat_keywords = [
+            "안녕", "누구", "좋아해", "응원", "날씨", "어때", "뭐해", "어디",
+            "언제", "왜", "어떻게", "고마워", "미안", "반가워", "잘가",
+            "소개", "설명", "도움", "기능", "사용법"
+        ]
+        
+        # 통계 관련 키워드
+        statistical_keywords = [
+            "타율", "홈런", "타점", "득점", "ops", "era", "방어율", "whip", 
+            "승", "패", "세이브", "홀드", "삼진", "볼넷", "출루율", "장타율",
+            "wrc+", "war", "fip", "babip", "몇위", "순위", "1위", "최고", 
+            "상위", "리더", "기록", "통계", "성적", "몇개", "몇점", "얼마나"
+        ]
+        
+        query_lower = query.lower()
+        
+        # 1단계: 일반 대화인지 확인 (우선순위 높음)
+        is_chitchat = any(keyword in query_lower for keyword in chitchat_keywords)
+        if is_chitchat and not any(keyword in query_lower for keyword in statistical_keywords):
+            return False  # 일반 대화이므로 통계 질문 아님
+        
+        # 2단계: 통계 키워드 확인
+        has_stat_keywords = any(keyword in query_lower for keyword in statistical_keywords)
+        
+        # 3단계: 구체적인 데이터 요청인지 확인
+        has_specific_request = (
+            entity_filter.player_name or 
+            entity_filter.stat_type or 
+            "년" in query or
+            any(word in query_lower for word in ["알려줘", "궁금", "얼마", "몇"])
+        )
+        
+        # 통계 키워드가 있고 구체적인 요청이면 통계 질문
+        return has_stat_keywords and has_specific_request
+    
+    def _is_regulation_query(self, query: str) -> bool:
+        """
+        질문이 KBO 규정 관련인지 판단합니다.
+        """
+        regulation_keywords = [
+            "규정", "규칙", "룰", "조항", "가능해", "허용", "금지",
+            "벌칙", "징계", "반칙", "파울", "아웃", "세이프",
+            "스트라이크", "볼", "홈런", "인플레이", "타이브레이크",
+            "지명타자", "연장전", "콜드게임", "더블헤더", "비디오판독",
+            "FA", "자유계약", "외국인선수", "몇명까지", "드래프트", "트레이드",
+            "도박", "폭력", "약물", "심판", "모독", "퇴장",
+            "플레이오프", "포스트시즌", "와일드카드", "한국시리즈", "몇팀", 
+            "보크", "방해", "인필드플라이", "그라운드룰", "몸에맞는공",
+            "용어", "뜻", "의미", "정의", "설명", "조건", "언제적용",
+            "세이브조건", "승리투수", "왕", "홈런왕", "득점왕", "순위",
+            "wrc+", "ops", "era", "whip", "babip", "war", "fip"
+        ]
+        
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in regulation_keywords)
+
+    def _is_game_query(self, query: str) -> bool:
+        """
+        질문이 경기 데이터 관련인지 판단합니다.
+        """
+        game_keywords = [
+            "경기", "게임", "박스스코어", "스코어", "결과", "이닝별",
+            "오늘", "어제", "내일", "날짜", "언제", "몇일", "며칠",
+            "vs", "대", "맞대결", "직접대결", "상대전적", "시리즈",
+            "승부", "이겼", "졌", "무승부", "점수", "승리", "패배",
+            "홈", "원정", "away", "home", "구장에서", "에서",
+            "몇점", "득점", "실점", "타점", "안타", "홈런친",
+            "투구", "선발", "등판", "세이브", "홀드", "승", "패"
+        ]
+        
+        # 날짜 패턴 확인 (YYYY-MM-DD, MM/DD, 월일 등)
+        date_patterns = [
+            r"\d{4}-\d{1,2}-\d{1,2}",  # 2024-10-15
+            r"\d{1,2}/\d{1,2}",        # 10/15
+            r"\d{1,2}월\s*\d{1,2}일",   # 10월 15일
+            r"오늘|어제|내일|모레|그저께"
+        ]
+        
+        query_lower = query.lower()
+        
+        # 키워드 매칭
+        has_game_keywords = any(keyword in query_lower for keyword in game_keywords)
+        
+        # 날짜 패턴 매칭
+        import re
+        has_date_pattern = any(re.search(pattern, query_lower) for pattern in date_patterns)
+        
+        # 팀 vs 팀 패턴
+        team_vs_pattern = r"(KIA|기아|LG|두산|롯데|삼성|키움|한화|KT|NC|SSG).*(vs|대|vs\.|대전|맞대결).*(KIA|기아|LG|두산|롯데|삼성|키움|한화|KT|NC|SSG)"
+        has_team_vs_pattern = bool(re.search(team_vs_pattern, query, re.IGNORECASE))
+        
+        return has_game_keywords or has_date_pattern or has_team_vs_pattern
+
+    def _is_general_conversation(self, query: str) -> bool:
+        """
+        일반 대화인지 판단합니다.
+        """
+        general_keywords = [
+            "안녕", "누구", "좋아", "응원", "날씨", "어때", "뭐해", 
+            "고마워", "미안", "반가워", "잘가", "소개", "설명", "도움",
+            "기능", "사용법", "어떻게", "왜", "언제", "어디"
+        ]
+        
+        query_lower = query.lower()
+        
+        # 야구/통계와 무관한 일반적인 대화
+        return any(keyword in query_lower for keyword in general_keywords)
+
+    async def _try_agent_first(
+        self,
+        query: str,
+        *,
+        intent: str = "freeform", 
+        filters: Optional[Dict[str, Any]] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        야구 에이전트를 우선 사용하여 통계 질문을 처리합니다.
+        에이전트가 실패하면 기존 RAG 방식으로 폴백합니다.
+        """
+        logger.info(f"[RAG] Attempting agent-first approach for: {query}")
+        
+        try:
+            # 야구 에이전트를 통한 처리 시도
+            agent_result = await self.baseball_agent.process_query(query, {
+                "intent": intent,
+                "filters": filters,
+                "history": history
+            })
+            
+            if agent_result["verified"] and not agent_result.get("error"):
+                logger.info(f"[RAG] Agent successfully handled query with verified data")
+                return {
+                    "answer": agent_result["answer"],
+                    "citations": [],  # 에이전트는 DB 직접 조회하므로 citations 불필요
+                    "intent": intent,
+                    "retrieved": agent_result.get("tool_results", []),
+                    "strategy": "verified_agent",
+                    "verified": True,
+                    "tool_calls": agent_result.get("tool_calls", []),
+                    "data_sources": agent_result.get("data_sources", [])
+                }
+            else:
+                logger.warning(f"[RAG] Agent failed or returned unverified data: {agent_result.get('error')}")
+                return None  # 폴백 신호
+                
+        except Exception as e:
+            logger.error(f"[RAG] Agent processing error: {e}")
+            return None  # 폴백 신호
+
+    async def _handle_general_conversation(self, query: str) -> Dict[str, Any]:
+        """
+        일반 대화를 처리합니다.
+        """
+        logger.info(f"[RAG] Handling general conversation: {query}")
+        
+        # 간단한 대화 응답 패턴
+        conversation_responses = {
+            "안녕": "안녕하세요! 저는 KBO 리그 데이터 분석가 BEGA입니다. KBO 야구 통계에 대해 궁금한 것이 있으시면 언제든 물어보세요!",
+            "누구": "저는 KBO 리그 전문 데이터 분석가 'BEGA'입니다. 한국 프로야구의 각종 통계와 기록을 정확하게 분석해드립니다.",
+            "좋아": "네, 저는 야구를 정말 좋아합니다! 특히 KBO 리그의 흥미진진한 경기와 선수들의 기록을 분석하는 것이 제 전문 분야입니다.",
+            "응원": "저는 모든 KBO 팀을 공정하게 분석합니다! 어떤 팀을 응원하시든 정확하고 객관적인 데이터를 제공해드릴게요.",
+            "날씨": "죄송하지만 날씨 정보는 제공하지 않습니다. 저는 KBO 야구 통계 전문 분석가입니다. 야구 관련 질문이 있으시면 언제든 물어보세요!",
+            "도움": "저는 다음과 같은 도움을 드릴 수 있습니다:\n- 선수 개인 통계 조회\n- 팀별 순위 및 기록 분석\n- 야구 지표 설명\n- KBO 리그 역사적 기록 비교\n\n궁금한 야구 통계가 있으시면 언제든 말씀해주세요!",
+            "기능": "제 주요 기능은 다음과 같습니다:\n1. 선수 개인 성적 분석 (타율, 홈런, ERA 등)\n2. 팀 순위 및 리더보드 조회\n3. 고급 야구 지표 계산 및 설명\n4. 시즌별, 연도별 기록 비교\n\n구체적인 야구 통계 질문을 해보세요!"
+        }
+        
+        query_lower = query.lower()
+        
+        # 키워드 기반 응답 매칭
+        for keyword, response in conversation_responses.items():
+            if keyword in query_lower:
+                return {
+                    "answer": response,
+                    "citations": [],
+                    "intent": "general_conversation",
+                    "retrieved": [],
+                    "strategy": "conversation_handler",
+                    "verified": True  # 일반 대화는 검증된 것으로 처리
+                }
+        
+        # 기본 응답
+        default_response = """안녕하세요! 저는 KBO 리그 데이터 분석가 'BEGA'입니다. 
+
+KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니다:
+- "2024년 김도영 타율은?" 
+- "홈런왕 TOP 5는?"
+- "LG 트윈스 주요 선수는?"
+- "OPS가 뭐야?"
+
+야구 통계에 대해 궁금한 것이 있으시면 언제든 물어보세요!"""
+        
+        return {
+            "answer": default_response,
+            "citations": [],
+            "intent": "general_conversation", 
+            "retrieved": [],
+            "strategy": "conversation_handler",
+            "verified": True
+        }
+
     async def run(
         self,
         query: str,
@@ -374,148 +624,166 @@ class RAGPipeline:
         filters: Optional[Dict[str, Any]] = None,
         history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
-        # 1. 관련 문서 검색
-        filters = filters or {}
-        year = filters.get("season_year") or filters.get("year", 2025)
-
-        # Auto-detect if question is about season stats (not game-specific)
-        season_keywords = ["시즌", "최고", "순위", "랭킹", "1위", "제일", "가장"]
-        is_season_query = any(keyword in query for keyword in season_keywords)
-
-        logger.info(f"[RAG] Query: {query}, is_season_query: {is_season_query}")
-
-        # For season queries, prioritize season stat tables
-        if is_season_query and "source_table" not in filters:
-            logger.info("[RAG] Season query detected, searching season stats first")
-            # Try season stats first, fallback to all if no results
-            season_filters = dict(filters)
-            # Filter for season stats only and regular season
-            season_filters["meta.league"] = "정규시즌"
-
-            # Try pitchers first
-            pitcher_filters = dict(season_filters)
-            pitcher_filters["source_table"] = "player_season_pitching"
-            logger.info(f"[RAG] Searching pitchers with filters: {pitcher_filters}")
-            docs_pitchers = await self.retrieve(query, filters=pitcher_filters, limit=15)
-            logger.info(f"[RAG] Found {len(docs_pitchers)} pitcher docs")
-
-            # Try batters
-            batter_filters = dict(season_filters)
-            batter_filters["source_table"] = "player_season_batting"
-            logger.info(f"[RAG] Searching batters with filters: {batter_filters}")
-            docs_batters = await self.retrieve(query, filters=batter_filters, limit=15)
-            logger.info(f"[RAG] Found {len(docs_batters)} batter docs")
-
-            # Combine results
-            docs = docs_pitchers + docs_batters
-            logger.info(f"[RAG] Total season docs: {len(docs)}")
-            if not docs:
-                # Fallback to all tables if no season stats found
-                logger.info("[RAG] No season stats found, falling back to all tables")
-                docs = await self.retrieve(query, filters=filters, limit=20)
+        # 1. Enhanced Entity Extraction and Search Strategy
+        logger.info(f"[RAG] Processing query: {query}")
+        
+        # Extract entities and enhance search strategy
+        search_strategy = enhance_search_strategy(query)
+        entity_filter = search_strategy["entity_filter"]
+        extracted_filters = search_strategy["db_filters"]
+        
+        # 2. 일반 대화인지 먼저 확인
+        if self._is_general_conversation(query):
+            logger.info(f"[RAG] General conversation detected")
+            return await self._handle_general_conversation(query)
+        
+        # 3. 규정 질문인지 먼저 확인 (통계보다 우선순위)
+        if self._is_regulation_query(query):
+            logger.info(f"[RAG] Regulation query detected, trying agent first")
+            agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
+            if agent_result is not None:
+                return agent_result
+            else:
+                logger.info(f"[RAG] Regulation agent failed, falling back to traditional RAG")
+        
+        # 4. 경기 데이터 질문인지 확인
+        elif self._is_game_query(query):
+            logger.info(f"[RAG] Game query detected, trying agent first")
+            agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
+            if agent_result is not None:
+                return agent_result
+            else:
+                logger.info(f"[RAG] Game agent failed, falling back to traditional RAG")
+        
+        # 5. 통계 질문인지 판단하고 에이전트 시도
+        elif self._is_statistical_query(query, entity_filter):
+            logger.info(f"[RAG] Statistical query detected, trying agent first")
+            agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
+            if agent_result is not None:
+                return agent_result
+            else:
+                logger.info(f"[RAG] Statistical agent failed, falling back to traditional RAG")
+        
+        # 6. 기존 RAG 방식으로 폴백 또는 일반 질문 처리
+        
+        # Merge user-provided filters with extracted filters
+        # User-provided filters take precedence
+        final_filters = {**extracted_filters, **(filters or {})}
+        
+        # Determine year for analysis
+        year = final_filters.get("season_year") or entity_filter.season_year or 2025
+        logger.info(f"[RAG] Analysis year: {year}")
+        logger.info(f"[RAG] Final filters: {final_filters}")
+        
+        # 2. Intelligent Multi-Strategy Retrieval
+        docs = []
+        
+        if search_strategy["is_ranking_query"]:
+            logger.info("[RAG] Ranking query detected - using multi-query retrieval")
+            
+            # For ranking queries, use multi-query retrieval for better coverage
+            if not entity_filter.position_type:
+                # Search both pitchers and batters with multi-query
+                pitcher_filters = dict(final_filters)
+                pitcher_filters["source_table"] = "player_season_pitching"
+                docs_pitchers = await self.retrieve_with_multi_query(
+                    query, entity_filter, filters=pitcher_filters
+                )
+                
+                batter_filters = dict(final_filters)
+                batter_filters["source_table"] = "player_season_batting"
+                docs_batters = await self.retrieve_with_multi_query(
+                    query, entity_filter, filters=batter_filters
+                )
+                
+                docs = docs_pitchers + docs_batters
+                logger.info(f"[RAG] Multi-query ranking search: {len(docs_pitchers)} pitchers + {len(docs_batters)} batters")
+            else:
+                # Position-specific multi-query search
+                docs = await self.retrieve_with_multi_query(
+                    query, entity_filter, filters=final_filters
+                )
+        
+        elif entity_filter.player_name:
+            logger.info(f"[RAG] Player-specific query: {entity_filter.player_name}")
+            # For specific player queries, use multi-query with relaxed filters
+            player_filters = dict(final_filters)
+            player_filters.pop("source_table", None)  # Remove source_table filter
+            docs = await self.retrieve_with_multi_query(
+                query, entity_filter, filters=player_filters, use_llm_expansion=True
+            )
+            
         else:
-            logger.info("[RAG] Regular search (not season-specific)")
-            # Regular search with increased limit to compensate for filtering
-            docs = await self.retrieve(query, filters=filters, limit=20)
+            logger.info("[RAG] General search strategy with multi-query")
+            # Use multi-query for general searches to improve coverage
+            docs = await self.retrieve_with_multi_query(
+                query, entity_filter, filters=final_filters
+            )
+        
+        # 3. Fallback Strategy
+        if not docs and final_filters:
+            logger.info("[RAG] No results with filters, attempting fallback search")
+            # Remove restrictive filters one by one
+            fallback_filters = dict(final_filters)
+            
+            # Try removing source_table first
+            if "source_table" in fallback_filters:
+                fallback_filters.pop("source_table")
+                docs = await self.retrieve(query, filters=fallback_filters, limit=20)
+                logger.info(f"[RAG] Fallback without source_table: {len(docs)} docs")
+            
+            # If still no results, try without team filter
+            if not docs and "team_id" in fallback_filters:
+                fallback_filters.pop("team_id")
+                docs = await self.retrieve(query, filters=fallback_filters, limit=20)
+                logger.info(f"[RAG] Fallback without team filter: {len(docs)} docs")
+            
+            # Final fallback: only keep year and league filters
+            if not docs:
+                minimal_filters = {}
+                if "season_year" in final_filters:
+                    minimal_filters["season_year"] = final_filters["season_year"]
+                if "meta.league" in final_filters:
+                    minimal_filters["meta.league"] = final_filters["meta.league"]
+                docs = await self.retrieve(query, filters=minimal_filters, limit=25)
+                logger.info(f"[RAG] Minimal fallback: {len(docs)} docs")
+        
+        logger.info(f"[RAG] Final retrieval result: {len(docs)} documents")
 
         # 2. 데이터 처리 및 보강
         processed_data = await self._process_and_enrich_docs(docs, year)
         
-        # 3. LLM 컨텍스트 생성
-        context_parts = []
-        warnings = processed_data["warnings"]
+        # 3. 의도별 컨텍스트 생성 (새로운 컨텍스트 포맷터 사용)
+        formatted_context = self.context_formatter.format_context(
+            processed_data, intent, query, entity_filter, year
+        )
         
-        # History context 우선 삽입
+        # 대화 기록 컨텍스트 추가
         history_block = _history_context_block(history)
         if history_block:
-            context_parts.append(history_block)
+            formatted_context = history_block + "\n\n" + formatted_context
 
-        # Pitcher context
-        sp_pitchers = [p for p in processed_data["pitchers"] if p["role"] == "SP"]
-        rp_pitchers = [p for p in processed_data["pitchers"] if p["role"] == "RP"]
-        batters = processed_data["batters"]
-
-        if sp_pitchers:
-            header = kbo_metrics.scope_header(year, len(set(p['team'] for p in sp_pitchers)), "SP", MIN_IP_SP)
-            context_parts.append(f"### 선발 투수 랭킹\n{header}\n")
-            for p in sp_pitchers:
-                line = (
-                    f"{p['name']}({p['team']}) — "
-                    f"{kbo_metrics.describe_metric_ko('ERA-', p['era_minus'], 0)}, "
-                    f"{kbo_metrics.describe_metric_ko('FIP-', p['fip_minus'], 0)}, "
-                    f"{kbo_metrics.describe_metric_ko('K-BB%', p['kbb_pct'], 1)}%, "
-                    f"{kbo_metrics.describe_metric_ko('WHIP', p['whip'])} "
-                    f"({kbo_metrics.format_ip(p['ip'])} IP)"
-                )
-                context_parts.append(f"- {line}")
-        
-        if rp_pitchers:
-            header = kbo_metrics.scope_header(year, len(set(p['team'] for p in rp_pitchers)), "RP", MIN_IP_RP)
-            context_parts.append(f"\n### 불펜 투수 랭킹\n{header}\n")
-            for p in rp_pitchers:
-                line = (
-                    f"{p['name']}({p['team']}) — "
-                    f"{kbo_metrics.describe_metric_ko('ERA-', p['era_minus'], 0)}, "
-                    f"{kbo_metrics.describe_metric_ko('FIP-', p['fip_minus'], 0)}, "
-                    f"{kbo_metrics.describe_metric_ko('K-BB%', p['kbb_pct'], 1)}%, "
-                    f"{kbo_metrics.describe_metric_ko('WHIP', p['whip'])} "
-                    f"({kbo_metrics.format_ip(p['ip'])} IP)"
-                )
-                context_parts.append(f"- {line}")
-
-        if batters:
-            header = kbo_metrics.scope_header(
-                year,
-                len(set(b['team'] for b in batters)),
-                "BAT",
-                MIN_PA_BATTER,
-            )
-            context_parts.append(f"\n### 타자 랭킹\n{header}\n")
-            for b in batters:
-                metrics = []
-                metrics.append(kbo_metrics.describe_metric_ko("wRC+", b["wrc_plus"], 0))
-                metrics.append(kbo_metrics.describe_metric_ko("OPS", b["ops"], 3))
-                metrics.append(kbo_metrics.describe_metric_ko("WAR", b["war"], 2))
-                if b.get("ops_plus") is not None:
-                    metrics.append(f"OPS+: {b['ops_plus']:.0f}")
-                if b.get("avg") is not None:
-                    metrics.append(f"타율 {b['avg']:.3f}")
-                counting = []
-                if b.get("home_runs"):
-                    counting.append(f"HR {int(b['home_runs'])}")
-                if b.get("rbi"):
-                    counting.append(f"RBI {int(b['rbi'])}")
-                if b.get("steals"):
-                    counting.append(f"SB {int(b['steals'])}")
-                if counting:
-                    metrics.append("/".join(counting))
-                line = f"{b['name']}({b['team']}) — {', '.join(metrics)} ({b['pa']} PA)"
-                context_parts.append(f"- {line}")
-
-        if not context_parts:
-            context_parts.append("분석에 적합한 데이터가 없습니다. (최소 샘플 기준: 선발 70이닝, 불펜 30이닝)")
-
-        # Add warnings and context info (disabled per user request)
-        # if warnings:
-        #     context_parts.append("\n### ⚠ 데이터 경고")
-        #     context_parts.extend(f"- {w}" for w in warnings)
-
-        # context_parts.append("\n### 분석 노트\n- 순위는 `pitcher_rank_score` (가중치: ERA- 40%, FIP- 30%, K-BB% 20%, WHIP 10%)를 기준으로 하며, IP에 따른 보정이 적용됩니다.")
-
-        joined_context = "\n".join(context_parts)
-        prompt = FOLLOWUP_PROMPT.format(question=query, context=joined_context)
+        # 4. LLM 프롬프트 구성
+        prompt = FOLLOWUP_PROMPT.format(question=query, context=formatted_context)
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(_history_for_messages(history))
         messages.append({"role": "user", "content": prompt})
         
-        # 4. LLM을 호출하여 답변 생성
+        # 5. LLM을 호출하여 답변 생성
         answer = await self._generate(messages)
 
-        # 5. 최종 결과 구성
+        # 6. 최종 결과 구성
         return {
             "answer": answer,
             "citations": [{"id": doc["id"], "title": doc.get("title", "")} for doc in docs],
             "intent": intent,
             "retrieved": docs,
-            "strategy": "rag_v2_enriched",
+            "strategy": "rag_v3_enhanced",  # 업데이트된 버전 명시
+            "entity_filter": {
+                "season_year": entity_filter.season_year,
+                "team_id": entity_filter.team_id,
+                "player_name": entity_filter.player_name,
+                "stat_type": entity_filter.stat_type,
+                "position_type": entity_filter.position_type,
+            }
         }
