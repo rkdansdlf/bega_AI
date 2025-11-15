@@ -291,13 +291,11 @@ async def transcribe_audio(
             language="ko"
         )
         
-        logger.info(f"✅ 변환 성공! 텍스트 길이: {len(response.text)}")
+        logger.info(f" 변환 성공! 텍스트 길이: {len(response.text)}")
         logger.info(f"변환된 텍스트: {response.text}")
         
         return {"text": response.text}
         
     except Exception as e:
-        logger.exception(f"❌ 음성 변환 중 오류: {str(e)}")
+        logger.exception(f" 음성 변환 중 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
