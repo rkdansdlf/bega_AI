@@ -102,14 +102,14 @@ class DatabaseQueryTool:
                         SUM(psb.walks) as total_walks,
                         SUM(psb.strikeouts) as total_strikeouts,
                         SUM(psb.stolen_bases) as total_stolen_bases,
-                        ROUND(CASE WHEN SUM(psb.at_bats) > 0 THEN SUM(psb.hits)::decimal / SUM(psb.at_bats) ELSE 0 END, 3) as career_avg,
-                        ROUND(CASE WHEN SUM(psb.at_bats + psb.walks + psb.hbp + psb.sacrifice_flies) > 0 
+                        ROUND((CASE WHEN SUM(psb.at_bats) > 0 THEN SUM(psb.hits)::decimal / SUM(psb.at_bats) ELSE 0 END)::numeric, 3) as career_avg,
+                        ROUND((CASE WHEN SUM(psb.at_bats + psb.walks + psb.hbp + psb.sacrifice_flies) > 0 
                                    THEN (SUM(psb.hits) + SUM(psb.walks) + SUM(psb.hbp))::decimal / 
                                         SUM(psb.at_bats + psb.walks + psb.hbp + psb.sacrifice_flies) 
-                                   ELSE 0 END, 3) as career_obp,
-                        ROUND(CASE WHEN SUM(psb.at_bats) > 0 
+                                   ELSE 0 END)::numeric, 3) as career_obp,
+                        ROUND((CASE WHEN SUM(psb.at_bats) > 0 
                                    THEN (SUM(psb.hits) + SUM(psb.doubles) + 2*SUM(psb.triples) + 3*SUM(psb.home_runs))::decimal / SUM(psb.at_bats)
-                                   ELSE 0 END, 3) as career_slg
+                                   ELSE 0 END)::numeric, 3) as career_slg
                     FROM player_season_batting psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 
@@ -150,12 +150,12 @@ class DatabaseQueryTool:
                         SUM(psp.hits_allowed) as total_hits_allowed,
                         SUM(psp.home_runs_allowed) as total_home_runs_allowed,
                         SUM(psp.earned_runs) as total_earned_runs,
-                        ROUND(CASE WHEN SUM(psp.innings_pitched) > 0 
+                        ROUND((CASE WHEN SUM(psp.innings_pitched) > 0 
                                    THEN (SUM(psp.earned_runs) * 9.0) / SUM(psp.innings_pitched) 
-                                   ELSE 0 END, 2) as career_era,
-                        ROUND(CASE WHEN SUM(psp.innings_pitched) > 0 
+                                   ELSE 0 END)::numeric, 2) as career_era,
+                        ROUND((CASE WHEN SUM(psp.innings_pitched) > 0 
                                    THEN (SUM(psp.hits_allowed) + SUM(psp.walks_allowed)) / SUM(psp.innings_pitched) 
-                                   ELSE 0 END, 2) as career_whip
+                                   ELSE 0 END)::numeric, 2) as career_whip
                     FROM player_season_pitching psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 
@@ -610,9 +610,9 @@ class DatabaseQueryTool:
                         SUM(psd.assists) as total_assists,
                         SUM(psd.errors) as total_errors,
                         SUM(psd.double_plays) as total_double_plays,
-                        ROUND(CASE WHEN SUM(psd.putouts + psd.assists + psd.errors) > 0 
+                        ROUND((CASE WHEN SUM(psd.putouts + psd.assists + psd.errors) > 0 
                                    THEN SUM(psd.putouts + psd.assists)::decimal / SUM(psd.putouts + psd.assists + psd.errors) 
-                                   ELSE 0 END, 3) as career_fielding_pct
+                                   ELSE 0 END)::numeric, 3) as career_fielding_pct
                     FROM player_season_defense psd
                     JOIN player_basic pb ON psd.player_id = pb.player_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 

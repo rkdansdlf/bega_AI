@@ -103,34 +103,33 @@ class GameQueryTool:
                 
                 if home_team:
                     normalized_home = self._normalize_team_name(home_team)
-                    where_conditions.append("g.home_team_id = %s")
+                    where_conditions.append("g.home_team = %s")
                     query_params.append(normalized_home)
                 
                 if away_team:
                     normalized_away = self._normalize_team_name(away_team)
-                    where_conditions.append("g.away_team_id = %s")
+                    where_conditions.append("g.away_team = %s")
                     query_params.append(normalized_away)
             
             if not where_conditions:
                 result["error"] = "검색 조건이 필요합니다 (game_id, date, 또는 팀명)"
                 return result
             
-            # 기본 경기 정보 조회 쿼리
+            # 기본 경기 정보 조회 쿼리 (실제 스키마에 맞게 수정)
             game_query = f"""
                 SELECT 
                     g.game_id,
                     g.game_date,
-                    g.home_team_id,
-                    g.away_team_id,
+                    g.home_team,
+                    g.away_team,
                     g.home_score,
                     g.away_score,
-                    g.status,
-                    g.innings,
-                    ht.team_name as home_team_name,
-                    at.team_name as away_team_name
-                FROM games g
-                LEFT JOIN teams ht ON g.home_team_id = ht.team_code
-                LEFT JOIN teams at ON g.away_team_id = at.team_code
+                    g.game_status,
+                    g.stadium,
+                    g.winning_team,
+                    g.home_pitcher,
+                    g.away_pitcher
+                FROM game g
                 WHERE {' AND '.join(where_conditions)}
                 ORDER BY g.game_date DESC, g.game_id
                 LIMIT 10;
@@ -147,45 +146,50 @@ class GameQueryTool:
             for game in games:
                 game_dict = dict(game)
                 
-                # 이닝별 득점 조회
+                # 박스스코어 상세 정보 조회 (실제 스키마 기준)
                 box_score_query = """
                     SELECT 
-                        inning,
-                        team_id,
-                        runs,
-                        hits,
-                        errors
-                    FROM box_scores 
-                    WHERE game_id = %s
-                    ORDER BY inning, team_id;
+                        game_id,
+                        stadium,
+                        crowd,
+                        start_time,
+                        end_time,
+                        game_time,
+                        away_record,
+                        home_record,
+                        away_1, away_2, away_3, away_4, away_5, away_6, away_7, away_8, away_9,
+                        home_1, home_2, home_3, home_4, home_5, home_6, home_7, home_8, home_9,
+                        away_r, away_h, away_e,
+                        home_r, home_h, home_e
+                    FROM box_score 
+                    WHERE game_id = %s;
                 """
                 
                 cursor.execute(box_score_query, (game_dict['game_id'],))
-                box_scores = cursor.fetchall()
+                box_score = cursor.fetchone()
                 
-                game_dict['box_scores'] = [dict(score) for score in box_scores]
+                if box_score:
+                    game_dict['box_score'] = dict(box_score)
+                else:
+                    game_dict['box_score'] = {}
                 
-                # 게임 요약 정보 조회 (있는 경우)
+                # 게임 요약 정보 조회 (실제 스키마 기준)
                 summary_query = """
                     SELECT 
-                        winning_pitcher,
-                        losing_pitcher,
-                        save_pitcher,
-                        game_mvp,
-                        attendance,
-                        weather,
-                        game_time_minutes
-                    FROM game_summaries
+                        summary_type,
+                        player_name,
+                        detail_text
+                    FROM game_summary
                     WHERE game_id = %s;
                 """
                 
                 cursor.execute(summary_query, (game_dict['game_id'],))
-                summary = cursor.fetchone()
+                summaries = cursor.fetchall()
                 
-                if summary:
-                    game_dict['summary'] = dict(summary)
+                if summaries:
+                    game_dict['summary'] = [dict(summary) for summary in summaries]
                 else:
-                    game_dict['summary'] = {}
+                    game_dict['summary'] = []
                 
                 result["games"].append(game_dict)
             
@@ -233,27 +237,23 @@ class GameQueryTool:
             
             if team:
                 normalized_team = self._normalize_team_name(team)
-                where_conditions.append("(g.home_team_id = %s OR g.away_team_id = %s)")
+                where_conditions.append("(g.home_team = %s OR g.away_team = %s)")
                 query_params.extend([normalized_team, normalized_team])
             
             query = f"""
                 SELECT 
                     g.game_id,
                     g.game_date,
-                    g.home_team_id,
-                    g.away_team_id,
+                    g.home_team,
+                    g.away_team,
                     g.home_score,
                     g.away_score,
-                    g.status,
-                    g.innings,
-                    ht.team_name as home_team_name,
-                    at.team_name as away_team_name,
-                    gs.game_mvp,
-                    gs.attendance
-                FROM games g
-                LEFT JOIN teams ht ON g.home_team_id = ht.team_code
-                LEFT JOIN teams at ON g.away_team_id = at.team_code
-                LEFT JOIN game_summaries gs ON g.game_id = gs.game_id
+                    g.game_status,
+                    g.stadium,
+                    g.winning_team,
+                    g.home_pitcher,
+                    g.away_pitcher
+                FROM game g
                 WHERE {' AND '.join(where_conditions)}
                 ORDER BY g.game_date, g.game_id;
             """
@@ -322,8 +322,8 @@ class GameQueryTool:
             
             # 쿼리 조건 구성
             where_conditions = [
-                "((g.home_team_id = %s AND g.away_team_id = %s) OR "
-                "(g.home_team_id = %s AND g.away_team_id = %s))"
+                "((g.home_team = %s AND g.away_team = %s) OR "
+                "(g.home_team = %s AND g.away_team = %s))"
             ]
             query_params = [team1_normalized, team2_normalized, team2_normalized, team1_normalized]
             
@@ -336,32 +336,27 @@ class GameQueryTool:
                 SELECT 
                     g.game_id,
                     g.game_date,
-                    g.home_team_id,
-                    g.away_team_id,
+                    g.home_team,
+                    g.away_team,
                     g.home_score,
                     g.away_score,
-                    g.status,
-                    g.innings,
-                    ht.team_name as home_team_name,
-                    at.team_name as away_team_name,
+                    g.game_status,
+                    g.stadium,
+                    g.winning_team,
                     CASE 
-                        WHEN g.home_score > g.away_score AND g.home_team_id = %s THEN 'team1_win'
-                        WHEN g.home_score > g.away_score AND g.home_team_id = %s THEN 'team2_win'
-                        WHEN g.away_score > g.home_score AND g.away_team_id = %s THEN 'team1_win'
-                        WHEN g.away_score > g.home_score AND g.away_team_id = %s THEN 'team2_win'
+                        WHEN g.winning_team = %s THEN 'team1_win'
+                        WHEN g.winning_team = %s THEN 'team2_win'
                         WHEN g.home_score = g.away_score THEN 'draw'
                         ELSE 'unknown'
                     END as game_result
-                FROM games g
-                LEFT JOIN teams ht ON g.home_team_id = ht.team_code
-                LEFT JOIN teams at ON g.away_team_id = at.team_code
+                FROM game g
                 WHERE {' AND '.join(where_conditions)}
-                AND g.status = 'completed'
+                AND g.game_status = 'COMPLETED'
                 ORDER BY g.game_date DESC
                 LIMIT %s;
             """
             
-            games_params = query_params + [team1_normalized, team2_normalized, team1_normalized, team2_normalized, limit]
+            games_params = query_params + [team1_normalized, team2_normalized, limit]
             cursor.execute(games_query, games_params)
             games = cursor.fetchall()
             
