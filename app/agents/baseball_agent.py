@@ -181,8 +181,7 @@ class BaseballStatisticsAgent:
             "get_games_by_date",
             "특정 날짜의 모든 경기를 조회합니다. '오늘 경기', '어제 경기' 등의 질문에 사용하세요.",
             {
-                "date": "경기 날짜 (YYYY-MM-DD)",
-                "team": "특정 팀만 조회 (선택적)"
+                "date": "경기 날짜 (YYYY-MM-DD)"
             },
             self._tool_get_games_by_date
         )
@@ -616,9 +615,10 @@ class BaseballStatisticsAgent:
                 message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_games_by_date(self, date: str, team: str = None) -> ToolResult:
+    def _tool_get_games_by_date(self, date: str, **kwargs) -> ToolResult:
         """날짜별 경기 조회 도구"""
         try:
+            team = kwargs.get('team', None)
             result = self.game_query_tool.get_games_by_date(date, team)
             
             if result["error"]:
@@ -781,8 +781,12 @@ class BaseballStatisticsAgent:
         logger.info(f"[BaseballAgent] Analyzing query for tool planning: {query}")
         
         # LLM을 사용하여 질문을 분석하고 도구 사용 계획 수립
-        analysis_prompt = f"""
+        query_text = query
+        # 템플릿을 분리하여 f-string 문제 해결
+        analysis_prompt_template = """
 당신은 야구 통계 전문 에이전트입니다. 사용자의 질문을 분석하고 실제 데이터베이스에서 정확한 답변을 얻기 위해 어떤 도구들을 사용해야 하는지 결정해야 합니다.
+
+질문: {query_text}
 
 사용 가능한 도구들과 정확한 매개변수:
 
@@ -866,7 +870,15 @@ class BaseballStatisticsAgent:
 위 질문에 정확히 답변하기 위해 어떤 도구들을 어떤 순서로 호출해야 하는지 JSON 형식으로 계획을 세워주세요.
 **중요**: 매개변수명을 정확히 사용하세요!
 
-응답 형식:
+중요한 원칙:
+- 반드시 실제 데이터베이스 조회가 필요한 경우만 도구를 사용하세요
+- 선수명이 불확실한 경우 먼저 validate_player로 확인하세요
+- "최고", "상위", "1위", "2025년 최고" 등의 질문은 get_leaderboard를 사용하세요
+- 개별 선수 통계는 get_player_stats를 사용하세요
+- 연도 정보가 없거나 2025년인 경우 2024년을 기본값으로 사용하세요
+
+**반드시 다음 JSON 형식으로만 응답하세요:**
+```json
 {{
     "analysis": "질문 분석 내용",
     "tool_calls": [
@@ -880,22 +892,47 @@ class BaseballStatisticsAgent:
     ],
     "expected_result": "예상되는 답변 유형"
 }}
-
-중요한 원칙:
-- 반드시 실제 데이터베이스 조회가 필요한 경우만 도구를 사용하세요
-- 선수명이 불확실한 경우 먼저 validate_player로 확인하세요
-- "최고", "상위", "1위" 등의 질문은 get_leaderboard를 사용하세요
-- 개별 선수 통계는 get_player_stats를 사용하세요
-- 연도 정보가 없으면 2024년을 기본값으로 사용하세요
+```
 """
+        analysis_prompt = analysis_prompt_template.format(query_text=query_text, query=query)
 
         try:
             # LLM 호출하여 분석 결과 받기
             analysis_messages = [{"role": "user", "content": analysis_prompt}]
             raw_response = await self.llm_generator(analysis_messages)
             
+            logger.info(f"[BaseballAgent] Raw LLM response: {raw_response[:200]}...")
+            
+            # JSON 블록 추출 (```json ... ``` 형태인 경우)
+            if '```json' in raw_response:
+                start = raw_response.find('```json') + 7
+                end = raw_response.find('```', start)
+                if end != -1:
+                    json_content = raw_response[start:end].strip()
+                else:
+                    json_content = raw_response[start:].strip()
+            elif raw_response.strip().startswith('{'):
+                json_content = raw_response.strip()
+            else:
+                # JSON이 아닌 응답인 경우 기본 분석 제공
+                logger.warning(f"[BaseballAgent] Non-JSON response, providing fallback analysis")
+                return {
+                    "analysis": f"'{query}' 질문을 리더보드로 분석",
+                    "tool_calls": [ToolCall(
+                        tool_name="get_leaderboard",
+                        parameters={
+                            "stat_name": "ops",
+                            "year": 2024,
+                            "position": "batting",
+                            "limit": 10
+                        }
+                    )],
+                    "expected_result": "상위 타자 순위",
+                    "error": None
+                }
+            
             # JSON 파싱
-            analysis_data = json.loads(raw_response)
+            analysis_data = json.loads(json_content)
             
             # ToolCall 객체들로 변환
             tool_calls = []
@@ -915,11 +952,42 @@ class BaseballStatisticsAgent:
             
         except json.JSONDecodeError as e:
             logger.error(f"[BaseballAgent] JSON parsing error in query analysis: {e}")
+            logger.error(f"[BaseballAgent] Failed response content: {raw_response}")
+            
+            # 질문 유형에 따른 스마트 폴백
+            query_lower = query.lower()
+            
+            # 투수 질문 감지
+            if any(word in query_lower for word in ["투수", "투구", "방어율", "era", "whip", "승", "세이브"]):
+                fallback_tool = ToolCall(
+                    tool_name="get_leaderboard",
+                    parameters={
+                        "stat_name": "era",
+                        "year": 2024,
+                        "position": "pitching",
+                        "limit": 10
+                    }
+                )
+                analysis = "투수 관련 질문으로 판단하여 ERA 기준 상위 투수 조회"
+            
+            # 타자 질문 감지 (기본값)
+            else:
+                fallback_tool = ToolCall(
+                    tool_name="get_leaderboard", 
+                    parameters={
+                        "stat_name": "ops",
+                        "year": 2024,
+                        "position": "batting",
+                        "limit": 10
+                    }
+                )
+                analysis = "타자 관련 질문으로 판단하여 OPS 기준 상위 타자 조회"
+            
             return {
-                "analysis": "",
-                "tool_calls": [],
-                "expected_result": "",
-                "error": f"응답 파싱 오류: {e}"
+                "analysis": analysis,
+                "tool_calls": [fallback_tool],
+                "expected_result": "리더보드 순위",
+                "error": None
             }
         except Exception as e:
             logger.error(f"[BaseballAgent] Error in query analysis: {e}")
@@ -982,7 +1050,8 @@ class BaseballStatisticsAgent:
 2. 범위 명시: 필요시 분석 범위(예: 2024년 정규시즌 기준) 자연스럽게 포함
 3. 근거 제시: "최신 기록을 확인해보니...", "현재 시즌 기준으로..." 등 자연스러운 표현 사용
 4. 데이터 부족 시: "죄송하지만 해당 정보를 찾을 수 없습니다" 등 친근한 표현 사용
-5. 지표 설명: 복잡한 지표는 쉽게 설명하되 자연스럽게 포함
+5. 지표 설명: 복잡한 지표는 한글로 쉽게 설명하되 자연스럽게 포함
+   - OPS (출루율+장타율), wRC+ (조정 득점 생산력), ERA- (조정 방어율), WAR (대체 선수 대비 승수) 등
 6. 정확성 우선: 확실한 정보만 제공하되 딱딱하지 않은 톤으로 전달
 
 위 DB 조회 결과만을 사용하여 정확하고 간결한 답변을 작성하세요.
