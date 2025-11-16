@@ -41,6 +41,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from pathlib import Path
 
 import psycopg2
 from psycopg2 import sql
@@ -73,6 +74,69 @@ class ChunkPayload:
 
 # TABLE_PROFILES에 테이블별 메타가 있음: 설명, select_sql, 제목 구성용 필드(title_fields), 본문 하이라이트(highlights), 기본키 힌트(pk_hint), 전용 렌더러(renderer).
 TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
+    "kbo_metrics_explained": {
+        "description": "KBO 야구 기록 지표 설명",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_metrics_explained.md",
+        "source_table": "kbo_definitions", # A new source_table name for these definitions
+        "title": "KBO 야구 기록 지표 설명", # Fixed title for the chunks
+        "pk_hint": ["title"], # A simple PK hint, though not strictly needed for a single file
+    },
+    "kbo_regulations_basic": {
+        "description": "KBO 기본 규정 (리그 구성, 경기 시간, 타이브레이크 등)",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "01_기본규정.md",
+        "source_table": "kbo_regulations",
+        "title": "KBO 기본 규정",
+        "pk_hint": ["title"],
+    },
+    "kbo_regulations_player": {
+        "description": "KBO 선수 규정 (등록, FA, 외국인선수, 드래프트 등)",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "02_선수규정.md",
+        "source_table": "kbo_regulations",
+        "title": "KBO 선수 규정",
+        "pk_hint": ["title"],
+    },
+    "kbo_regulations_game": {
+        "description": "KBO 경기 규정 (경기 진행, 방해, 보크, 홈런 등)",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "03_경기규정.md",
+        "source_table": "kbo_regulations",
+        "title": "KBO 경기 규정",
+        "pk_hint": ["title"],
+    },
+    "kbo_regulations_technical": {
+        "description": "KBO 기술 규정 (기록, 통계, 심판, 용품 등)",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "04_기술규정.md",
+        "source_table": "kbo_regulations",
+        "title": "KBO 기술 규정",
+        "pk_hint": ["title"],
+    },
+    "kbo_regulations_discipline": {
+        "description": "KBO 징계 규정 (폭력, 도박, 약물, 처벌 기준 등)",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "05_징계규정.md",
+        "source_table": "kbo_regulations",
+        "title": "KBO 징계 규정",
+        "pk_hint": ["title"],
+    },
+    "kbo_regulations_postseason": {
+        "description": "KBO 포스트시즌 규정 (플레이오프, 와일드카드, 한국시리즈 등)",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "06_포스트시즌.md",
+        "source_table": "kbo_regulations",
+        "title": "KBO 포스트시즌 규정",
+        "pk_hint": ["title"],
+    },
+    "kbo_regulations_special": {
+        "description": "KBO 특별 규정 (코로나19, 기상이변, 비상상황 등)",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "07_특별규정.md",
+        "source_table": "kbo_regulations",
+        "title": "KBO 특별 규정",
+        "pk_hint": ["title"],
+    },
+    "kbo_regulations_terms": {
+        "description": "KBO 야구 용어 정의 (기본 용어, 통계 지표, 포지션 등)",
+        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "08_용어정의.md",
+        "source_table": "kbo_regulations",
+        "title": "KBO 야구 용어 정의",
+        "pk_hint": ["title"],
+    },
     "player_season_batting": {
         "description": "KBO 타자 시즌 기록 요약",
         "kind": "batting_season",
@@ -520,6 +584,15 @@ DEFAULT_TABLES = [
     "player_basic",
     "team_profiles",
     "team_name_mapping",
+    "kbo_metrics_explained",
+    "kbo_regulations_basic",
+    "kbo_regulations_player",
+    "kbo_regulations_game",
+    "kbo_regulations_technical",
+    "kbo_regulations_discipline",
+    "kbo_regulations_postseason",
+    "kbo_regulations_special",
+    "kbo_regulations_terms",
 ]
 
 TARGET_RPM = 10
@@ -916,21 +989,10 @@ def ingest_table(
         return 0
 
     profile = TABLE_PROFILES.get(table, {})
-    pk_columns = get_primary_key_columns(conn, table)
-    query, params = build_select_query(
-        table,
-        profile,
-        pk_columns,
-        limit,
-        season_year,
-        since,
-    )
-
     total_chunks = 0
     buffer: List[ChunkPayload] = []
     settings = get_settings()
     processed_chunks = 0
-    fetched_rows = 0
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
 
     # upsert 작업이 오래 걸려 타임아웃이 발생하지 않도록 statement_timeout을 방지
@@ -939,6 +1001,64 @@ def ingest_table(
 
     with conn.cursor(cursor_factory=RealDictCursor) as read_cur, conn.cursor() as write_cur:
         write_cur.execute("SET statement_timeout TO 0;")
+
+        # --- NEW LOGIC FOR STATIC FILE ---
+        if "source_file" in profile:
+            print(f"      정적 파일 '{profile['source_file']}'을(를) 수집 중입니다...")
+            try:
+                with open(profile["source_file"], "r", encoding="utf-8") as f:
+                    content = f.read()
+            except FileNotFoundError:
+                print(f"오류: '{profile['source_file']}' 파일을 찾을 수 없습니다.")
+                return 0
+
+            chunks = smart_chunks(content)
+            if not chunks:
+                print(f"오류: '{profile['source_file']}' 파일 내용에서 청크를 생성할 수 없습니다.")
+                return 0
+
+            for idx, chunk in enumerate(chunks, start=1):
+                buffer.append(
+                    ChunkPayload(
+                        table=profile["source_table"],
+                        source_row_id=f"{profile['source_table']}_part_{idx}",
+                        title=profile["title"],
+                        content=chunk,
+                        season_year=0,
+                        season_id=None,
+                        league_type_code=0,
+                        team_id=None,
+                        player_id=None,
+                        meta={"source_file": str(profile["source_file"]), "chunk_index": idx},
+                    )
+                )
+            flushed = flush_chunks(
+                write_cur,
+                settings,
+                buffer,
+                max_concurrency=max_concurrency,
+                commit_interval=commit_interval,
+                stats=stats,
+                skip_embedding=skip_embedding,
+            )
+            total_chunks += flushed
+            conn.commit() # Commit after static file ingestion
+            if flushed > 0:
+                print(f"      총 {flushed}개 청크를 처리했습니다.", flush=True)
+            return total_chunks
+        # --- END NEW LOGIC ---
+
+        pk_columns = get_primary_key_columns(conn, table)
+        query, params = build_select_query(
+            table,
+            profile,
+            pk_columns,
+            limit,
+            season_year,
+            since,
+        )
+
+        fetched_rows = 0
         read_cur.itersize = read_batch_size
         read_cur.execute(query, params)
 
