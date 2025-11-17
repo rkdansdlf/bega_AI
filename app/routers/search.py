@@ -27,7 +27,7 @@ class SearchAnalysisResponse(BaseModel):
 async def debug_search(
     q: str = Query(..., min_length=2, description="분석할 질문 또는 키워드"),
     limit: int = Query(10, ge=1, le=50, description="검색 결과 개수"),
-    year: Optional[int] = Query(None, description="시즌 연도 (예: 2024)"),
+    year: Optional[int] = Query(None, description="시즌 연도 (예: 2025)"),
     team: Optional[str] = Query(None, description="팀명 (예: LG, KIA)"),
     use_multi_query: bool = Query(True, description="다중 쿼리 검색 사용 여부"),
     pipeline=Depends(get_rag_pipeline),

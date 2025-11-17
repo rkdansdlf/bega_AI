@@ -387,6 +387,79 @@ class GameQueryTool:
         
         return result
     
+    def get_schedule(
+        self, 
+        start_date: str, 
+        end_date: str, 
+        team: str = None
+    ) -> Dict[str, Any]:
+        """
+        특정 기간 동안의 경기 일정을 조회합니다.
+        
+        Args:
+            start_date: 조회 시작 날짜 (YYYY-MM-DD)
+            end_date: 조회 종료 날짜 (YYYY-MM-DD)
+            team: 특정 팀의 일정만 조회 (선택적)
+            
+        Returns:
+            경기 일정 목록
+        """
+        logger.info(f"[GameQuery] Schedule query: {start_date} to {end_date}, Team: {team}")
+        
+        result = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "team_filter": team,
+            "games": [],
+            "found": False,
+            "total_games": 0,
+            "error": None
+        }
+        
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            where_conditions = ["g.game_date BETWEEN %s AND %s"]
+            query_params = [start_date, end_date]
+            
+            if team:
+                normalized_team = self._normalize_team_name(team)
+                where_conditions.append("(g.home_team = %s OR g.away_team = %s)")
+                query_params.extend([normalized_team, normalized_team])
+            
+            query = f"""
+                SELECT 
+                    g.game_id,
+                    g.game_date,
+                    g.home_team,
+                    g.away_team,
+                    g.game_status,
+                    g.stadium
+                FROM game g
+                WHERE {' AND '.join(where_conditions)}
+                ORDER BY g.game_date, g.game_id;
+            """
+            
+            cursor.execute(query, query_params)
+            games = cursor.fetchall()
+            
+            if games:
+                result["games"] = [dict(game) for game in games]
+                result["found"] = True
+                result["total_games"] = len(games)
+                logger.info(f"[GameQuery] Found {len(games)} scheduled games")
+            else:
+                logger.warning(f"[GameQuery] No scheduled games found in the period")
+                
+        except Exception as e:
+            logger.error(f"[GameQuery] Schedule query error: {e}")
+            result["error"] = f"경기 일정 조회 오류: {e}"
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+        
+        return result
+    
     def get_player_game_performance(
         self, 
         player_name: str, 
@@ -490,8 +563,8 @@ class GameQueryTool:
                 return result
             
             query = f"""
-                SELECT game_id, game_date, home_team_id, away_team_id, status
-                FROM games 
+                SELECT game_id, game_date, home_team, away_team, game_status
+                FROM game 
                 WHERE {' AND '.join(where_conditions)}
                 ORDER BY game_date;
             """
