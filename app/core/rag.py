@@ -426,7 +426,8 @@ class RAGPipeline:
             "타율", "홈런", "타점", "득점", "ops", "era", "방어율", "whip", 
             "승", "패", "세이브", "홀드", "삼진", "볼넷", "출루율", "장타율",
             "wrc+", "war", "fip", "babip", "몇위", "순위", "1위", "최고", 
-            "상위", "리더", "기록", "통계", "성적", "몇개", "몇점", "얼마나"
+            "상위", "리더", "기록", "통계", "성적", "몇개", "몇점", "얼마나",
+            "vs", "대", "비교", "누가", "더", "뛰어난", "우수한", "좋은", "맞대결"
         ]
         
         query_lower = query.lower()
@@ -512,15 +513,28 @@ class RAGPipeline:
         """
         일반 대화인지 판단합니다.
         """
+        # 야구 지식/용어 관련 질문들 (우선 확인)
+        baseball_knowledge_keywords = [
+            "ops", "wrc+", "war", "era", "whip", "babip", "fip", "골든글러브",
+            "fa", "신인왕", "mvp", "타율", "방어율", "출루율", "장타율",
+            "자책점", "세이브", "홀드", "승리투수", "뜻", "의미", "정의",
+            "계산", "어떻게", "무엇", "기준"
+        ]
+        
+        # 일반 대화 키워드 (야구와 무관한 것들)
         general_keywords = [
-            "안녕", "누구", "좋아", "응원", "날씨", "어때", "뭐해", 
-            "고마워", "미안", "반가워", "잘가", "소개", "설명", "도움",
-            "기능", "사용법", "어떻게", "왜", "언제", "어디"
+            "안녕", "누구", "좋아해", "응원", "날씨", "어때", "뭐해", 
+            "고마워", "미안", "반가워", "잘가", "소개", "도움",
+            "기능", "사용법"
         ]
         
         query_lower = query.lower()
         
-        # 야구/통계와 무관한 일반적인 대화
+        # 야구 지식 질문이면 일반 대화가 아님
+        if any(keyword in query_lower for keyword in baseball_knowledge_keywords):
+            return True  # 야구 지식 질문이므로 일반 대화로 처리 (지식 답변 제공)
+        
+        # 야구/통계와 무관한 일반적인 대화만 일반 대화로 분류
         return any(keyword in query_lower for keyword in general_keywords)
 
     async def _try_agent_first(
@@ -571,6 +585,17 @@ class RAGPipeline:
         """
         logger.info(f"[RAG] Handling general conversation: {query}")
         
+        # 야구 지식 관련 질문 처리
+        knowledge_responses = {
+            "ops": "OPS는 출루율(OBP)과 장타율(SLG)을 더한 값입니다.\n- 계산법: OPS = 출루율 + 장타율\n- 좋은 OPS: 0.800 이상\n- 뛰어난 OPS: 0.900 이상\n- 최고 수준 OPS: 1.000 이상\n\nOPS는 타자의 종합적인 공격력을 나타내는 대표적인 지표입니다.",
+            "wrc+": "wRC+는 가중출루율을 기반으로 한 공격력 지표입니다.\n- 100이 평균 (리그 평균 대비 100%)\n- 120이면 리그 평균보다 20% 우수\n- 80이면 리그 평균보다 20% 부족\n\nwRC+는 볼파크와 리그 환경을 보정한 정확한 공격력 지표입니다.",
+            "war": "WAR(Wins Above Replacement)는 대체 선수 대비 승수 기여도입니다.\n- WAR 2: 평균 주전급\n- WAR 5: 올스타급\n- WAR 8+: MVP급\n\nWAR은 선수의 종합적인 가치를 하나의 숫자로 나타내는 가장 포괄적인 지표입니다.",
+            "era": "ERA(자책점평균)는 투수가 9이닝당 내주는 자책점 수입니다.\n- 계산법: (자책점 × 9) ÷ 투구이닝\n- 좋은 ERA: 4.00 미만\n- 뛰어난 ERA: 3.00 미만\n- 최고 수준 ERA: 2.50 미만",
+            "whip": "WHIP는 투수가 이닝당 내주는 안타와 볼넷의 합계입니다.\n- 계산법: (피안타 + 볼넷) ÷ 투구이닝\n- 좋은 WHIP: 1.30 미만\n- 뛰어난 WHIP: 1.20 미만\n- 최고 수준 WHIP: 1.10 미만",
+            "골든글러브": "KBO 골든글러브는 각 포지션별 최고의 수비수에게 수여되는 상입니다.\n- 선정 방식: 기자단 투표\n- 대상: 각 포지션별 1명 (포수, 1루수, 2루수, 3루수, 유격수, 외야수 3명, 지명타자)\n- 기준: 수비율, 범위, 송구력 등 종합적인 수비 능력\n- 최소 출전: 규정 이닝의 2/3 이상",
+            "fa": "FA(자유계약선수)는 팀을 자유롭게 선택할 수 있는 선수입니다.\n- 자격 조건: 프로 경력 9년 이상 (2015년부터 8년으로 단축)\n- 권리: 어떤 팀과도 자유롭게 계약 가능\n- 보상: FA 영입팀은 원소속팀에게 보상선수 제공"
+        }
+        
         # 간단한 대화 응답 패턴
         conversation_responses = {
             "안녕": "안녕하세요! 저는 KBO 리그 데이터 분석가 BEGA입니다. KBO 야구 통계에 대해 궁금한 것이 있으시면 언제든 물어보세요!",
@@ -584,7 +609,19 @@ class RAGPipeline:
         
         query_lower = query.lower()
         
-        # 키워드 기반 응답 매칭
+        # 야구 지식 질문 먼저 확인 (우선순위 높음)
+        for keyword, response in knowledge_responses.items():
+            if keyword in query_lower:
+                return {
+                    "answer": response,
+                    "citations": [],
+                    "intent": "knowledge_explanation",
+                    "retrieved": [],
+                    "strategy": "knowledge_handler",
+                    "verified": True
+                }
+        
+        # 일반 대화 키워드 확인
         for keyword, response in conversation_responses.items():
             if keyword in query_lower:
                 return {
@@ -593,10 +630,10 @@ class RAGPipeline:
                     "intent": "general_conversation",
                     "retrieved": [],
                     "strategy": "conversation_handler",
-                    "verified": True  # 일반 대화는 검증된 것으로 처리
+                    "verified": True
                 }
         
-        # 기본 응답
+        # 기본 응답 (아무 키워드도 매칭되지 않을 때만)
         default_response = """안녕하세요! 저는 KBO 리그 데이터 분석가 'BEGA'입니다. 
 
 KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니다:

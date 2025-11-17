@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EntityFilter:
     """질문에서 추출된 엔티티 정보를 저장하는 필터 클래스"""
-    season_year: Optional[int] = None      # 시즌 연도 (예: 2024)
+    season_year: Optional[int] = None      # 시즌 연도 (예: 2025)
     team_id: Optional[str] = None          # 팀 식별자 (예: "LG", "KIA")
     player_name: Optional[str] = None      # 선수 이름 (예: "김현수")
     stat_type: Optional[str] = None        # 통계 지표 (예: "ops", "era") 
