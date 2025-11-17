@@ -617,7 +617,7 @@ ON CONFLICT (source_table, source_row_id)
 DO UPDATE SET
     meta = EXCLUDED.meta,
     content = EXCLUDED.content,
-    embedding = EXCLUDED.embedding,
+    embedding = COALESCE(EXCLUDED.embedding, rag_chunks.embedding),
     season_year = COALESCE(EXCLUDED.season_year, rag_chunks.season_year),
     season_id = COALESCE(EXCLUDED.season_id, rag_chunks.season_id),
     league_type_code = COALESCE(EXCLUDED.league_type_code, rag_chunks.league_type_code),
