@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     chatbot_model_name: Optional[str] = Field(None, env="CHATBOT_MODEL_NAME")
 
     # --- 검색(Retrieval) 관련 설정 ---
-    default_search_limit: int = Field(6, env="DEFAULT_SEARCH_LIMIT")
+    default_search_limit: int = Field(3, env="DEFAULT_SEARCH_LIMIT")
 
     # --- SSE / 채팅 관련 설정 ---
     max_output_tokens: int = Field(1024, env="MAX_OUTPUT_TOKENS")
