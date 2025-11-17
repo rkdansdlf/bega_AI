@@ -84,6 +84,26 @@ class DatabaseQueryTool:
         try:
             cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
+            # 우선 선수가 존재하는지 확인
+            check_query = """
+                SELECT DISTINCT name FROM player_basic 
+                WHERE (LOWER(name) = LOWER(%s) OR LOWER(name) LIKE LOWER(%s))
+                LIMIT 5
+            """
+            cursor.execute(check_query, (player_name, f'%{player_name}%'))
+            existing_players = [row[0] for row in cursor.fetchall()]
+            
+            if not existing_players:
+                result["error"] = f"선수 '{player_name}'을(를) 찾을 수 없습니다. 정확한 선수명을 확인해주세요."
+                logger.warning(f"[DatabaseQuery] No player found matching: {player_name}")
+                return result
+            else:
+                logger.info(f"[DatabaseQuery] Found matching players: {existing_players}")
+                # 정확히 일치하는 선수명이 있으면 그것을 사용, 없으면 첫 번째 결과 사용
+                exact_match = next((name for name in existing_players if name.lower() == player_name.lower()), None)
+                matched_name = exact_match if exact_match else existing_players[0]
+                player_name = matched_name  # 실제 데이터베이스의 선수명으로 업데이트
+            
             # 타격 통산 통계 조회 (합계)
             if position in ["batting", "both"]:
                 batting_query = """
@@ -112,14 +132,15 @@ class DatabaseQueryTool:
                                    ELSE 0 END)::numeric, 3) as career_slg
                     FROM player_season_batting psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
-                    WHERE LOWER(pb.name) LIKE LOWER(%s) 
-                    AND psb.league = '정규시즌'
+                    JOIN kbo_seasons ks ON psb.season = ks.season_year
+                    WHERE (LOWER(pb.name) = LOWER(%s) OR LOWER(pb.name) LIKE LOWER(%s))
+                    AND ks.league_type_code = '0'
                     AND psb.plate_appearances >= 10  -- 최소 기준
                     GROUP BY pb.player_id, pb.name
                     ORDER BY total_home_runs DESC
                     LIMIT 1
                 """
-                cursor.execute(batting_query, (f'%{player_name}%',))
+                cursor.execute(batting_query, (player_name, f'%{player_name}%'))
                 batting_row = cursor.fetchone()
                 
                 if batting_row:
@@ -158,14 +179,15 @@ class DatabaseQueryTool:
                                    ELSE 0 END)::numeric, 2) as career_whip
                     FROM player_season_pitching psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
-                    WHERE LOWER(pb.name) LIKE LOWER(%s) 
-                    AND psp.league = '정규시즌'
+                    JOIN kbo_seasons ks ON psp.season = ks.season_year
+                    WHERE (LOWER(pb.name) = LOWER(%s) OR LOWER(pb.name) LIKE LOWER(%s))
+                    AND ks.league_type_code = '0'
                     AND psp.innings_pitched >= 1  -- 최소 기준
                     GROUP BY pb.player_id, pb.name
                     ORDER BY total_wins DESC
                     LIMIT 1
                 """
-                cursor.execute(pitching_query, (f'%{player_name}%',))
+                cursor.execute(pitching_query, (player_name, f'%{player_name}%'))
                 pitching_row = cursor.fetchone()
                 
                 if pitching_row:
@@ -225,10 +247,11 @@ class DatabaseQueryTool:
                         psb.avg, psb.obp, psb.slg, psb.ops, psb.babip
                     FROM player_season_batting psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
+                    JOIN kbo_seasons ks ON psb.season = ks.season_year
                     LEFT JOIN teams t ON psb.team_code = t.team_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 
                     AND psb.season = %s 
-                    AND psb.league = '정규시즌'
+                    AND ks.league_type_code = '0'
                     ORDER BY psb.plate_appearances DESC
                     LIMIT 1
                 """
@@ -252,10 +275,11 @@ class DatabaseQueryTool:
                         psp.home_runs_allowed, psp.walks_allowed, psp.strikeouts, psp.era, psp.whip
                     FROM player_season_pitching psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
+                    JOIN kbo_seasons ks ON psp.season = ks.season_year
                     LEFT JOIN teams t ON psp.team_code = t.team_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 
                     AND psp.season = %s 
-                    AND psp.league = '정규시즌'
+                    AND ks.league_type_code = '0'
                     ORDER BY psp.innings_pitched DESC
                     LIMIT 1
                 """
@@ -356,9 +380,10 @@ class DatabaseQueryTool:
                         psb.plate_appearances, psb.avg, psb.obp, psb.slg, psb.ops, psb.home_runs, psb.rbi
                     FROM player_season_batting psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
+                    JOIN kbo_seasons ks ON psb.season = ks.season_year
                     LEFT JOIN teams t ON psb.team_code = t.team_id
                     WHERE psb.season = %s 
-                    AND psb.league = '정규시즌'
+                    AND ks.league_type_code = '0'
                     {team_condition}
                     AND psb.plate_appearances >= %s 
                     AND psb.{db_column} IS NOT NULL
@@ -405,9 +430,10 @@ class DatabaseQueryTool:
                         psp.innings_pitched, psp.era, psp.whip, psp.wins, psp.losses, psp.saves, psp.strikeouts
                     FROM player_season_pitching psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
+                    JOIN kbo_seasons ks ON psp.season = ks.season_year
                     LEFT JOIN teams t ON psp.team_code = t.team_id
                     WHERE psp.season = %s 
-                    AND psp.league = '정규시즌'
+                    AND ks.league_type_code = '0'
                     {team_condition}
                     AND psp.innings_pitched >= %s 
                     AND psp.{db_column} IS NOT NULL

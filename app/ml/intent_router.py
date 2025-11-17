@@ -15,8 +15,8 @@ MODEL_PATH = Path(__file__).with_name("intent_router.joblib")
 
 
 def rule_intent(question: str) -> Optional[str]:
-    stats_pattern = r"(순위|상위|평균|합계|ERA|OPS|승률|다음 경기|라인업|박스스코어)"
-    explanatory_pattern = r"(역사|구단 변천|구장|파크팩터|특징)"
+    stats_pattern = r"(순위|상위|평균|합계|ERA|OPS|승률|다음 경기|라인업|박스스코어|일정|결과|기록|플레이오프|포스트시즌|세이브)"
+    explanatory_pattern = r"(역사|구단 변천|구장|파크팩터|특징|규정|룰|규칙)"
 
     if re.search(stats_pattern, question):
         return "stats_lookup"
