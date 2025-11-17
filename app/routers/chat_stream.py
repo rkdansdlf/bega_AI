@@ -205,7 +205,15 @@ async def chat_completion(
         filters=filters,
         history=history,
     )
-    return JSONResponse(result)
+    if isinstance(result, dict):
+        return JSONResponse(result)
+    else:
+        # result가 객체라면 dict로 변환
+        return JSONResponse({
+            "answer": getattr(result, 'answer', str(result)),
+            "citations": getattr(result, 'citations', []),
+            "intent": intent
+        })
 
 
 @router.post("/stream")
