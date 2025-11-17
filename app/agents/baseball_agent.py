@@ -85,7 +85,7 @@ class BaseballStatisticsAgent:
             "선수가 해당 연도에 실제로 기록이 있는지 DB에서 확인합니다. 선수명 오타나 존재하지 않는 선수 질문 시 사용하세요.",
             {
                 "player_name": "선수명",
-                "year": "시즌 년도 (기본값: 2024)"
+                "year": "시즌 년도 (기본값: 2025)"
             },
             self._tool_validate_player
         )
@@ -211,6 +211,20 @@ class BaseballStatisticsAgent:
             self._tool_get_player_game_performance
         )
         
+        # 선수 비교 도구
+        self.tool_caller.register_tool(
+            "compare_players",
+            "두 선수의 통계를 비교 분석합니다. 'A vs B', 'A와 B 중 누가' 등 선수 비교 질문에 사용하세요.",
+            {
+                "player1": "첫 번째 선수명",
+                "player2": "두 번째 선수명",
+                "comparison_type": "career(통산 비교, 기본값) 또는 season(특정 시즌 비교)",
+                "year": "특정 시즌 비교 시 연도 (선택적)",
+                "position": "batting(타자), pitching(투수), 또는 both(둘다, 기본값)"
+            },
+            self._tool_compare_players
+        )
+        
     def _tool_get_player_stats(self, player_name: str, year: int, position: str = "both") -> ToolResult:
         """선수 개별 통계 조회 도구"""
         try:
@@ -319,7 +333,7 @@ class BaseballStatisticsAgent:
                 message=f"도구 실행 중 오류 발생: {e}"
             )
     
-    def _tool_validate_player(self, player_name: str, year: int = 2024) -> ToolResult:
+    def _tool_validate_player(self, player_name: str, year: int = 2025) -> ToolResult:
         """선수 존재 여부 확인 도구"""
         try:
             result = self.db_query_tool.validate_player_exists(player_name, year)
@@ -726,6 +740,177 @@ class BaseballStatisticsAgent:
                 data={},
                 message=f"도구 실행 중 오류 발생: {e}"
             )
+    
+    def _tool_compare_players(
+        self, 
+        player1: str, 
+        player2: str, 
+        comparison_type: str = "career",
+        year: int = None,
+        position: str = "both"
+    ) -> ToolResult:
+        """선수 비교 도구"""
+        try:
+            logger.info(f"[BaseballAgent] Comparing players: {player1} vs {player2} ({comparison_type})")
+            
+            # 두 선수의 통계를 모두 조회
+            if comparison_type == "season" and year:
+                # 특정 시즌 비교
+                player1_result = self.db_query_tool.get_player_season_stats(player1, year, position)
+                player2_result = self.db_query_tool.get_player_season_stats(player2, year, position)
+                comparison_label = f"{year}년 시즌"
+            else:
+                # 통산 비교
+                player1_result = self.db_query_tool.get_player_career_stats(player1, position)
+                player2_result = self.db_query_tool.get_player_career_stats(player2, position)
+                comparison_label = "통산"
+            
+            # 오류 처리
+            if player1_result["error"] or player2_result["error"]:
+                return ToolResult(
+                    success=False,
+                    data={
+                        "player1_result": player1_result,
+                        "player2_result": player2_result
+                    },
+                    message=f"데이터 조회 오류: {player1_result.get('error') or player2_result.get('error')}"
+                )
+            
+            # 두 선수 중 하나라도 데이터가 없으면 실패
+            if not player1_result["found"]:
+                return ToolResult(
+                    success=False,
+                    data={
+                        "player1_result": player1_result,
+                        "player2_result": player2_result
+                    },
+                    message=f"{comparison_label} '{player1}' 선수의 기록을 찾을 수 없습니다."
+                )
+            
+            if not player2_result["found"]:
+                return ToolResult(
+                    success=False,
+                    data={
+                        "player1_result": player1_result,
+                        "player2_result": player2_result
+                    },
+                    message=f"{comparison_label} '{player2}' 선수의 기록을 찾을 수 없습니다."
+                )
+            
+            # 비교 분석 데이터 구성
+            comparison_data = {
+                "comparison_type": comparison_label,
+                "player1": {
+                    "name": player1,
+                    "data": player1_result
+                },
+                "player2": {
+                    "name": player2,
+                    "data": player2_result
+                },
+                "analysis": self._analyze_player_comparison(player1_result, player2_result, position)
+            }
+            
+            return ToolResult(
+                success=True,
+                data=comparison_data,
+                message=f"{player1} vs {player2} {comparison_label} 비교 분석 완료"
+            )
+            
+        except Exception as e:
+            logger.error(f"Player comparison tool error: {e}")
+            return ToolResult(
+                success=False,
+                data={},
+                message=f"선수 비교 도구 실행 중 오류 발생: {e}"
+            )
+    
+    def _analyze_player_comparison(self, player1_data: Dict, player2_data: Dict, position: str) -> Dict:
+        """두 선수 데이터를 분석하여 비교 결과를 생성합니다."""
+        analysis = {
+            "summary": "",
+            "key_stats": {},
+            "strengths": {
+                "player1": [],
+                "player2": []
+            }
+        }
+        
+        try:
+            # 타자 비교 분석
+            if position in ["batting", "both"] and "batting_stats" in player1_data and "batting_stats" in player2_data:
+                p1_batting = player1_data["batting_stats"]
+                p2_batting = player2_data["batting_stats"]
+                
+                # 주요 타격 지표 비교
+                key_batting_stats = ["avg", "ops", "home_runs", "rbi", "runs", "hits"]
+                
+                for stat in key_batting_stats:
+                    if stat in p1_batting and stat in p2_batting:
+                        p1_val = float(p1_batting[stat] or 0)
+                        p2_val = float(p2_batting[stat] or 0)
+                        
+                        analysis["key_stats"][stat] = {
+                            "player1": p1_val,
+                            "player2": p2_val,
+                            "difference": p1_val - p2_val,
+                            "better_player": "player1" if p1_val > p2_val else "player2" if p2_val > p1_val else "tie"
+                        }
+                        
+                        # 장점 분석
+                        if p1_val > p2_val:
+                            analysis["strengths"]["player1"].append(f"{stat}: {p1_val}")
+                        elif p2_val > p1_val:
+                            analysis["strengths"]["player2"].append(f"{stat}: {p2_val}")
+            
+            # 투수 비교 분석
+            if position in ["pitching", "both"] and "pitching_stats" in player1_data and "pitching_stats" in player2_data:
+                p1_pitching = player1_data["pitching_stats"]
+                p2_pitching = player2_data["pitching_stats"]
+                
+                # 주요 투구 지표 비교 (ERA, WHIP은 낮을수록 좋음)
+                key_pitching_stats = ["era", "whip", "wins", "strikeouts", "innings_pitched"]
+                
+                for stat in key_pitching_stats:
+                    if stat in p1_pitching and stat in p2_pitching:
+                        p1_val = float(p1_pitching[stat] or 0)
+                        p2_val = float(p2_pitching[stat] or 0)
+                        
+                        # ERA, WHIP은 낮을수록 좋음
+                        if stat in ["era", "whip"]:
+                            better_player = "player1" if p1_val < p2_val else "player2" if p2_val < p1_val else "tie"
+                        else:
+                            better_player = "player1" if p1_val > p2_val else "player2" if p2_val > p1_val else "tie"
+                        
+                        analysis["key_stats"][stat] = {
+                            "player1": p1_val,
+                            "player2": p2_val,
+                            "difference": p1_val - p2_val,
+                            "better_player": better_player
+                        }
+                        
+                        # 장점 분석
+                        if better_player == "player1":
+                            analysis["strengths"]["player1"].append(f"{stat}: {p1_val}")
+                        elif better_player == "player2":
+                            analysis["strengths"]["player2"].append(f"{stat}: {p2_val}")
+            
+            # 요약 생성
+            p1_advantages = len(analysis["strengths"]["player1"])
+            p2_advantages = len(analysis["strengths"]["player2"])
+            
+            if p1_advantages > p2_advantages:
+                analysis["summary"] = f"선수1이 {p1_advantages}개 지표에서 우세, 선수2가 {p2_advantages}개 지표에서 우세"
+            elif p2_advantages > p1_advantages:
+                analysis["summary"] = f"선수2가 {p2_advantages}개 지표에서 우세, 선수1이 {p1_advantages}개 지표에서 우세"
+            else:
+                analysis["summary"] = f"두 선수 모두 {p1_advantages}개씩 지표에서 우세하여 비슷한 수준"
+                
+        except Exception as e:
+            logger.error(f"Player comparison analysis error: {e}")
+            analysis["summary"] = "비교 분석 중 오류 발생"
+        
+        return analysis
 
     async def process_query(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -792,7 +977,7 @@ class BaseballStatisticsAgent:
 
 1. **get_player_stats**: 특정 선수의 개별 시즌 통계 조회
    - player_name (필수): 선수명
-   - year (필수): 시즌 년도 (예: 2024)
+   - year (필수): 시즌 년도 (예: 2025)
    - position (선택): "batting", "pitching", "both" 중 하나 (기본값: "both")
 
 2. **get_leaderboard**: 통계 지표별 순위/리더보드 조회  
@@ -804,7 +989,7 @@ class BaseballStatisticsAgent:
 
 3. **validate_player**: 선수 존재 여부 및 정확한 이름 확인
    - player_name (필수): 선수명
-   - year (선택): 시즌 년도 (기본값: 2024)
+   - year (선택): 시즌 년도 (기본값: 2025)
 
 4. **get_career_stats**: 선수의 통산(커리어) 통계 조회
    - player_name (필수): 선수명
@@ -855,17 +1040,32 @@ class BaseballStatisticsAgent:
    - date (선택): 경기 날짜
    - recent_games (선택): 최근 몇 경기까지 (기본 5경기)
 
+16. **compare_players**: 두 선수의 통계를 비교 분석
+   - player1 (필수): 첫 번째 선수명
+   - player2 (필수): 두 번째 선수명
+   - comparison_type (선택): "career"(통산 비교, 기본값) 또는 "season"(특정 시즌 비교)
+   - year (선택): 특정 시즌 비교 시 연도
+   - position (선택): "batting", "pitching", "both" 중 하나 (기본값: "both")
+
 질문: {query}
 
 **중요한 규칙:**
-- 시즌이 명시되지 않으면 2024년을 기본값으로 사용
-- "통산", "커리어", "총" 키워드가 있으면 반드시 get_career_stats 사용
+- 시즌이 명시되지 않으면 2025년을 기본값으로 사용
+- "통산", "커리어", "총", "KBO 리그 통산" 키워드가 있으면 반드시 get_career_stats 사용
+- "세이브" 키워드가 포함된 통산 기록 질문은 get_career_stats 사용
 - "몇 년", "2023년" 등 구체적 연도가 있으면 get_player_stats 사용
+- "가장 많은", "최고", "언제", "어느 시즌" 등 최고 기록 시즌을 묻는 질문:
+  * 먼저 get_career_stats로 통산 기록 확인
+  * 필요시 여러 연도의 get_player_stats로 연도별 비교
 - 순위/리더보드 질문은 get_leaderboard 사용
 - 경기 결과, 박스스코어 질문은 get_game_box_score 사용
-- 특정 날짜 경기 질문은 get_games_by_date 사용
+- 특정 날짜 경기 질문("5월 5일 경기", "어린이날")은 get_games_by_date 사용
+- 시즌 일정 질문("언제부터 시작", "시범경기 일정")은 get_games_by_date 사용
 - 팀 간 맞대결 질문은 get_head_to_head 사용
+- 포스트시즌("한국시리즈", "플레이오프") 질문은 get_games_by_date 사용
 - 선수 개별 경기 활약 질문은 get_player_game_performance 사용
+- 선수 비교 질문("A vs B", "A와 B 중 누가", "더 뛰어난")은 compare_players 사용
+- 통산 기록 비교는 comparison_type="career", 특정 시즌 비교는 comparison_type="season"
 
 위 질문에 정확히 답변하기 위해 어떤 도구들을 어떤 순서로 호출해야 하는지 JSON 형식으로 계획을 세워주세요.
 **중요**: 매개변수명을 정확히 사용하세요!
@@ -873,9 +1073,13 @@ class BaseballStatisticsAgent:
 중요한 원칙:
 - 반드시 실제 데이터베이스 조회가 필요한 경우만 도구를 사용하세요
 - 선수명이 불확실한 경우 먼저 validate_player로 확인하세요
-- "최고", "상위", "1위", "2025년 최고" 등의 질문은 get_leaderboard를 사용하세요
-- 개별 선수 통계는 get_player_stats를 사용하세요
-- 연도 정보가 없거나 2025년인 경우 2024년을 기본값으로 사용하세요
+- 리그 전체 순위("최고", "상위", "1위")는 get_leaderboard를 사용하세요
+- 특정 선수의 개별 시즌 통계는 get_player_stats를 사용하세요
+- 특정 선수의 통산/커리어 기록은 get_career_stats를 사용하세요
+- 특정 선수의 "가장 좋은 시즌" 질문은 get_career_stats + 여러 연도 get_player_stats 조합
+- 경기 일정/결과는 get_games_by_date 또는 get_game_box_score 사용하세요
+- 날짜 형식은 YYYY-MM-DD로 변환하세요 (예: "5월 5일" → "2023-05-05")
+- 연도 정보가 없는 경우 2025년을 기본값으로 사용하세요
 
 **반드시 다음 JSON 형식으로만 응답하세요:**
 ```json
@@ -922,7 +1126,7 @@ class BaseballStatisticsAgent:
                         tool_name="get_leaderboard",
                         parameters={
                             "stat_name": "ops",
-                            "year": 2024,
+                            "year": 2025,
                             "position": "batting",
                             "limit": 10
                         }
@@ -957,31 +1161,139 @@ class BaseballStatisticsAgent:
             # 질문 유형에 따른 스마트 폴백
             query_lower = query.lower()
             
-            # 투수 질문 감지
-            if any(word in query_lower for word in ["투수", "투구", "방어율", "era", "whip", "승", "세이브"]):
-                fallback_tool = ToolCall(
-                    tool_name="get_leaderboard",
-                    parameters={
-                        "stat_name": "era",
-                        "year": 2024,
-                        "position": "pitching",
-                        "limit": 10
-                    }
-                )
-                analysis = "투수 관련 질문으로 판단하여 ERA 기준 상위 투수 조회"
+            # 선수명 추출 시도
+            import re
+            korean_names = re.findall(r'[가-힣]{2,4}', query)
+            potential_player_name = korean_names[0] if korean_names else None
+            
+            # 통산/커리어 질문 감지
+            if any(word in query_lower for word in ["통산", "커리어", "총", "kbo 리그"]):
+                if potential_player_name:
+                    fallback_tool = ToolCall(
+                        tool_name="get_career_stats",
+                        parameters={
+                            "player_name": potential_player_name,
+                            "position": "both"
+                        }
+                    )
+                    analysis = f"{potential_player_name} 선수의 통산 기록 조회"
+                else:
+                    fallback_tool = ToolCall(
+                        tool_name="get_leaderboard",
+                        parameters={
+                            "stat_name": "ops",
+                            "year": 2025,
+                            "position": "batting",
+                            "limit": 10
+                        }
+                    )
+                    analysis = "통산 기록 관련 질문으로 판단하여 상위 타자 조회"
+                    
+            # 경기 일정/결과 질문 감지
+            elif any(word in query_lower for word in ["경기", "일정", "결과", "어린이날", "한국시리즈", "시범경기", "언제부터", "우승"]):
+                # 날짜 추출 시도
+                import re
+                date_patterns = [
+                    r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일',  # 2023년 5월 5일
+                    r'(\d{4})-(\d{1,2})-(\d{1,2})',  # 2023-05-05
+                ]
+                extracted_date = None
+                for pattern in date_patterns:
+                    match = re.search(pattern, query)
+                    if match:
+                        year, month, day = match.groups()
+                        extracted_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                        break
+                
+                if extracted_date:
+                    fallback_tool = ToolCall(
+                        tool_name="get_games_by_date",
+                        parameters={
+                            "date": extracted_date
+                        }
+                    )
+                    analysis = f"{extracted_date} 경기 결과 조회"
+                else:
+                    # 연도 추출
+                    year_match = re.search(r'(\d{4})', query)
+                    year = int(year_match.group(1)) if year_match else 2025
+                    
+                    fallback_tool = ToolCall(
+                        tool_name="get_games_by_date", 
+                        parameters={
+                            "date": f"{year}-03-01"  # 기본값으로 시즌 시작 시점
+                        }
+                    )
+                    analysis = f"{year}년 경기 정보 조회"
+                    
+            # 가장 많은/최고 시즌 질문 감지
+            elif any(word in query_lower for word in ["가장 많은", "최고", "언제", "어느 시즌", "어떤 년도"]):
+                if potential_player_name:
+                    fallback_tool = ToolCall(
+                        tool_name="get_career_stats",
+                        parameters={
+                            "player_name": potential_player_name,
+                            "position": "both"
+                        }
+                    )
+                    analysis = f"{potential_player_name} 선수의 최고 시즌 조회를 위한 통산 기록 확인"
+                else:
+                    fallback_tool = ToolCall(
+                        tool_name="get_leaderboard",
+                        parameters={
+                            "stat_name": "home_runs",
+                            "year": 2025,
+                            "position": "batting",
+                            "limit": 10
+                        }
+                    )
+                    analysis = "최고 기록 관련 질문으로 판단하여 홈런 순위 조회"
+                    
+            # 투수 질문 감지  
+            elif any(word in query_lower for word in ["투수", "투구", "방어율", "era", "whip", "승", "세이브"]):
+                if potential_player_name:
+                    fallback_tool = ToolCall(
+                        tool_name="get_career_stats",
+                        parameters={
+                            "player_name": potential_player_name,
+                            "position": "pitching"
+                        }
+                    )
+                    analysis = f"{potential_player_name} 투수의 통산 기록 조회"
+                else:
+                    fallback_tool = ToolCall(
+                        tool_name="get_leaderboard",
+                        parameters={
+                            "stat_name": "era",
+                            "year": 2025,
+                            "position": "pitching",
+                            "limit": 10
+                        }
+                    )
+                    analysis = "투수 관련 질문으로 판단하여 ERA 기준 상위 투수 조회"
             
             # 타자 질문 감지 (기본값)
             else:
-                fallback_tool = ToolCall(
-                    tool_name="get_leaderboard", 
-                    parameters={
-                        "stat_name": "ops",
-                        "year": 2024,
-                        "position": "batting",
-                        "limit": 10
-                    }
-                )
-                analysis = "타자 관련 질문으로 판단하여 OPS 기준 상위 타자 조회"
+                if potential_player_name:
+                    fallback_tool = ToolCall(
+                        tool_name="get_career_stats",
+                        parameters={
+                            "player_name": potential_player_name,
+                            "position": "batting"
+                        }
+                    )
+                    analysis = f"{potential_player_name} 선수의 타격 통계 조회"
+                else:
+                    fallback_tool = ToolCall(
+                        tool_name="get_leaderboard", 
+                        parameters={
+                            "stat_name": "ops",
+                            "year": 2025,
+                            "position": "batting",
+                            "limit": 10
+                        }
+                    )
+                    analysis = "타자 관련 질문으로 판단하여 OPS 기준 상위 타자 조회"
             
             return {
                 "analysis": analysis,
@@ -1047,7 +1359,7 @@ class BaseballStatisticsAgent:
 
 ### 답변 생성 규칙
 1. 자연스러운 톤: 마치 야구 전문가가 답변하는 것처럼 자연스럽고 친근하게 작성
-2. 범위 명시: 필요시 분석 범위(예: 2024년 정규시즌 기준) 자연스럽게 포함
+2. 범위 명시: 필요시 분석 범위(예: 2025년 정규시즌 기준) 자연스럽게 포함
 3. 근거 제시: "최신 기록을 확인해보니...", "현재 시즌 기준으로..." 등 자연스러운 표현 사용
 4. 데이터 부족 시: "죄송하지만 해당 정보를 찾을 수 없습니다" 등 친근한 표현 사용
 5. 지표 설명: 복잡한 지표는 한글로 쉽게 설명하되 자연스럽게 포함
