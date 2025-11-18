@@ -445,11 +445,24 @@ class RAGPipeline:
             entity_filter.player_name or 
             entity_filter.stat_type or 
             "년" in query or
-            any(word in query_lower for word in ["알려줘", "궁금", "얼마", "몇"])
+            any(word in query_lower for word in ["알려줘", "궁금", "얼마", "몇", "는", "은", "의"]) or
+            # 질문 형태나 통계 지표가 있으면 통계 질문으로 간주
+            "?" in query or "몇" in query or "어떻게" in query or
+            any(stat in query_lower for stat in ["타율", "홈런", "ops", "era", "방어율"])
         )
         
+        # 디버깅을 위한 로그 출력
+        logger.info(f"[RAG] _is_statistical_query debug:")
+        logger.info(f"  query: {query}")
+        logger.info(f"  has_stat_keywords: {has_stat_keywords}")
+        logger.info(f"  has_specific_request: {has_specific_request}")
+        logger.info(f"  entity_filter.player_name: {entity_filter.player_name}")
+        logger.info(f"  entity_filter.stat_type: {entity_filter.stat_type}")
+        
         # 통계 키워드가 있고 구체적인 요청이면 통계 질문
-        return has_stat_keywords and has_specific_request
+        result = has_stat_keywords and has_specific_request
+        logger.info(f"  RESULT: {result}")
+        return result
     
     def _is_regulation_query(self, query: str) -> bool:
         """
@@ -513,12 +526,17 @@ class RAGPipeline:
         """
         일반 대화인지 판단합니다.
         """
-        # 야구 지식/용어 관련 질문들 (우선 확인)
-        baseball_knowledge_keywords = [
+        # 야구 지식/용어 관련 질문들 + 통계 질문 키워드들
+        baseball_keywords = [
             "ops", "wrc+", "war", "era", "whip", "babip", "fip", "골든글러브",
             "fa", "신인왕", "mvp", "타율", "방어율", "출루율", "장타율",
             "자책점", "세이브", "홀드", "승리투수", "뜻", "의미", "정의",
-            "계산", "어떻게", "무엇", "기준"
+            "계산", "어떻게", "무엇", "기준",
+            # 통계 질문 키워드 추가
+            "홈런", "타점", "득점", "승", "패", "삼진", "볼넷", "몇위", "순위",
+            "1위", "최고", "상위", "리더", "기록", "통계", "성적", "몇개", "몇점",
+            "얼마나", "얼마", "vs", "대", "비교", "누가", "더", "뛰어난", "우수한",
+            "좋은", "맞대결", "시즌", "년", "연도"
         ]
         
         # 일반 대화 키워드 (야구와 무관한 것들)
@@ -530,9 +548,9 @@ class RAGPipeline:
         
         query_lower = query.lower()
         
-        # 야구 지식 질문이면 일반 대화가 아님
-        if any(keyword in query_lower for keyword in baseball_knowledge_keywords):
-            return True  # 야구 지식 질문이므로 일반 대화로 처리 (지식 답변 제공)
+        # 야구 관련 질문이면 일반 대화가 아님  
+        if any(keyword in query_lower for keyword in baseball_keywords):
+            return False  # 야구 관련 질문이므로 일반 대화가 아님
         
         # 야구/통계와 무관한 일반적인 대화만 일반 대화로 분류
         return any(keyword in query_lower for keyword in general_keywords)
@@ -634,6 +652,7 @@ class RAGPipeline:
                 }
         
         # 기본 응답 (아무 키워드도 매칭되지 않을 때만)
+        logger.info(f"[RAG] _handle_general_conversation fallback for query: {query}")
         default_response = """안녕하세요! 저는 KBO 리그 데이터 분석가 'BEGA'입니다. 
 
 KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니다:
@@ -669,13 +688,22 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         entity_filter = search_strategy["entity_filter"]
         extracted_filters = search_strategy["db_filters"]
         
-        # 2. 일반 대화인지 먼저 확인
-        if self._is_general_conversation(query):
+        # 2. 통계 질문인지 먼저 확인 (최우선)
+        is_statistical = self._is_statistical_query(query, entity_filter)
+        logger.info(f"[RAG] Is statistical query: {is_statistical}")
+        logger.info(f"[RAG] Entity filter: {entity_filter}")
+        if is_statistical:
+            logger.info(f"[RAG] Statistical query detected, using traditional RAG directly")
+            # 통계 질문이면 바로 RAG로 처리 (에이전트 건너뛰기)
+            pass  # 6단계로 진행
+        
+        # 3. 일반 대화인지 확인
+        elif self._is_general_conversation(query):
             logger.info(f"[RAG] General conversation detected")
             return await self._handle_general_conversation(query)
         
-        # 3. 규정 질문인지 먼저 확인 (통계보다 우선순위)
-        if self._is_regulation_query(query):
+        # 4. 규정 질문인지 확인
+        elif self._is_regulation_query(query):
             logger.info(f"[RAG] Regulation query detected, trying agent first")
             agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
             if agent_result is not None:
@@ -683,7 +711,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             else:
                 logger.info(f"[RAG] Regulation agent failed, falling back to traditional RAG")
         
-        # 4. 경기 데이터 질문인지 확인
+        # 5. 경기 데이터 질문인지 확인
         elif self._is_game_query(query):
             logger.info(f"[RAG] Game query detected, trying agent first")
             agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
@@ -691,15 +719,6 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 return agent_result
             else:
                 logger.info(f"[RAG] Game agent failed, falling back to traditional RAG")
-        
-        # 5. 통계 질문인지 판단하고 에이전트 시도
-        elif self._is_statistical_query(query, entity_filter):
-            logger.info(f"[RAG] Statistical query detected, trying agent first")
-            agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
-            if agent_result is not None:
-                return agent_result
-            else:
-                logger.info(f"[RAG] Statistical agent failed, falling back to traditional RAG")
         
         # 6. 기존 RAG 방식으로 폴백 또는 일반 질문 처리
         
@@ -791,9 +810,21 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         processed_data = await self._process_and_enrich_docs(docs, year)
         
         # 3. 의도별 컨텍스트 생성 (새로운 컨텍스트 포맷터 사용)
+        # TEMP: 디버깅을 위해 raw 검색 결과도 컨텍스트에 포함
+        raw_context_parts = []
+        for doc in docs[:10]:  # 상위 10개 결과만 사용
+            title = doc.get("title", "제목 없음")
+            content = doc.get("content", "")[:200]  # 내용 200자 제한
+            raw_context_parts.append(f"- {title}: {content}")
+        
+        raw_context = "\n### 검색된 원본 데이터:\n" + "\n".join(raw_context_parts)
+        
         formatted_context = self.context_formatter.format_context(
             processed_data, intent, query, entity_filter, year
         )
+        
+        # 원본 데이터도 포함
+        formatted_context = formatted_context + "\n\n" + raw_context
         
         # 대화 기록 컨텍스트 추가
         history_block = _history_context_block(history)
@@ -802,6 +833,12 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         # 4. LLM 프롬프트 구성
         prompt = FOLLOWUP_PROMPT.format(question=query, context=formatted_context)
+        
+        # DEBUG: 컨텍스트 로깅
+        logger.info(f"[RAG_DEBUG] Question: {query}")
+        logger.info(f"[RAG_DEBUG] Formatted context length: {len(formatted_context)}")
+        logger.info(f"[RAG_DEBUG] Formatted context preview: {formatted_context[:500]}...")
+        
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(_history_for_messages(history))
         messages.append({"role": "user", "content": prompt})
