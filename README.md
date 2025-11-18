@@ -95,14 +95,14 @@ PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 
 엔드포인트:
 
-| 메소드 | 경로               | 설명                              |
+| 메소드   | 경로               | 설명                            |
 |--------|--------------------|-------------------------------|
 | POST   | `/chat/completion` | RAG 파이프라인 JSON 응답          |
 | POST   | `/chat/stream`     | SSE 스트림 (EventSource)        |
-| POST   | `/chat/voice`      | 음성 파일을 텍스트로 변환 (Whisper)  |
+| POST   | `/chat/voice`      | 음성 파일을 텍스트로 변환 (Whisper) |
 | GET    | `/search/`         | 상위 K개 검색된 청크 조회           |
 | POST   | `/ingest/`         | 단일 문서 업서트(Upsert)          |
-| GET    | `/health`          | 기본 헬스 체크                    |
+| GET    | `/health`          | 기본 헬스 체크                   |
 
 ### 채팅 요청 예시
 
