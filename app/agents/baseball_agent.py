@@ -5,10 +5,12 @@
 반드시 실제 DB를 조회한 결과만 사용합니다.
 """
 
+import re
 import json
 import logging
 from typing import Dict, List, Any, Optional, Union
 from psycopg2.extensions import connection as PgConnection
+from datetime import date, datetime
 
 from ..tools.database_query import DatabaseQueryTool
 from ..tools.regulation_query import RegulationQueryTool
@@ -16,6 +18,27 @@ from ..tools.game_query import GameQueryTool
 from .tool_caller import ToolCaller, ToolCall, ToolResult
 
 logger = logging.getLogger(__name__)
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (date, datetime)):
+            return obj.isoformat()
+        return super().default(obj)
+    
+def clean_json_response(response: str) -> str:
+    """LLM 응답에서 순수 JSON 추출 및 정제"""
+    # 코드 블록 제거
+    response = re.sub(r'```json\s*', '', response)
+    response = re.sub(r'```\s*', '', response)
+    
+    # 주석 제거 (// 와 /* */)
+    response = re.sub(r'//.*?$', '', response, flags=re.MULTILINE)
+    response = re.sub(r'/\*.*?\*/', '', response, flags=re.DOTALL)
+    
+    # 후행 쉼표 제거
+    response = re.sub(r',(\s*[}\]])', r'\1', response)
+    
+    return response.strip()
 
 class BaseballStatisticsAgent:
     """
@@ -1111,10 +1134,7 @@ class BaseballStatisticsAgent:
             if '```json' in raw_response:
                 start = raw_response.find('```json') + 7
                 end = raw_response.find('```', start)
-                if end != -1:
-                    json_content = raw_response[start:end].strip()
-                else:
-                    json_content = raw_response[start:].strip()
+                json_content = raw_response[start:end].strip() if end != -1 else raw_response[start:].strip()
             elif raw_response.strip().startswith('{'):
                 json_content = raw_response.strip()
             else:
@@ -1136,7 +1156,14 @@ class BaseballStatisticsAgent:
                 }
             
             # JSON 파싱
-            analysis_data = json.loads(json_content)
+            try:
+                cleaned_json = clean_json_response(json_content)
+                analysis_data = json.loads(cleaned_json)
+            except json.JSONDecodeError as e:
+                logger.error(f"[BaseballAgent] JSON parsing error: {e}")
+                logger.error(f"[BaseballAgent] Original content: {json_content}")
+                logger.error(f"[BaseballAgent] Cleaned content: {cleaned_json}")
+                raise
             
             # ToolCall 객체들로 변환
             tool_calls = []
@@ -1328,7 +1355,18 @@ class BaseballStatisticsAgent:
         for i, result in enumerate(tool_results):
             if result.success:
                 tool_data_summary.append(f"도구 {i+1} 결과: {result.message}")
-                tool_data_summary.append(f"데이터: {json.dumps(result.data, ensure_ascii=False, indent=2)}")
+                try:
+                    data_json = json.dumps(
+                        result.data, 
+                        ensure_ascii=False, 
+                        indent=2,
+                        cls=DateTimeEncoder  # 핵심 수정
+                    )
+                    tool_data_summary.append(f"데이터: {data_json}")
+                except Exception as e:
+                    logger.error(f"[BaseballAgent] JSON serialization error: {e}")
+                    tool_data_summary.append(f"데이터: (직렬화 실패)")
+                
                 data_sources.append({
                     "tool": result.data.get("source", "database"),
                     "verified": True,
