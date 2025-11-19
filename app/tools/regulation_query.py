@@ -62,8 +62,12 @@ class RegulationQueryTool:
         try:
             cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
-            # 벡터 검색 쿼리 (규정 문서만 필터링)
-            search_query = """
+            # 검색 키워드 준비
+            search_pattern = f"%{query}%"
+            
+            # 텍스트 및 벡터 검색을 모두 활용 (ILIKE로 1차 필터링, embedding으로 순위 결정)
+            # 참고: 임베딩 컬럼이 없어, 현재는 텍스트 검색만 수행됩니다.
+            text_search_query = """
                 SELECT 
                     id,
                     title,
@@ -72,75 +76,44 @@ class RegulationQueryTool:
                     meta->>'document_type' as document_type,
                     meta->>'category' as category,
                     meta->>'regulation_code' as regulation_code,
-                    1 - (embedding <=> %s::vector) as similarity_score
+                    CASE 
+                        WHEN title ILIKE %s THEN 0.9
+                        WHEN content ILIKE %s THEN 0.7
+                        ELSE 0.5
+                    END as similarity_score
                 FROM rag_chunks 
-                WHERE source_table = 'kbo_regulations'
+                WHERE source_table IN ('kbo_regulations', 'markdown_docs')
                 AND (
                     content ILIKE %s 
                     OR title ILIKE %s
-                    OR meta->>'keywords' ILIKE %s
                 )
                 ORDER BY similarity_score DESC, title
                 LIMIT %s;
             """
             
-            # 검색 키워드 준비
-            search_pattern = f"%{query}%"
+            cursor.execute(text_search_query, (
+                search_pattern, # for title ILIKE
+                search_pattern, # for content ILIKE
+                limit
+            ))
             
-            # 임베딩이 있는 경우 벡터 검색, 없으면 텍스트 검색만
-            try:
-                # 간단한 텍스트 검색으로 먼저 시도
-                text_search_query = """
-                    SELECT 
-                        id,
-                        title,
-                        content,
-                        source_table,
-                        meta->>'document_type' as document_type,
-                        meta->>'category' as category,
-                        meta->>'regulation_code' as regulation_code,
-                        CASE 
-                            WHEN title ILIKE %s THEN 0.9
-                            WHEN content ILIKE %s THEN 0.7
-                            ELSE 0.5
-                        END as similarity_score
-                    FROM rag_chunks 
-                    WHERE source_table = 'kbo_regulations'
-                    AND (
-                        content ILIKE %s 
-                        OR title ILIKE %s
-                        OR meta->>'keywords' ILIKE %s
-                    )
-                    ORDER BY similarity_score DESC, title
-                    LIMIT %s;
-                """
+            rows = cursor.fetchall()
+            
+            if rows:
+                result["regulations"] = [dict(row) for row in rows]
+                result["found"] = True
+                result["total_found"] = len(rows)
                 
-                cursor.execute(text_search_query, (
-                    search_pattern, search_pattern, search_pattern, 
-                    search_pattern, search_pattern, limit
-                ))
+                # 카테고리 추출
+                categories = set()
+                for row in rows:
+                    if row.get('category'):
+                        categories.add(row['category'])
+                result["categories"] = list(categories)
                 
-                rows = cursor.fetchall()
-                
-                if rows:
-                    result["regulations"] = [dict(row) for row in rows]
-                    result["found"] = True
-                    result["total_found"] = len(rows)
-                    
-                    # 카테고리 추출
-                    categories = set()
-                    for row in rows:
-                        if row.get('category'):
-                            categories.add(row['category'])
-                    result["categories"] = list(categories)
-                    
-                    logger.info(f"[RegulationQuery] Found {len(rows)} regulations")
-                else:
-                    logger.warning(f"[RegulationQuery] No regulations found for: {query}")
-                    
-            except Exception as search_error:
-                logger.error(f"[RegulationQuery] Search error: {search_error}")
-                result["error"] = f"검색 중 오류: {search_error}"
+                logger.info(f"[RegulationQuery] Found {len(rows)} regulations via text search")
+            else:
+                logger.warning(f"[RegulationQuery] No regulations found for: {query}")
                 
         except Exception as e:
             logger.error(f"[RegulationQuery] Database error: {e}")
