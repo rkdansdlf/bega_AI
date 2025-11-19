@@ -26,29 +26,72 @@ class GameQueryTool:
     def __init__(self, connection: PgConnection):
         self.connection = connection
         
-        # 팀명 매핑 (약어와 전체명)
-        self.team_mapping = {
-            "KIA": ["KIA", "기아", "KIA 타이거즈", "타이거즈"],
-            "LG": ["LG", "LG 트윈스", "트윈스"],
-            "두산": ["두산", "두산 베어스", "베어스"],
-            "롯데": ["롯데", "롯데 자이언츠", "자이언츠"],
-            "삼성": ["삼성", "삼성 라이온즈", "라이온즈"],
-            "키움": ["키움", "키움 히어로즈", "히어로즈"],
-            "한화": ["한화", "한화 이글스", "이글스"],
-            "KT": ["KT", "KT 위즈", "위즈"],
-            "NC": ["NC", "NC 다이노스", "다이노스"],
-            "SSG": ["SSG", "SSG 랜더스", "랜더스"]
+        self.TEAM_CODE_TO_NAME = {
+            "KIA": "KIA 타이거즈",
+            "LG": "LG 트윈스",
+            "OB": "두산 베어스",
+            "LT": "롯데 자이언츠",
+            "SS": "삼성 라이온즈",
+            "WO": "키움 히어로즈",
+            "HH": "한화 이글스",
+            "KT": "KT 위즈",
+            "NC": "NC 다이노스",
+            "SK": "SSG 랜더스"
         }
+
+        self.NAME_TO_CODE = {
+            "KIA": "KIA", "기아": "KIA", "KIA 타이거즈": "KIA", "타이거즈": "KIA",
+            "LG": "LG", "LG 트윈스": "LG", "트윈스": "LG",
+            "두산": "OB", "OB": "OB", "두산 베어스": "OB", "베어스": "OB",
+            "롯데": "LT", "LT": "LT", "롯데 자이언츠": "LT", "자이언츠": "LT",
+            "삼성": "SS", "SS": "SS", "삼성 라이온즈": "SS", "라이온즈": "SS",
+            "키움": "WO", "WO": "WO", "키움 히어로즈": "WO", "히어로즈": "WO", "우리": "WO",
+            "한화": "HH", "HH": "HH", "한화 이글스": "HH", "이글스": "HH",
+            "KT": "KT", "KT 위즈": "KT", "위즈": "KT",
+            "NC": "NC", "NC 다이노스": "NC", "다이노스": "NC",
+            "SSG": "SK", "SK": "SK", "SSG 랜더스": "SK", "랜더스": "SK"
+        }
+
+    def get_team_name(self, team_code: str) -> str:
+        return self.TEAM_CODE_TO_NAME.get(team_code, team_code)
+    
+    def get_team_code(self, team_input: str) -> str:
+        return self.NAME_TO_CODE.get(team_input, team_input)
     
     def _normalize_team_name(self, team_name: str) -> str:
         """팀명을 정규화합니다."""
         team_name = team_name.strip()
         
-        for standard_name, variations in self.team_mapping.items():
-            if team_name in variations:
-                return standard_name
+        # for standard_name, variations in self.team_mapping.items():
+        #     if team_name in variations:
+        #         return standard_name
         
-        return team_name
+        # return team_name
+        return self.get_team_code(team_name)
+    
+    def _format_game_response(self, game_dict: Dict) -> Dict:
+        """
+        경기 데이터에 팀 정식 명칭 추가
+        
+        Args:
+            game_dict: 원본 경기 데이터
+            
+        Returns:
+            팀 이름이 추가된 경기 데이터
+        """
+        if 'home_team' in game_dict:
+            game_dict['home_team_code'] = game_dict['home_team']
+            game_dict['home_team_name'] = self.get_team_name(game_dict['home_team'])
+        
+        if 'away_team' in game_dict:
+            game_dict['away_team_code'] = game_dict['away_team']
+            game_dict['away_team_name'] = self.get_team_name(game_dict['away_team'])
+        
+        if 'winning_team' in game_dict and game_dict['winning_team']:
+            game_dict['winning_team_code'] = game_dict['winning_team']
+            game_dict['winning_team_name'] = self.get_team_name(game_dict['winning_team'])
+        
+        return game_dict
     
     def get_game_box_score(
         self, 
@@ -145,6 +188,7 @@ class GameQueryTool:
             # 각 경기의 박스스코어 상세 정보 조회
             for game in games:
                 game_dict = dict(game)
+                game_dict = self._format_game_response(game_dict)
                 
                 # 박스스코어 상세 정보 조회 (실제 스키마 기준)
                 box_score_query = """
@@ -301,10 +345,12 @@ class GameQueryTool:
         
         team1_normalized = self._normalize_team_name(team1)
         team2_normalized = self._normalize_team_name(team2)
+        team1_name = self.get_team_name(team1_normalized)
+        team2_name = self.get_team_name(team2_normalized)
         
         result = {
-            "team1": team1_normalized,
-            "team2": team2_normalized,
+            "team1": team1_name,
+            "team2": team2_name,
             "year": year,
             "games": [],
             "summary": {
@@ -361,7 +407,7 @@ class GameQueryTool:
             games = cursor.fetchall()
             
             if games:
-                result["games"] = [dict(game) for game in games]
+                result["games"] = [self._format_game_response(dict(game)) for game in games]
                 result["found"] = True
                 
                 # 요약 통계 계산
@@ -444,7 +490,7 @@ class GameQueryTool:
             games = cursor.fetchall()
             
             if games:
-                result["games"] = [dict(game) for game in games]
+                result["games"] = [self._format_game_response(dict(game)) for game in games]
                 result["found"] = True
                 result["total_games"] = len(games)
                 logger.info(f"[GameQuery] Found {len(games)} scheduled games")
