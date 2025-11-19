@@ -21,30 +21,30 @@ class EntityFilter:
     player_name: Optional[str] = None      # 선수 이름 (예: "김현수")
     stat_type: Optional[str] = None        # 통계 지표 (예: "ops", "era") 
     position_type: Optional[str] = None    # 포지션 타입 ('pitcher', 'batter')
-    league_type: str = "정규시즌"           # 리그 타입 (기본값: 정규시즌)
+    league_type: Optional[str] = None      # 리그 타입 (None이면 모든 리그 검색)
 
-# KBO 팀명 매핑 테이블 (사용자 입력 → 표준 팀 코드)
+# KBO 팀명 매핑 테이블 (사용자 입력 → 실제 DB team_id)
 TEAM_MAPPING = {
-    # KIA
-    "KIA": "KIA", "기아": "KIA", "타이거즈": "KIA", "기아타이거즈": "KIA",
-    # LG
+    # KIA (DB: HT)
+    "KIA": "HT", "기아": "HT", "타이거즈": "HT", "기아타이거즈": "HT",
+    # LG (DB: LG)  
     "LG": "LG", "엘지": "LG", "트윈스": "LG", "LG트윈스": "LG",
-    # 두산
-    "두산": "두산", "베어스": "두산", "두산베어스": "두산",
-    # 롯데
-    "롯데": "롯데", "자이언츠": "롯데", "롯데자이언츠": "롯데", "거인": "롯데",
-    # 삼성
-    "삼성": "삼성", "라이온즈": "삼성", "삼성라이온즈": "삼성", "사자": "삼성",
-    # 키움
-    "키움": "키움", "히어로즈": "키움", "키움히어로즈": "키움", "영웅": "키움",
-    # 한화
-    "한화": "한화", "이글스": "한화", "한화이글스": "한화", "독수리": "한화",
-    # KT
+    # 두산 (DB: OB)
+    "두산": "OB", "베어스": "OB", "두산베어스": "OB",
+    # 롯데 (DB: LT)
+    "롯데": "LT", "자이언츠": "LT", "롯데자이언츠": "LT", "거인": "LT",
+    # 삼성 (DB: SS)
+    "삼성": "SS", "라이온즈": "SS", "삼성라이온즈": "SS", "사자": "SS",
+    # 키움 (DB: WO)
+    "키움": "WO", "히어로즈": "WO", "키움히어로즈": "WO", "영웅": "WO",
+    # 한화 (DB: HH)
+    "한화": "HH", "이글스": "HH", "한화이글스": "HH", "독수리": "HH",
+    # KT (DB: KT)
     "KT": "KT", "위즈": "KT", "KT위즈": "KT", "케이티": "KT",
-    # NC
+    # NC (DB: NC)
     "NC": "NC", "다이노스": "NC", "NC다이노스": "NC", "공룡": "NC", "엔씨": "NC",
-    # SSG
-    "SSG": "SSG", "랜더스": "SSG", "SSG랜더스": "SSG", "에스에스지": "SSG",
+    # SSG (DB: SK)
+    "SSG": "SK", "랜더스": "SK", "SSG랜더스": "SK", "에스에스지": "SK",
 }
 
 # 야구 통계 지표 매핑 테이블 (사용자 입력 → 표준 지표명)
@@ -76,29 +76,48 @@ POSITION_MAPPING = {
     "내야수": "batter", "외야수": "batter", "포수": "batter",
 }
 
+# 리그 타입 매핑 테이블 (사용자 입력 → 표준 리그명)
+LEAGUE_TYPE_MAPPING = {
+    # 포스트시즌 (더 구체적인 것들을 먼저)
+    "포스트시즌": "포스트시즌", "후기리그": "포스트시즌",
+    # 한국시리즈
+    "한국시리즈": "한국시리즈", "코리안시리즈": "한국시리즈", "KS": "한국시리즈", 
+    "시리즈": "한국시리즈", "우승결정전": "한국시리즈",
+    # 와일드카드
+    "와일드카드": "와일드카드", "wildcard": "와일드카드", "WC": "와일드카드",
+    # 준플레이오프
+    "준플레이오프": "준플레이오프", "준PO": "준플레이오프",
+    # 플레이오프 (일반)
+    "플레이오프": "플레이오프", "PO": "플레이오프",
+    # 정규시즌 (가장 일반적인 것은 마지막에)
+    "정규시즌": "정규시즌", "레귤러시즌": "정규시즌",
+}
+
 def extract_year(query: str) -> Optional[int]:
     """질문에서 연도를 추출합니다."""
-    # 2000~2025년 범위 내의 4자리 숫자 찾기 (더 유연한 패턴 사용)
+    import datetime as dt
+    current_year = dt.datetime.now().year
+    
+    # 2000년부터 현재연도+5년까지의 범위로 유연하게 처리
     year_patterns = [
-        r'(20[0-2][0-9])년',     # "2022년" 형태
-        r'(20[0-2][0-9])시즌',   # "2022시즌" 형태
-        r'(20[0-2][0-9])년도',   # "2022년도" 형태
-        r'(20[0-2][0-9])(?=\s)', # 공백 앞의 연도
-        r'(?<=\s)(20[0-2][0-9])', # 공백 뒤의 연도
-        r'^(20[0-2][0-9])',      # 문장 시작 연도
-        r'(20[0-2][0-9])$'       # 문장 끝 연도
+        r'(20[0-9][0-9])년',     # "2022년" 형태
+        r'(20[0-9][0-9])시즌',   # "2022시즌" 형태
+        r'(20[0-9][0-9])년도',   # "2022년도" 형태
+        r'(20[0-9][0-9])(?=\s)', # 공백 앞의 연도
+        r'(?<=\s)(20[0-9][0-9])', # 공백 뒤의 연도
+        r'^(20[0-9][0-9])',      # 문장 시작 연도
+        r'(20[0-9][0-9])$'       # 문장 끝 연도
     ]
     
     for pattern in year_patterns:
         match = re.search(pattern, query)
         if match:
             year = int(match.group(1))
-            # 2000~2025년 사이의 연도만 허용
-            if 2000 <= year <= 2025:
+            # 2000년부터 현재연도+5년까지의 범위만 허용 (미래 시즌 고려)
+            if 2000 <= year <= current_year + 5:
                 return year
     
     # "작년", "올해", "지난해" 등의 상대적 표현 처리
-    current_year = 2025  # 시스템 기준년도
     if re.search(r'(작년|지난해)', query):
         return current_year - 1
     elif re.search(r'(올해|금년|이번해)', query):
@@ -128,6 +147,36 @@ def extract_position_type(query: str) -> Optional[str]:
     for pos_variant, standard_pos in POSITION_MAPPING.items():
         if pos_variant in query:
             return standard_pos
+    return None
+
+def extract_league_type(query: str) -> Optional[str]:
+    """질문에서 리그 타입을 추출합니다."""
+    # 직접적인 리그 타입 매핑 확인
+    for league_variant, standard_league in LEAGUE_TYPE_MAPPING.items():
+        if league_variant in query:
+            return standard_league
+    
+    # 특별한 키워드로 리그 타입 추론
+    # "마지막 경기"는 보통 포스트시즌(한국시리즈)을 의미
+    if re.search(r'(마지막\s*경기|최종\s*경기|우승\s*경기)', query):
+        return "한국시리즈"
+    
+    # "결승"이나 "우승" 관련은 한국시리즈
+    if re.search(r'(결승|우승|챔피언)', query):
+        return "한국시리즈"
+    
+    # 명시적으로 정규시즌이 아닌 경우 판단
+    postseason_indicators = [
+        r'(플레이오프|PO)',
+        r'(포스트시즌)',
+        r'(와일드카드)',
+        r'(준\s*플레이오프)',
+    ]
+    
+    for indicator in postseason_indicators:
+        if re.search(indicator, query):
+            return "포스트시즌"
+    
     return None
 
 def extract_player_name(query: str) -> Optional[str]:
@@ -347,6 +396,7 @@ def extract_entities_from_query(query: str) -> EntityFilter:
     entity_filter.player_name = extract_player_name(query)
     entity_filter.stat_type = extract_stat_type(query)
     entity_filter.position_type = extract_position_type(query)
+    entity_filter.league_type = extract_league_type(query)
     
     # 로깅
     logger.info(f"[EntityExtractor] Extracted entities: "
@@ -354,7 +404,8 @@ def extract_entities_from_query(query: str) -> EntityFilter:
                 f"team={entity_filter.team_id}, "
                 f"player={entity_filter.player_name}, "
                 f"stat={entity_filter.stat_type}, "
-                f"position={entity_filter.position_type}")
+                f"position={entity_filter.position_type}, "
+                f"league={entity_filter.league_type}")
     
     return entity_filter
 
@@ -370,8 +421,9 @@ def convert_to_db_filters(entity_filter: EntityFilter) -> Dict[str, Any]:
     if entity_filter.team_id:
         filters["team_id"] = entity_filter.team_id
     
-    # 리그 타입 (항상 정규시즌으로 필터링)
-    filters["meta.league"] = entity_filter.league_type
+    # 리그 타입 필터 (특정 리그가 감지된 경우에만 적용)
+    if entity_filter.league_type:
+        filters["meta.league"] = entity_filter.league_type
     
     # 포지션별 테이블 필터링
     if entity_filter.position_type == "pitcher":
