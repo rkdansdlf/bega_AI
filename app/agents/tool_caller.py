@@ -29,6 +29,14 @@ class ToolResult:
     
     def __str__(self):
         return f"ToolResult(success={self.success}, message='{self.message}')"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """JSON serialization을 위한 딕셔너리 변환"""
+        return {
+            "success": self.success,
+            "data": self.data,
+            "message": self.message
+        }
 
 class ToolCaller:
     """
