@@ -27,17 +27,30 @@ class DatabaseQueryTool:
         self.connection = connection
         
         # KBO 팀 매핑 (정확한 DB 데이터와 매칭)
-        self.team_mapping = {
-            "KIA": "KIA 타이거즈", "기아": "KIA 타이거즈",
+        self.TEAM_CODE_TO_NAME = {
+            "KIA": "KIA 타이거즈",
             "LG": "LG 트윈스",
-            "두산": "두산 베어스", 
-            "롯데": "롯데 자이언츠",
-            "삼성": "삼성 라이온즈",
-            "키움": "키움 히어로즈",
-            "한화": "한화 이글스",
+            "OB": "두산 베어스",
+            "LT": "롯데 자이언츠",
+            "SS": "삼성 라이온즈",
+            "WO": "키움 히어로즈",
+            "HH": "한화 이글스",
             "KT": "KT 위즈",
             "NC": "NC 다이노스",
-            "SSG": "SSG 랜더스"
+            "SK": "SSG 랜더스"
+        }
+
+        self.NAME_TO_CODE = {
+            "KIA": "KIA", "기아": "KIA", "KIA 타이거즈": "KIA",
+            "LG": "LG", "LG 트윈스": "LG",
+            "두산": "OB", "OB": "OB", "두산 베어스": "OB",
+            "롯데": "LT", "LT": "LT", "롯데 자이언츠": "LT",
+            "삼성": "SS", "SS": "SS", "삼성 라이온즈": "SS",
+            "키움": "WO", "WO": "WO", "키움 히어로즈": "WO", "우리": "WO",
+            "한화": "HH", "HH": "HH", "한화 이글스": "HH",
+            "KT": "KT", "KT 위즈": "KT",
+            "NC": "NC", "NC 다이노스": "NC",
+            "SSG": "SK", "SK": "SK", "SSG 랜더스": "SK"
         }
         
         # KBO 포지션 약어 매핑
@@ -54,6 +67,11 @@ class DatabaseQueryTool:
             "유": "유격수",
             "포": "포수"
         }
+    def get_team_name(self, team_code: str) -> str:
+        return self.TEAM_CODE_TO_NAME.get(team_code, team_code)
+    
+    def get_team_code(self, team_input: str) -> str:
+        return self.NAME_TO_CODE.get(team_input, team_input)
     
     def get_player_career_stats(
         self, 
@@ -366,9 +384,9 @@ class DatabaseQueryTool:
                 team_condition = ""
                 params = [year]
                 if team_filter:
-                    team_name = self.team_mapping.get(team_filter, team_filter)
-                    team_condition = "AND team_name = %s"
-                    params.append(team_name)
+                    team_code = self.get_team_code(team_filter)
+                    team_condition = "AND psb.team_code = %s"
+                    params.append(team_code)
                 
                 params.extend([min_pa, limit])
                 
@@ -416,9 +434,9 @@ class DatabaseQueryTool:
                 team_condition = ""
                 params = [year]
                 if team_filter:
-                    team_name = self.team_mapping.get(team_filter, team_filter)
-                    team_condition = "AND team_name = %s"
-                    params.append(team_name)
+                    team_code = self.get_team_code(team_filter)
+                    team_condition = "AND psb.team_code = %s"
+                    params.append(team_code)
                 
                 params.extend([min_ip, limit])
                 
@@ -743,7 +761,8 @@ class DatabaseQueryTool:
         """
         logger.info(f"[DatabaseQuery] Querying team basic info: {team_name}")
         
-        full_team_name = self.team_mapping.get(team_name, team_name)
+        team_code = self.get_team_code(team_name) if team_name else None
+        full_team_name = self.get_team_name(team_code) if team_code else None
         
         result = {
             "team_name": full_team_name,
@@ -849,8 +868,9 @@ class DatabaseQueryTool:
             실제 DB에서 조회된 팀 요약 정보
         """
         logger.info(f"[DatabaseQuery] Querying team summary: {team_name}, {year}")
-        
-        full_team_name = self.team_mapping.get(team_name, team_name)
+
+        team_code = self.get_team_code(team_name) if team_name else None
+        full_team_name = self.get_team_name(team_code) if team_code else None
         
         result = {
             "team_name": full_team_name,
@@ -870,7 +890,7 @@ class DatabaseQueryTool:
                 FROM player_season_batting psb
                 JOIN player_basic pb ON psb.player_id = pb.player_id
                 LEFT JOIN teams t ON psb.team_code = t.team_id
-                WHERE t.team_name = %s 
+                WHERE psb.team_code = %s 
                 AND psb.season = %s 
                 AND psb.league = '정규시즌'
                 AND psb.plate_appearances >= 100
@@ -878,7 +898,7 @@ class DatabaseQueryTool:
                 ORDER BY psb.ops DESC
                 LIMIT 5
             """
-            cursor.execute(batters_query, (full_team_name, year))
+            cursor.execute(batters_query, (team_code, year))
             batters = cursor.fetchall()
             
             if batters:
@@ -891,7 +911,7 @@ class DatabaseQueryTool:
                 FROM player_season_pitching psp
                 JOIN player_basic pb ON psp.player_id = pb.player_id
                 LEFT JOIN teams t ON psp.team_code = t.team_id
-                WHERE t.team_name = %s 
+                WHERE psp.team_code = %s 
                 AND psp.season = %s 
                 AND psp.league = '정규시즌'
                 AND psp.innings_pitched >= 30
@@ -899,7 +919,7 @@ class DatabaseQueryTool:
                 ORDER BY psp.era ASC
                 LIMIT 5
             """
-            cursor.execute(pitchers_query, (full_team_name, year))
+            cursor.execute(pitchers_query, (team_code, year))
             pitchers = cursor.fetchall()
             
             if pitchers:
