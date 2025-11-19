@@ -792,13 +792,13 @@ class DatabaseQueryTool:
             },
             "키움 히어로즈": {
                 "home_stadium": "고척스카이돔",
-                "mascot": "고라니",
+                "mascot": "턱돌이",
                 "city": "서울",
                 "founded": "2008"
             },
             "한화 이글스": {
                 "home_stadium": "한화생명 이글스파크",
-                "mascot": "이글맨",
+                "mascot": "수리 (Suri)",
                 "city": "대전",
                 "founded": "1985"
             },
@@ -810,13 +810,13 @@ class DatabaseQueryTool:
             },
             "NC 다이노스": {
                 "home_stadium": "창원 NC파크",
-                "mascot": "딘트",
+                "mascot": "단디 & 쎄리",
                 "city": "창원",
                 "founded": "2013"
             },
             "SSG 랜더스": {
                 "home_stadium": "문학야구장",
-                "mascot": "스토리",
+                "mascot": "랜디 (Landy)",
                 "city": "인천",
                 "founded": "2000"
             }
