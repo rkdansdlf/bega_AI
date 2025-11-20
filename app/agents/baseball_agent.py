@@ -150,7 +150,7 @@ class BaseballStatisticsAgent:
             "선수가 해당 연도에 실제로 기록이 있는지 DB에서 확인합니다. 선수명 오타나 존재하지 않는 선수 질문 시 사용하세요.",
             {
                 "player_name": "선수명",
-                "year": "시즌 년도 (기본값: 현재년도)"
+                "year": "시즌 년도 (기본값: current_year = {current_year})"
             },
             self._tool_validate_player
         )
@@ -1704,21 +1704,20 @@ class BaseballStatisticsAgent:
         
         # 시간 표현 전처리
         now = datetime.now()
+        current_year = now.year
+        current_date = now.strftime("%Y년 %m월 %d일")
         year_replacements = {
             "재작년": str(now.year - 2),
             "작년": str(now.year - 1),
             "올해": str(now.year),
             "내년": str(now.year + 1),
         }
-        
+
         processed_query = query
         for keyword, year_str in year_replacements.items():
             if keyword in processed_query:
                 processed_query = processed_query.replace(keyword, f"{year_str}년")
 
-        if processed_query != query:
-            logger.info(f"[BaseballAgent] Query pre-processed: '{query}' -> '{processed_query}'")
-        
         # LLM을 사용하여 질문을 분석하고 도구 사용 계획 수립
         
         # 0. 엔티티 추출 (LLM 호출 전)
@@ -1745,7 +1744,11 @@ class BaseballStatisticsAgent:
         query_text = processed_query # 전처리된 쿼리 사용
         analysis_prompt_template = f"""
 당신은 야구 통계 전문 에이전트입니다. 사용자의 질문을 분석하고 실제 데이터베이스에서 정확한 답변을 얻기 위해 어떤 도구들을 사용해야 하는지 결정해야 합니다.
-{entity_context}
+
+**현재날짜: {current_date}**
+**현재년도: {current_year}년**
+작년: {last_year}년
+재작년: {two_years_ago}년
 
 질문: {query_text}
 
@@ -1753,19 +1756,19 @@ class BaseballStatisticsAgent:
 
 1. **get_player_stats**: 특정 선수의 개별 시즌 통계 조회
    - player_name (필수): 선수명
-   - year (필수): 시즌 년도 (예: 현재년도 또는 명시된 연도)
+   - year (필수): 시즌 년도 (기본값: current_year = {current_year})
    - position (선택): "batting", "pitching", "both" 중 하나 (기본값: "both")
 
 2. **get_leaderboard**: 통계 지표별 순위/리더보드 조회  
    - stat_name (필수): 통계 지표명 (예: "home_runs", "era", "ops", "타율")
-   - year (필수): 시즌 년도
+   - year (필수): 시즌 년도 (기본값: current_year = {current_year})
    - position (필수): "batting" 또는 "pitching"
    - team_filter (선택): 특정 팀명 (예: "KIA", "LG")
    - limit (선택): 상위 몇 명까지 (기본값: 10)
 
 3. **validate_player**: 선수 존재 여부 및 정확한 이름 확인
    - player_name (필수): 선수명
-   - year (선택): 시즌 년도 (기본값: 현재년도)
+   - year (선택): 시즌 년도 (기본값: current_year = {current_year})
 
 4. **get_career_stats**: 선수의 통산(커리어) 통계 조회
    - player_name (필수): 선수명
@@ -1773,7 +1776,7 @@ class BaseballStatisticsAgent:
 
 5. **get_team_summary**: 팀의 주요 선수들과 통계 조회
    - team_name (필수): 팀명 (예: "KIA", "기아")
-   - year (필수): 시즌 년도
+   - year (필수): 시즌 년도 (기본값: current_year = {current_year})
 
 6. **get_position_info**: 포지션 약어를 전체 포지션명으로 변환
    - position_abbr (필수): 포지션 약어 (예: "지", "포", "一", "二", "三")
@@ -1783,7 +1786,7 @@ class BaseballStatisticsAgent:
 
 8. **get_defensive_stats**: 선수의 수비 통계 조회
    - player_name (필수): 선수명
-   - year (선택): 시즌 년도 (생략하면 통산)
+   - year (선택): 시즌 년도 (생략하면 통산) 
 
 9. **get_velocity_data**: 투수의 구속 데이터 조회
    - player_name (필수): 선수명
@@ -1824,21 +1827,21 @@ class BaseballStatisticsAgent:
     - position (선택): "batting", "pitching", "both" 중 하나 (기본값: "both")
 
 17. **get_season_final_game_date**: 특정 시즌의 마지막 경기 날짜를 조회
-    - year (필수): 시즌 년도
-    - league_type (선택): "regular_season" 또는 "korean_series" (기본값: "korean_series")
+   - year (필수): 시즌 년도 (기본값: current_year = {current_year})
+   - league_type (선택): "regular_season" 또는 "korean_series" (기본값: "korean_series")
 
 18. **get_team_rank**: 특정 시즌의 팀 최종 순위를 조회
-    - team_name (필수): 팀명 (예: "KIA", "기아", "SSG")
-    - year (필수): 시즌 년도
+   - team_name (필수): 팀명 (예: "KIA", "기아", "SSG")
+   - year (필수): 시즌 년도 (기본값: current_year = {current_year})
 
 19. **get_team_last_game**: 특정 팀의 실제 마지막 경기를 지능적으로 조회
-    - team_name (필수): 팀명 (예: "SSG", "기아", "KIA")
-    - year (필수): 시즌 년도
-    - 자동으로 팀 순위를 확인하여 포스트시즌 진출팀(1-5위)은 한국시리즈, 미진출팀(6-10위)은 정규시즌 마지막 경기를 조회
+   - team_name (필수): 팀명 (예: "SSG", "기아", "KIA")
+   - year (필수): 시즌 년도 (기본값: current_year = {current_year})
+   - 자동으로 팀 순위를 확인하여 포스트시즌 진출팀(1-5위)은 한국시리즈, 미진출팀(6-10위)은 정규시즌 마지막 경기를 조회
 
 20. **get_korean_series_winner**: 특정 시즌의 한국시리즈 우승팀을 조회
-    - year (필수): 시즌 년도
-    - 우승팀과 함께 정규시즌 순위 정보도 제공
+   - year (필수): 시즌 년도 (기본값: current_year = {current_year})
+   - 우승팀과 함께 정규시즌 순위 정보도 제공
 
 21. **get_current_datetime**: 현재 날짜와 시간 조회
     - "지금 몇 시", "오늘 날짜" 질문에 사용
@@ -1859,11 +1862,10 @@ class BaseballStatisticsAgent:
 
 **중요한 규칙:**
 - "우승팀", "챔피언", "한국시리즈 우승" 질문은 get_korean_series_winner 사용 (자동으로 우승팀과 순위 정보 제공)
-- "ABS가 뭐야?", "FA 규정", "피치클락" 등 규칙이나 용어에 대한 설명이 필요할 경우, 다른 도구보다 search_documents 도구를 우선적으로 사용해야 함.
-- 시즌이 명시되지 않으면 2025년을 기본값으로 사용
+- 시즌이 명시되지 않으면 current_year({current_year})을 기본값으로 사용
 - "통산", "커리어", "총", "KBO 리그 통산" 키워드가 있으면 반드시 get_career_stats 사용
 - "세이브" 키워드가 포함된 통산 기록 질문은 get_career_stats 사용
-- "몇 년", "2023년" 등 구체적 연도가 있으면 get_player_stats 사용
+- "몇 년", "2025년" 등 구체적 연도가 있으면 get_player_stats 사용
 - "가장 많은", "최고", "언제", "어느 시즌" 등 최고 기록 시즌을 묻는 질문:
   * 먼저 get_career_stats로 통산 기록 확인
   * 필요시 여러 연도의 get_player_stats로 연도별 비교
@@ -1886,11 +1888,11 @@ class BaseballStatisticsAgent:
 - 매개변수 값은 반드시 실제 구체적인 값을 사용하세요
 
 **질문 유형별 도구 선택 예시**:
-- "작년 SSG 마지막 경기" → get_team_last_game(team_name="SSG", year=현재년도-1)
-- "2023시즌 정규시즌 최종전" → get_season_final_game_date(year=2023, league_type="regular_season")  
-- "기아 마지막 경기" → get_team_last_game(team_name="기아", year=현재년도-1)
-- "한국시리즈 마지막 경기" → get_season_final_game_date(year=현재년도-1, league_type="korean_series")
-- "작년 우승팀은?" → get_korean_series_winner(year=현재년도-1)
+- "작년 SSG 마지막 경기" → get_team_last_game(team_name="SSG", year: {last_year})
+- "2025시즌 정규시즌 최종전" → get_season_final_game_date(year=2025, league_type="regular_season")  
+- "기아 마지막 경기" → get_team_last_game(team_name="기아", year: {last_year})
+- "한국시리즈 마지막 경기" → get_season_final_game_date(year: {last_year}, league_type="korean_series")
+- "작년 우승팀은?" → get_korean_series_winner(year: {last_year})
 - "2024년 한국시리즈 챔피언" → get_korean_series_winner(year=2024)
 
 중요한 원칙:
@@ -1901,9 +1903,12 @@ class BaseballStatisticsAgent:
 - 특정 선수의 통산/커리어 기록은 get_career_stats를 사용하세요
 - 특정 선수의 "가장 좋은 시즌" 질문은 get_career_stats + 여러 연도 get_player_stats 조합
 - 경기 일정/결과는 get_games_by_date 또는 get_game_box_score 사용하세요
-- 날짜 형식은 YYYY-MM-DD로 변환하세요 (예: "5월 5일" → "현재년도-05-05")
+- 날짜 형식은 YYYY-MM-DD로 변환하세요 (기본값: current_year = {current_year}, 
+예: "5월 5일" → "{current_year}-05-05")
 - 연도 정보가 없는 경우 현재 연도를 기본값으로 사용하세요
-- "작년", "지난해" → 현재년도-1, "올해" → 현재년도로 자동 변환하세요
+- "재작년", "제작년" → {two_years_ago}, 
+"작년", "지난해" → {last_year}, 
+"올해" → {current_year}로 자동 변환하세요
 - 상대적 연도 표현은 현재 연도를 기반으로 동적으로 계산하세요
 
 **반드시 다음 JSON 형식으로만 응답하세요:**
@@ -1923,7 +1928,16 @@ class BaseballStatisticsAgent:
 }}
 ```
 """
-        analysis_prompt = analysis_prompt_template
+        analysis_prompt = analysis_prompt_template.format(
+            current_date=current_date,
+            current_year=current_year,
+            last_year=current_year - 1,
+            two_years_ago=current_year - 2,
+            query_text=query_text,
+            query=query
+            )
+        
+        logger.info(f"[TEST] query: {query_text}")
 
         try:
             # LLM 호출하여 분석 결과 받기
