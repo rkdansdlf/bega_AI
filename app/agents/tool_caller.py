@@ -80,7 +80,7 @@ class ToolCaller:
             "parameters_schema": parameters_schema,
             "function": function
         }
-        logger.debug(f"[ToolCaller] Registered tool: {tool_name}")
+        logger.info(f"[ToolCaller] Registered tool: {tool_name}")
         
     def get_tool_descriptions(self) -> str:
         """등록된 모든 도구들의 설명을 반환합니다."""

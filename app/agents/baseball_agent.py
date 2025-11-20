@@ -10,7 +10,6 @@ import json
 import logging
 from typing import Dict, List, Any, Optional, Union
 from psycopg2.extensions import connection as PgConnection
-from decimal import Decimal
 from datetime import date, datetime
 
 from ..tools.database_query import DatabaseQueryTool
@@ -29,8 +28,6 @@ class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (date, datetime)):
             return obj.isoformat()
-        if isinstance(obj, Decimal):  
-            return float(obj)
         return super().default(obj)
     
 def clean_json_response(response: str) -> str:
@@ -1616,26 +1613,15 @@ class BaseballStatisticsAgent:
 
     def _is_chitchat(self, query: str) -> bool:
         """간단한 일상 대화인지 키워드 기반으로 확인합니다."""
+        chitchat_keywords = ["안녕", "누구", "고마워", "반가워", "도움", "기능", "너는", "이름이"]
         query_lower = query.lower().strip()
-        
-        # 야구 관련 키워드가 있으면 일상 대화 아님
-        baseball_keywords = [
-            "우승", "챔피언", "선수", "팀", "경기", "시즌", "년",
-            "성적", "기록", "통산", "타율", "홈런", "투수", "타자"
-        ]
-        
-        if any(keyword in query_lower for keyword in baseball_keywords):
+        # 한 글자 질문은 일상 대화로 간주하지 않음
+        if len(query_lower) <= 2 and query_lower not in ["안녕"]:
             return False
-        
-        # 선수 관련 질문 패턴 ("김도영이 누구야" 같은 질문)
-        import re
-        if re.search(r'[가-힣]{2,4}(이가|이는|이)?\s*(누구|뭐)', query_lower):
-            return False
-    
-        # 일상 대화 키워드
-        chitchat_keywords = ["안녕", "고마워", "반가워", "도움", "기능"]
-    
-        return any(keyword in query_lower for keyword in chitchat_keywords)
+        for keyword in chitchat_keywords:
+            if keyword in query_lower:
+                return True
+        return False
 
     def _get_chitchat_response(self, query: str) -> Optional[str]:
         """미리 정의된 일상 대화 응답을 반환합니다."""
@@ -1756,7 +1742,7 @@ class BaseballStatisticsAgent:
             entity_context = "\n\n### 질문에서 분석된 정보:\n" + "\n".join(entity_context_parts)
 
         query_text = processed_query # 전처리된 쿼리 사용
-        analysis_prompt_template = """
+        analysis_prompt_template = f"""
 당신은 야구 통계 전문 에이전트입니다. 사용자의 질문을 분석하고 실제 데이터베이스에서 정확한 답변을 얻기 위해 어떤 도구들을 사용해야 하는지 결정해야 합니다.
 
 **현재날짜: {current_date}**
@@ -2193,20 +2179,6 @@ class BaseballStatisticsAgent:
         """
         logger.info(f"[BaseballAgent] Generating verified answer with {len(tool_results)} tool results")
         
-        # 시간 컨텍스트 생성 
-        now = datetime.now()
-        current_year = now.year
-
-        time_context = ""
-        if "재작년" in query:
-            actual_year = current_year - 2
-            time_context = f"\n\n**중요**: 사용자가 '재작년'이라고 했고, 현재가 {current_year}년이므로 조회된 데이터는 {actual_year}년입니다. 답변할 때 '{actual_year}년'으로 명시하세요."
-        elif "작년" in query:
-            actual_year = current_year - 1
-            time_context = f"\n\n**중요**: 사용자가 '작년'이라고 했고, 현재가 {current_year}년이므로 조회된 데이터는 {actual_year}년입니다. 답변할 때 '{actual_year}년'으로 명시하세요."
-        elif "올해" in query:
-            time_context = f"\n\n**중요**: 사용자가 '올해'라고 했고, 현재는 {current_year}년입니다."
-
         # 도구 실행 결과를 텍스트로 변환
         tool_data_summary = []
         data_sources = []
@@ -2247,18 +2219,12 @@ class BaseballStatisticsAgent:
         answer_prompt = f"""
 안녕하세요! KBO 야구 데이터를 다루는 BEGA입니다.
 
-사용자 질문: {query}{time_context}
+사용자 질문: {query}
 
 조회된 기록:
 {chr(10).join(tool_data_summary)}
 
 다음 가이드라인에 따라 자연스럽고 친근하게 답변해주세요:
-
-**중요 - 연도 처리:**
-- 조회된 데이터의 연도(year 필드)를 그대로 사용하세요
-- 절대로 연도를 재계산하거나 추측하지 마세요
-- 데이터에 "year: 2023"이 있으면 → "2023년"이라고 답변
-- "재작년", "작년" 같은 표현은 이미 정확한 연도로 변환되어 조회되었습니다
 
 답변 스타일:
 - 친구에게 설명하듯 편안하고 자연스럽게
@@ -2280,7 +2246,6 @@ class BaseballStatisticsAgent:
 - "핵심:", "설명:", "요약:" 같은 구조화된 표현  
 - "제공된 DB에서", "데이터베이스 기준", "제시된 검색 결과" 같은 기술적 용어
 - 지나치게 격식적인 공문서 톤
-- **조회된 연도를 임의로 변경하거나 재계산**
 
 데이터 없는 경우:
 - "아쉽게도 해당 경기 기록을 찾을 수 없네요"
@@ -2289,7 +2254,6 @@ class BaseballStatisticsAgent:
 
 정확성 원칙:
 - 위의 조회 데이터만 사용 (추측 금지)
-- **조회된 연도(year 필드)를 절대 변경하지 마세요!**
 - 불확실하면 솔직하게 모른다고 표현
 
 자연스럽고 친근한 대화체로 답변해주세요!
