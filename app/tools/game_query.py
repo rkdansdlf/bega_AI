@@ -26,29 +26,72 @@ class GameQueryTool:
     def __init__(self, connection: PgConnection):
         self.connection = connection
         
-        # 팀명 매핑 (약어와 전체명)
-        self.team_mapping = {
-            "KIA": ["KIA", "기아", "KIA 타이거즈", "타이거즈"],
-            "LG": ["LG", "LG 트윈스", "트윈스"],
-            "두산": ["두산", "두산 베어스", "베어스"],
-            "롯데": ["롯데", "롯데 자이언츠", "자이언츠"],
-            "삼성": ["삼성", "삼성 라이온즈", "라이온즈"],
-            "키움": ["키움", "키움 히어로즈", "히어로즈"],
-            "한화": ["한화", "한화 이글스", "이글스"],
-            "KT": ["KT", "KT 위즈", "위즈"],
-            "NC": ["NC", "NC 다이노스", "다이노스"],
-            "SSG": ["SSG", "SSG 랜더스", "랜더스"]
+        self.TEAM_CODE_TO_NAME = {
+            "KIA": "KIA 타이거즈",
+            "LG": "LG 트윈스",
+            "OB": "두산 베어스",
+            "LT": "롯데 자이언츠",
+            "SS": "삼성 라이온즈",
+            "WO": "키움 히어로즈",
+            "HH": "한화 이글스",
+            "KT": "KT 위즈",
+            "NC": "NC 다이노스",
+            "SK": "SSG 랜더스"
         }
+
+        self.NAME_TO_CODE = {
+            "KIA": "KIA", "기아": "KIA", "KIA 타이거즈": "KIA", "타이거즈": "KIA",
+            "LG": "LG", "LG 트윈스": "LG", "트윈스": "LG",
+            "두산": "OB", "OB": "OB", "두산 베어스": "OB", "베어스": "OB",
+            "롯데": "LT", "LT": "LT", "롯데 자이언츠": "LT", "자이언츠": "LT",
+            "삼성": "SS", "SS": "SS", "삼성 라이온즈": "SS", "라이온즈": "SS",
+            "키움": "WO", "WO": "WO", "키움 히어로즈": "WO", "히어로즈": "WO", "우리": "WO",
+            "한화": "HH", "HH": "HH", "한화 이글스": "HH", "이글스": "HH",
+            "KT": "KT", "KT 위즈": "KT", "위즈": "KT",
+            "NC": "NC", "NC 다이노스": "NC", "다이노스": "NC",
+            "SSG": "SK", "SK": "SK", "SSG 랜더스": "SK", "랜더스": "SK"
+        }
+
+    def get_team_name(self, team_code: str) -> str:
+        return self.TEAM_CODE_TO_NAME.get(team_code, team_code)
+    
+    def get_team_code(self, team_input: str) -> str:
+        return self.NAME_TO_CODE.get(team_input, team_input)
     
     def _normalize_team_name(self, team_name: str) -> str:
         """팀명을 정규화합니다."""
         team_name = team_name.strip()
         
-        for standard_name, variations in self.team_mapping.items():
-            if team_name in variations:
-                return standard_name
+        # for standard_name, variations in self.team_mapping.items():
+        #     if team_name in variations:
+        #         return standard_name
         
-        return team_name
+        # return team_name
+        return self.get_team_code(team_name)
+    
+    def _format_game_response(self, game_dict: Dict) -> Dict:
+        """
+        경기 데이터에 팀 정식 명칭 추가
+        
+        Args:
+            game_dict: 원본 경기 데이터
+            
+        Returns:
+            팀 이름이 추가된 경기 데이터
+        """
+        if 'home_team' in game_dict:
+            game_dict['home_team_code'] = game_dict['home_team']
+            game_dict['home_team_name'] = self.get_team_name(game_dict['home_team'])
+        
+        if 'away_team' in game_dict:
+            game_dict['away_team_code'] = game_dict['away_team']
+            game_dict['away_team_name'] = self.get_team_name(game_dict['away_team'])
+        
+        if 'winning_team' in game_dict and game_dict['winning_team']:
+            game_dict['winning_team_code'] = game_dict['winning_team']
+            game_dict['winning_team_name'] = self.get_team_name(game_dict['winning_team'])
+        
+        return game_dict
     
     def get_game_box_score(
         self, 
@@ -145,6 +188,7 @@ class GameQueryTool:
             # 각 경기의 박스스코어 상세 정보 조회
             for game in games:
                 game_dict = dict(game)
+                game_dict = self._format_game_response(game_dict)
                 
                 # 박스스코어 상세 정보 조회 (실제 스키마 기준)
                 box_score_query = """
@@ -301,10 +345,12 @@ class GameQueryTool:
         
         team1_normalized = self._normalize_team_name(team1)
         team2_normalized = self._normalize_team_name(team2)
+        team1_name = self.get_team_name(team1_normalized)
+        team2_name = self.get_team_name(team2_normalized)
         
         result = {
-            "team1": team1_normalized,
-            "team2": team2_normalized,
+            "team1": team1_name,
+            "team2": team2_name,
             "year": year,
             "games": [],
             "summary": {
@@ -361,7 +407,7 @@ class GameQueryTool:
             games = cursor.fetchall()
             
             if games:
-                result["games"] = [dict(game) for game in games]
+                result["games"] = [self._format_game_response(dict(game)) for game in games]
                 result["found"] = True
                 
                 # 요약 통계 계산
@@ -444,7 +490,7 @@ class GameQueryTool:
             games = cursor.fetchall()
             
             if games:
-                result["games"] = [dict(game) for game in games]
+                result["games"] = [self._format_game_response(dict(game)) for game in games]
                 result["found"] = True
                 result["total_games"] = len(games)
                 logger.info(f"[GameQuery] Found {len(games)} scheduled games")
@@ -460,6 +506,116 @@ class GameQueryTool:
         
         return result
     
+    def get_team_ranking(self, year: int = 2025) -> Dict[str, Any]:
+        """
+        특정 연도의 팀 순위를 조회합니다.
+        [실제 구현] 이 함수는 GET /team/ranking API를 호출해야 합니다.
+        
+        Args:
+            year: 조회할 시즌 년도 (기본값: 2025)
+            
+        Returns:
+            팀 순위 정보
+        """
+        logger.info(f"[GameQuery] Getting team ranking for {year}")
+        
+        # NOTE: 이것은 모의 데이터입니다. 실제로는 API를 호출해야 합니다.
+        # KB V2.0 문서의 "3.1 2025 정규시즌 최종 순위 및 승률표" 기반
+        mock_ranking_2025 = [
+            {"rank": 1, "team_name": "LG 트윈스", "wins": 85, "losses": 56, "draws": 3, "win_rate": 0.603, "games_behind": 0.0},
+            {"rank": 2, "team_name": "한화 이글스", "wins": 83, "losses": 57, "draws": 4, "win_rate": 0.593, "games_behind": 1.5},
+            {"rank": 3, "team_name": "SSG 랜더스", "wins": 75, "losses": 65, "draws": 4, "win_rate": 0.536, "games_behind": 9.5},
+            {"rank": 4, "team_name": "삼성 라이온즈", "wins": 74, "losses": 68, "draws": 2, "win_rate": 0.521, "games_behind": 11.5},
+            {"rank": 5, "team_name": "NC 다이노스", "wins": 71, "losses": 67, "draws": 6, "win_rate": 0.514, "games_behind": 12.5},
+            {"rank": 6, "team_name": "KT 위즈", "wins": 70, "losses": 72, "draws": 2, "win_rate": 0.493, "games_behind": 15.5},
+            {"rank": 7, "team_name": "롯데 자이언츠", "wins": 68, "losses": 74, "draws": 2, "win_rate": 0.479, "games_behind": 17.5},
+            {"rank": 8, "team_name": "KIA 타이거즈", "wins": 65, "losses": 76, "draws": 3, "win_rate": 0.461, "games_behind": 20.0},
+            {"rank": 9, "team_name": "두산 베어스", "wins": 61, "losses": 80, "draws": 3, "win_rate": 0.433, "games_behind": 24.0},
+            {"rank": 10, "team_name": "키움 히어로즈", "wins": 58, "losses": 85, "draws": 1, "win_rate": 0.406, "games_behind": 28.0},
+        ]
+        
+        result = {
+            "year": year,
+            "ranking": [],
+            "found": False,
+            "error": None
+        }
+        
+        if year == 2025:
+            result["ranking"] = mock_ranking_2025
+            result["found"] = True
+            logger.info(f"[GameQuery] Returned mock ranking for {year}")
+        else:
+            result["error"] = f"{year}년의 순위 데이터는 현재 사용할 수 없습니다."
+            logger.warning(f"[GameQuery] No ranking data available for {year}")
+        
+        return result
+
+    def get_season_final_game_date(self, year: int, league_type: str = 'korean_series') -> Dict[str, Any]:
+        """
+        특정 시즌의 마지막 경기 날짜를 조회합니다.
+        
+        Args:
+            year: 시즌 년도
+            league_type: 'regular_season' 또는 'korean_series' (기본값)
+            
+        Returns:
+            마지막 경기 날짜 정보
+        """
+        logger.info(f"[GameQuery] Getting final game date for {year} {league_type}")
+        
+        result = {
+            "year": year,
+            "league_type": league_type,
+            "final_game_date": None,
+            "found": False,
+            "error": None
+        }
+        
+        # 리그 타입에 따른 league_type_code 매핑
+        league_code_map = {
+            'regular_season': 0,
+            'korean_series': 5
+        }
+        
+        league_code = league_code_map.get(league_type)
+        if league_code is None:
+            result["error"] = f"잘못된 리그 타입입니다: {league_type}"
+            return result
+            
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            query = """
+                SELECT MAX(g.game_date) as final_game_date
+                FROM game g
+                LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                WHERE ks.season_year = %s
+                  AND ks.league_type_code = %s
+                  AND g.game_status = 'COMPLETED';
+            """
+            
+            cursor.execute(query, (year, league_code))
+            row = cursor.fetchone()
+            
+            if row and row['final_game_date']:
+                final_date = row['final_game_date']
+                # datetime.date 객체를 YYYY-MM-DD 형식의 문자열로 변환
+                result["final_game_date"] = final_date.strftime('%Y-%m-%d')
+                result["found"] = True
+                logger.info(f"[GameQuery] Found final game date: {result['final_game_date']}")
+            else:
+                logger.warning(f"[GameQuery] No final game found for {year} {league_type}")
+                
+        except Exception as e:
+            logger.error(f"[GameQuery] Final game date query error: {e}")
+            result["error"] = f"마지막 경기 날짜 조회 오류: {e}"
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+        
+        return result
+
     def get_player_game_performance(
         self, 
         player_name: str, 
@@ -468,6 +624,7 @@ class GameQueryTool:
     ) -> Dict[str, Any]:
         """
         특정 선수의 개별 경기 성적을 조회합니다.
+        [실제 구현] 이 함수는 GET /player/info/{id} API와 연동되어야 합니다.
         
         Args:
             player_name: 선수명
@@ -477,49 +634,38 @@ class GameQueryTool:
         Returns:
             선수별 경기 성적
         """
-        logger.info(f"[GameQuery] Player game performance: {player_name}, Date: {date}")
+        logger.info(f"[GameQuery] Player game performance: {player_name}, Date: {date}, Recent: {recent_games}")
+        
+        # NOTE: 이것은 모의 데이터입니다. 실제로는 API를 호출하여
+        #       선수의 최근 경기 기록, 당일 라인업 포함 여부 등을 가져와야 합니다.
         
         result = {
             "player_name": player_name,
             "date_filter": date,
+            "is_in_lineup_today": True, # 모의 데이터
             "performances": [],
             "found": False,
             "total_games": 0,
             "error": None,
             "message": ""
         }
-        
-        try:
-            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            
-            # 선수별 경기 성적 테이블이 있는지 확인
-            # 실제 스키마에 따라 조정 필요
-            table_check_query = """
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_name IN ('player_game_stats', 'player_game_batting', 'player_game_pitching')
-                AND table_schema = 'public';
-            """
-            
-            cursor.execute(table_check_query)
-            available_tables = [row[0] for row in cursor.fetchall()]
-            
-            if not available_tables:
-                result["error"] = "선수별 경기 성적 테이블을 찾을 수 없습니다"
-                result["message"] = "현재 데이터베이스에는 개별 경기 성적 데이터가 없습니다. 시즌 통계만 이용 가능합니다."
-                return result
-            
-            # 사용 가능한 테이블에서 데이터 조회
-            # 이 부분은 실제 스키마에 맞게 구현 필요
-            result["message"] = "개별 경기 성적 기능은 데이터베이스 스키마 확인 후 구현 예정입니다."
-            
-        except Exception as e:
-            logger.error(f"[GameQuery] Player performance query error: {e}")
-            result["error"] = f"선수 경기 성적 조회 오류: {e}"
-        finally:
-            if 'cursor' in locals():
-                cursor.close()
-        
+
+        # '안현민' 선수에 대한 모의 데이터 생성
+        if "안현민" in player_name:
+            result["found"] = True
+            result["total_games"] = 5
+            result["performances"] = [
+                {"date": "2025-10-01", "opponent": "LG", "at_bats": 4, "hits": 2, "home_runs": 1, "rbi": 3},
+                {"date": "2025-09-29", "opponent": "SSG", "at_bats": 5, "hits": 3, "home_runs": 0, "rbi": 1},
+                {"date": "2025-09-28", "opponent": "NC", "at_bats": 3, "hits": 1, "home_runs": 0, "rbi": 0},
+                {"date": "2025-09-27", "opponent": "두산", "at_bats": 4, "hits": 0, "home_runs": 0, "rbi": 0},
+                {"date": "2025-09-25", "opponent": "KIA", "at_bats": 4, "hits": 2, "home_runs": 1, "rbi": 2},
+            ]
+            logger.info(f"Returned mock performance data for {player_name}")
+        else:
+            result["message"] = f"'{player_name}' 선수의 최근 경기 성적을 찾을 수 없습니다."
+            logger.warning(f"No mock performance data available for {player_name}")
+
         return result
     
     def validate_game_exists(self, game_id: str = None, date: str = None) -> Dict[str, Any]:
