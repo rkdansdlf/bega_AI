@@ -2,10 +2,8 @@
 
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
-from typing import Optional
 
 import psycopg2
-from psycopg2 import pool
 from psycopg2.extensions import connection as PgConnection
 from fastapi import Depends
 
@@ -15,56 +13,21 @@ from .ml.intent_router import predict_intent, load_clf
 from .agents.baseball_agent import BaseballStatisticsAgent
 from .core.prompts import SYSTEM_PROMPT
 
-# 전역 커넥션 풀 (앱 시작 시 한 번만 생성)
-_connection_pool: Optional[pool.SimpleConnectionPool] = None
-
-
-def get_connection_pool() -> pool.SimpleConnectionPool:
-    """커넥션 풀을 가져오거나 생성합니다."""
-    global _connection_pool
-    
-    if _connection_pool is None:
-        settings = get_settings()
-        _connection_pool = pool.SimpleConnectionPool(
-            minconn=1,        # 최소 1개 커넥션 유지
-            maxconn=5,        # 최대 5개 커넥션 (Supabase 무료 플랜 고려)
-            dsn=settings.database_url
-        )
-    
-    return _connection_pool
-
-
-def close_connection_pool():
-    """앱 종료 시 커넥션 풀을 닫습니다."""
-    global _connection_pool
-    if _connection_pool is not None:
-        _connection_pool.closeall()
-        _connection_pool = None
-
 
 @asynccontextmanager
 async def lifespan(app):
-    """앱 시작/종료 시 실행되는 lifespan 이벤트"""
-    # 시작 시
     load_clf()
-    get_connection_pool()  # 커넥션 풀 초기화
-    
     yield
-    
-    # 종료 시
-    close_connection_pool()  # 모든 커넥션 정리
 
 
 def get_db_connection() -> Generator[PgConnection, None, None]:
-    """커넥션 풀에서 커넥션을 가져와서 사용 후 반환합니다."""
-    pool_instance = get_connection_pool()
-    conn = pool_instance.getconn()  # 풀에서 재사용 가능한 커넥션 가져오기
+    settings = get_settings()
+    conn = psycopg2.connect(settings.database_url)
     conn.autocommit = True
-    
     try:
         yield conn
     finally:
-        pool_instance.putconn(conn)  # 사용 후 풀에 반환 (닫지 않음!)
+        conn.close()
 
 
 def get_rag_pipeline(
@@ -80,6 +43,13 @@ def get_agent(
     """Dependency to get an instance of the BaseballStatisticsAgent."""
     settings = get_settings()
     
+    # 에이전트가 LLM을 직접 호출할 수 있도록 생성기 함수를 전달해야 합니다.
+    # 이 부분은 실제 LLM 호출 로직에 따라 달라집니다.
+    # 여기서는 RAGPipeline에 있던 _generate_with_openrouter를 임시로 가져왔다고 가정합니다.
+    # 실제로는 LLM 호출을 위한 별도의 클라이언트를 만드는 것이 좋습니다.
+    
+    # 임시 LLM 생성기 함수
+    # To-Do: Refactor LLM client into a separate dependency
     async def llm_generator(messages):
         import httpx
         if not settings.openrouter_api_key:
