@@ -20,6 +20,13 @@ class ToolCall:
     def __str__(self):
         return f"ToolCall(tool_name='{self.tool_name}', parameters={self.parameters})"
 
+    def to_dict(self) -> Dict[str, Any]:
+        """JSON serialization을 위한 딕셔너리 변환"""
+        return {
+            "tool_name": self.tool_name,
+            "parameters": self.parameters
+        }
+
 @dataclass 
 class ToolResult:
     """도구 실행 결과를 나타내는 클래스"""
