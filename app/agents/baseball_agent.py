@@ -15,9 +15,14 @@ from datetime import date, datetime
 from ..tools.database_query import DatabaseQueryTool
 from ..tools.regulation_query import RegulationQueryTool
 from ..tools.game_query import GameQueryTool
+from ..tools.document_query import DocumentQueryTool
+from ..core.tools.datetime_tool import get_current_datetime, get_baseball_season_info # 신규 도구 임포트
 from .tool_caller import ToolCaller, ToolCall, ToolResult
 
 logger = logging.getLogger(__name__)
+
+from ..core.prompts import SYSTEM_PROMPT # SYSTEM_PROMPT 임포트
+from ..core.entity_extractor import extract_entities_from_query # 엔티티 추출 임포트
 
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -40,6 +45,39 @@ def clean_json_response(response: str) -> str:
     
     return response.strip()
 
+TEAM_CODE_TO_NAME = {
+    "KIA": "KIA 타이거즈", "기아": "KIA 타이거즈",
+    "LG": "LG 트윈스",
+    "SSG": "SSG 랜더스",
+    "NC": "NC 다이노스",
+    "두산": "두산 베어스",
+    "KT": "KT 위즈",
+    "롯데": "롯데 자이언츠",
+    "삼성": "삼성 라이온즈",
+    "한화": "한화 이글스",
+    "키움": "키움 히어로즈",
+    "키움": "키움 히어로즈",
+}
+
+def _replace_team_codes(data: Any) -> Any:
+    """Recursively replace team codes with full names in a data structure."""
+    if isinstance(data, dict):
+        new_dict = {}
+        for k, v in data.items():
+            # 키에 'team'이 포함되어 있고, 값이 코드 사전에 있는 경우 변환
+            if 'team' in k and isinstance(v, str) and v in TEAM_CODE_TO_NAME:
+                new_dict[k] = TEAM_CODE_TO_NAME[v]
+            else:
+                new_dict[k] = _replace_team_codes(v)
+        return new_dict
+    elif isinstance(data, list):
+        return [_replace_team_codes(item) for item in data]
+    else:
+        # 값 자체가 팀 코드인 경우도 변환 (예: winning_team: "LG")
+        if isinstance(data, str) and data in TEAM_CODE_TO_NAME:
+            return TEAM_CODE_TO_NAME[data]
+        return data
+
 class BaseballStatisticsAgent:
     """
     야구 통계 전문 에이전트
@@ -57,6 +95,7 @@ class BaseballStatisticsAgent:
         self.db_query_tool = DatabaseQueryTool(connection)
         self.regulation_query_tool = RegulationQueryTool(connection)
         self.game_query_tool = GameQueryTool(connection)
+        self.document_query_tool = DocumentQueryTool(connection) # 신규 도구 인스턴스 생성
         self.tool_caller = ToolCaller()
         
         # 팀명 매핑 캐시 초기화
@@ -287,13 +326,128 @@ class BaseballStatisticsAgent:
         # 한국시리즈 우승팀 조회 도구
         self.tool_caller.register_tool(
             "get_korean_series_winner",
-            "특정 시즌의 한국시리즈 우승팀을 조회합니다. '우승팀', '챔피언', '한국시리즈 우승' 등의 질문에 사용하세요.",
+            """특정 시즌의 한국시리즈 우승팀을 조회합니다.
+
+다음 질문에서 반드시 사용하세요:
+- '우승팀', '챔피언', '한국시리즈 우승' 등의 질문
+- '작년 우승팀', '지난해 챔피언' (시간 확인 후 연도 변환하여 호출)
+- 'X년 우승팀은?' 
+
+이 도구는 한국시리즈 마지막 경기의 승리팀을 자동으로 식별하여 우승팀을 판단합니다.""",
             {
                 "year": "시즌 년도"
             },
             self._tool_get_korean_series_winner
         )
+        
+        # 현재 날짜 및 시간 조회 도구
+        self.tool_caller.register_tool(
+            "get_current_datetime",
+            """현재 날짜와 시간을 한국 시간 기준으로 조회합니다.
+
+다음 상황에서 반드시 이 도구를 먼저 사용해야 합니다:
+- '작년', '지난해', '올해', '금년' 등 상대적 시간 표현이 포함된 질문
+- '오늘', '지금' 등 현재 시점 기준 질문
+- 우승팀, 시즌 기록 등에서 정확한 연도가 필요한 질문
+- 예: '작년 우승팀은?' → 먼저 현재 날짜 확인하여 '작년' = '2024년'임을 파악
+
+중요: 상대적 시간 표현이 있으면 절대적 연도로 변환하기 위해 반드시 이 도구를 호출하세요.""",
+            {},
+            self._tool_get_current_datetime
+        )
+
+        self.tool_caller.register_tool(
+            "get_baseball_season_info",
+            "현재 KBO 야구 시즌 정보 조회합니다. '지금 야구 시즌이야?', '현재 시즌 상태는?' 등의 질문에 사용하세요.",
+            {},
+            self._tool_get_baseball_season_info
+        )
+
+        # 문서 검색 도구 (신규 추가)
+        self.tool_caller.register_tool(
+            "search_documents",
+            "KBO 리그 규정, 용어 정의, 선수 관련 스토리 등 비정형 텍스트 문서를 검색합니다. 'ABS가 뭐야?', 'FA 규정 알려줘'와 같은 설명형/정의형 질문에 사용하세요.",
+            {
+                "query": "검색할 질문 또는 키워드",
+                "limit": "반환할 최대 결과 수 (선택적, 기본값 10)"
+            },
+            self._tool_search_documents
+        )
     
+    def _tool_search_documents(self, query: str, limit: int = 10) -> ToolResult:
+        """문서 검색 도구의 래퍼 함수"""
+        try:
+            result = self.document_query_tool.search_documents(query, limit)
+            
+            if result.get("error"):
+                return ToolResult(
+                    success=False,
+                    data=result,
+                    message=f"문서 검색 오류: {result['error']}"
+                )
+            
+            if not result.get("found"):
+                return ToolResult(
+                    success=False,
+                    data=result,
+                    message=f"'{query}'와 관련된 문서를 찾을 수 없습니다."
+                )
+            
+            # 답변 생성에 용이하도록 컨텍스트 포맷팅
+            formatted_docs = []
+            for doc in result["documents"]:
+                title = doc.get('title', '정보 조각')
+                content = doc.get('content', '')
+                formatted_docs.append(f"문서명: {title}\n내용: {content}")
+            
+            return ToolResult(
+                success=True,
+                data={"documents": formatted_docs},
+                message=f"'{query}' 관련 문서를 {len(formatted_docs)}개 찾았습니다."
+            )
+            
+        except Exception as e:
+            logger.error(f"[BaseballAgent] Document search tool error: {e}")
+            return ToolResult(
+                success=False,
+                data={},
+                message=f"문서 검색 도구 실행 중 오류 발생: {e}"
+            )
+
+    def _tool_get_current_datetime(self, **kwargs) -> ToolResult:
+        """현재 날짜 및 시간 조회 도구"""
+        try:
+            datetime_info = get_current_datetime()
+            return ToolResult(
+                success=True,
+                data=datetime_info,
+                message=f"현재 시간은 {datetime_info['formatted_date']} {datetime_info['formatted_time']}입니다."
+            )
+        except Exception as e:
+            logger.error(f"Current datetime tool error: {e}")
+            return ToolResult(
+                success=False,
+                data={},
+                message=f"현재 시간 조회 중 오류 발생: {e}"
+            )
+
+    def _tool_get_baseball_season_info(self, **kwargs) -> ToolResult:
+        """현재 야구 시즌 정보 조회 도구"""
+        try:
+            season_info = get_baseball_season_info()
+            return ToolResult(
+                success=True,
+                data=season_info,
+                message=f"현재 {season_info['current_year']}년 야구 시즌은 '{season_info['season_status']}' 상태입니다."
+            )
+        except Exception as e:
+            logger.error(f"Baseball season info tool error: {e}")
+            return ToolResult(
+                success=False,
+                data={},
+                message=f"야구 시즌 정보 조회 중 오류 발생: {e}"
+            )
+
     def _load_team_name_mapping(self) -> Dict[str, str]:
         """팀 ID와 팀명 매핑을 데이터베이스에서 로드합니다."""
         if self._team_name_cache is not None:
@@ -1335,6 +1489,40 @@ class BaseballStatisticsAgent:
                 data={},
                 message=f"한국시리즈 우승팀 조회 중 오류 발생: {e}"
             )
+
+    def _tool_get_current_datetime(self, **kwargs) -> ToolResult:
+        """현재 날짜 및 시간 조회 도구"""
+        try:
+            datetime_info = get_current_datetime()
+            return ToolResult(
+                success=True,
+                data=datetime_info,
+                message=f"현재 시간은 {datetime_info['formatted_date']} {datetime_info['formatted_time']}입니다."
+            )
+        except Exception as e:
+            logger.error(f"Current datetime tool error: {e}")
+            return ToolResult(
+                success=False,
+                data={},
+                message=f"현재 시간 조회 중 오류 발생: {e}"
+            )
+
+    def _tool_get_baseball_season_info(self, **kwargs) -> ToolResult:
+        """현재 야구 시즌 정보 조회 도구"""
+        try:
+            season_info = get_baseball_season_info()
+            return ToolResult(
+                success=True,
+                data=season_info,
+                message=f"현재 {season_info['current_year']}년 야구 시즌은 '{season_info['season_status']}' 상태입니다."
+            )
+        except Exception as e:
+            logger.error(f"Baseball season info tool error: {e}")
+            return ToolResult(
+                success=False,
+                data={},
+                message=f"야구 시즌 정보 조회 중 오류 발생: {e}"
+            )
     
     def _analyze_player_comparison(self, player1_data: Dict, player2_data: Dict, position: str) -> Dict:
         """두 선수 데이터를 분석하여 비교 결과를 생성합니다."""
@@ -1423,19 +1611,56 @@ class BaseballStatisticsAgent:
         
         return analysis
 
+    def _is_chitchat(self, query: str) -> bool:
+        """간단한 일상 대화인지 키워드 기반으로 확인합니다."""
+        chitchat_keywords = ["안녕", "누구", "고마워", "반가워", "도움", "기능", "너는", "이름이"]
+        query_lower = query.lower().strip()
+        # 한 글자 질문은 일상 대화로 간주하지 않음
+        if len(query_lower) <= 2 and query_lower not in ["안녕"]:
+            return False
+        for keyword in chitchat_keywords:
+            if keyword in query_lower:
+                return True
+        return False
+
+    def _get_chitchat_response(self, query: str) -> Optional[str]:
+        """미리 정의된 일상 대화 응답을 반환합니다."""
+        query_lower = query.lower()
+        if "안녕" in query_lower:
+            return "안녕하세요! 저는 KBO 리그 데이터 분석가 BEGA입니다. 야구에 대해 궁금한 점이 있으시면 무엇이든 물어보세요!"
+        if "누구" in query_lower or "이름이" in query_lower:
+            return "저는 KBO 리그 전문 데이터 분석가 'BEGA'입니다. 선수 기록, 경기 결과, 리그 규정 등 야구에 대한 모든 것을 알려드릴 수 있습니다."
+        if "고마워" in query_lower:
+            return "천만에요! 더 궁금한 점이 있으시면 언제든지 다시 물어보세요."
+        if "도움" in query_lower or "기능" in query_lower:
+            return """저는 KBO 리그와 관련된 다양한 질문에 답변할 수 있어요. 예를 들어, 다음과 같이 질문해보세요.
+- "어제 LG 경기 결과 알려줘"
+- "김도영 2024년 성적은 어땠어?"
+- "ABS 규정에 대해 설명해줘"
+"""
+        return None
+
     async def process_query(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         통계 질문을 처리하고 실제 DB 데이터를 사용하여 답변을 생성합니다.
-        
-        Args:
-            query: 사용자 질문
-            context: 추가 컨텍스트 정보
-            
-        Returns:
-            처리 결과와 검증된 답변
         """
         logger.info(f"[BaseballAgent] Processing query: {query}")
         
+        # --- 신규 추가: 일상 대화 처리기 ---
+        if self._is_chitchat(query):
+            response = self._get_chitchat_response(query)
+            if response:
+                logger.info("[BaseballAgent] 일상 대화로 처리합니다.")
+                return {
+                    "answer": response,
+                    "tool_calls": [],
+                    "tool_results": [],
+                    "verified": True,
+                    "data_sources": ["predefined"],
+                    "error": None
+                }
+        # --- 일상 대화 처리기 끝 ---
+
         # 1단계: 질문 분석 및 필요한 도구 결정
         analysis_result = await self._analyze_query_and_plan_tools(query, context)
         
@@ -1452,8 +1677,7 @@ class BaseballStatisticsAgent:
         for tool_call in analysis_result["tool_calls"]:
             logger.info(f"[BaseballAgent] Executing tool: {tool_call.tool_name}")
             result = self.tool_caller.execute_tool(tool_call)
-            # Convert ToolResult to dict for JSON serialization
-            tool_results.append(result.to_dict() if hasattr(result, 'to_dict') else result)
+            tool_results.append(result)
             
         # 3단계: 수집된 실제 데이터를 바탕으로 답변 생성
         answer_result = await self._generate_verified_answer(query, tool_results, context)
@@ -1496,10 +1720,32 @@ class BaseballStatisticsAgent:
             logger.info(f"[BaseballAgent] Query pre-processed: '{query}' -> '{processed_query}'")
         
         # LLM을 사용하여 질문을 분석하고 도구 사용 계획 수립
+        
+        # 0. 엔티티 추출 (LLM 호출 전)
+        from ..core.entity_extractor import extract_entities_from_query
+        entity_filter = extract_entities_from_query(processed_query)
+
+        # 추출된 엔티티를 프롬프트에 제공할 컨텍스트로 포맷팅
+        entity_context_parts = []
+        if entity_filter.season_year:
+            entity_context_parts.append(f"- 연도: {entity_filter.season_year}년")
+        if entity_filter.player_name:
+            entity_context_parts.append(f"- 선수명: {entity_filter.player_name}")
+        if entity_filter.team_id:
+            entity_context_parts.append(f"- 팀명: {entity_filter.team_id}")
+        if entity_filter.stat_type:
+            entity_context_parts.append(f"- 통계 지표: {entity_filter.stat_type}")
+        if entity_filter.league_type:
+            entity_context_parts.append(f"- 리그 타입: {entity_filter.league_type}")
+        
+        entity_context = ""
+        if entity_context_parts:
+            entity_context = "\n\n### 질문에서 분석된 정보:\n" + "\n".join(entity_context_parts)
+
         query_text = processed_query # 전처리된 쿼리 사용
-        # 템플릿을 분리하여 f-string 문제 해결
-        analysis_prompt_template = """
+        analysis_prompt_template = f"""
 당신은 야구 통계 전문 에이전트입니다. 사용자의 질문을 분석하고 실제 데이터베이스에서 정확한 답변을 얻기 위해 어떤 도구들을 사용해야 하는지 결정해야 합니다.
+{entity_context}
 
 질문: {query_text}
 
@@ -1544,60 +1790,76 @@ class BaseballStatisticsAgent:
    - year (선택): 시즌 년도 (생략하면 최근 데이터)
 
 10. **search_regulations**: KBO 규정 검색
-   - query (필수): 검색할 규정 내용 (예: "타이브레이크", "FA 조건", "인필드 플라이")
+    - query (필수): 검색할 규정 내용 (예: "타이브레이크", "FA 조건", "인필드 플라이")
 
 11. **get_regulations_by_category**: 카테고리별 규정 조회
-   - category (필수): 규정 카테고리 (basic, player, game, technical, discipline, postseason, special, terms)
+    - category (필수): 규정 카테고리 (basic, player, game, technical, discipline, postseason, special, terms)
 
 12. **get_game_box_score**: 특정 경기의 박스스코어와 상세 정보 조회
-   - game_id (선택): 경기 고유 ID
-   - date (선택): 경기 날짜 (YYYY-MM-DD)
-   - home_team (선택): 홈팀명
-   - away_team (선택): 원정팀명
+    - game_id (선택): 경기 고유 ID
+    - date (선택): 경기 날짜 (YYYY-MM-DD)
+    - home_team (선택): 홈팀명
+    - away_team (선택): 원정팀명
 
 13. **get_games_by_date**: 특정 날짜의 모든 경기 조회
-   - date (필수): 경기 날짜 (YYYY-MM-DD)
-   - team (선택): 특정 팀만 조회
+    - date (필수): 경기 날짜 (YYYY-MM-DD)
+    - team (선택): 특정 팀만 조회
 
 14. **get_head_to_head**: 두 팀 간의 직접 대결 기록 조회
-   - team1 (필수): 팀1 이름
-   - team2 (필수): 팀2 이름
-   - year (선택): 시즌 년도
-   - limit (선택): 최근 몇 경기까지 (기본 10경기)
+    - team1 (필수): 팀1 이름
+    - team2 (필수): 팀2 이름
+    - year (선택): 시즌 년도
+    - limit (선택): 최근 몇 경기까지 (기본 10경기)
 
 15. **get_player_game_performance**: 특정 선수의 개별 경기 성적 조회
-   - player_name (필수): 선수명
-   - date (선택): 경기 날짜
-   - recent_games (선택): 최근 몇 경기까지 (기본 5경기)
+    - player_name (필수): 선수명
+    - date (선택): 경기 날짜
+    - recent_games (선택): 최근 몇 경기까지 (기본 5경기)
 
 16. **compare_players**: 두 선수의 통계를 비교 분석
-   - player1 (필수): 첫 번째 선수명
-   - player2 (필수): 두 번째 선수명
-   - comparison_type (선택): "career"(통산 비교, 기본값) 또는 "season"(특정 시즌 비교)
-   - year (선택): 특정 시즌 비교 시 연도
-   - position (선택): "batting", "pitching", "both" 중 하나 (기본값: "both")
+    - player1 (필수): 첫 번째 선수명
+    - player2 (필수): 두 번째 선수명
+    - comparison_type (선택): "career"(통산 비교, 기본값) 또는 "season"(특정 시즌 비교)
+    - year (선택): 특정 시즌 비교 시 연도
+    - position (선택): "batting", "pitching", "both" 중 하나 (기본값: "both")
 
 17. **get_season_final_game_date**: 특정 시즌의 마지막 경기 날짜를 조회
-   - year (필수): 시즌 년도
-   - league_type (선택): "regular_season" 또는 "korean_series" (기본값: "korean_series")
+    - year (필수): 시즌 년도
+    - league_type (선택): "regular_season" 또는 "korean_series" (기본값: "korean_series")
 
 18. **get_team_rank**: 특정 시즌의 팀 최종 순위를 조회
-   - team_name (필수): 팀명 (예: "KIA", "기아", "SSG")
-   - year (필수): 시즌 년도
+    - team_name (필수): 팀명 (예: "KIA", "기아", "SSG")
+    - year (필수): 시즌 년도
 
 19. **get_team_last_game**: 특정 팀의 실제 마지막 경기를 지능적으로 조회
-   - team_name (필수): 팀명 (예: "SSG", "기아", "KIA")
-   - year (필수): 시즌 년도
-   - 자동으로 팀 순위를 확인하여 포스트시즌 진출팀(1-5위)은 한국시리즈, 미진출팀(6-10위)은 정규시즌 마지막 경기를 조회
+    - team_name (필수): 팀명 (예: "SSG", "기아", "KIA")
+    - year (필수): 시즌 년도
+    - 자동으로 팀 순위를 확인하여 포스트시즌 진출팀(1-5위)은 한국시리즈, 미진출팀(6-10위)은 정규시즌 마지막 경기를 조회
 
 20. **get_korean_series_winner**: 특정 시즌의 한국시리즈 우승팀을 조회
-   - year (필수): 시즌 년도
-   - 우승팀과 함께 정규시즌 순위 정보도 제공
+    - year (필수): 시즌 년도
+    - 우승팀과 함께 정규시즌 순위 정보도 제공
+
+21. **get_current_datetime**: 현재 날짜와 시간 조회
+    - "지금 몇 시", "오늘 날짜" 질문에 사용
+
+22. **get_baseball_season_info**: 현재 야구 시즌 정보 조회
+    - "지금 몇 시", "오늘 날짜" 질문에 사용
+    - "지금 야구 시즌이야?", "시즌 중" 질문에 사용
+
+23. **search_documents**: KBO 리그 규정, 용어 정의, 선수 관련 스토리 등 비정형 텍스트 문서를 검색합니다.
+    - query (필수): 검색할 질문 또는 키워드
+    - 'ABS가 뭐야?', 'FA 규정 알려줘'와 같은 설명형/정의형 질문에 사용
+
+23. **search_documents**: KBO 리그 규정, 용어 정의 등 비정형 텍스트 문서 검색
+    - query (필수): 검색할 질문 또는 키워드
+    - 'ABS가 뭐야?', 'FA 규정 알려줘'와 같은 설명형/정의형 질문에 사용
 
 질문: {query}
 
 **중요한 규칙:**
 - "우승팀", "챔피언", "한국시리즈 우승" 질문은 get_korean_series_winner 사용 (자동으로 우승팀과 순위 정보 제공)
+- "ABS가 뭐야?", "FA 규정", "피치클락" 등 규칙이나 용어에 대한 설명이 필요할 경우, 다른 도구보다 search_documents 도구를 우선적으로 사용해야 함.
 - 시즌이 명시되지 않으면 2025년을 기본값으로 사용
 - "통산", "커리어", "총", "KBO 리그 통산" 키워드가 있으면 반드시 get_career_stats 사용
 - "세이브" 키워드가 포함된 통산 기록 질문은 get_career_stats 사용
@@ -1661,7 +1923,7 @@ class BaseballStatisticsAgent:
 }}
 ```
 """
-        analysis_prompt = analysis_prompt_template.format(query_text=query_text, query=query)
+        analysis_prompt = analysis_prompt_template
 
         try:
             # LLM 호출하여 분석 결과 받기
@@ -1909,32 +2171,34 @@ class BaseballStatisticsAgent:
         
         for i, result in enumerate(tool_results):
             # result는 이제 dict 형태 (ToolResult.to_dict() 결과)
-            if result.get("success", False):
-                tool_data_summary.append(f"도구 {i+1} 결과: {result.get('message', '')}")
+            if result.success:
+                tool_data_summary.append(f"도구 {i+1} 결과: {result.message}")
                 try:
+                    # 팀 코드를 전체 이름으로 변환하는 로직 추가
+                    sanitized_data = _replace_team_codes(result.data)
                     data_json = json.dumps(
-                        result.get("data", {}), 
+                        sanitized_data, 
                         ensure_ascii=False, 
                         indent=2,
-                        cls=DateTimeEncoder  # 핵심 수정
+                        cls=DateTimeEncoder
                     )
                     tool_data_summary.append(f"데이터: {data_json}")
                 except Exception as e:
                     logger.error(f"[BaseballAgent] JSON serialization error: {e}")
                     tool_data_summary.append(f"데이터: (직렬화 실패)")
                 
-                result_data = result.get("data", {})
+                result_data = result.data if result.data else {}
                 data_sources.append({
-                    "tool": result_data.get("source", "database"),
+                    "tool": result_data.get("source", "database") if isinstance(result_data, dict) else "database",
                     "verified": True,
                     "data_points": len(result_data) if isinstance(result_data, list) else 1
                 })
             else:
-                tool_data_summary.append(f"도구 {i+1} 실패: {result.get('message', '')}")
+                tool_data_summary.append(f"도구 {i+1} 실패: {result.message}")
                 data_sources.append({
                     "tool": "failed",
                     "verified": False,
-                    "error": result.get('message', '')
+                    "error": result.message
                 })
         
         # 검증된 데이터만 사용하여 답변 생성
@@ -1987,7 +2251,7 @@ class BaseballStatisticsAgent:
             answer = await self.llm_generator(answer_messages)
             
             # 성공한 도구가 하나라도 있는지 확인
-            has_verified_data = any(result.get("success", False) for result in tool_results)
+            has_verified_data = any(result.success for result in tool_results)
             
             return {
                 "answer": answer,
