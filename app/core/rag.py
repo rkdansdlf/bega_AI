@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import time
 from typing import Any, Dict, List, Optional, Sequence
 from psycopg2.extensions import connection as PgConnection
 import math
@@ -151,15 +153,16 @@ class RAGPipeline:
                 continue
 
             # Filter out non-regular season data (playoffs, etc.)
-            league = meta.get("league", "")
-            if league and league != "정규시즌":
-                filtered_playoff_count += 1
-                continue
+            # league = meta.get("league", "")
+            # if league and league != "정규시즌":
+            #     filtered_playoff_count += 1
+            #     continue
 
             # --- Pitcher Processing ---
             if doc.get("source_table") == "player_season_pitching":
                 ip = _get_safe_stat(meta, "innings_pitched", 0.0)
                 gs = _get_safe_stat(meta, "games_started", 0)
+                league = meta.get("league", "N/A")
                 logger.info(f"[RAG] Found pitcher: {meta.get('player_name')} - IP: {ip}, League: {league}")
                 
                 role = "SP" if ip >= MIN_IP_SP or gs >= 10 else "RP"
@@ -293,6 +296,18 @@ class RAGPipeline:
         processed_pitchers.sort(key=lambda p: p["score"])
         processed_batters.sort(key=lambda b: b["score"], reverse=True)
 
+        # Check for ambiguous players (same name in batters and pitchers)
+        batter_names = {p["name"] for p in processed_batters}
+        pitcher_names = {p["name"] for p in processed_pitchers}
+        ambiguous_names = batter_names.intersection(pitcher_names)
+
+        if ambiguous_names:
+            for name in ambiguous_names:
+                warnings.add(
+                    f"주의: '{name}'은(는) 투수와 타자 모두 존재합니다. "
+                    "답변 시 이 모호성을 반드시 언급하고, 가능하다면 포지션(투수/타자)을 명시하여 혼동을 피하세요."
+                )
+
         logger.info(f"[RAG] Filtered {filtered_playoff_count} playoff records")
         logger.info(f"[RAG] Final processed: {len(processed_pitchers)} pitchers, {len(processed_batters)} batters")
 
@@ -324,7 +339,7 @@ class RAGPipeline:
         if not embeddings:
             return []
 
-        keyword = query if len(query.split()) <= 5 else None
+        keyword = query
         docs = similarity_search(
             self.connection,
             embeddings[0],
@@ -372,14 +387,38 @@ class RAGPipeline:
 
     async def _generate(self, messages: Sequence[Dict[str, str]]) -> str:
         provider = self.settings.llm_provider
-        if provider == "gemini":
-            # (Implementation for Gemini - not shown for brevity)
-            pass
-        elif provider == "openrouter":
-            return await self._generate_with_openrouter(messages)
-        raise RuntimeError(f"지원되지 않는 LLM 공급자: {provider}")
+        
+        try:
+            if provider == "gemini":
+                return await self._generate_with_gemini(messages)
+            elif provider == "openrouter":
+                return await self._generate_with_openrouter(messages)
+            else:
+                raise RuntimeError(f"지원되지 않는 LLM 공급자: {provider}")
+        except Exception as e:
+            logger.error(f"[RAG] Primary LLM provider '{provider}' failed: {e}")
+            
+            # Try fallback provider
+            fallback_provider = "gemini" if provider == "openrouter" else "openrouter"
+            
+            # Check if fallback is available
+            if fallback_provider == "gemini" and self.settings.gemini_api_key:
+                logger.info(f"[RAG] Attempting fallback to Gemini")
+                try:
+                    return await self._generate_with_gemini(messages)
+                except Exception as fallback_e:
+                    logger.error(f"[RAG] Fallback to Gemini also failed: {fallback_e}")
+            elif fallback_provider == "openrouter" and self.settings.openrouter_api_key:
+                logger.info(f"[RAG] Attempting fallback to OpenRouter")
+                try:
+                    return await self._generate_with_openrouter(messages)
+                except Exception as fallback_e:
+                    logger.error(f"[RAG] Fallback to OpenRouter also failed: {fallback_e}")
+            
+            # All providers failed
+            raise RuntimeError(f"모든 LLM 제공자가 실패했습니다. 주 제공자({provider}): {e}")
 
-    async def _generate_with_openrouter(self, messages: Sequence[Dict[str, str]]) -> str:
+    async def _generate_with_openrouter(self, messages: Sequence[Dict[str, str]], max_retries: int = 3) -> str:
         if not self.settings.openrouter_api_key:
             raise RuntimeError("OpenRouter를 사용하려면 OPENROUTER_API_KEY가 필요합니다.")
         
@@ -395,19 +434,158 @@ class RAGPipeline:
             "max_tokens": self.settings.max_output_tokens,
         }
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
+        last_exception = None
         
-        response.raise_for_status()
-        data = response.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        if not content:
-            raise RuntimeError("OpenRouter 응답이 비어 있습니다.")
-        return content
+        for attempt in range(max_retries):
+            try:
+                # Exponential backoff with jitter
+                if attempt > 0:
+                    base_delay = 2 ** (attempt - 1)  # 1, 2, 4 seconds
+                    jitter = random.uniform(0.1, 0.5)  # Add randomness to prevent thundering herd
+                    delay = base_delay + jitter
+                    logger.info(f"[OpenRouter] Retry attempt {attempt + 1}/{max_retries}, waiting {delay:.2f}s")
+                    await asyncio.sleep(delay)
+                
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(
+                        f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                    )
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                # 디버깅을 위한 응답 로깅 (첫 번째 시도에서만)
+                if attempt == 0:
+                    logger.info(f"[OpenRouter] Response status: {response.status_code}")
+                    logger.debug(f"[OpenRouter] Response data keys: {list(data.keys())}")
+                
+                choices = data.get("choices", [])
+                if not choices:
+                    error_msg = f"OpenRouter 응답에 choices가 없습니다. Keys: {list(data.keys())}"
+                    logger.error(f"[OpenRouter] {error_msg}")
+                    raise RuntimeError(error_msg)
+                
+                message = choices[0].get("message", {})
+                content = message.get("content", "")
+                
+                if not content:
+                    error_msg = f"OpenRouter 응답이 비어 있습니다. Message keys: {list(message.keys())}"
+                    logger.error(f"[OpenRouter] {error_msg}")
+                    raise RuntimeError(error_msg)
+                
+                logger.info(f"[OpenRouter] Successfully generated response on attempt {attempt + 1}")
+                return content
+                
+            except (httpx.RequestError, httpx.HTTPStatusError, RuntimeError) as e:
+                last_exception = e
+                logger.warning(f"[OpenRouter] Attempt {attempt + 1}/{max_retries} failed: {e}")
+                
+                # If it's the last attempt, don't wait
+                if attempt == max_retries - 1:
+                    break
+        
+        # All retries failed
+        logger.error(f"[OpenRouter] All {max_retries} attempts failed. Last error: {last_exception}")
+        raise RuntimeError(f"OpenRouter API 호출이 {max_retries}번 모두 실패했습니다. 마지막 오류: {last_exception}")
+
+    async def _generate_with_gemini(self, messages: Sequence[Dict[str, str]], max_retries: int = 3) -> str:
+        """Google Gemini API를 사용하여 응답을 생성합니다."""
+        if not self.settings.gemini_api_key:
+            raise RuntimeError("Gemini를 사용하려면 GEMINI_API_KEY가 필요합니다.")
+        
+        # Convert OpenAI format messages to Gemini format
+        gemini_contents = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            
+            if role == "system":
+                # Gemini doesn't have system role, prepend to first user message
+                if not gemini_contents:
+                    gemini_contents.append({
+                        "role": "user", 
+                        "parts": [{"text": f"System: {content}\n\nUser: "}]
+                    })
+                else:
+                    # Prepend to existing user message
+                    if gemini_contents[-1]["role"] == "user":
+                        gemini_contents[-1]["parts"][0]["text"] = f"System: {content}\n\n" + gemini_contents[-1]["parts"][0]["text"]
+            elif role == "user":
+                gemini_contents.append({
+                    "role": "user",
+                    "parts": [{"text": content}]
+                })
+            elif role == "assistant":
+                gemini_contents.append({
+                    "role": "model",
+                    "parts": [{"text": content}]
+                })
+        
+        payload = {
+            "contents": gemini_contents,
+            "generationConfig": {
+                "maxOutputTokens": self.settings.max_output_tokens,
+                "temperature": 0.7,
+            }
+        }
+        
+        model = self.settings.gemini_model or "gemini-1.5-flash"
+        url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
+        params = {"key": self.settings.gemini_api_key}
+        
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Exponential backoff with jitter
+                if attempt > 0:
+                    base_delay = 2 ** (attempt - 1)
+                    jitter = random.uniform(0.1, 0.5)
+                    delay = base_delay + jitter
+                    logger.info(f"[Gemini] Retry attempt {attempt + 1}/{max_retries}, waiting {delay:.2f}s")
+                    await asyncio.sleep(delay)
+                
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(url, json=payload, params=params)
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                # 디버깅을 위한 응답 로깅 (첫 번째 시도에서만)
+                if attempt == 0:
+                    logger.info(f"[Gemini] Response status: {response.status_code}")
+                    logger.debug(f"[Gemini] Response data keys: {list(data.keys())}")
+                
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    error_msg = f"Gemini 응답에 candidates가 없습니다. Keys: {list(data.keys())}"
+                    logger.error(f"[Gemini] {error_msg}")
+                    raise RuntimeError(error_msg)
+                
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                
+                if not parts or not parts[0].get("text"):
+                    error_msg = f"Gemini 응답이 비어 있습니다. Content: {content}"
+                    logger.error(f"[Gemini] {error_msg}")
+                    raise RuntimeError(error_msg)
+                
+                result = parts[0]["text"]
+                logger.info(f"[Gemini] Successfully generated response on attempt {attempt + 1}")
+                return result
+                
+            except (httpx.RequestError, httpx.HTTPStatusError, RuntimeError) as e:
+                last_exception = e
+                logger.warning(f"[Gemini] Attempt {attempt + 1}/{max_retries} failed: {e}")
+                
+                if attempt == max_retries - 1:
+                    break
+        
+        # All retries failed
+        logger.error(f"[Gemini] All {max_retries} attempts failed. Last error: {last_exception}")
+        raise RuntimeError(f"Gemini API 호출이 {max_retries}번 모두 실패했습니다. 마지막 오류: {last_exception}")
 
     def _is_statistical_query(self, query: str, entity_filter) -> bool:
         """
@@ -445,11 +623,24 @@ class RAGPipeline:
             entity_filter.player_name or 
             entity_filter.stat_type or 
             "년" in query or
-            any(word in query_lower for word in ["알려줘", "궁금", "얼마", "몇"])
+            any(word in query_lower for word in ["알려줘", "궁금", "얼마", "몇", "는", "은", "의"]) or
+            # 질문 형태나 통계 지표가 있으면 통계 질문으로 간주
+            "?" in query or "몇" in query or "어떻게" in query or
+            any(stat in query_lower for stat in ["타율", "홈런", "ops", "era", "방어율"])
         )
         
+        # 디버깅을 위한 로그 출력
+        logger.info(f"[RAG] _is_statistical_query debug:")
+        logger.info(f"  query: {query}")
+        logger.info(f"  has_stat_keywords: {has_stat_keywords}")
+        logger.info(f"  has_specific_request: {has_specific_request}")
+        logger.info(f"  entity_filter.player_name: {entity_filter.player_name}")
+        logger.info(f"  entity_filter.stat_type: {entity_filter.stat_type}")
+        
         # 통계 키워드가 있고 구체적인 요청이면 통계 질문
-        return has_stat_keywords and has_specific_request
+        result = has_stat_keywords and has_specific_request
+        logger.info(f"  RESULT: {result}")
+        return result
     
     def _is_regulation_query(self, query: str) -> bool:
         """
@@ -513,12 +704,17 @@ class RAGPipeline:
         """
         일반 대화인지 판단합니다.
         """
-        # 야구 지식/용어 관련 질문들 (우선 확인)
-        baseball_knowledge_keywords = [
+        # 야구 지식/용어 관련 질문들 + 통계 질문 키워드들
+        baseball_keywords = [
             "ops", "wrc+", "war", "era", "whip", "babip", "fip", "골든글러브",
             "fa", "신인왕", "mvp", "타율", "방어율", "출루율", "장타율",
             "자책점", "세이브", "홀드", "승리투수", "뜻", "의미", "정의",
-            "계산", "어떻게", "무엇", "기준"
+            "계산", "어떻게", "무엇", "기준",
+            # 통계 질문 키워드 추가
+            "홈런", "타점", "득점", "승", "패", "삼진", "볼넷", "몇위", "순위",
+            "1위", "최고", "상위", "리더", "기록", "통계", "성적", "몇개", "몇점",
+            "얼마나", "얼마", "vs", "대", "비교", "누가", "더", "뛰어난", "우수한",
+            "좋은", "맞대결", "시즌", "년", "연도"
         ]
         
         # 일반 대화 키워드 (야구와 무관한 것들)
@@ -530,9 +726,9 @@ class RAGPipeline:
         
         query_lower = query.lower()
         
-        # 야구 지식 질문이면 일반 대화가 아님
-        if any(keyword in query_lower for keyword in baseball_knowledge_keywords):
-            return True  # 야구 지식 질문이므로 일반 대화로 처리 (지식 답변 제공)
+        # 야구 관련 질문이면 일반 대화가 아님  
+        if any(keyword in query_lower for keyword in baseball_keywords):
+            return False  # 야구 관련 질문이므로 일반 대화가 아님
         
         # 야구/통계와 무관한 일반적인 대화만 일반 대화로 분류
         return any(keyword in query_lower for keyword in general_keywords)
@@ -634,6 +830,7 @@ class RAGPipeline:
                 }
         
         # 기본 응답 (아무 키워드도 매칭되지 않을 때만)
+        logger.info(f"[RAG] _handle_general_conversation fallback for query: {query}")
         default_response = """안녕하세요! 저는 KBO 리그 데이터 분석가 'BEGA'입니다. 
 
 KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니다:
@@ -669,13 +866,22 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         entity_filter = search_strategy["entity_filter"]
         extracted_filters = search_strategy["db_filters"]
         
-        # 2. 일반 대화인지 먼저 확인
-        if self._is_general_conversation(query):
+        # 2. 통계 질문인지 먼저 확인 (최우선)
+        is_statistical = self._is_statistical_query(query, entity_filter)
+        logger.info(f"[RAG] Is statistical query: {is_statistical}")
+        logger.info(f"[RAG] Entity filter: {entity_filter}")
+        if is_statistical:
+            logger.info(f"[RAG] Statistical query detected, using traditional RAG directly")
+            # 통계 질문이면 바로 RAG로 처리 (에이전트 건너뛰기)
+            pass  # 6단계로 진행
+        
+        # 3. 일반 대화인지 확인
+        elif self._is_general_conversation(query):
             logger.info(f"[RAG] General conversation detected")
             return await self._handle_general_conversation(query)
         
-        # 3. 규정 질문인지 먼저 확인 (통계보다 우선순위)
-        if self._is_regulation_query(query):
+        # 4. 규정 질문인지 확인
+        elif self._is_regulation_query(query):
             logger.info(f"[RAG] Regulation query detected, trying agent first")
             agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
             if agent_result is not None:
@@ -683,7 +889,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             else:
                 logger.info(f"[RAG] Regulation agent failed, falling back to traditional RAG")
         
-        # 4. 경기 데이터 질문인지 확인
+        # 5. 경기 데이터 질문인지 확인
         elif self._is_game_query(query):
             logger.info(f"[RAG] Game query detected, trying agent first")
             agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
@@ -691,15 +897,6 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 return agent_result
             else:
                 logger.info(f"[RAG] Game agent failed, falling back to traditional RAG")
-        
-        # 5. 통계 질문인지 판단하고 에이전트 시도
-        elif self._is_statistical_query(query, entity_filter):
-            logger.info(f"[RAG] Statistical query detected, trying agent first")
-            agent_result = await self._try_agent_first(query, intent=intent, filters=filters, history=history)
-            if agent_result is not None:
-                return agent_result
-            else:
-                logger.info(f"[RAG] Statistical agent failed, falling back to traditional RAG")
         
         # 6. 기존 RAG 방식으로 폴백 또는 일반 질문 처리
         
@@ -791,9 +988,21 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         processed_data = await self._process_and_enrich_docs(docs, year)
         
         # 3. 의도별 컨텍스트 생성 (새로운 컨텍스트 포맷터 사용)
+        # TEMP: 디버깅을 위해 raw 검색 결과도 컨텍스트에 포함
+        raw_context_parts = []
+        for doc in docs[:10]:  # 상위 10개 결과만 사용
+            title = doc.get("title", "제목 없음")
+            content = doc.get("content", "")[:200]  # 내용 200자 제한
+            raw_context_parts.append(f"- {title}: {content}")
+        
+        raw_context = "\n### 검색된 원본 데이터:\n" + "\n".join(raw_context_parts)
+        
         formatted_context = self.context_formatter.format_context(
             processed_data, intent, query, entity_filter, year
         )
+        
+        # 원본 데이터도 포함
+        formatted_context = formatted_context + "\n\n" + raw_context
         
         # 대화 기록 컨텍스트 추가
         history_block = _history_context_block(history)
@@ -802,6 +1011,12 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         # 4. LLM 프롬프트 구성
         prompt = FOLLOWUP_PROMPT.format(question=query, context=formatted_context)
+        
+        # DEBUG: 컨텍스트 로깅
+        logger.info(f"[RAG_DEBUG] Question: {query}")
+        logger.info(f"[RAG_DEBUG] Formatted context length: {len(formatted_context)}")
+        logger.info(f"[RAG_DEBUG] Formatted context preview: {formatted_context[:500]}...")
+        
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(_history_for_messages(history))
         messages.append({"role": "user", "content": prompt})
