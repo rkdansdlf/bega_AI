@@ -20,51 +20,15 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Upl
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from ..core.rag import RAGPipeline
+from ..deps import get_agent
+from ..agents.baseball_agent import BaseballStatisticsAgent
 from ..core.ratelimit import rate_limit_dependency
-from ..deps import get_intent_router, get_rag_pipeline
 
 logger = logging.getLogger(__name__)
 load_dotenv()
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
-
-
-def _infer_filters_from_question(
-    question: str,
-    base_filters: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """
-    질문에 포함된 연도 표현을 분석해 season_year 필터를 자동으로 지정합니다.
-    base_filters에 season_year가 이미 있으면 그대로 반환합니다.
-    """
-    if base_filters and base_filters.get("season_year"):
-        return base_filters
-
-    match = re.search(r"(\d{2,4})\s*년", question)
-    token: Optional[str] = None
-    if match:
-        token = match.group(1)
-    else:
-        match = re.search(r"(19|20)\d{2}", question)
-        if match:
-            token = match.group(0)
-
-    year: Optional[int] = None
-    if token:
-        if len(token) == 4:
-            year = int(token)
-        elif len(token) == 2:
-            short = int(token)
-            year = 1900 + short if short >= 82 else 2000 + short
-
-    if year and 1900 <= year <= 2100:
-        merged = dict(base_filters) if base_filters else {}
-        merged["season_year"] = year
-        return merged
-
-    return base_filters
 
 
 def _decode_history_payload(payload: Any) -> Optional[List[Dict[str, str]]]:
@@ -102,9 +66,9 @@ def _decode_history_payload(payload: Any) -> Optional[List[Dict[str, str]]]:
 
 
 async def _render_answer(result: Dict[str, Any], style: str) -> str:
-    """RAG 파이프라인 결과를 지정된 스타일에 맞게 렌더링합니다."""
+    """에이전트 결과를 지정된 스타일에 맞게 렌더링합니다."""
     if style == "json":
-        return json.dumps(result, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False, indent=2)
     if style == "compact":
         answer = result.get("answer", "").replace("\n", " ").strip()
         return answer
@@ -119,25 +83,19 @@ async def _stream_response(
     filters: Optional[Dict[str, Any]],
     style: str,
     history: Optional[List[Dict[str, str]]],
-    pipeline: RAGPipeline,
-    intent_router,
+    agent: BaseballStatisticsAgent,
 ):
     """질문에 대한 답변을 생성하고 SSE 스트림으로 반환하는 핵심 로직입니다."""
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
-    # 사용자의 질문 의도를 파악합니다.
-    intent = intent_router(question)
     result: Optional[Dict[str, Any]] = None
     error_payload: Optional[Dict[str, Any]] = None
     try:
-        filters = _infer_filters_from_question(question, filters)
-        # RAG 파이프라인을 실행하여 결과를 생성합니다.
-        result = await pipeline.run(
+        # 에이전트를 실행하여 결과를 생성합니다.
+        result = await agent.process_query(
             question,
-            intent=intent,
-            filters=filters,
-            history=history,
+            context={"filters": filters, "history": history},
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("chat_stream에서 오류가 발생했습니다.")
@@ -145,26 +103,54 @@ async def _stream_response(
 
     async def event_generator():
         """SSE 이벤트 스트림을 생성하는 비동기 제너레이터입니다."""
-        # 1. 의도(intent) 이벤트 전송
-        yield {"event": "intent", "data": json.dumps({"intent": intent}, ensure_ascii=False)}
-        
-        # 2. 오류 발생 시 오류 이벤트 전송
+        # 1. 오류 발생 시 오류 이벤트 전송
         if error_payload:
             yield {"event": "error", "data": json.dumps(error_payload, ensure_ascii=False)}
-        # 3. 성공 시 메시지와 메타데이터 이벤트 전송
+        # 2. 성공 시 메시지와 메타데이터 이벤트 전송
         elif result:
             rendered = await _render_answer(result, style)
             # 답변의 일부(delta)를 message 이벤트로 전송
             yield {"event": "message", "data": json.dumps({"delta": rendered}, ensure_ascii=False)}
             
-            # 인용(citations) 등 추가 정보를 meta 이벤트로 전송
-            meta_payload = {
-                "citations": result.get("citations", []),
+            def safe_serialize(obj):
+                """JSON 직렬화 가능한 형태로 객체를 변환"""
+                from datetime import datetime, date
+                
+                if obj is None:
+                    return None
+                elif isinstance(obj, (str, int, float, bool)):
+                    return obj
+                elif isinstance(obj, (datetime, date)):
+                    return obj.isoformat()
+                elif hasattr(obj, 'to_dict'):
+                    return safe_serialize(obj.to_dict())
+                elif isinstance(obj, dict):
+                    return {key: safe_serialize(value) for key, value in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [safe_serialize(item) for item in obj]
+                else:
+                    # ToolResult 등의 객체
+                    if hasattr(obj, '__dict__'):
+                        return {key: safe_serialize(value) for key, value in obj.__dict__.items()}
+                    else:
+                        return str(obj)
+            
+            # 도구 호출 등 추가 정보를 meta 이벤트로 전송
+            tool_results_raw = result.get("tool_results", [])
+            tool_results_serialized = safe_serialize(tool_results_raw)
+            
+            meta_payload_raw = {
+                "tool_calls": [tc.to_dict() for tc in result.get("tool_calls", [])],
+                "tool_results": tool_results_serialized,
+                "data_sources": result.get("data_sources", []),
+                "verified": result.get("verified", False),
                 "style": style,
             }
+            # 전체 payload를 안전하게 직렬화
+            meta_payload = safe_serialize(meta_payload_raw)
             yield {"event": "meta", "data": json.dumps(meta_payload, ensure_ascii=False)}
             
-        # 4. 스트림 종료를 알리는 done 이벤트 전송
+        # 3. 스트림 종료를 알리는 done 이벤트 전송
         yield {"event": "done", "data": "[DONE]"}
 
     return EventSourceResponse(
@@ -187,8 +173,7 @@ class ChatPayload(Dict[str, Any]):
 @router.post("/completion")
 async def chat_completion(
     payload: Dict[str, Any] = Body(...),
-    pipeline: RAGPipeline = Depends(get_rag_pipeline),
-    intent_router=Depends(get_intent_router),
+    agent: BaseballStatisticsAgent = Depends(get_agent),
     _: None = Depends(rate_limit_dependency),  # 요청 빈도 제한 적용
 ):
     """단일 JSON 응답으로 전체 채팅 답변을 반환하는 엔드포인트입니다."""
@@ -196,14 +181,12 @@ async def chat_completion(
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
-    filters = _infer_filters_from_question(question, payload.get("filters"))
+    filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
-    intent = intent_router(question)
-    result = await pipeline.run(
+
+    result = await agent.process_query(
         question,
-        intent=intent,
-        filters=filters,
-        history=history,
+        context={"filters": filters, "history": history},
     )
     if isinstance(result, dict):
         return JSONResponse(result)
@@ -220,8 +203,7 @@ async def chat_completion(
 async def chat_stream_post(
     payload: Dict[str, Any] = Body(...),
     style: str = Query("markdown", regex="^(markdown|json|compact)$"),
-    pipeline: RAGPipeline = Depends(get_rag_pipeline),
-    intent_router=Depends(get_intent_router),
+    agent: BaseballStatisticsAgent = Depends(get_agent),
     _: None = Depends(rate_limit_dependency),
     request: Request = None,
 ):
@@ -241,8 +223,7 @@ async def chat_stream_post(
         filters=filters,
         style=style,
         history=history,
-        pipeline=pipeline,
-        intent_router=intent_router,
+        agent=agent,
     )
 
 
@@ -250,8 +231,7 @@ async def chat_stream_post(
 async def chat_stream_get(
     q: str = Query("", description="질문 텍스트"),
     style: str = Query("markdown", regex="^(markdown|json|compact)$"),
-    pipeline: RAGPipeline = Depends(get_rag_pipeline),
-    intent_router=Depends(get_intent_router),
+    agent: BaseballStatisticsAgent = Depends(get_agent),
     _: None = Depends(rate_limit_dependency),
     request: Request = None,
 ):
@@ -268,8 +248,7 @@ async def chat_stream_get(
         filters=None,
         style=style,
         history=history,
-        pipeline=pipeline,
-        intent_router=intent_router,
+        agent=agent,
     )
 
 whisper_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY2"))
