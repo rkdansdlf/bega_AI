@@ -276,6 +276,7 @@ async def transcribe_audio(
             model="whisper-1",
             file=audio_file,
             language="ko"
+            prompt="야구, KBO, 직관, 경기, 선수, 팀에 대한 질문입니다."
         )
         
         logger.info(f" 변환 성공! 텍스트 길이: {len(response.text)}")
