@@ -109,8 +109,7 @@ class DatabaseQueryTool:
                 LIMIT 5
             """
             cursor.execute(check_query, (player_name, f'%{player_name}%'))
-            rows = cursor.fetchall()
-            existing_players = [row['name'] for row in rows]
+            existing_players = [row[0] for row in cursor.fetchall()]
             
             if not existing_players:
                 result["error"] = f"선수 '{player_name}'을(를) 찾을 수 없습니다. 정확한 선수명을 확인해주세요."
@@ -371,8 +370,7 @@ class DatabaseQueryTool:
                     "obp": ("obp", "DESC", 100),
                     "장타율": ("slg", "DESC", 100),
                     "slg": ("slg", "DESC", 100),
-                    "wrc_plus": ("wrc_plus", "DESC", 100),
-                    "war": ("war", "DESC", 100)
+                    "wrc_plus": ("wrc_plus", "DESC", 100)
                 }
                 
                 if stat_name.lower() not in stat_mapping:
@@ -421,8 +419,7 @@ class DatabaseQueryTool:
                     "삼진": ("strikeouts", "DESC", 30),
                     "strikeouts": ("strikeouts", "DESC", 30),
                     "세이브": ("saves", "DESC", 0),
-                    "saves": ("saves", "DESC", 0),
-                    "war": ("war", "DESC", 30)
+                    "saves": ("saves", "DESC", 0)
                 }
                 
                 if stat_name.lower() not in stat_mapping:
