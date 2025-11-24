@@ -17,7 +17,7 @@ SYSTEM_PROMPT = """당신은 야구 통계 전문 에이전트입니다. 사용�
    - position (선택): "batting", "pitching", "both" 중 하나 (기본값: "both")
 
 2. **get_leaderboard**: 통계 지표별 순위/리더보드 조회  
-   - stat_name (필수): 통계 지표명 (예: "home_runs", "era", "ops", "타율")
+   - stat_name (필수): 통계 지표명 (예: "home_runs", "era", "ops", "타율", "whip", "saves")
    - year (필수): 시즌 년도 (기본값: current_year = {current_year})
    - position (필수): "batting" 또는 "pitching"
    - team_filter (선택): 특정 팀명 (예: "KIA", "LG")
