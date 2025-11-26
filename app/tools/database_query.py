@@ -109,7 +109,7 @@ class DatabaseQueryTool:
                 LIMIT 5
             """
             cursor.execute(check_query, (player_name, f'%{player_name}%'))
-            existing_players = [row[0] for row in cursor.fetchall()]
+            existing_players = [row['name'] for row in cursor.fetchall()]
             
             if not existing_players:
                 result["error"] = f"선수 '{player_name}'을(를) 찾을 수 없습니다. 정확한 선수명을 확인해주세요."
