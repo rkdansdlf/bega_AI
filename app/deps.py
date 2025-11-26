@@ -26,9 +26,14 @@ def get_connection_pool() -> pool.SimpleConnectionPool:
     if _connection_pool is None:
         settings = get_settings()
         _connection_pool = pool.SimpleConnectionPool(
-            minconn=1,        # 최소 1개 커넥션 유지
-            maxconn=5,        # 최대 5개 커넥션 (Supabase 무료 플랜 고려)
-            dsn=settings.database_url
+            minconn=1,
+            maxconn=5,
+            dsn=settings.database_url,
+            # TCP keepalive 옵션 추가
+            keepalives=1,
+            keepalives_idle=30,      # 30초 유휴 후 keepalive 시작
+            keepalives_interval=10,  # 10초마다 keepalive 패킷
+            keepalives_count=5       # 5번 실패하면 연결 끊김으로 판단
         )
     
     return _connection_pool
@@ -54,18 +59,28 @@ async def lifespan(app):
     # 종료 시
     close_connection_pool()  # 모든 커넥션 정리
 
-
 def get_db_connection() -> Generator[PgConnection, None, None]:
     """커넥션 풀에서 커넥션을 가져와서 사용 후 반환합니다."""
     pool_instance = get_connection_pool()
-    conn = pool_instance.getconn()  # 풀에서 재사용 가능한 커넥션 가져오기
+    conn = pool_instance.getconn()
+    
+    # 연결 상태 확인 (stale connection 방지)
+    try:
+        # 간단한 쿼리로 연결이 살아있는지 확인
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.rollback()  # 트랜잭션 종료 (autocommit 설정 전에 필요)
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        # 연결이 끊어졌으면 풀에서 제거하고 새 연결 생성
+        pool_instance.putconn(conn, close=True)
+        conn = pool_instance.getconn()
+    
     conn.autocommit = True
     
     try:
         yield conn
     finally:
-        pool_instance.putconn(conn)  # 사용 후 풀에 반환 (닫지 않음!)
-
+        pool_instance.putconn(conn)
 
 def get_rag_pipeline(
     conn: PgConnection = Depends(get_db_connection),
