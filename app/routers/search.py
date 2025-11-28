@@ -10,7 +10,7 @@ from psycopg2.extensions import connection as PgConnection
 from ..deps import get_db_connection, get_rag_pipeline
 from ..core.entity_extractor import enhance_search_strategy
 
-router = APIRouter(prefix="/search", tags=["search"])
+router = APIRouter(prefix="/ai/search", tags=["search"])
 
 
 class SearchAnalysisResponse(BaseModel):

@@ -26,7 +26,7 @@ from ..core.ratelimit import rate_limit_dependency
 
 logger = logging.getLogger(__name__)
 load_dotenv()
-router = APIRouter(prefix="/chat", tags=["chat"])
+router = APIRouter(prefix="/ai/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
 
