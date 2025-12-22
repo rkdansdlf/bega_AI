@@ -2,8 +2,11 @@
 
 이 모듈은 PostgreSQL 데이터베이스와 pgvector 확장을 사용하여
 벡터 임베딩 간의 코사인 유사도를 계산하고, 관련성 높은 문서를 검색하는 기능을 구현합니다.
+
+환경 변수 USE_FIRESTORE_SEARCH=true로 설정하면 Firestore Vector Search를 사용합니다.
 """
 
+import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from psycopg2.extensions import connection as PgConnection
@@ -30,8 +33,11 @@ def similarity_search(
 ) -> List[Dict[str, Any]]:
     """주어진 임베딩과 유사한 문서를 데이터베이스에서 검색합니다.
 
+    환경 변수 USE_FIRESTORE_SEARCH=true인 경우 Firestore Vector Search를 사용하고,
+    그렇지 않으면 Supabase pgvector를 사용합니다.
+
     Args:
-        conn: PostgreSQL 데이터베이스 연결 객체.
+        conn: PostgreSQL 데이터베이스 연결 객체 (Firestore 사용 시 무시됨).
         embedding: 검색의 기준이 될 벡터 임베딩.
         limit: 반환할 최대 문서 수.
         filters: 검색 결과를 필터링할 조건 (예: {'source_table': 'news'}).
@@ -40,6 +46,43 @@ def similarity_search(
     Returns:
         유사도 순으로 정렬된 문서 리스트. 각 문서는 사전(dict) 형태로 반환됩니다.
     """
+    # 환경 변수로 검색 엔진 선택
+    use_firestore = os.getenv("USE_FIRESTORE_SEARCH", "false").lower() == "true"
+
+    if use_firestore:
+        # Firestore Vector Search 사용
+        from .retrieval_firestore import similarity_search_firestore
+
+        # Firestore는 snake_case 필드명을 camelCase로 변환해야 함
+        firestore_filters = {}
+        if filters:
+            for key, value in filters.items():
+                if key == "source_table":
+                    firestore_filters["sourceTable"] = value
+                elif key == "source_row_id":
+                    firestore_filters["sourceRowId"] = value
+                elif key == "season_year":
+                    firestore_filters["seasonYear"] = value
+                elif key == "season_id":
+                    firestore_filters["seasonId"] = value
+                elif key == "league_type_code":
+                    firestore_filters["leagueTypeCode"] = value
+                elif key == "team_id":
+                    firestore_filters["teamId"] = value
+                elif key == "player_id":
+                    firestore_filters["playerId"] = value
+                else:
+                    # meta.league 같은 필드는 그대로 전달
+                    firestore_filters[key] = value
+
+        return similarity_search_firestore(
+            embedding,
+            limit=limit,
+            filters=firestore_filters,
+            keyword=keyword,
+        )
+
+    # 기본값: Supabase pgvector 사용 (기존 코드)
     filter_clauses: List[str] = ["embedding IS NOT NULL"]  # 임베딩이 없는 문서는 제외
     filter_params: List[Any] = []
 

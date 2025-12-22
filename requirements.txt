@@ -10,3 +10,6 @@ google-generativeai==0.8.5
 httpx>=0.25
 openai>=1.14.0
 sentence-transformers
+tqdm>=4.66.0
+firebase-admin>=6.5.0
+google-cloud-firestore>=2.14.0
