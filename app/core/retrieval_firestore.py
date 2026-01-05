@@ -36,7 +36,7 @@ def _init_firebase():
             "FIREBASE_SERVICE_ACCOUNT_KEY",
             "/Users/mac/project/KBO_platform/AI/bega-186a7-firebase-adminsdk-fbsvc-bb50c006a7.json"
         )
-        database_id = os.getenv("FIRESTORE_DATABASE_ID", "chatbot")
+        database_id = os.getenv("FIRESTORE_DATABASE_ID", "begachatbot")
 
         if not os.path.exists(service_account_key_path):
             raise FileNotFoundError(
@@ -117,9 +117,9 @@ def similarity_search_firestore(
                 # JSON 필드 필터링 지원 (예: "meta.league")
                 if "." in key:
                     # Firestore에서는 중첩된 필드를 직접 쿼리 가능
-                    query = query.where(key, "==", value)
+                    query = query.where(filter=firestore.FieldFilter(key, "==", value))
                 else:
-                    query = query.where(key, "==", value)
+                    query = query.where(filter=firestore.FieldFilter(key, "==", value))
 
         # 벡터 검색 실행
         # Firestore Vector Search는 find_nearest() 메서드 사용
@@ -130,13 +130,18 @@ def similarity_search_firestore(
             limit=limit,
         )
 
-        # 결과 가져오기
-        docs = vector_query.stream()
+        # 결과 가져오기 (stream() 대신 get() 사용)
+        docs = vector_query.get()
 
         # 결과를 dict 리스트로 변환
         results = []
         for doc in docs:
             data = doc.to_dict()
+
+            # 벡터 검색 거리 정보 가져오기
+            # Firestore vector search는 내부적으로 distance를 계산하지만
+            # 공개 API로 노출하지 않을 수 있음 (현재 베타)
+            # 임시로 유사도 1.0으로 설정 (정렬은 이미 거리순으로 되어 있음)
 
             # pgvector 호환성을 위해 필드 이름 변환 (camelCase → snake_case)
             result = {
@@ -146,7 +151,7 @@ def similarity_search_firestore(
                 'source_table': data.get('sourceTable'),
                 'source_row_id': data.get('sourceRowId'),
                 'meta': data.get('meta', {}),
-                'similarity': 1.0 - doc.get('distance', 0),  # 코사인 거리 → 유사도
+                'similarity': 1.0,  # 임시: Firestore는 거리 정보를 직접 노출하지 않음
             }
 
             # content가 없고 storagePath가 있는 경우 (향후 구현 가능)

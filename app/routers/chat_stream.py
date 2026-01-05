@@ -188,15 +188,38 @@ async def chat_completion(
         question,
         context={"filters": filters, "history": history},
     )
+    
+    # ToolCall 등 커스텀 객체 직렬화 헬퍼
+    def safe_serialize(obj):
+        """JSON 직렬화 가능한 형태로 객체를 변환"""
+        from datetime import datetime, date
+        
+        if obj is None:
+            return None
+        elif isinstance(obj, (str, int, float, bool)):
+            return obj
+        elif isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        elif hasattr(obj, 'to_dict'):
+            return safe_serialize(obj.to_dict())
+        elif isinstance(obj, dict):
+            return {key: safe_serialize(value) for key, value in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [safe_serialize(item) for item in obj]
+        else:
+            if hasattr(obj, '__dict__'):
+                return {key: safe_serialize(value) for key, value in obj.__dict__.items()}
+            return str(obj)
+
     if isinstance(result, dict):
-        return JSONResponse(result)
+        return JSONResponse(safe_serialize(result))
     else:
         # result가 객체라면 dict로 변환
-        return JSONResponse({
+        return JSONResponse(safe_serialize({
             "answer": getattr(result, 'answer', str(result)),
             "citations": getattr(result, 'citations', []),
-            "intent": intent
-        })
+            "intent": getattr(result, 'intent', 'unknown')
+        }))
 
 
 @router.post("/stream")
