@@ -1,0 +1,52 @@
+INFO:     Will watch for changes in these directories: ['/Users/mac/project/KBO_platform/AI']
+INFO:     Uvicorn running on http://0.0.0.0:8002 (Press CTRL+C to quit)
+INFO:     Started reloader process [84662] using StatReload
+/Users/mac/project/KBO_platform/AI/app/routers/chat_stream.py:228: FastAPIDeprecationWarning: `regex` has been deprecated, please use `pattern` instead
+  style: str = Query("markdown", regex="^(markdown|json|compact)$"),
+/Users/mac/project/KBO_platform/AI/app/routers/chat_stream.py:256: FastAPIDeprecationWarning: `regex` has been deprecated, please use `pattern` instead
+  style: str = Query("markdown", regex="^(markdown|json|compact)$"),
+INFO:     Started server process [84664]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+2025-12-30 15:42:42,356 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_player_stats
+2025-12-30 15:42:42,356 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_career_stats
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_leaderboard
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: validate_player
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_team_summary
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_position_info
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_team_basic_info
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_defensive_stats
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_velocity_data
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: search_regulations
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_regulations_by_category
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_game_box_score
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_games_by_date
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_head_to_head
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_player_game_performance
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: compare_players
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_season_final_game_date
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_team_rank
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_team_last_game
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_korean_series_winner
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_current_datetime
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: get_baseball_season_info
+2025-12-30 15:42:42,357 - app.agents.tool_caller - DEBUG - [ToolCaller] Registered tool: search_documents
+2025-12-30 15:42:42,358 - app.agents.baseball_agent - INFO - [BaseballAgent] Processing query: 2024년 KIA 타이거즈의 성적은 어때?
+2025-12-30 15:42:42,358 - app.agents.baseball_agent - INFO - [BaseballAgent] Analyzing query for tool planning: 2024년 KIA 타이거즈의 성적은 어때?
+2025-12-30 15:42:42,359 - app.core.entity_extractor - INFO - [EntityExtractor] Extracting entities from: 2024년 KIA 타이거즈의 성적은 어때?
+2025-12-30 15:42:42,361 - app.core.entity_extractor - INFO - [EntityExtractor] Extracted entities: year=2024, team=HT, player=이거즈의, stat=strikeouts, position=None, league=None
+2025-12-30 15:42:42,361 - app.agents.baseball_agent - INFO - [TEST] query: 2024년 KIA 타이거즈의 성적은 어때?
+2025-12-30 15:42:43,021 - httpx - INFO - HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+2025-12-30 15:42:53,814 - app.agents.baseball_agent - INFO - [BaseballAgent] Raw LLM response: {
+    "analysis": "질문은 '2024년 KIA 타이거즈의 성적은 어때?'로, 사용자는 2024 시즌 KIA(기아) 팀의 전체 성적(최종 순위, 승패기록, 포스트시즌 진출 여부 등)과 주요 선수들의 시즌 성적(주요 지표)을 알고자 하는 의도로 판단됩니다. 따라서 팀의 최종 순위와 승패 정보를 얻기 위한 get_team_rank 호출과, 팀의 주...
+2025-12-30 15:42:53,816 - app.agents.baseball_agent - INFO - [BaseballAgent] Executing tool: get_team_rank
+2025-12-30 15:42:53,816 - app.agents.tool_caller - INFO - [ToolCaller] Executing: ToolCall(tool_name='get_team_rank', parameters={'team_name': 'KIA', 'year': 2024})
+2025-12-30 15:42:53,980 - app.agents.tool_caller - INFO - [ToolCaller] Tool executed successfully: get_team_rank
+2025-12-30 15:42:53,981 - app.agents.baseball_agent - INFO - [BaseballAgent] Executing tool: get_team_summary
+2025-12-30 15:42:53,981 - app.agents.tool_caller - INFO - [ToolCaller] Executing: ToolCall(tool_name='get_team_summary', parameters={'team_name': 'KIA', 'year': 2024})
+2025-12-30 15:42:53,981 - app.tools.database_query - INFO - [DatabaseQuery] Querying team summary: KIA, 2024
+2025-12-30 15:42:54,101 - app.tools.database_query - INFO - [DatabaseQuery] Found team data: 0 batters, 0 pitchers
+2025-12-30 15:42:54,101 - app.agents.tool_caller - INFO - [ToolCaller] Tool executed successfully: get_team_summary
+2025-12-30 15:42:54,101 - app.agents.baseball_agent - INFO - [BaseballAgent] Generating verified answer with 2 tool results
+2025-12-30 15:42:55,154 - httpx - INFO - HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:52627 - "POST /chat/completion HTTP/1.1" 200 OK
