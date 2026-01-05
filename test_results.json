@@ -1,0 +1,13 @@
+{
+  "timestamp": "2025-12-24T22:03:24.237407",
+  "tests": {
+    "data_integrity": {
+      "passed": false,
+      "details": {},
+      "errors": [
+        "'_UnaryStreamMultiCallable' object has no attribute '_retry'"
+      ]
+    }
+  },
+  "summary": {}
+}
