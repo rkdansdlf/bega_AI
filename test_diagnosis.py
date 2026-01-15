@@ -15,9 +15,9 @@ load_dotenv()
 
 class BEGADiagnostics:
     def __init__(self):
-        self.db_url = os.getenv("SUPABASE_DB_URL")
+        self.db_url = os.getenv("OCI_DB_URL")
         if not self.db_url:
-            raise ValueError("SUPABASE_DB_URL이 .env 파일에 없습니다!")
+            raise ValueError("OCI_DB_URL이 .env 파일에 없습니다!")
         
         self.conn = psycopg2.connect(self.db_url)
         self.results = []
@@ -49,6 +49,7 @@ class BEGADiagnostics:
             )
             cur.close()
         except Exception as e:
+            self.conn.rollback()
             self.print_result("DB 연결", False, str(e))
     
     def test_2_rag_chunks_table(self):
@@ -106,6 +107,7 @@ class BEGADiagnostics:
             
             cur.close()
         except Exception as e:
+            self.conn.rollback()
             self.print_result("rag_chunks 테이블", False, str(e))
     
     def test_3_player_data(self):
@@ -150,6 +152,7 @@ class BEGADiagnostics:
             
             cur.close()
         except Exception as e:
+            self.conn.rollback()
             self.print_result("선수 데이터", False, str(e))
     
     def test_4_kim_doyoung_search(self):
@@ -173,7 +176,7 @@ class BEGADiagnostics:
             
             # player_basic에서 검색
             cur.execute("""
-                SELECT player_id, name, team_id, position
+                SELECT player_id, name, team, position
                 FROM player_basic
                 WHERE name LIKE '%김도영%'
             """)
@@ -182,7 +185,7 @@ class BEGADiagnostics:
             if players:
                 print("\n     [발견된 선수]")
                 for p in players:
-                    print(f"     - {p['name']} ({p['player_id']}) | {p['team_id']} | {p['position']}")
+                    print(f"     - {p['name']} ({p['player_id']}) | {p['team']} | {p['position']}")
                 
                 # 첫 번째 선수의 2025년 성적
                 player_id = players[0]['player_id']
@@ -220,6 +223,7 @@ class BEGADiagnostics:
             
             cur.close()
         except Exception as e:
+            self.conn.rollback()
             self.print_result("김도영 검색", False, str(e))
     
     def test_5_vector_search(self):
@@ -253,6 +257,7 @@ class BEGADiagnostics:
             
             cur.close()
         except Exception as e:
+            self.conn.rollback()
             self.print_result("벡터 검색", False, str(e))
     
     def test_6_full_text_search(self):
@@ -299,6 +304,7 @@ class BEGADiagnostics:
             
             cur.close()
         except Exception as e:
+            self.conn.rollback()
             self.print_result("Full-text 검색", False, str(e))
     
     def test_7_regulations_data(self):
@@ -335,6 +341,7 @@ class BEGADiagnostics:
             
             cur.close()
         except Exception as e:
+            self.conn.rollback()
             self.print_result("규정 데이터", False, str(e))
     
     def test_8_api_endpoints(self):

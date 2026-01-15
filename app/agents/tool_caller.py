@@ -125,13 +125,21 @@ class ToolCaller:
         
         try:
             # 매개변수 유효성 검사
-            required_params = set(tool_info["parameters_schema"].keys())
-            provided_params = set(tool_call.parameters.keys())
+            # 매개변수 유효성 검사
+            import inspect
+            sig = inspect.signature(tool_function)
             
-            # 필수 매개변수 확인 (일부는 선택적일 수 있으므로 경고만)
-            missing_params = required_params - provided_params
-            if missing_params:
-                logger.warning(f"[ToolCaller] Missing parameters: {missing_params}")
+            # 실제 필수 파라미터(default 값이 없는)만 확인
+            required_func_params = {
+                name for name, param in sig.parameters.items()
+                if param.default == inspect.Parameter.empty and param.kind != inspect.Parameter.VAR_KEYWORD
+            }
+            
+            provided_params = set(tool_call.parameters.keys())
+            missing_required = required_func_params - provided_params
+            
+            if missing_required:
+                logger.warning(f"[ToolCaller] Missing REQUIRED parameters: {missing_required}")
             
             # 도구 함수 실행
             result = tool_function(**tool_call.parameters)

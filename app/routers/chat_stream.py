@@ -108,9 +108,20 @@ async def _stream_response(
             yield {"event": "error", "data": json.dumps(error_payload, ensure_ascii=False)}
         # 2. 성공 시 메시지와 메타데이터 이벤트 전송
         elif result:
-            rendered = await _render_answer(result, style)
-            # 답변의 일부(delta)를 message 이벤트로 전송
-            yield {"event": "message", "data": json.dumps({"delta": rendered}, ensure_ascii=False)}
+            answer = result.get("answer")
+            
+            # answer가 비동기 제너레이터인 경우 (스트리밍)
+            if hasattr(answer, '__aiter__'):
+                async for delta in answer:
+                    yield {"event": "message", "data": json.dumps({"delta": delta}, ensure_ascii=False)}
+                    
+                # 스트리밍 완료 후 전체 답변을 문자열로 결합하여 meta 데이터 준비 (옵션)
+                # 실제로는 meta 데이터만 보내면 됨
+            
+            # answer가 일반 문자열인 경우 (비스트리밍/일상대화)
+            else:
+                rendered = await _render_answer(result, style)
+                yield {"event": "message", "data": json.dumps({"delta": rendered}, ensure_ascii=False)}
             
             def safe_serialize(obj):
                 """JSON 직렬화 가능한 형태로 객체를 변환"""

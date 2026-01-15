@@ -457,8 +457,26 @@ def embed_texts(
     *,
     max_concurrency: int = 1,
 ) -> List[List[float]]:
-    """`async_embed_texts` 함수의 동기적 래퍼(wrapper)입니다."""
-    return asyncio.run(async_embed_texts(texts, settings, max_concurrency=max_concurrency))
+    """`async_embed_texts` 함수의 동기적 래퍼(wrapper)입니다.
+    이미 이벤트 루프가 실행 중인 경우(예: Uvicorn), 별도 스레드에서 실행하여 RuntimeError를 방지합니다.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+        
+    if loop and loop.is_running():
+        # 실행 중인 루프가 있으면 별도 스레드에서 실행
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                asyncio.run, 
+                async_embed_texts(texts, settings, max_concurrency=max_concurrency)
+            )
+            return future.result()
+    else:
+        # 실행 중인 루프가 없으면 바로 실행
+        return asyncio.run(async_embed_texts(texts, settings, max_concurrency=max_concurrency))
 
 def _estimate_tokens(text: str) -> int:
     """간단한 토큰 수 추정 (4 글자 ≈ 1 토큰)."""

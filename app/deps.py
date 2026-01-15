@@ -8,6 +8,7 @@ import psycopg2
 from psycopg2 import pool
 from psycopg2.extensions import connection as PgConnection
 from fastapi import Depends
+from fastapi.params import Depends as DependsClass
 
 from .config import get_settings
 from .core.rag import RAGPipeline
@@ -92,11 +93,22 @@ def get_rag_pipeline(
 def get_agent(
     conn: PgConnection = Depends(get_db_connection),
 ) -> BaseballStatisticsAgent:
-    """Dependency to get an instance of the BaseballStatisticsAgent."""
+    """Dependency to get an instance of the BaseballStatisticsAgent.
+    
+    NOTE: If called directly (outside FastAPI request context), 
+    conn will be a Depends object, not a connection. We detect this
+    and manually obtain a connection from the pool.
+    """
+    # Handle direct calls (not via FastAPI DI)
+    if isinstance(conn, DependsClass):
+        pool_instance = get_connection_pool()
+        conn = pool_instance.getconn()
+        conn.autocommit = True
     settings = get_settings()
     
     async def llm_generator(messages):
         import httpx
+        import json
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required.")
         
@@ -106,24 +118,34 @@ def get_agent(
             "HTTP-Referer": settings.openrouter_referer or "",
             "X-Title": settings.openrouter_app_title or "",
         }
+        # 스트리밍 활성화
         payload = {
             "model": settings.openrouter_model,
             "messages": list(messages),
             "max_tokens": settings.max_output_tokens,
+            "stream": True 
         }
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
+            async with client.stream(
+                "POST",
                 f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
                 json=payload,
                 headers=headers,
-            )
-        response.raise_for_status()
-        data = response.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        if not content:
-            raise RuntimeError("OpenRouter response is empty.")
-        return content
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if delta:
+                                yield delta
+                        except json.JSONDecodeError:
+                            continue
 
     return BaseballStatisticsAgent(connection=conn, llm_generator=llm_generator)
 
