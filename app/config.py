@@ -29,8 +29,9 @@ class Settings(BaseSettings):
     debug: bool = False
     cors_origins: List[str] = Field(default_factory=lambda: ["*"])
 
-    # --- 데이터베이스 설정 (Supabase/Postgres) ---
-    supabase_db_url: str = Field(..., env="SUPABASE_DB_URL")
+    # --- 데이터베이스 설정 (OCI/Postgres) ---
+    oci_db_url: str = Field(..., env="OCI_DB_URL")
+    supabase_db_url: Optional[str] = Field(None, env="SUPABASE_DB_URL")
 
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
@@ -96,7 +97,7 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """데이터베이스 연결 URL을 반환합니다."""
-        return self.supabase_db_url
+        return self.oci_db_url
 
     @property
     def function_calling_model(self) -> str:

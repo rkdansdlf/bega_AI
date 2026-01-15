@@ -46,9 +46,9 @@ def benchmark_supabase(embeddings: List[List[float]], limit: int = 10) -> Dict[s
     print("\n🔵 Supabase pgvector 벤치마크")
     print("="*60)
 
-    supabase_url = os.getenv("SUPABASE_DB_URL")
+    supabase_url = os.getenv("OCI_DB_URL")
     if not supabase_url:
-        print("❌ SUPABASE_DB_URL 환경변수가 설정되지 않았습니다.")
+        print("❌ OCI_DB_URL 환경변수가 설정되지 않았습니다.")
         return {}
 
     conn = psycopg2.connect(supabase_url)

@@ -19,9 +19,12 @@ class EntityFilter:
     season_year: Optional[int] = None      # 시즌 연도 (예: 2025)
     team_id: Optional[str] = None          # 팀 식별자 (예: "LG", "KIA")
     player_name: Optional[str] = None      # 선수 이름 (예: "김현수")
-    stat_type: Optional[str] = None        # 통계 지표 (예: "ops", "era") 
+    stat_type: Optional[str] = None        # 통계 지표 (예: "ops", "era")
     position_type: Optional[str] = None    # 포지션 타입 ('pitcher', 'batter')
     league_type: Optional[str] = None      # 리그 타입 (None이면 모든 리그 검색)
+    award_type: Optional[str] = None       # 수상 유형 (예: "mvp", "golden_glove")
+    movement_type: Optional[str] = None    # 이적 유형 (예: "fa", "trade")
+    game_date: Optional[str] = None        # 경기 날짜 (예: "2025-05-10")
 
 # KBO 팀명 매핑 테이블 (사용자 입력 → 실제 DB team_id)
 TEAM_MAPPING = {
@@ -81,7 +84,7 @@ LEAGUE_TYPE_MAPPING = {
     # 포스트시즌 (더 구체적인 것들을 먼저)
     "포스트시즌": "포스트시즌", "후기리그": "포스트시즌",
     # 한국시리즈
-    "한국시리즈": "한국시리즈", "코리안시리즈": "한국시리즈", "KS": "한국시리즈", 
+    "한국시리즈": "한국시리즈", "코리안시리즈": "한국시리즈", "KS": "한국시리즈",
     "시리즈": "한국시리즈", "우승결정전": "한국시리즈",
     # 와일드카드
     "와일드카드": "와일드카드", "wildcard": "와일드카드", "WC": "와일드카드",
@@ -93,37 +96,92 @@ LEAGUE_TYPE_MAPPING = {
     "정규시즌": "정규시즌", "레귤러시즌": "정규시즌",
 }
 
+# 수상 유형 매핑 테이블 (사용자 입력 → 표준 수상명)
+AWARD_MAPPING = {
+    # MVP
+    "MVP": "mvp", "엠브이피": "mvp", "최우수선수": "mvp", "mvp": "mvp",
+    # 신인왕
+    "신인왕": "rookie", "신인상": "rookie", "루키": "rookie",
+    # 골든글러브
+    "골든글러브": "golden_glove", "골글": "golden_glove", "황금장갑": "golden_glove",
+    # 타이틀 홀더들
+    "타격왕": "batting_title", "타율왕": "batting_title",
+    "홈런왕": "hr_leader", "장타왕": "hr_leader",
+    "타점왕": "rbi_leader",
+    "도루왕": "sb_leader", "도루 1위": "sb_leader",
+    "다승왕": "wins_leader", "다승": "wins_leader",
+    "방어율왕": "era_leader", "방어율 1위": "era_leader",
+    "세이브왕": "saves_leader", "세이브 1위": "saves_leader",
+    "탈삼진왕": "so_leader", "탈삼진 1위": "so_leader",
+}
+
+# 선수 이동 유형 매핑 테이블 (사용자 입력 → 표준 이동 유형)
+MOVEMENT_MAPPING = {
+    # FA
+    "FA": "fa", "에프에이": "fa", "자유계약": "fa", "fa": "fa",
+    # 트레이드
+    "트레이드": "trade", "교환": "trade", "맞트레이드": "trade",
+    # 드래프트
+    "드래프트": "draft", "신인드래프트": "draft", "지명": "draft", "1차지명": "draft",
+    # 외국인 선수
+    "외국인": "foreign", "용병": "foreign", "외인": "foreign",
+    # 기타
+    "방출": "release", "웨이버": "release",
+    "은퇴": "retirement", "현역은퇴": "retirement",
+    "군보류": "military", "군입대": "military",
+    "복귀": "return", "군복귀": "return",
+}
+
 def extract_year(query: str) -> Optional[int]:
-    """질문에서 연도를 추출합니다."""
+    """질문에서 연도를 추출합니다. (4자리 및 2자리 연도 지원)"""
     import datetime as dt
     current_year = dt.datetime.now().year
     
-    # 2000년부터 현재연도+5년까지의 범위로 유연하게 처리
-    year_patterns = [
-        r'(20[0-9][0-9])년',     # "2022년" 형태
-        r'(20[0-9][0-9])시즌',   # "2022시즌" 형태
-        r'(20[0-9][0-9])년도',   # "2022년도" 형태
-        r'(20[0-9][0-9])(?=\s)', # 공백 앞의 연도
-        r'(?<=\s)(20[0-9][0-9])', # 공백 뒤의 연도
-        r'^(20[0-9][0-9])',      # 문장 시작 연도
-        r'(20[0-9][0-9])$'       # 문장 끝 연도
+    # 1. 4자리 연도 패턴 ("2024년", "1999시즌" 등)
+    full_year_patterns = [
+        r'(19[8-9][0-9]|20[0-9][0-9])년',     # 1980~2099년
+        r'(19[8-9][0-9]|20[0-9][0-9])시즌',
+        r'(19[8-9][0-9]|20[0-9][0-9])년도',
+        r'(19[8-9][0-9]|20[0-9][0-9])(?=\s)', 
+        r'(?<=\s)(19[8-9][0-9]|20[0-9][0-9])',
+        r'^(19[8-9][0-9]|20[0-9][0-9])',
+        r'(19[8-9][0-9]|20[0-9][0-9])$'
     ]
     
-    for pattern in year_patterns:
+    for pattern in full_year_patterns:
         match = re.search(pattern, query)
         if match:
             year = int(match.group(1))
-            # 2000년부터 현재연도+5년까지의 범위만 허용 (미래 시즌 고려)
-            if 2000 <= year <= current_year + 5:
+            if 1982 <= year <= current_year + 5: # KBO 원년(1982)부터
                 return year
+
+    # 2. 2자리 연도 패턴 ("25년", "99시즌")
+    short_year_patterns = [
+        r'(\d{2})년',
+        r'(\d{2})시즌',
+        r'(\d{2})년도'
+    ]
     
-    # "작년", "올해", "지난해" 등의 상대적 표현 처리
+    for pattern in short_year_patterns:
+        match = re.search(pattern, query)
+        if match:
+            short_year = int(match.group(1))
+            # KBO 문맥에 따른 연도 변환 (82~99: 1900년대, 00~현재+5: 2000년대)
+            if 82 <= short_year <= 99:
+                return 1900 + short_year
+            elif 0 <= short_year <= (current_year + 5) % 100:
+                return 2000 + short_year
+            # 그 외(예: "50년")는 나이 등일 수 있으므로 무시
+    
+    # 3. 상대적 연도 표현
     if re.search(r'(작년|지난해)', query):
         return current_year - 1
     elif re.search(r'(올해|금년|이번해)', query):
         return current_year
     elif re.search(r'재작년', query):
         return current_year - 2
+    elif re.search(r'내년', query):
+        return current_year + 1
     
     return None
 
@@ -155,16 +213,16 @@ def extract_league_type(query: str) -> Optional[str]:
     for league_variant, standard_league in LEAGUE_TYPE_MAPPING.items():
         if league_variant in query:
             return standard_league
-    
+
     # 특별한 키워드로 리그 타입 추론
     # "마지막 경기"는 보통 포스트시즌(한국시리즈)을 의미
     if re.search(r'(마지막\s*경기|최종\s*경기|우승\s*경기)', query):
         return "한국시리즈"
-    
+
     # "결승"이나 "우승" 관련은 한국시리즈
     if re.search(r'(결승|우승|챔피언)', query):
         return "한국시리즈"
-    
+
     # 명시적으로 정규시즌이 아닌 경우 판단
     postseason_indicators = [
         r'(플레이오프|PO)',
@@ -172,11 +230,84 @@ def extract_league_type(query: str) -> Optional[str]:
         r'(와일드카드)',
         r'(준\s*플레이오프)',
     ]
-    
+
     for indicator in postseason_indicators:
         if re.search(indicator, query):
             return "포스트시즌"
-    
+
+    return None
+
+
+def extract_award_type(query: str) -> Optional[str]:
+    """질문에서 수상 유형을 추출합니다."""
+    for award_variant, standard_award in AWARD_MAPPING.items():
+        if award_variant in query:
+            return standard_award
+
+    # 수상 관련 키워드 추가 탐지
+    if re.search(r'(수상|상을?\s*받|상을?\s*탔)', query):
+        return "any"  # 어떤 수상이든
+
+    return None
+
+
+def extract_movement_type(query: str) -> Optional[str]:
+    """질문에서 선수 이동/이적 유형을 추출합니다."""
+    for movement_variant, standard_movement in MOVEMENT_MAPPING.items():
+        if movement_variant in query:
+            return standard_movement
+
+    # 이적 관련 키워드 추가 탐지
+    if re.search(r'(이적|영입|계약)', query):
+        return "any"  # 어떤 이동이든
+
+    return None
+
+
+def extract_game_date(query: str) -> Optional[str]:
+    """질문에서 경기 날짜를 추출합니다."""
+    import datetime as dt
+    today = dt.date.today()
+
+    # 1. 상대적 날짜 표현
+    if re.search(r'(어제|지난\s*경기)', query):
+        return (today - dt.timedelta(days=1)).isoformat()
+    elif re.search(r'(오늘|금일)', query):
+        return today.isoformat()
+    elif re.search(r'(그저께|그제)', query):
+        return (today - dt.timedelta(days=2)).isoformat()
+    elif re.search(r'(내일)', query):
+        return (today + dt.timedelta(days=1)).isoformat()
+
+    # 2. YYYY-MM-DD 또는 YYYY.MM.DD 패턴
+    date_patterns = [
+        r'(\d{4})[-.\/](\d{1,2})[-.\/](\d{1,2})',  # 2025-04-12, 2025/4/12
+    ]
+
+    for pattern in date_patterns:
+        match = re.search(pattern, query)
+        if match:
+            year, month, day = match.groups()
+            try:
+                parsed_date = dt.date(int(year), int(month), int(day))
+                return parsed_date.isoformat()
+            except ValueError:
+                continue
+
+    # 3. MM월 DD일 패턴 (현재 연도 가정)
+    month_day_pattern = r'(\d{1,2})월\s*(\d{1,2})일'
+    match = re.search(month_day_pattern, query)
+    if match:
+        month, day = match.groups()
+        try:
+            # 현재 연도로 가정, 미래 날짜면 작년으로
+            parsed_date = dt.date(today.year, int(month), int(day))
+            if parsed_date > today:
+                parsed_date = dt.date(today.year - 1, int(month), int(day))
+            return parsed_date.isoformat()
+        except ValueError:
+            pass
+
     return None
 
 def extract_player_name(query: str) -> Optional[str]:
@@ -411,9 +542,9 @@ def extract_ranking_count(query: str) -> Optional[int]:
 def extract_entities_from_query(query: str) -> EntityFilter:
     """질문에서 모든 엔티티를 추출하여 EntityFilter 객체로 반환합니다."""
     logger.info(f"[EntityExtractor] Extracting entities from: {query}")
-    
+
     entity_filter = EntityFilter()
-    
+
     # 각 엔티티 추출
     entity_filter.season_year = extract_year(query)
     entity_filter.team_id = extract_team(query)
@@ -421,7 +552,10 @@ def extract_entities_from_query(query: str) -> EntityFilter:
     entity_filter.stat_type = extract_stat_type(query)
     entity_filter.position_type = extract_position_type(query)
     entity_filter.league_type = extract_league_type(query)
-    
+    entity_filter.award_type = extract_award_type(query)
+    entity_filter.movement_type = extract_movement_type(query)
+    entity_filter.game_date = extract_game_date(query)
+
     # 로깅
     logger.info(f"[EntityExtractor] Extracted entities: "
                 f"year={entity_filter.season_year}, "
@@ -429,32 +563,52 @@ def extract_entities_from_query(query: str) -> EntityFilter:
                 f"player={entity_filter.player_name}, "
                 f"stat={entity_filter.stat_type}, "
                 f"position={entity_filter.position_type}, "
-                f"league={entity_filter.league_type}")
-    
+                f"league={entity_filter.league_type}, "
+                f"award={entity_filter.award_type}, "
+                f"movement={entity_filter.movement_type}, "
+                f"game_date={entity_filter.game_date}")
+
     return entity_filter
 
 def convert_to_db_filters(entity_filter: EntityFilter) -> Dict[str, Any]:
     """EntityFilter를 데이터베이스 검색용 필터 딕셔너리로 변환합니다."""
     filters: Dict[str, Any] = {}
-    
+
     # 시즌 연도 필터
     if entity_filter.season_year:
         filters["season_year"] = entity_filter.season_year
-    
-    # 팀 필터  
+
+    # 팀 필터
     if entity_filter.team_id:
         filters["team_id"] = entity_filter.team_id
-    
+
     # 리그 타입 필터 (특정 리그가 감지된 경우에만 적용)
     if entity_filter.league_type:
         filters["meta.league"] = entity_filter.league_type
-    
-    # 포지션별 테이블 필터링
-    if entity_filter.position_type == "pitcher":
-        filters["source_table"] = "player_season_pitching"
-    elif entity_filter.position_type == "batter":
-        filters["source_table"] = "player_season_batting"
-    
+
+    # 수상 유형 필터
+    if entity_filter.award_type and entity_filter.award_type != "any":
+        filters["meta.award_type"] = entity_filter.award_type
+        # 수상 관련 질문은 awards 테이블에서 검색
+        filters["source_table"] = "awards"
+
+    # 선수 이동 유형 필터
+    if entity_filter.movement_type and entity_filter.movement_type != "any":
+        filters["meta.movement_type"] = entity_filter.movement_type
+        # 이동 관련 질문은 player_movements 테이블에서 검색
+        filters["source_table"] = "player_movements"
+
+    # 경기 날짜 필터
+    if entity_filter.game_date:
+        filters["meta.game_date"] = entity_filter.game_date
+
+    # 포지션별 테이블 필터링 (다른 필터가 없을 때만)
+    if "source_table" not in filters:
+        if entity_filter.position_type == "pitcher":
+            filters["source_table"] = "player_season_pitching"
+        elif entity_filter.position_type == "batter":
+            filters["source_table"] = "player_season_batting"
+
     return filters
 
 def enhance_search_strategy(query: str) -> Dict[str, Any]:

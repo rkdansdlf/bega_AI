@@ -452,63 +452,33 @@ class BaseballStatisticsAgent:
             )
 
     def _load_team_name_mapping(self) -> Dict[str, str]:
-        """팀 ID와 팀명 매핑을 데이터베이스에서 로드합니다."""
+        """팀 ID와 팀명 매핑을 로드합니다."""
         if self._team_name_cache is not None:
             return self._team_name_cache
             
-        try:
-            with self.connection.cursor() as cursor:
-                # 현재 활성화된 팀들의 매핑 정보를 조회 (가장 적절한 팀명 선택)
-                cursor.execute("""
-                    SELECT team_id, full_name 
-                    FROM team_name_mapping 
-                    WHERE full_name IN (
-                        '한화 이글스', 'KIA 타이거즈', 'KT 위즈', 'LG 트윈스', 
-                        '롯데 자이언츠', 'NC 다이노스', '두산 베어스', 'SSG 랜더스', 
-                        '삼성 라이언즈', '키움 히어로즈'
-                    )
-                    ORDER BY team_id, full_name
-                """)
+        # DB 테이블 team_name_mapping이 없으므로 정적 매핑 사용
+        mapping = {
+            'HH': '한화 이글스',
+            'HT': 'KIA 타이거즈', 
+            'KT': 'KT 위즈',
+            'LG': 'LG 트윈스',
+            'LT': '롯데 자이언츠',
+            'NC': 'NC 다이노스',
+            'OB': '두산 베어스',
+            'SK': 'SSG 랜더스',
+            'SS': '삼성 라이언즈',
+            'WO': '키움 히어로즈',
+            '한화': '한화 이글스', 'KIA': 'KIA 타이거즈', '기아': 'KIA 타이거즈',
+            '두산': '두산 베어스', '롯데': '롯데 자이언츠', '삼성': '삼성 라이온즈',
+            '키움': '키움 히어로즈', 'SSG': 'SSG 랜더스', 'NC': 'NC 다이노스',
+            'KT': 'KT 위즈', 'LG': 'LG 트윈스'
+        }
+        
+        self._team_name_cache = mapping
+        return mapping
                 
-                mapping = {}
-                for team_id, full_name in cursor.fetchall():
-                    if team_id not in mapping:  # 각 team_id당 첫 번째 매핑만 사용
-                        mapping[team_id] = full_name
-                
-                # 누락된 team_id에 대한 폴백 매핑
-                fallback_mapping = {
-                    'HH': '한화 이글스',
-                    'HT': 'KIA 타이거즈', 
-                    'KT': 'KT 위즈',
-                    'LG': 'LG 트윈스',
-                    'LT': '롯데 자이언츠',
-                    'NC': 'NC 다이노스',
-                    'OB': '두산 베어스',
-                    'SK': 'SSG 랜더스',
-                    'SS': '삼성 라이언즈',
-                    'WO': '키움 히어로즈'
-                }
-                
-                # 누락된 매핑 보완
-                for team_id, team_name in fallback_mapping.items():
-                    if team_id not in mapping:
-                        mapping[team_id] = team_name
-                
-                self._team_name_cache = mapping
-                logger.info(f"[BaseballAgent] Loaded team mappings: {mapping}")
-                return mapping
-                
-        except Exception as e:
-            logger.error(f"[BaseballAgent] Failed to load team mappings: {e}")
-            # 에러 시 기본 매핑 사용
-            fallback_mapping = {
-                'HH': '한화 이글스', 'HT': 'KIA 타이거즈', 'KT': 'KT 위즈',
-                'LG': 'LG 트윈스', 'LT': '롯데 자이언츠', 'NC': 'NC 다이노스',
-                'OB': '두산 베어스', 'SK': 'SSG 랜더스', 'SS': '삼성 라이언즈',
-                'WO': '키움 히어로즈'
-            }
-            self._team_name_cache = fallback_mapping
-            return fallback_mapping
+        # 이전 DB 조회 코드는 제거됨 (테이블 없음)
+
     
     def _convert_team_id_to_name(self, team_id: str) -> str:
         """팀 ID를 팀명으로 변환합니다."""
@@ -1281,28 +1251,22 @@ class BaseballStatisticsAgent:
                 if not team_id:
                     team_id = team_name  # 직접 매핑 실패시 원본 사용
                 
-                # v_team_rank_all 뷰에서 팀 순위 조회 (올바른 컬럼명 사용)
-                cursor.execute("""
-                    SELECT season_rank, team_name
-                    FROM v_team_rank_all 
-                    WHERE (team_id = %s OR team_name LIKE %s) 
-                    AND season_year = %s
-                """, [team_id, f'%{team_name}%', year])
+                # v_team_rank_all 뷰 대신 동적 계산 도구 사용
+                rank_result = self.db_query_tool.get_team_season_rank(team_name, year)
                 
-                result = cursor.fetchone()
-                
-                if result:
-                    season_rank, full_team_name = result
+                if rank_result["found"]:
                     return ToolResult(
                         success=True,
                         data={
-                            "team_name": full_team_name,
-                            "team_rank": season_rank,  # API 호환성을 위해 team_rank로 반환
-                            "season_rank": season_rank,  # 실제 DB 컬럼명
+                            "team_name": rank_result["team_name"],
+                            "team_rank": rank_result["rank"],
+                            "season_rank": rank_result["rank"],
+                            "wins": rank_result["wins"],
+                            "losses": rank_result["losses"],
                             "year": year,
                             "found": True
                         },
-                        message=f"{full_team_name}의 {year}년 최종 순위: {season_rank}등"
+                        message=f"{rank_result['team_name']}의 {year}년 정규시즌 최종 순위: {rank_result['rank']}위 ({rank_result['wins']}승 {rank_result['losses']}패)"
                     )
                 else:
                     return ToolResult(
@@ -1314,6 +1278,7 @@ class BaseballStatisticsAgent:
                         },
                         message=f"{team_name}의 {year}년 순위 정보를 찾을 수 없습니다"
                     )
+
                     
         except Exception as e:
             logger.error(f"[BaseballAgent] Team rank query error: {e}")
@@ -1956,7 +1921,12 @@ class BaseballStatisticsAgent:
         try:
             # LLM 호출하여 분석 결과 받기
             analysis_messages = [{"role": "user", "content": analysis_prompt}]
-            raw_response = await self.llm_generator(analysis_messages)
+            
+            # 스트리밍 API인 경우 전체 응답을 모아서 처리
+            raw_response = ""
+            async for chunk in self.llm_generator(analysis_messages):
+                if chunk:
+                    raw_response += chunk
             
             logger.info(f"[BaseballAgent] Raw LLM response: {raw_response[:200]}...")
             
@@ -2252,53 +2222,46 @@ class BaseballStatisticsAgent:
 조회된 기록:
 {chr(10).join(tool_data_summary)}
 
-다음 가이드라인에 따라 자연스럽고 친근하게 답변해주세요:
+다음 가이드라인에 따라 가독성 좋고 자연스러운 답변을 생성해주세요:
 
-**중요 - 연도 처리:**
-- 조회된 데이터의 연도(year 필드)를 그대로 사용하세요
-- 절대로 연도를 재계산하거나 추측하지 마세요
-- 데이터에 "year: 2023"이 있으면 → "2023년"이라고 답변
-- "재작년", "작년" 같은 표현은 이미 정확한 연도로 변환되어 조회되었습니다
+**1. 데이터 시각화 강화 (필수)**
+- 3명 이상의 선수나 팀을 나열할 때는 **반드시 마크다운 표(Table)**를 사용하세요.
+- 예시:
+| 순위 | 선수명 | 팀 | 타율 | 홈런 | OPS |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 1 | 김도영 | KIA | 0.347 | 38 | 1.067 |
+| 2 | 에레디아 | SSG | 0.360 | 21 | 0.937 |
 
-답변 스타일:
-- 친구에게 설명하듯 편안하고 자연스럽게
-- "기록을 확인해보니", "데이터를 살펴보면", "최신 정보로는" 등의 자연스러운 표현
-- 실제 야구 해설위원이나 스포츠 기자가 답변하는 톤
+**2. 텍스트 서식 활용**
+- **핵심 엔티티(선수명, 팀명, 우승 여부)**는 굵게(**Bold**) 처리하여 강조하세요.
+- 긴 줄글 대신 **불렛 포인트(-)**를 적극 활용하여 가독성을 높이세요.
+- 문단 사이에는 충분한 공백을 두세요.
 
-팀 순위 정보가 있는 경우:
-- 마지막 경기 결과와 함께 팀의 최종 순위를 자연스럽게 언급
-- 예: "~팀의 최종순위는 ~등으로 시즌을 마무리 했습니다"
-- 포스트시즌 진출 여부(상위 5등 이내)도 함께 언급
-- 한국시리즈 우승팀인 경우 "우승"이라는 표현 사용
+**3. 답변 구조**
+- **결론 요약**: 질문에 대한 핵심 답을 먼저 제시 (예: "2025년 최고의 타자는 삼성의 **디아즈** 선수입니다.")
+- **상세 데이터**: 표나 불렛 포인트로 세부 기록 제시
+- **인사이트**: 데이터에 기반한 짧은 해설 추가 (예: "특히 장타율 부분에서 2위와 큰 격차를 보였습니다.")
 
-우승팀 식별 방법:
-- 한국시리즈 마지막 경기에서 승리한 팀이 우승팀
-- 경기 데이터의 'winning_team' 필드 또는 점수 비교로 우승팀 판단
-- "우승", "챔피언", "한국시리즈 우승팀" 등의 표현으로 답변
+**4. 연도 및 데이터 정확성**
+- 조회된 데이터의 연도(year 필드)를 그대로 사용하세요 (재계산 금지).
+- "재작년", "작년" 같은 표현은 이미 정확한 연도로 변환되어 조회되었습니다.
 
-절대 사용 금지:
-- "핵심:", "설명:", "요약:" 같은 구조화된 표현  
-- "제공된 DB에서", "데이터베이스 기준", "제시된 검색 결과" 같은 기술적 용어
-- 지나치게 격식적인 공문서 톤
-- **조회된 연도를 임의로 변경하거나 재계산**
+**5. 톤앤매너**
+- 친구에게 설명하듯 편안하고 자연스럽게.
+- 딱딱한 보고서 말투보다는 야구 팬끼리 대화하는 듯한 느낌으로.
 
-데이터 없는 경우:
-- "아쉽게도 해당 경기 기록을 찾을 수 없네요"
-- "죄송해요, 그 정보는 현재 확인이 어려워요"  
-- "해당 데이터가 아직 업데이트되지 않은 것 같아요"
+**6. 데이터 없는 경우**
+- "아쉽게도 해당 경기 기록을 찾을 수 없네요."
+- "죄송합니다, 요청하신 정보를 현재 데이터베이스에서 확인할 수 없습니다."
 
-정확성 원칙:
-- 위의 조회 데이터만 사용 (추측 금지)
-- **조회된 연도(year 필드)를 절대 변경하지 마세요!**
-- 불확실하면 솔직하게 모른다고 표현
-
-자연스럽고 친근한 대화체로 답변해주세요!
+자연스럽고 가독성 높은 답변을 만들어주세요!
 """
 
         try:
             # 검증된 데이터 기반 답변 생성
             answer_messages = [{"role": "user", "content": answer_prompt}]
-            answer = await self.llm_generator(answer_messages)
+            # 스트리밍을 위해 await 제거하고 제너레이터 반환
+            answer = self.llm_generator(answer_messages)
             
             # 성공한 도구가 하나라도 있는지 확인
             has_verified_data = any(result.success for result in tool_results)

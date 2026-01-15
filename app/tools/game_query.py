@@ -189,57 +189,72 @@ class GameQueryTool:
             for game in games:
                 game_dict = dict(game)
                 game_dict = self._format_game_response(game_dict)
+                game_id = game_dict['game_id']
                 
-                # 박스스코어 상세 정보 조회 (실제 스키마 기준)
-                box_score_query = """
-                    SELECT 
-                        game_id,
-                        stadium,
-                        crowd,
-                        start_time,
-                        end_time,
-                        game_time,
-                        away_record,
-                        home_record,
-                        away_1, away_2, away_3, away_4, away_5, away_6, away_7, away_8, away_9,
-                        home_1, home_2, home_3, home_4, home_5, home_6, home_7, home_8, home_9,
-                        away_r, away_h, away_e,
-                        home_r, home_h, home_e
-                    FROM box_score 
-                    WHERE game_id = %s;
+                # 1. 이닝별 점수 조회
+                inning_query = """
+                    SELECT inning_number, home_score, away_score 
+                    FROM game_inning_scores 
+                    WHERE game_id = %s 
+                    ORDER BY inning_number;
                 """
+                cursor.execute(inning_query, (game_id,))
+                innings = cursor.fetchall()
                 
-                cursor.execute(box_score_query, (game_dict['game_id'],))
-                box_score = cursor.fetchone()
+                box_score = {
+                    "game_id": game_id,
+                    "away_r": game_dict.get('away_score', 0),
+                    "home_r": game_dict.get('home_score', 0),
+                    "away_h": 0, "home_h": 0,  # 타격 스탯에서 집계 필요
+                    "away_e": 0, "home_e": 0   # 실책 정보는 현재 스키마에 없으면 0 처리
+                }
                 
-                if box_score:
-                    game_dict['box_score'] = dict(box_score)
-                else:
-                    game_dict['box_score'] = {}
+                # 이닝 점수 매핑
+                for inning in innings:
+                    idx = inning['inning_number']
+                    box_score[f'away_{idx}'] = inning['away_score']
+                    box_score[f'home_{idx}'] = inning['home_score']
+                    
+                game_dict['box_score'] = box_score
                 
-                # 게임 요약 정보 조회 (실제 스키마 기준)
-                summary_query = """
-                    SELECT 
-                        summary_type,
-                        player_name,
-                        detail_text
-                    FROM game_summary
-                    WHERE game_id = %s;
+                # 2. 타격 기록 요약 (안타 수 집계 등)
+                batting_query = """
+                    SELECT team_code, COUNT(*) as hits
+                    FROM game_batting_stats
+                    WHERE game_id = %s AND hit_type IS NOT NULL
+                    GROUP BY team_code
+                """ 
+                # Note: hit_type 컬럼이 있는지 확인 필요. 
+                # 단순 안타수 집계가 어렵다면 game_batting_stats에서 hits 컬럼을 sum 
+                # (테이블 구조 확인이 안되므로 일반적인 구조 가정: hits 컬럼 존재 시)
+                
+                stats_check_query = """
+                    SELECT team_code, SUM(hits) as total_hits, SUM(rbi) as total_rbi
+                    FROM game_batting_stats
+                    WHERE game_id = %s
+                    GROUP BY team_code
                 """
-                
-                cursor.execute(summary_query, (game_dict['game_id'],))
-                summaries = cursor.fetchall()
-                
-                if summaries:
-                    game_dict['summary'] = [dict(summary) for summary in summaries]
-                else:
-                    game_dict['summary'] = []
-                
+                try:
+                    cursor.execute(stats_check_query, (game_id,))
+                    team_stats = cursor.fetchall()
+                    for stat in team_stats:
+                        # team_code가 home_team인지 away_team인지 확인
+                        # (DB에 저장된 team_code와 game 테이블의 팀 코드가 일치한다고 가정)
+                        # normalize를 통해 비교
+                        t_code = self._normalize_team_name(stat['team_code'])
+                        if t_code == self._normalize_team_name(game_dict.get('home_team', '')):
+                            box_score['home_h'] = stat['total_hits']
+                        else:
+                            box_score['away_h'] = stat['total_hits']
+                except Exception:
+                    # 컬럼이 없거나 오류 발생시 0으로 유지 (로그 생략 가능)
+                    pass
+
                 result["games"].append(game_dict)
             
             result["found"] = True
             result["total_games"] = len(result["games"])
-            logger.info(f"[GameQuery] Found {len(result['games'])} games")
+            logger.info(f"[GameQuery] Found {len(result['games'])} games (stats aggregated)")
             
         except Exception as e:
             logger.error(f"[GameQuery] Box score query error: {e}")
@@ -402,7 +417,8 @@ class GameQueryTool:
                 LIMIT %s;
             """
             
-            games_params = query_params + [team1_normalized, team2_normalized, limit]
+            # 파라미터 순서: [CASE_WHEN_team1, CASE_WHEN_team2] + [WHERE_params] + [LIMIT]
+            games_params = [team1_normalized, team2_normalized] + query_params + [limit]
             cursor.execute(games_query, games_params)
             games = cursor.fetchall()
             

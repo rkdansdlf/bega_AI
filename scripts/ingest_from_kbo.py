@@ -56,6 +56,8 @@ from app.core.embeddings import embed_texts
 from app.core.renderers.baseball import (
     render_batting_season,
     render_pitching_season,
+    render_hitter_game,
+    render_pitcher_game,
 )
 
 
@@ -268,89 +270,194 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["id", "game_id"],
         "season_filter_column": "ks.season_year",
     },
-    "box_score": {
-        "description": "경기별 팀 박스 스코어 요약",
+    "game_batting_stats": {
+        "description": "경기별 타자 기록",
+        "kind": "batting_game",
         "title_fields": [
             ["game_date"],
-            ["game_id"],
-            ["stadium", "stadium_name"],
+            ["team_name", "team_code"],
+            ["player_name", "player_id"],
         ],
         "select_sql": """
             SELECT
-                bs.*,
+                gbs.*,
                 g.game_date,
-                g.home_team,
-                g.away_team,
-                g.home_score,
-                g.away_score,
-                g.season_id,
                 ks.season_year,
                 ks.league_type_code,
-                s.stadium_name
-            FROM box_score bs
-            LEFT JOIN game g
-              ON g.game_id = bs.game_id
-            LEFT JOIN kbo_seasons ks
-              ON ks.season_id = g.season_id
-            LEFT JOIN stadiums s
-              ON s.stadium_id = bs.stadium_id
-            ORDER BY g.game_date DESC NULLS LAST, bs.game_id
+                pb.name AS player_name,
+                t.team_name
+            FROM game_batting_stats gbs
+            LEFT JOIN game g ON g.game_id = gbs.game_id
+            LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN player_basic pb ON pb.player_id = gbs.player_id
+            LEFT JOIN teams t ON t.team_id = gbs.team_code
+            ORDER BY g.game_date DESC, gbs.team_code, gbs.batting_order
         """,
         "highlights": [
             ("경기", ["game_id"]),
             ("경기일", ["game_date"]),
-            ("구장", ["stadium", "stadium_name", "stadium_id"]),
-            ("관중", ["crowd"]),
-            ("경기 시간", ["game_time"]),
-            ("홈팀 성적", ["home_record"]),
-            ("원정팀 성적", ["away_record"]),
-            ("홈팀 득점", ["home_r"]),
-            ("원정팀 득점", ["away_r"]),
-            ("홈팀 안타", ["home_h"]),
-            ("원정팀 안타", ["away_h"]),
-            ("홈팀 실책", ["home_e"]),
-            ("원정팀 실책", ["away_e"]),
+            ("팀", ["team_name", "team_code"]),
+            ("선수", ["player_name", "player_id"]),
+            ("타순", ["batting_order"]),
+            ("포지션", ["position"]),
+            ("타수", ["at_bats", "ab"]),
+            ("안타", ["hits", "h"]),
+            ("득점", ["runs", "r"]),
+            ("타점", ["rbi"]),
+            ("홈런", ["home_runs", "hr"]),
+            ("도루", ["stolen_bases", "sb"]),
+            ("볼넷", ["walks", "bb"]),
+            ("삼진", ["strikeouts", "so"]),
         ],
-        "pk_hint": ["id", "game_id"],
+        "pk_hint": ["game_id", "player_id", "team_code"],
         "season_filter_column": "ks.season_year",
+        "renderer": render_hitter_game,
     },
-    "game_summary": {
-        "description": "경기 텍스트 요약 및 주요 이슈",
+    "game_pitching_stats": {
+        "description": "경기별 투수 기록",
+        "kind": "pitching_game",
         "title_fields": [
-            ["game_id"],
-            ["summary_type"],
-            ["player_name"],
+            ["game_date"],
+            ["team_name", "team_code"],
+            ["player_name", "player_id"],
         ],
         "select_sql": """
             SELECT
-                gs.*,
+                gps.*,
+                g.game_date,
+                ks.season_year,
+                ks.league_type_code,
+                pb.name AS player_name,
+                t.team_name
+            FROM game_pitching_stats gps
+            LEFT JOIN game g ON g.game_id = gps.game_id
+            LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN player_basic pb ON pb.player_id = gps.player_id
+            LEFT JOIN teams t ON t.team_id = gps.team_code
+            ORDER BY g.game_date DESC, gps.team_code, gps.appearance_seq
+        """,
+        "highlights": [
+            ("경기", ["game_id"]),
+            ("경기일", ["game_date"]),
+            ("팀", ["team_name", "team_code"]),
+            ("선수", ["player_name", "player_id"]),
+            ("등판 순서", ["appearance_seq"]),
+            ("결과", ["result"]),
+            ("이닝", ["innings_pitched", "ip"]),
+            ("실점", ["earned_runs", "er"]),
+            ("피안타", ["hits_allowed", "h"]),
+            ("볼넷", ["walks", "bb"]),
+            ("탈삼진", ["strikeouts", "so"]),
+        ],
+        "pk_hint": ["game_id", "player_id", "team_code"],
+        "season_filter_column": "ks.season_year",
+        "renderer": render_pitcher_game,
+    },
+    "game_inning_scores": {
+        "description": "이닝별 점수 기록",
+        "title_fields": [
+            ["game_date"],
+            ["home_team_name", "home_team"],
+            ["away_team_name", "away_team"],
+        ],
+        "select_sql": """
+            SELECT
+                gis.*,
                 g.game_date,
                 g.home_team,
                 g.away_team,
+                ks.season_year,
+                ks.league_type_code,
                 ht.team_name AS home_team_name,
                 at.team_name AS away_team_name,
-                ks.season_year,
-                ks.league_type_code,
-                g.season_id
-            FROM game_summary gs
-            LEFT JOIN game g
-              ON g.game_id = gs.game_id
-            LEFT JOIN teams ht
-              ON ht.team_id = g.home_team
-            LEFT JOIN teams at
-              ON at.team_id = g.away_team
-            LEFT JOIN kbo_seasons ks
-              ON ks.season_id = g.season_id
-            ORDER BY g.game_date DESC NULLS LAST, gs.id
+                g.home_score,
+                g.away_score
+            FROM game_inning_scores gis
+            LEFT JOIN game g ON g.game_id = gis.game_id
+            LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN teams ht ON ht.team_id = g.home_team
+            LEFT JOIN teams at ON at.team_id = g.away_team
+            ORDER BY g.game_date DESC, gis.game_id, gis.inning
         """,
         "highlights": [
             ("경기", ["game_id"]),
             ("경기일", ["game_date"]),
-            ("요약 종류", ["summary_type"]),
-            ("관련 선수", ["player_name"]),
-            ("요약", ["detail_text"]),
+            ("이닝", ["inning"]),
+            ("홈팀", ["home_team_name", "home_team"]),
+            ("홈팀 점수", ["home_score"]),
+            ("원정팀", ["away_team_name", "away_team"]),
+            ("원정팀 점수", ["away_score"]),
         ],
-        "pk_hint": ["game_id", "id"],
+        "pk_hint": ["game_id", "inning"],
+        "season_filter_column": "ks.season_year",
+    },
+    "game_lineups": {
+        "description": "경기 라인업 정보",
+        "title_fields": [
+            ["game_date"],
+            ["team_name", "team_code"],
+        ],
+        "select_sql": """
+            SELECT
+                gl.*,
+                g.game_date,
+                ks.season_year,
+                ks.league_type_code,
+                pb.name AS player_name,
+                t.team_name
+            FROM game_lineups gl
+            LEFT JOIN game g ON g.game_id = gl.game_id
+            LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN player_basic pb ON pb.player_id = gl.player_id
+            LEFT JOIN teams t ON t.team_id = gl.team_code
+            ORDER BY g.game_date DESC, gl.game_id, gl.team_code, gl.batting_order
+        """,
+        "highlights": [
+            ("경기", ["game_id"]),
+            ("경기일", ["game_date"]),
+            ("팀", ["team_name", "team_code"]),
+            ("선수", ["player_name", "player_id"]),
+            ("타순", ["batting_order"]),
+            ("포지션", ["position"]),
+        ],
+        "pk_hint": ["game_id", "team_code", "batting_order"],
+        "season_filter_column": "ks.season_year",
+    },
+    "game_metadata": {
+        "description": "경기 메타데이터 (심판, 날씨, 관중)",
+        "title_fields": [
+            ["game_date"],
+            ["home_team_name", "home_team"],
+            ["away_team_name", "away_team"],
+        ],
+        "select_sql": """
+            SELECT
+                gm.*,
+                gm.game_time_minutes AS game_duration,
+                g.game_date,
+                g.home_team,
+                g.away_team,
+                ks.season_year,
+                ks.league_type_code,
+                ht.team_name AS home_team_name,
+                at.team_name AS away_team_name
+            FROM game_metadata gm
+            LEFT JOIN game g ON g.game_id = gm.game_id
+            LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN teams ht ON ht.team_id = g.home_team
+            LEFT JOIN teams at ON at.team_id = g.away_team
+            ORDER BY g.game_date DESC
+        """,
+        "highlights": [
+            ("경기", ["game_id"]),
+            ("경기일", ["game_date"]),
+            ("홈팀", ["home_team_name", "home_team"]),
+            ("원정팀", ["away_team_name", "away_team"]),
+            ("관중", ["attendance", "crowd"]),
+            ("경기 시간", ["game_duration", "game_time"]),
+            ("날씨", ["weather"]),
+        ],
+        "pk_hint": ["game_id"],
         "season_filter_column": "ks.season_year",
     },
     "kbo_seasons": {
@@ -432,76 +539,81 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["team_code", "start_season"],
         "season_filter_column": "th.start_season",
     },
-    "hitter_record": {
-        "description": "경기별 타자 기록",
+    "awards": {
+        "description": "KBO 수상 기록 (MVP, 신인왕, 골든글러브)",
         "title_fields": [
-            ["game_id"],
-            ["team_id"],
-            ["player_name", "player_id"],
-        ],
-        "select_sql": """
-            SELECT
-                hr.*,
-                ks.season_year,
-                ks.league_type_code,
-                t.team_name
-            FROM hitter_record hr
-            LEFT JOIN kbo_seasons ks
-              ON ks.season_id = hr.season_id
-            LEFT JOIN teams t
-              ON t.team_id = hr.team_id
-            ORDER BY hr.game_id DESC, hr.team_id, hr.batting_order
-        """,
-        "highlights": [
-            ("경기", ["game_id"]),
-            ("팀", ["team_name", "team_id"]),
-            ("선수", ["player_name"]),
-            ("타순", ["batting_order"]),
-            ("포지션", ["position"]),
-            ("타수", ["at_bats"]),
-            ("안타", ["hits"]),
-            ("득점", ["runs"]),
-            ("타점", ["rbis"]),
-            ("타율", ["batting_average"]),
-        ],
-        "pk_hint": ["game_id", "team_id", "player_name"],
-        "season_filter_column": "ks.season_year",
-    },
-    "pitcher_record": {
-        "description": "경기별 투수 기록",
-        "title_fields": [
-            ["game_id"],
-            ["team_id"],
+            ["year"],
+            ["award_type"],
             ["player_name"],
         ],
         "select_sql": """
             SELECT
-                pr.*,
-                ks.season_year,
-                ks.league_type_code,
+                a.*,
+                a.year AS season_year,
                 t.team_name
-            FROM pitcher_record pr
-            LEFT JOIN kbo_seasons ks
-              ON ks.season_id = pr.season_id
-            LEFT JOIN teams t
-              ON t.team_id = pr.team_id
-            ORDER BY pr.game_id DESC, pr.team_id, pr.id
+            FROM awards a
+            LEFT JOIN teams t ON t.team_name = a.team_name
+            ORDER BY a.year DESC, a.award_type, a.player_name
         """,
         "highlights": [
-            ("경기", ["game_id"]),
-            ("팀", ["team_name", "team_id"]),
+            ("시즌", ["year", "season_year"]),
+            ("수상 종류", ["award_type"]),
             ("선수", ["player_name"]),
-            ("등판", ["appearance"]),
-            ("결과", ["result"]),
-            ("승", ["wins"]),
-            ("패", ["losses"]),
-            ("세이브", ["saves"]),
-            ("이닝", ["innings", "innings_display"]),
-            ("탈삼진", ["strikeouts"]),
-            ("실점", ["runs_allowed"]),
+            ("팀", ["team_name", "team"]),
+            ("포지션", ["position"]),
         ],
-        "pk_hint": ["game_id", "team_id", "player_name"],
-        "season_filter_column": "ks.season_year",
+        "pk_hint": ["id", "year", "award_type", "player_name"],
+        "season_filter_column": "a.year",
+    },
+    "player_movements": {
+        "description": "선수 이동 기록 (FA, 트레이드, 드래프트)",
+        "title_fields": [
+            ["date"],
+            ["section"],
+            ["player_name"],
+        ],
+        "select_sql": """
+            SELECT
+                pm.*,
+                EXTRACT(YEAR FROM pm.date) AS season_year,
+                t.team_name
+            FROM player_movements pm
+            LEFT JOIN teams t ON t.team_id = pm.team_code
+            ORDER BY pm.date DESC, pm.player_name
+        """,
+        "highlights": [
+            ("날짜", ["date"]),
+            ("이동 유형", ["section"]),
+            ("선수", ["player_name"]),
+            ("팀", ["team_name", "team_code"]),
+            ("비고", ["remarks"]),
+        ],
+        "pk_hint": ["id", "date", "player_name"],
+        "season_filter_column": None,
+    },
+    "team_franchises": {
+        "description": "KBO 프랜차이즈 그룹 정보",
+        "title_fields": [
+            ["name"],
+            ["current_code"],
+        ],
+        "select_sql": """
+            SELECT
+                tf.*,
+                (SELECT STRING_AGG(t.team_name, ', ' ORDER BY t.team_id)
+                 FROM teams t WHERE t.franchise_id = tf.id) AS member_teams
+            FROM team_franchises tf
+            ORDER BY tf.id
+        """,
+        "highlights": [
+            ("프랜차이즈", ["name"]),
+            ("원래 코드", ["original_code"]),
+            ("현재 코드", ["current_code"]),
+            ("소속 팀", ["member_teams"]),
+            ("공식 사이트", ["web_url"]),
+        ],
+        "pk_hint": ["id"],
+        "season_filter_column": None,
     },
     "player_basic": {
         "description": "선수 기본 정보",
@@ -515,7 +627,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
                 t.team_name
             FROM player_basic pb
             LEFT JOIN teams t
-              ON t.team_id = pb.team_id
+              ON t.team_name = pb.team
             ORDER BY pb.player_id
         """,
         "highlights": [
@@ -569,21 +681,30 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
 }
 
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
+# team_daily_roster는 데이터가 많아 스킵
 DEFAULT_TABLES = [
+    # 기본 정보 테이블
+    "teams",
+    "team_franchises",
+    "team_history",
+    "stadiums",
+    "kbo_seasons",
+    "player_basic",
+    # 수상/이적 기록
+    "awards",
+    "player_movements",
+    # 시즌 통계
     "player_season_batting",
     "player_season_pitching",
-    "hitter_record",
-    "pitcher_record",
+    # 경기 정보
     "game",
-    "box_score",
-    "game_summary",
-    "kbo_seasons",
-    "stadiums",
-    "teams",
-    "team_history",
-    "player_basic",
-    "team_profiles",
-    "team_name_mapping",
+    "game_metadata",
+    "game_inning_scores",
+    "game_lineups",
+    # 경기별 기록 (가장 많은 데이터)
+    "game_batting_stats",
+    "game_pitching_stats",
+    # 정적 문서
     "kbo_metrics_explained",
     "kbo_regulations_basic",
     "kbo_regulations_player",
@@ -970,8 +1091,9 @@ def flush_chunks(
 
 
 def ingest_table(
-    conn,
-    table: str,
+    source_conn: Any,
+    dest_conn: Any,
+    table_name: str,
     *,
     limit: Optional[int],
     embed_batch_size: int,
@@ -984,11 +1106,11 @@ def ingest_table(
     commit_interval: int,
     stats: Dict[str, Any],
 ) -> int:
-    if table == "rag_chunks":
+    if table_name == "rag_chunks":
         print("경고: rag_chunks 테이블은 처리 대상에서 제외됩니다.")
         return 0
 
-    profile = TABLE_PROFILES.get(table, {})
+    profile = TABLE_PROFILES.get(table_name, {})
     total_chunks = 0
     buffer: List[ChunkPayload] = []
     settings = get_settings()
@@ -996,10 +1118,10 @@ def ingest_table(
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
 
     # upsert 작업이 오래 걸려 타임아웃이 발생하지 않도록 statement_timeout을 방지
-    with conn.cursor() as cur:
+    with dest_conn.cursor() as cur:
         cur.execute("SET statement_timeout TO 0;")
 
-    with conn.cursor(cursor_factory=RealDictCursor) as read_cur, conn.cursor() as write_cur:
+    with source_conn.cursor(cursor_factory=RealDictCursor) as read_cur, dest_conn.cursor() as write_cur:
         write_cur.execute("SET statement_timeout TO 0;")
 
         # --- NEW LOGIC FOR STATIC FILE ---
@@ -1042,15 +1164,15 @@ def ingest_table(
                 skip_embedding=skip_embedding,
             )
             total_chunks += flushed
-            conn.commit() # Commit after static file ingestion
+            dest_conn.commit() # Commit after static file ingestion
             if flushed > 0:
                 print(f"      총 {flushed}개 청크를 처리했습니다.", flush=True)
             return total_chunks
         # --- END NEW LOGIC ---
 
-        pk_columns = get_primary_key_columns(conn, table)
+        pk_columns = get_primary_key_columns(source_conn, table_name)
         query, params = build_select_query(
-            table,
+            table_name,
             profile,
             pk_columns,
             limit,
@@ -1068,19 +1190,19 @@ def ingest_table(
                 break
             fetched_rows += len(rows)
             print(
-                f"      테이블 '{table}'에서 {fetched_rows}개 행을 가져왔습니다...",
+                f"      테이블 '{table_name}'에서 {fetched_rows}개 행을 가져왔습니다...",
                 flush=True,
             )
             for raw_row in rows:
                 row = dict(raw_row)
                 source_row_id = build_source_row_id(
-                    row, table, pk_columns, profile.get("pk_hint", [])
+                    row, table_name, pk_columns, profile.get("pk_hint", [])
                 )
-                title = build_title(row, table, source_row_id, profile)
+                title = build_title(row, table_name, source_row_id, profile)
                 renderer = profile.get("renderer")
                 if renderer and not use_legacy_renderer:
                     enriched_row = dict(row)
-                    enriched_row["source_table"] = table
+                    enriched_row["source_table"] = table_name
                     enriched_row["source_row_id"] = source_row_id
                     content = renderer(
                         enriched_row,
@@ -1089,7 +1211,7 @@ def ingest_table(
                         today_str=today_str,
                     )
                 else:
-                    content = build_content(row, table, source_row_id, profile)
+                    content = build_content(row, table_name, source_row_id, profile)
 
                 season_year = coerce_int(
                     first_value(row, ["season_year", "season", "year"])
@@ -1126,7 +1248,7 @@ def ingest_table(
                 if len(chunks) == 1:
                     buffer.append(
                         ChunkPayload(
-                            table=table,
+                            table=table_name,
                             source_row_id=source_row_id,
                             title=title,
                             content=chunks[0],
@@ -1142,7 +1264,7 @@ def ingest_table(
                     for idx, chunk in enumerate(chunks, start=1):
                         buffer.append(
                             ChunkPayload(
-                                table=table,
+                                table=table_name,
                                 source_row_id=f"{source_row_id}#part{idx}",
                                 title=f"{title} (분할 {idx})",
                                 content=chunk,
@@ -1159,7 +1281,7 @@ def ingest_table(
 
                 if len(buffer) >= embed_batch_size:
                     flushed = flush_chunks(
-                        write_cur,
+                        write_cur, # Use write_cur for flushing
                         settings,
                         buffer,
                         max_concurrency=max_concurrency,
@@ -1175,7 +1297,7 @@ def ingest_table(
                     )
 
         flushed = flush_chunks(
-            write_cur,
+            write_cur, # Use write_cur for flushing
             settings,
             buffer,
             max_concurrency=max_concurrency,
@@ -1190,7 +1312,7 @@ def ingest_table(
                 f"      현재까지 {processed_chunks}개 청크를 처리했습니다...",
                 flush=True,
             )
-        conn.commit()
+        dest_conn.commit() # Commit on dest_conn
 
     if processed_chunks:
         print(f"      총 {processed_chunks}개 청크를 처리했습니다.", flush=True)
@@ -1212,12 +1334,23 @@ def ingest(
     commit_interval: int,
 ) -> None:
     settings = get_settings()
-    conn = psycopg2.connect(settings.database_url)
-    original_autocommit = conn.autocommit
-    conn.autocommit = True
-    with conn.cursor() as cur:
+    
+    # Connect to Source (Supabase) for reading data
+    print(f"Connecting to Source DB (Supabase)...")
+    if not settings.supabase_db_url:
+        raise ValueError("SUPABASE_DB_URL is not set in environment variables.")
+    source_conn = psycopg2.connect(settings.supabase_db_url)
+    
+    # Connect to Destination (OCI) for writing vectors
+    print(f"Connecting to Destination DB (OCI)...")
+    dest_conn = psycopg2.connect(settings.database_url) # settings.database_url maps to oci_db_url
+    
+    original_autocommit = dest_conn.autocommit
+    dest_conn.autocommit = True
+    with dest_conn.cursor() as cur:
         cur.execute("SET statement_timeout TO 0;")
-    conn.autocommit = original_autocommit
+    dest_conn.autocommit = original_autocommit
+    
     ingested_total = 0
     try:
         for table in tables:
@@ -1229,7 +1362,8 @@ def ingest(
                 "since_commit": 0,
             }
             chunks = ingest_table(
-                conn,
+                source_conn, # Read from Source
+                dest_conn,   # Write to Dest
                 table,
                 limit=limit,
                 embed_batch_size=embed_batch_size,
@@ -1248,7 +1382,8 @@ def ingest(
                 f"(배치={stats['batches']}, 임베딩 호출={stats['embedding_calls']}, 대기 시간={stats['sleep_seconds']:.2f}초)"
             )
     finally:
-        conn.close()
+        source_conn.close()
+        dest_conn.close()
     print(f"총 {ingested_total}개 청크 수집을 완료했습니다.")
 
 

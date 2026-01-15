@@ -20,16 +20,16 @@ class ContextFormatter:
         self.MIN_PA_BATTER = 100
     
     def format_context(
-        self, 
-        processed_data: Dict[str, Any], 
-        intent: str, 
+        self,
+        processed_data: Dict[str, Any],
+        intent: str,
         query: str,
         entity_filter,
         year: int
     ) -> str:
         """
         질문 의도에 따라 최적화된 컨텍스트 형식을 생성하여 반환합니다.
-        
+
         인수:
             processed_data: _process_and_enrich_docs에서 처리된 데이터
             intent: 질문 의도 (통계조회, 선수프로필, 비교분석, 설명형 등)
@@ -38,7 +38,20 @@ class ContextFormatter:
             year: 분석 대상 연도
         """
         logger.info(f"[ContextFormatter] Formatting context for intent: {intent}")
-        
+
+        # 수상 관련 질문
+        if intent == "award_lookup" or entity_filter.award_type:
+            return self._format_award_context(processed_data, query, entity_filter, year)
+
+        # 경기 상세 질문
+        if intent == "game_detail" or entity_filter.game_date:
+            return self._format_game_detail(processed_data, query, entity_filter, year)
+
+        # 선수 이동/이적 질문
+        if intent == "movement_lookup" or entity_filter.movement_type:
+            return self._format_player_movement(processed_data, query, entity_filter, year)
+
+        # 기존 의도들
         if intent == "stats_lookup" or entity_filter.stat_type:
             return self._format_statistical_ranking(processed_data, query, entity_filter, year)
         elif intent == "player_profile" or entity_filter.player_name:
@@ -345,7 +358,202 @@ class ContextFormatter:
         """팀 ID를 전체 팀명으로 변환합니다."""
         team_names = {
             "KIA": "KIA 타이거즈", "LG": "LG 트윈스", "두산": "두산 베어스",
-            "롯데": "롯데 자이언츠", "삼성": "삼성 라이온즈", "키움": "키움 히어로즈", 
+            "롯데": "롯데 자이언츠", "삼성": "삼성 라이온즈", "키움": "키움 히어로즈",
             "한화": "한화 이글스", "KT": "KT 위즈", "NC": "NC 다이노스", "SSG": "SSG 랜더스"
         }
         return team_names.get(team_id, team_id)
+
+    def _format_award_context(
+        self,
+        processed_data: Dict[str, Any],
+        query: str,
+        entity_filter,
+        year: int
+    ) -> str:
+        """수상 기록 형식으로 포맷합니다."""
+        context_parts = []
+
+        award_type_display = {
+            "mvp": "MVP",
+            "rookie": "신인왕",
+            "golden_glove": "골든글러브",
+            "batting_title": "타격왕",
+            "hr_leader": "홈런왕",
+            "rbi_leader": "타점왕",
+            "sb_leader": "도루왕",
+            "wins_leader": "다승왕",
+            "era_leader": "방어율왕",
+            "saves_leader": "세이브왕",
+            "so_leader": "탈삼진왕",
+        }
+
+        # 수상 유형 표시
+        if entity_filter.award_type and entity_filter.award_type != "any":
+            award_name = award_type_display.get(entity_filter.award_type, entity_filter.award_type)
+            context_parts.append(f"### {year}년 KBO {award_name}")
+        else:
+            context_parts.append(f"### {year}년 KBO 수상 기록")
+
+        # 수상 데이터 추출 (processed_data에서 awards 관련 문서 찾기)
+        awards = processed_data.get("awards", [])
+
+        if not awards:
+            # raw_docs에서 수상 관련 데이터 추출 시도
+            raw_docs = processed_data.get("raw_docs", [])
+            for doc in raw_docs:
+                if doc.get("source_table") == "awards":
+                    awards.append(doc)
+
+        if awards:
+            # 수상 유형별로 그룹화
+            award_groups: Dict[str, List] = {}
+            for award in awards:
+                award_type = award.get("award_type", "기타")
+                if award_type not in award_groups:
+                    award_groups[award_type] = []
+                award_groups[award_type].append(award)
+
+            for award_type, award_list in award_groups.items():
+                display_name = award_type_display.get(award_type.lower(), award_type)
+                context_parts.append(f"\n**{display_name}**")
+                for award in award_list:
+                    player = award.get("player_name", "알 수 없음")
+                    team = award.get("team_name") or award.get("team", "")
+                    position = award.get("position", "")
+                    line = f"- {player}"
+                    if team:
+                        line += f" ({team})"
+                    if position:
+                        line += f" - {position}"
+                    context_parts.append(line)
+        else:
+            context_parts.append(f"\n{year}년 수상 기록을 찾을 수 없습니다.")
+
+        return "\n".join(context_parts)
+
+    def _format_game_detail(
+        self,
+        processed_data: Dict[str, Any],
+        query: str,
+        entity_filter,
+        year: int
+    ) -> str:
+        """경기 상세 정보 형식으로 포맷합니다."""
+        context_parts = []
+
+        game_date = entity_filter.game_date
+        if game_date:
+            context_parts.append(f"### {game_date} 경기 정보")
+        else:
+            context_parts.append(f"### {year}년 경기 정보")
+
+        # 경기 데이터 추출
+        games = processed_data.get("games", [])
+        if not games:
+            raw_docs = processed_data.get("raw_docs", [])
+            for doc in raw_docs:
+                if doc.get("source_table") in ["game", "game_metadata", "game_inning_scores"]:
+                    games.append(doc)
+
+        if games:
+            # 경기별로 그룹화
+            seen_games = set()
+            for game in games:
+                game_id = game.get("game_id")
+                if game_id and game_id not in seen_games:
+                    seen_games.add(game_id)
+
+                    home_team = game.get("home_team_name") or game.get("home_team", "")
+                    away_team = game.get("away_team_name") or game.get("away_team", "")
+                    home_score = game.get("home_score", "?")
+                    away_score = game.get("away_score", "?")
+                    stadium = game.get("stadium_name") or game.get("stadium", "")
+                    date = game.get("game_date", "")
+
+                    context_parts.append(f"\n**{date} {away_team} @ {home_team}**")
+                    context_parts.append(f"- 스코어: {away_team} {away_score} - {home_score} {home_team}")
+                    if stadium:
+                        context_parts.append(f"- 구장: {stadium}")
+
+                    # 관중, 경기시간 등 추가 정보
+                    attendance = game.get("attendance") or game.get("crowd")
+                    if attendance:
+                        context_parts.append(f"- 관중: {attendance:,}명" if isinstance(attendance, int) else f"- 관중: {attendance}")
+
+                    game_time = game.get("game_duration") or game.get("game_time")
+                    if game_time:
+                        context_parts.append(f"- 경기 시간: {game_time}")
+        else:
+            if game_date:
+                context_parts.append(f"\n{game_date} 경기 정보를 찾을 수 없습니다.")
+            else:
+                context_parts.append(f"\n경기 정보를 찾을 수 없습니다.")
+
+        return "\n".join(context_parts)
+
+    def _format_player_movement(
+        self,
+        processed_data: Dict[str, Any],
+        query: str,
+        entity_filter,
+        year: int
+    ) -> str:
+        """선수 이동 기록 형식으로 포맷합니다."""
+        context_parts = []
+
+        movement_type_display = {
+            "fa": "FA (자유계약)",
+            "trade": "트레이드",
+            "draft": "드래프트",
+            "foreign": "외국인 선수",
+            "release": "방출",
+            "retirement": "은퇴",
+            "military": "군보류",
+            "return": "복귀",
+        }
+
+        # 이동 유형 표시
+        if entity_filter.movement_type and entity_filter.movement_type != "any":
+            movement_name = movement_type_display.get(entity_filter.movement_type, entity_filter.movement_type)
+            context_parts.append(f"### {year}년 {movement_name} 기록")
+        else:
+            context_parts.append(f"### {year}년 선수 이동 기록")
+
+        # 이동 데이터 추출
+        movements = processed_data.get("movements", [])
+        if not movements:
+            raw_docs = processed_data.get("raw_docs", [])
+            for doc in raw_docs:
+                if doc.get("source_table") == "player_movements":
+                    movements.append(doc)
+
+        if movements:
+            # 이동 유형별로 그룹화
+            movement_groups: Dict[str, List] = {}
+            for movement in movements:
+                m_type = movement.get("section") or movement.get("movement_type", "기타")
+                if m_type not in movement_groups:
+                    movement_groups[m_type] = []
+                movement_groups[m_type].append(movement)
+
+            for m_type, m_list in movement_groups.items():
+                display_name = movement_type_display.get(m_type.lower(), m_type)
+                context_parts.append(f"\n**{display_name}**")
+                for m in m_list:
+                    player = m.get("player_name", "알 수 없음")
+                    team = m.get("team_name") or m.get("team_code", "")
+                    date = m.get("date", "")
+                    remarks = m.get("remarks", "")
+
+                    line = f"- {player}"
+                    if team:
+                        line += f" → {team}"
+                    if date:
+                        line += f" ({date})"
+                    context_parts.append(line)
+                    if remarks:
+                        context_parts.append(f"  {remarks}")
+        else:
+            context_parts.append(f"\n{year}년 선수 이동 기록을 찾을 수 없습니다.")
+
+        return "\n".join(context_parts)

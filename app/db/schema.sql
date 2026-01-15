@@ -34,5 +34,15 @@ create index if not exists idx_rag_chunks_season_team on rag_chunks (season_year
 create index if not exists idx_rag_chunks_season_source on rag_chunks (season_year, source_table);
 create index if not exists idx_rag_chunks_team_source on rag_chunks (team_id, source_table);
 
+-- New indexes for awards, movements, and game queries
+create index if not exists idx_rag_chunks_award_type on rag_chunks using gin ((meta->>'award_type'));
+create index if not exists idx_rag_chunks_movement_type on rag_chunks using gin ((meta->>'movement_type'));
+create index if not exists idx_rag_chunks_game_date on rag_chunks using gin ((meta->>'game_date'));
+create index if not exists idx_rag_chunks_game_id on rag_chunks using gin ((meta->>'game_id'));
+
+-- Composite index for award queries by season
+create index if not exists idx_rag_chunks_season_award on rag_chunks (season_year)
+  where source_table = 'awards';
+
 -- Unique constraint for data integrity and upserts
 create unique index if not exists idx_rag_chunks_source on rag_chunks (source_table, source_row_id);

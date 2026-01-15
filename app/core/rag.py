@@ -144,6 +144,10 @@ class RAGPipeline:
         ctx = kbo_metrics.LeagueContext()
         processed_pitchers = []
         processed_batters = []
+        processed_games = []
+        processed_awards = []
+        processed_movements = []
+        raw_docs = []
         warnings = set()
         filtered_playoff_count = 0
 
@@ -151,6 +155,9 @@ class RAGPipeline:
             meta = doc.get("meta", {})
             if not meta:
                 continue
+
+            # Always keep raw doc reference
+            raw_docs.append(doc)
 
             # Filter out non-regular season data (playoffs, etc.)
             # league = meta.get("league", "")
@@ -290,7 +297,15 @@ class RAGPipeline:
                     "rbi": rbi,
                     "steals": steals,
                     "score": score,
+                    "steals": steals,
+                    "score": score,
                 })
+            elif doc.get("source_table") in ["game", "game_metadata", "game_inning_scores", "game_batting_stats", "game_pitching_stats"]:
+                processed_games.append(doc)
+            elif doc.get("source_table") == "awards":
+                processed_awards.append(doc)
+            elif doc.get("source_table") == "player_movements":
+                processed_movements.append(doc)
 
         # Sort by rank score (lower is better)
         processed_pitchers.sort(key=lambda p: p["score"])
@@ -313,7 +328,11 @@ class RAGPipeline:
 
         return {
             "pitchers": processed_pitchers,
-            "batters": processed_batters, # Placeholder for batter logic
+            "batters": processed_batters,
+            "games": processed_games,
+            "awards": processed_awards,
+            "movements": processed_movements,
+            "raw_docs": raw_docs,
             "warnings": list(warnings),
             "context": ctx,
         }
