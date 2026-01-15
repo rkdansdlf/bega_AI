@@ -50,37 +50,7 @@ def similarity_search(
     use_firestore = os.getenv("USE_FIRESTORE_SEARCH", "false").lower() == "true"
 
     if use_firestore:
-        # Firestore Vector Search 사용
-        from .retrieval_firestore import similarity_search_firestore
-
-        # Firestore는 snake_case 필드명을 camelCase로 변환해야 함
-        firestore_filters = {}
-        if filters:
-            for key, value in filters.items():
-                if key == "source_table":
-                    firestore_filters["sourceTable"] = value
-                elif key == "source_row_id":
-                    firestore_filters["sourceRowId"] = value
-                elif key == "season_year":
-                    firestore_filters["seasonYear"] = value
-                elif key == "season_id":
-                    firestore_filters["seasonId"] = value
-                elif key == "league_type_code":
-                    firestore_filters["leagueTypeCode"] = value
-                elif key == "team_id":
-                    firestore_filters["teamId"] = value
-                elif key == "player_id":
-                    firestore_filters["playerId"] = value
-                else:
-                    # meta.league 같은 필드는 그대로 전달
-                    firestore_filters[key] = value
-
-        return similarity_search_firestore(
-            embedding,
-            limit=limit,
-            filters=firestore_filters,
-            keyword=keyword,
-        )
+        raise NotImplementedError("Firestore search has been removed.")
 
     # 기본값: Supabase pgvector 사용 (기존 코드)
     filter_clauses: List[str] = ["embedding IS NOT NULL"]  # 임베딩이 없는 문서는 제외

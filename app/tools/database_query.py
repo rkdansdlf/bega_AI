@@ -433,7 +433,7 @@ class DatabaseQueryTool:
                 params = [year]
                 if team_filter:
                     team_code = self.get_team_code(team_filter)
-                    team_condition = "AND psb.team_code = %s"
+                    team_condition = "AND psp.team_code = %s"
                     params.append(team_code)
                 
                 params.extend([min_ip, limit])
@@ -747,6 +747,97 @@ class DatabaseQueryTool:
         logger.info(f"[DatabaseQuery] Pitch velocity data not available for {player_name}")
         return result
     
+    def get_team_season_rank(self, team_name: str, year: int) -> Dict[str, Any]:
+        """
+        특정 팀의 시즌 순위를 계산하여 반환합니다.
+        MISSING VIEW v_team_rank_all 대체 구현
+        """
+        logger.info(f"[DatabaseQuery] Calculating team rank for {team_name} ({year})")
+        
+        team_code = self.get_team_code(team_name)
+        result = {
+            "team_name": team_name,
+            "year": year,
+            "rank": None,
+            "wins": 0,
+            "losses": 0,
+            "draws": 0,
+            "found": False,
+            "error": None
+        }
+        
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # 모든 팀의 승무패 집계 (정규시즌 기준)
+            # season_id를 통해 정확한 시즌 필터링
+            rank_query = """
+                WITH team_stats AS (
+                    SELECT 
+                        team,
+                        SUM(CASE WHEN winning_team = team THEN 1 ELSE 0 END) as wins,
+                        SUM(CASE WHEN winning_team IS NOT NULL AND winning_team != team THEN 1 ELSE 0 END) as losses,
+                        SUM(CASE WHEN winning_team IS NULL AND home_score = away_score THEN 1 ELSE 0 END) as draws
+                    FROM (
+                        SELECT home_team as team, winning_team, home_score, away_score 
+                        FROM game g
+                        JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                        WHERE ks.season_year = %s AND ks.league_type_code = '0' -- 정규시즌
+                        AND g.game_status = 'COMPLETED'
+                        
+                        UNION ALL
+                        
+                        SELECT away_team as team, winning_team, home_score, away_score 
+                        FROM game g
+                        JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                        WHERE ks.season_year = %s AND ks.league_type_code = '0'
+                        AND g.game_status = 'COMPLETED'
+                    ) all_games
+                    GROUP BY team
+                )
+                SELECT 
+                    team, wins, losses, draws,
+                    RANK() OVER (ORDER BY (wins::float / NULLIF(wins + losses, 0)) DESC) as rank
+                FROM team_stats
+            """
+            
+            cursor.execute(rank_query, (year, year))
+            rankings = cursor.fetchall()
+            
+            target_team_code = self.get_team_code(team_name)
+            
+            # 1차 시도: 팀 코드로 매칭
+            for row in rankings:
+                if row['team'] == target_team_code:
+                    result['rank'] = row['rank']
+                    result['wins'] = row['wins']
+                    result['losses'] = row['losses']
+                    result['draws'] = row['draws']
+                    result['found'] = True
+                    break
+            
+            # 2차 시도: 매칭 실패 시 팀명으로 재확인 (혹시 DB에 한글로 저장된 경우)
+            if not result['found']:
+                for row in rankings:
+                    if self.get_team_name(row['team']) == team_name:
+                         result['rank'] = row['rank']
+                         result['wins'] = row['wins']
+                         result['found'] = True
+                         break
+            
+            # 찾는 팀이 순위표에 없으면 (신생팀이거나 이름 불일치)
+            if not result['found'] and rankings:
+                 logger.warning(f"[DatabaseQuery] Team {team_name}({target_team_code}) not found in rankings. Available: {[r['team'] for r in rankings]}")
+
+        except Exception as e:
+            logger.error(f"[DatabaseQuery] Error calculating team rank: {e}")
+            result["error"] = str(e)
+        finally:
+             if 'cursor' in locals():
+                cursor.close()
+                
+        return result
+
     def get_team_basic_info(self, team_name: str) -> Dict[str, Any]:
         """
         특정 팀의 기본 정보를 조회합니다 (홈구장, 마스코트, 감독 등).
