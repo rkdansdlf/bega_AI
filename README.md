@@ -65,7 +65,7 @@ OPENROUTER_MODEL=openai/gpt-4o-mini
 # --- Google Gemini 설정 (선택) ---
 # GEMINI_API_KEY=...
 # GEMINI_MODEL=gemini-1.5-flash
-# GEMINI_EMBED_MODEL=text-embedding-004
+# GEMINI_EMBED_MODEL=... (예: 사용 중인 Gemini 임베딩 모델명)
 
 # --- OpenAI 설정 (선택) ---
 # OPENAI_API_KEY=sk-...
@@ -154,4 +154,3 @@ PYTHONPATH=. .venv/bin/python scripts/ingest_from_kbo.py --tables player_season_
 -   대량 데이터 수집 시에는 `scripts/ingest_from_kbo.py`를 템플릿으로 사용하세요. 이 스크립트는 통계 데이터를 LLM 친화적인 텍스트로 변환하고, 청크로 나누고, 임베딩하여 `rag_chunks`에 업서트하는 방법을 보여줍니다.
 -   오프라인 개발 시에는 `.env` 파일에서 `EMBED_PROVIDER=local`로 설정하세요. 임베딩은 결정론적인 의사(pseudo) 벡터로 대체됩니다.
 -   스트리밍은 `sse-starlette`에 의해 구동됩니다. 프록시 뒤에 배포할 때는 하트비트/타임아웃 규칙을 처리해야 합니다.
-

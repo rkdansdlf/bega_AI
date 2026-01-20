@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     # --- Google Gemini 설정 ---
     gemini_api_key: Optional[str] = Field(None, env="GEMINI_API_KEY")
     gemini_model: str = Field("gemini-2.5-flash", env="GEMINI_MODEL")
-    gemini_embed_model: str = Field("text-embedding-004", env="GEMINI_EMBED_MODEL")
+    gemini_embed_model: str = Field("", env="GEMINI_EMBED_MODEL")
     gemini_base_url: str = Field(
         "https://generativelanguage.googleapis.com/v1beta/openai",
         env="GEMINI_BASE_URL",
@@ -54,7 +54,15 @@ class Settings(BaseSettings):
 
     # --- OpenRouter 설정 ---
     openrouter_api_key: Optional[str] = Field(None, env="OPENROUTER_API_KEY")
-    openrouter_model: str = Field("openai/gpt-4o-mini", env="OPENROUTER_MODEL")
+    openrouter_model: str = Field("openai/gpt-oss-120b", env="OPENROUTER_MODEL")
+    # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
+    openrouter_fallback_models_raw: str = Field("", env="OPENROUTER_FALLBACK_MODELS")
+    
+    @property
+    def openrouter_fallback_models(self) -> List[str]:
+        if not self.openrouter_fallback_models_raw:
+            return []
+        return [m.strip() for m in self.openrouter_fallback_models_raw.split(",") if m.strip()]
     openrouter_base_url: str = Field(
         "https://openrouter.ai/api/v1", env="OPENROUTER_BASE_URL"
     )
