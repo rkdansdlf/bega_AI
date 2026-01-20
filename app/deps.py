@@ -26,9 +26,9 @@ def get_connection_pool() -> pool.SimpleConnectionPool:
     
     if _connection_pool is None:
         settings = get_settings()
-        _connection_pool = pool.SimpleConnectionPool(
+        _connection_pool = pool.ThreadedConnectionPool(
             minconn=1,
-            maxconn=5,
+            maxconn=30,
             dsn=settings.database_url,
             # TCP keepalive 옵션 추가
             keepalives=1,
@@ -105,27 +105,30 @@ def get_agent(
         conn = pool_instance.getconn()
         conn.autocommit = True
     settings = get_settings()
-    
-    async def llm_generator(messages):
-        import httpx
-        import json
-        if not settings.openrouter_api_key:
-            raise RuntimeError("OpenRouter API key is required.")
-        
-        headers = {
-            "Authorization": f"Bearer {settings.openrouter_api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": settings.openrouter_referer or "",
-            "X-Title": settings.openrouter_app_title or "",
-        }
-        # 스트리밍 활성화
-        payload = {
-            "model": settings.openrouter_model,
-            "messages": list(messages),
-            "max_tokens": settings.max_output_tokens,
-            "stream": True 
-        }
 
+    # tenacity settings
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception, before_sleep_log
+    import httpx
+    import logging
+    import json
+    
+    logger = logging.getLogger("BaseballAgent")
+
+    def is_server_error(exception):
+        """Return True if exception is a 5xx server error."""
+        return (
+            isinstance(exception, httpx.HTTPStatusError) and 
+            exception.response.status_code >= 500
+        )
+
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception(is_server_error),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
+    async def fetch_completion_stream(payload, headers):
+        """Helper function to fetch stream with retry logic."""
         async with httpx.AsyncClient(timeout=60.0) as client:
             async with client.stream(
                 "POST",
@@ -135,6 +138,39 @@ def get_agent(
             ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
+                    yield line
+
+    async def llm_generator(messages):
+        if not settings.openrouter_api_key:
+            raise RuntimeError("OpenRouter API key is required.")
+        
+        headers = {
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": settings.openrouter_referer or "",
+            "X-Title": settings.openrouter_app_title or "",
+        }
+        
+        # Combine primary model with fallbacks
+        models_to_try = [settings.openrouter_model] + settings.openrouter_fallback_models
+        
+        last_exception = None
+
+        for i, model in enumerate(models_to_try):
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "temperature": 0.1
+            }
+            is_fallback = i > 0
+            
+            if is_fallback:
+                logger.warning(f"Switching to model {i}: {model} (Previous error: {last_exception})")
+
+            try:
+                # Reuse the same helper (retry on 5xx, fail fast on 429)
+                async for line in fetch_completion_stream(payload, headers):
                     if line.startswith("data: "):
                         data_str = line[6:]
                         if data_str == "[DONE]":
@@ -146,6 +182,16 @@ def get_agent(
                                 yield delta
                         except json.JSONDecodeError:
                             continue
+                return # Success!
+                
+            except Exception as e:
+                logger.error(f"Model {model} failed: {e}")
+                last_exception = e
+                # Continue to next model in loop
+        
+        # If all models fail
+        logger.error(f"All models failed. details: {last_exception}")
+        raise last_exception
 
     return BaseballStatisticsAgent(connection=conn, llm_generator=llm_generator)
 

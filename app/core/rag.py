@@ -8,17 +8,19 @@ LLM(Large Language Model)을 사용하여 자연스러운 답변을 생성하는
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from psycopg2.extensions import connection as PgConnection
 import math
 
 import httpx
 
 from ..config import Settings
-from .embeddings import async_embed_texts
+from .embeddings import async_embed_query
 from .prompts import FOLLOWUP_PROMPT, SYSTEM_PROMPT, HYDE_PROMPT
 from .retrieval import similarity_search
 from . import kbo_metrics
@@ -81,6 +83,155 @@ def batter_rank_score(wrc_plus, war):
 
 
 HISTORY_CONTEXT_LIMIT = 6
+_RAG_CACHE_MAX = 10000
+_LEAGUE_CONTEXT = kbo_metrics.LeagueContext()
+
+
+def _meta_cache_key(meta: Dict[str, Any]) -> str:
+    try:
+        return json.dumps(meta, sort_keys=True, ensure_ascii=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return str(meta)
+
+
+@lru_cache(maxsize=_RAG_CACHE_MAX)
+def _process_stat_doc_cached(source_table: str, meta_json: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    meta = json.loads(meta_json)
+
+    if source_table == "player_season_pitching":
+        ip = _get_safe_stat(meta, "innings_pitched", 0.0)
+        gs = _get_safe_stat(meta, "games_started", 0)
+
+        role = "SP" if ip >= MIN_IP_SP or gs >= 10 else "RP"
+        min_ip_threshold = MIN_IP_SP if role == "SP" else MIN_IP_RP
+
+        if ip < min_ip_threshold:
+            return None, (
+                f"'{meta.get('player_name', 'N/A')}' 선수는 표본 부족(IP < {min_ip_threshold})으로 제외되었습니다."
+            )
+
+        era = _get_safe_stat(meta, "era", 99.0)
+        whip = _get_safe_stat(meta, "whip", 99.0)
+        k = _get_safe_stat(meta, "strikeouts")
+        bb = _get_safe_stat(meta, "walks_allowed")
+        hbp = _get_safe_stat(meta, "hit_batters")
+        hr = _get_safe_stat(meta, "home_runs_allowed")
+        pa = _get_safe_stat(meta, "tbf", 0)
+
+        fip_val = kbo_metrics.fip(hr, bb, hbp, k, ip, _LEAGUE_CONTEXT) or 99.0
+        era_minus_val = kbo_metrics.era_minus(era, _LEAGUE_CONTEXT) or 999.0
+        fip_minus_val = kbo_metrics.fip_minus(fip_val, _LEAGUE_CONTEXT) or 999.0
+        kbb_pct = kbo_metrics.k_minus_bb_pct(k, bb, pa) or -99.0
+
+        score = kbo_metrics.pitcher_rank_score(era_minus_val, fip_minus_val, kbb_pct, whip, ip)
+
+        return {
+            "name": meta.get("player_name", "N/A"),
+            "team": _get_team_name(meta.get("team_name", "N/A")),
+            "role": role,
+            "ip": ip,
+            "era": era,
+            "whip": whip,
+            "kbb_pct": kbb_pct,
+            "era_minus": era_minus_val,
+            "fip_minus": fip_minus_val,
+            "score": score,
+        }, None
+
+    if source_table == "player_season_batting":
+        pa = int(_get_safe_stat(meta, "plate_appearances", 0) or 0)
+        if pa < MIN_PA_BATTER:
+            return None, (
+                f"'{meta.get('player_name', 'N/A')}' 선수는 표본 부족(PA < {MIN_PA_BATTER})으로 제외되었습니다."
+            )
+
+        wrc_plus = _get_safe_stat(meta, "wrc_plus")
+        ops_plus = _get_safe_stat(meta, "ops_plus")
+        war = _get_safe_stat(meta, "war")
+        ops_val = _get_safe_stat(meta, "ops")
+        obp = _get_safe_stat(meta, "obp")
+        slg = _get_safe_stat(meta, "slg")
+        avg = _get_safe_stat(meta, "avg")
+
+        hits = _to_int(meta.get("hits"))
+        doubles = _to_int(meta.get("doubles"))
+        triples = _to_int(meta.get("triples"))
+        home_runs = _to_int(meta.get("home_runs") or meta.get("hr"))
+        walks = _to_int(meta.get("walks"))
+        ibb = _to_int(meta.get("intentional_walks"))
+        hbp = _to_int(meta.get("hbp"))
+        sf = _to_int(meta.get("sacrifice_flies"))
+        ab = _to_int(meta.get("at_bats"))
+        rbi = _to_int(meta.get("rbi"))
+        steals = _to_int(meta.get("stolen_bases"))
+
+        if ops_val is None:
+            ops_val = kbo_metrics.ops(
+                hits,
+                walks,
+                hbp,
+                ab,
+                sf,
+                doubles,
+                triples,
+                home_runs,
+            )
+
+        league_ops = (_LEAGUE_CONTEXT.lg_OBP + _LEAGUE_CONTEXT.lg_SLG) if _LEAGUE_CONTEXT.lg_OBP and _LEAGUE_CONTEXT.lg_SLG else None
+        if ops_plus is None and ops_val and league_ops:
+            ops_plus = (ops_val / league_ops) * 100
+
+        woba_val = kbo_metrics.woba(
+            walks,
+            ibb,
+            hbp,
+            hits,
+            doubles,
+            triples,
+            home_runs,
+            ab,
+            sf,
+            _LEAGUE_CONTEXT,
+        )
+        if wrc_plus is None and woba_val is not None and pa > 0:
+            wrc_plus = kbo_metrics.wrc_plus(woba_val, pa, _LEAGUE_CONTEXT)
+
+        if war is None and woba_val is not None:
+            war = kbo_metrics.war_batter(
+                woba_val,
+                pa,
+                baserunning_runs=0.0,
+                fielding_runs=0.0,
+                positional_runs=0.0,
+                league_adj_runs=0.0,
+                ctx=_LEAGUE_CONTEXT,
+            )
+
+        score = batter_rank_score(
+            wrc_plus if wrc_plus is not None else 90,
+            war if war is not None else 0,
+        )
+
+        return {
+            "name": meta.get("player_name", "N/A"),
+            "team": _get_team_name(meta.get("team_name", "N/A")),
+            "pa": pa,
+            "wrc_plus": wrc_plus,
+            "ops_plus": ops_plus,
+            "war": war,
+            "ops": ops_val,
+            "obp": obp,
+            "slg": slg,
+            "avg": avg,
+            "home_runs": home_runs,
+            "rbi": rbi,
+            "steals": steals,
+            "score": score,
+            "steals": steals,
+            "score": score,
+        }, None
+
+    return None, None
 
 
 def _history_for_messages(history: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
@@ -141,7 +292,6 @@ class RAGPipeline:
         검색된 문서를 필터링, 분류, 계산, 랭킹 매겨 LLM에 전달할 최종 컨텍스트를 생성합니다.
         """
         logger.info(f"[RAG] Processing {len(docs)} retrieved documents for year {year}")
-        ctx = kbo_metrics.LeagueContext()
         processed_pitchers = []
         processed_batters = []
         processed_games = []
@@ -165,141 +315,21 @@ class RAGPipeline:
             #     filtered_playoff_count += 1
             #     continue
 
-            # --- Pitcher Processing ---
-            if doc.get("source_table") == "player_season_pitching":
-                ip = _get_safe_stat(meta, "innings_pitched", 0.0)
-                gs = _get_safe_stat(meta, "games_started", 0)
+            # --- Pitcher / Batter Processing (cached) ---
+            if doc.get("source_table") in {"player_season_pitching", "player_season_batting"}:
                 league = meta.get("league", "N/A")
-                logger.info(f"[RAG] Found pitcher: {meta.get('player_name')} - IP: {ip}, League: {league}")
-                
-                role = "SP" if ip >= MIN_IP_SP or gs >= 10 else "RP"
-                min_ip_threshold = MIN_IP_SP if role == "SP" else MIN_IP_RP
-
-                if ip < min_ip_threshold:
-                    warnings.add(f"'{meta.get('player_name', 'N/A')}' 선수는 표본 부족(IP < {min_ip_threshold})으로 제외되었습니다.")
+                if doc.get("source_table") == "player_season_pitching":
+                    logger.info(f"[RAG] Found pitcher: {meta.get('player_name')} - IP: {meta.get('innings_pitched')}, League: {league}")
+                meta_key = _meta_cache_key(meta)
+                processed, warning = _process_stat_doc_cached(doc.get("source_table"), meta_key)
+                if warning:
+                    warnings.add(warning)
                     continue
-
-                # Calculate metrics
-                era = _get_safe_stat(meta, "era", 99.0)
-                whip = _get_safe_stat(meta, "whip", 99.0)
-                k = _get_safe_stat(meta, "strikeouts")
-                bb = _get_safe_stat(meta, "walks_allowed")
-                hbp = _get_safe_stat(meta, "hit_batters")
-                hr = _get_safe_stat(meta, "home_runs_allowed")
-                pa = _get_safe_stat(meta, "tbf", 0)
-
-                fip_val = kbo_metrics.fip(hr, bb, hbp, k, ip, ctx) or 99.0
-                era_minus_val = kbo_metrics.era_minus(era, ctx) or 999.0
-                fip_minus_val = kbo_metrics.fip_minus(fip_val, ctx) or 999.0
-                kbb_pct = kbo_metrics.k_minus_bb_pct(k, bb, pa) or -99.0
-                
-                score = kbo_metrics.pitcher_rank_score(era_minus_val, fip_minus_val, kbb_pct, whip, ip)
-
-                processed_pitchers.append({
-                    "name": meta.get("player_name", "N/A"),
-                    "team": _get_team_name(meta.get("team_name", "N/A")),
-                    "role": role,
-                    "ip": ip,
-                    "era": era,
-                    "whip": whip,
-                    "kbb_pct": kbb_pct,
-                    "era_minus": era_minus_val,
-                    "fip_minus": fip_minus_val,
-                    "score": score,
-                })
-            elif doc.get("source_table") == "player_season_batting":
-                pa = int(_get_safe_stat(meta, "plate_appearances", 0) or 0)
-                if pa < MIN_PA_BATTER:
-                    warnings.add(
-                        f"'{meta.get('player_name', 'N/A')}' 선수는 표본 부족(PA < {MIN_PA_BATTER})으로 제외되었습니다."
-                    )
-                    continue
-
-                wrc_plus = _get_safe_stat(meta, "wrc_plus")
-                ops_plus = _get_safe_stat(meta, "ops_plus")
-                war = _get_safe_stat(meta, "war")
-                ops_val = _get_safe_stat(meta, "ops")
-                obp = _get_safe_stat(meta, "obp")
-                slg = _get_safe_stat(meta, "slg")
-                avg = _get_safe_stat(meta, "avg")
-
-                hits = _to_int(meta.get("hits"))
-                doubles = _to_int(meta.get("doubles"))
-                triples = _to_int(meta.get("triples"))
-                home_runs = _to_int(meta.get("home_runs") or meta.get("hr"))
-                walks = _to_int(meta.get("walks"))
-                ibb = _to_int(meta.get("intentional_walks"))
-                hbp = _to_int(meta.get("hbp"))
-                sf = _to_int(meta.get("sacrifice_flies"))
-                ab = _to_int(meta.get("at_bats"))
-                rbi = _to_int(meta.get("rbi"))
-                steals = _to_int(meta.get("stolen_bases"))
-
-                if ops_val is None:
-                    ops_val = kbo_metrics.ops(
-                        hits,
-                        walks,
-                        hbp,
-                        ab,
-                        sf,
-                        doubles,
-                        triples,
-                        home_runs,
-                    )
-
-                league_ops = (ctx.lg_OBP + ctx.lg_SLG) if ctx.lg_OBP and ctx.lg_SLG else None
-                if ops_plus is None and ops_val and league_ops:
-                    ops_plus = (ops_val / league_ops) * 100
-
-                woba_val = kbo_metrics.woba(
-                    walks,
-                    ibb,
-                    hbp,
-                    hits,
-                    doubles,
-                    triples,
-                    home_runs,
-                    ab,
-                    sf,
-                    ctx,
-                )
-                if wrc_plus is None and woba_val is not None and pa > 0:
-                    wrc_plus = kbo_metrics.wrc_plus(woba_val, pa, ctx)
-
-                if war is None and woba_val is not None:
-                    war = kbo_metrics.war_batter(
-                        woba_val,
-                        pa,
-                        baserunning_runs=0.0,
-                        fielding_runs=0.0,
-                        positional_runs=0.0,
-                        league_adj_runs=0.0,
-                        ctx=ctx,
-                    )
-
-                score = batter_rank_score(
-                    wrc_plus if wrc_plus is not None else 90,
-                    war if war is not None else 0,
-                )
-
-                processed_batters.append({
-                    "name": meta.get("player_name", "N/A"),
-                    "team": _get_team_name(meta.get("team_name", "N/A")),
-                    "pa": pa,
-                    "wrc_plus": wrc_plus,
-                    "ops_plus": ops_plus,
-                    "war": war,
-                    "ops": ops_val,
-                    "obp": obp,
-                    "slg": slg,
-                    "avg": avg,
-                    "home_runs": home_runs,
-                    "rbi": rbi,
-                    "steals": steals,
-                    "score": score,
-                    "steals": steals,
-                    "score": score,
-                })
+                if processed:
+                    if doc.get("source_table") == "player_season_pitching":
+                        processed_pitchers.append(processed)
+                    else:
+                        processed_batters.append(processed)
             elif doc.get("source_table") in ["game", "game_metadata", "game_inning_scores", "game_batting_stats", "game_pitching_stats"]:
                 processed_games.append(doc)
             elif doc.get("source_table") == "awards":
@@ -334,7 +364,7 @@ class RAGPipeline:
             "movements": processed_movements,
             "raw_docs": raw_docs,
             "warnings": list(warnings),
-            "context": ctx,
+            "context": _LEAGUE_CONTEXT,
         }
 
     async def retrieve(
@@ -354,14 +384,17 @@ class RAGPipeline:
             search_query = query
 
         limit = limit or self.settings.default_search_limit
-        embeddings = await async_embed_texts([search_query], self.settings)
-        if not embeddings:
+        embedding = await async_embed_query(search_query, self.settings)
+        if not embedding:
             return []
 
         keyword = query
-        docs = similarity_search(
+        from fastapi.concurrency import run_in_threadpool
+
+        docs = await run_in_threadpool(
+            similarity_search,
             self.connection,
-            embeddings[0],
+            embedding,
             limit=limit,
             filters=filters,
             keyword=keyword,

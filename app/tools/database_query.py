@@ -513,7 +513,7 @@ class DatabaseQueryTool:
                 LEFT JOIN teams t ON psb.team_code = t.team_id
                 WHERE LOWER(pb.name) LIKE LOWER(%s) 
                 AND psb.season = %s 
-                AND psb.league = '정규시즌'
+                AND psb.league = 'REGULAR'
                 
                 UNION
                 
@@ -523,7 +523,7 @@ class DatabaseQueryTool:
                 LEFT JOIN teams t ON psp.team_code = t.team_id
                 WHERE LOWER(pb.name) LIKE LOWER(%s) 
                 AND psp.season = %s 
-                AND psp.league = '정규시즌'
+                AND psp.league = 'REGULAR'
                 
                 ORDER BY player_name
             """
@@ -635,7 +635,7 @@ class DatabaseQueryTool:
                     LEFT JOIN teams t ON psd.team_code = t.team_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 
                     AND psd.season = %s 
-                    AND psd.league = '정규시즌'
+                    AND psd.league = 'REGULAR'
                     ORDER BY psd.games_played DESC
                     LIMIT 1
                 '''
@@ -658,7 +658,7 @@ class DatabaseQueryTool:
                     FROM player_season_defense psd
                     JOIN player_basic pb ON psd.player_id = pb.player_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 
-                    AND psd.league = '정규시즌'
+                    AND psd.league = 'REGULAR'
                     GROUP BY pb.player_id, pb.name
                     LIMIT 1
                 '''
@@ -726,7 +726,7 @@ class DatabaseQueryTool:
                 LEFT JOIN teams t ON ppv.team_code = t.team_id
                 WHERE LOWER(pb.name) LIKE LOWER(%s) 
                 AND ppv.season = %s 
-                AND ppv.league = '정규시즌'
+                AND ppv.league = 'REGULAR'
                 LIMIT 1
             '''
             
@@ -981,7 +981,7 @@ class DatabaseQueryTool:
                 LEFT JOIN teams t ON psb.team_code = t.team_id
                 WHERE psb.team_code = %s 
                 AND psb.season = %s 
-                AND psb.league = '정규시즌'
+                AND psb.league = 'REGULAR'
                 AND psb.plate_appearances >= 100
                 AND psb.ops IS NOT NULL
                 ORDER BY psb.ops DESC
@@ -1002,7 +1002,7 @@ class DatabaseQueryTool:
                 LEFT JOIN teams t ON psp.team_code = t.team_id
                 WHERE psp.team_code = %s 
                 AND psp.season = %s 
-                AND psp.league = '정규시즌'
+                AND psp.league = 'REGULAR'
                 AND psp.innings_pitched >= 30
                 AND psp.era IS NOT NULL
                 ORDER BY psp.era ASC

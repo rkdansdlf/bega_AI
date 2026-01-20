@@ -357,7 +357,7 @@ def render_hitter_game(
 
     game_id = row.get("game_id", "정보 미상")
     player = row.get("player_name", f"선수 {row.get('player_id', '정보 미상')}")
-    team = row.get("team_id", "팀 정보 미상")
+    team = row.get("team_name") or row.get("team_code", "팀 정보 미상")
     batting_order = row.get("batting_order")
 
     position_raw = row.get("position")
@@ -465,7 +465,7 @@ def render_pitcher_game(
     
     game_id = row.get("game_id", "정보 미상")
     player = row.get("player_name", f"선수 {row.get('player_id', '정보 미상')}")
-    team = row.get("team_id", "팀 정보 미상")
+    team = row.get("team_name") or row.get("team_code", "팀 정보 미상")
     appearance = row.get("appearance", "등판")
     result = row.get("result", "")
     

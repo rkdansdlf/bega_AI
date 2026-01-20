@@ -40,7 +40,7 @@ class InMemoryRateLimiter:
             bucket.append(now)
 
 
-rate_limiter = InMemoryRateLimiter(max_requests=10, window_seconds=60)
+rate_limiter = InMemoryRateLimiter(max_requests=1000, window_seconds=60)
 
 
 async def rate_limit_dependency(request: Request) -> None:

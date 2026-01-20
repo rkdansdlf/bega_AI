@@ -684,6 +684,101 @@ class GameQueryTool:
 
         return result
     
+    def get_game_lineup(
+        self, 
+        game_id: str = None, 
+        date: str = None,
+        team_name: str = None
+    ) -> Dict[str, Any]:
+        """
+        특정 경기의 선발 라인업을 조회합니다.
+        
+        Args:
+            game_id: 경기 고유 ID
+            date: 경기 날짜 (YYYY-MM-DD)
+            team_name: 팀명
+            
+        Returns:
+            라인업 정보 결과
+        """
+        logger.info(f"[GameQuery] Lineup query - ID: {game_id}, Date: {date}, Team: {team_name}")
+        
+        result = {
+            "query_params": {
+                "game_id": game_id,
+                "date": date,
+                "team_name": team_name
+            },
+            "lineups": [],
+            "found": False,
+            "error": None
+        }
+        
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # 1. 경기 ID 찾기 (ID가 없는 경우)
+            if not game_id and date:
+                where_clause = "DATE(game_date) = %s"
+                params = [date]
+                if team_name:
+                    normalized_team = self._normalize_team_name(team_name)
+                    where_clause += " AND (home_team = %s OR away_team = %s)"
+                    params.extend([normalized_team, normalized_team])
+                
+                cursor.execute(f"SELECT game_id FROM game WHERE {where_clause} LIMIT 1", params)
+                row = cursor.fetchone()
+                if row:
+                    game_id = row['game_id']
+            
+            if not game_id:
+                result["error"] = "경기를 찾을 수 없거나 game_id가 제공되지 않았습니다."
+                return result
+            
+            # 2. 라인업 조회 (새로 추가된 player_name, is_starter 컬럼 사용)
+            lineup_query = """
+                SELECT 
+                    team_code,
+                    player_name,
+                    position,
+                    batting_order,
+                    is_starter
+                FROM game_lineups
+                WHERE game_id = %s
+            """
+            params = [game_id]
+            
+            if team_name:
+                normalized_team = self._normalize_team_name(team_name)
+                lineup_query += " AND team_code = %s"
+                params.append(normalized_team)
+                
+            lineup_query += " ORDER BY team_code, batting_order"
+            
+            cursor.execute(lineup_query, params)
+            rows = cursor.fetchall()
+            
+            if rows:
+                result["lineups"] = [dict(row) for row in rows]
+                result["found"] = True
+                
+                # 팀 코드를 이름으로 변환
+                for entry in result["lineups"]:
+                    entry["team_name"] = self.get_team_name(entry["team_code"])
+                    
+                logger.info(f"[GameQuery] Found {len(rows)} lineup entries for game {game_id}")
+            else:
+                logger.warning(f"[GameQuery] No lineup found for game {game_id}")
+                
+        except Exception as e:
+            logger.error(f"[GameQuery] Lineup query error: {e}")
+            result["error"] = f"라인업 조회 오류: {e}"
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+                
+        return result
+
     def validate_game_exists(self, game_id: str = None, date: str = None) -> Dict[str, Any]:
         """
         경기 존재 여부를 확인합니다.

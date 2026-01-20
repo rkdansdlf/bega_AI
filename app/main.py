@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .deps import lifespan
-from .routers import chat_stream, search, ingest
+from .routers import chat_stream, search, ingest, vision, coach
 
 
 def create_app() -> FastAPI:
@@ -42,6 +42,8 @@ def create_app() -> FastAPI:
     app.include_router(chat_stream.router)
     app.include_router(search.router)
     app.include_router(ingest.router)
+    app.include_router(vision.router)
+    app.include_router(coach.router)
 
     @app.get("/health", tags=["system"])
     async def health():
