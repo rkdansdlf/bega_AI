@@ -60,14 +60,18 @@ STAT_MAPPING = {
     "도루": "stolen_bases", "SB": "stolen_bases", "sb": "stolen_bases",
     "WAR": "war", "war": "war", "대체선수대비승수": "war",
     "wRC+": "wrc_plus", "wrc+": "wrc_plus",
+    "득점권 타율": "scoring_position_avg", "득점권타율": "scoring_position_avg", "득타율": "scoring_position_avg",
+    "승률": "win_rate", "홈 승률": "home_win_rate", "홈경기 승률": "home_win_rate", "안방 승률": "home_win_rate",
     
     # 투수 지표
-    "ERA": "era", "era": "era", "평균자책": "era", "방어율": "era",
+    "ERA": "era", "era": "era", "평균자책": "era", "평균자책점": "era", "방어율": "era",
     "WHIP": "whip", "whip": "whip",
     "승수": "wins", "W": "wins", "win": "wins",
     "세이브": "saves", "SV": "saves", "save": "saves",
     "삼진": "strikeouts", "K": "strikeouts", "SO": "strikeouts",
     "이닝": "innings_pitched", "IP": "innings_pitched", "ip": "innings_pitched",
+    "승률": "win_rate", "WPCT": "win_rate",
+    "득점권타율": "ops_risp", # 임시로 ops_risp 또는 별도 필드 정의 필요
 }
 
 # 야구 포지션 및 역할 매핑 테이블
@@ -394,7 +398,13 @@ def extract_player_name(query: str) -> Optional[str]:
                 "포수", "내야수", "외야수", "유격수", "중견수", "좌익수", "우익수",
                 
                 "올스타", "신인왕", "골든글러브", "베스트", "엠브이피", "타이틀",
-                "트레이드", "이적", "영입", "방출", "등록", "말소", "계약", "연봉"
+                "트레이드", "이적", "영입", "방출", "등록", "말소", "계약", "연봉",
+                "알려줘", "설명해줘", "보여줘", "부탁해", "어딨어", "누구야",
+    "작년", "올해", "재작년", "내년", "순위", "성적", "기록", "랭킹", "정규시즌",
+    "승률", "몇승", "몇패", "방어율", "평균자책", "평균자책점", "타율", "홈런", "타점", "도루",
+    "포스트시즌", "준플레이오프", "플레이오프", "한국시리즈", "와일드카드",
+    "누구", "어디", "언제", "어떻게", "얼마나", "어떠니", "궁금해", "그려줘", "표",
+    "상대", "특정", "결과", "대결", "승부", "위가", "경기"
             }
             if match not in common_terms:
                 return match

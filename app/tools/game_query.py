@@ -26,8 +26,9 @@ class GameQueryTool:
     def __init__(self, connection: PgConnection):
         self.connection = connection
         
+        # 기본 매핑 (폴백용)
         self.TEAM_CODE_TO_NAME = {
-            "KIA": "KIA 타이거즈",
+            "HT": "KIA 타이거즈", "KIA": "KIA 타이거즈",
             "LG": "LG 트윈스",
             "OB": "두산 베어스",
             "LT": "롯데 자이언츠",
@@ -36,11 +37,12 @@ class GameQueryTool:
             "HH": "한화 이글스",
             "KT": "KT 위즈",
             "NC": "NC 다이노스",
+            "SSG": "SSG 랜더스",
             "SK": "SSG 랜더스"
         }
 
         self.NAME_TO_CODE = {
-            "KIA": "KIA", "기아": "KIA", "KIA 타이거즈": "KIA", "타이거즈": "KIA",
+            "KIA": "HT", "기아": "HT", "KIA 타이거즈": "HT", "타이거즈": "HT", "HT": "HT",
             "LG": "LG", "LG 트윈스": "LG", "트윈스": "LG",
             "두산": "OB", "OB": "OB", "두산 베어스": "OB", "베어스": "OB",
             "롯데": "LT", "LT": "LT", "롯데 자이언츠": "LT", "자이언츠": "LT",
@@ -49,8 +51,68 @@ class GameQueryTool:
             "한화": "HH", "HH": "HH", "한화 이글스": "HH", "이글스": "HH",
             "KT": "KT", "KT 위즈": "KT", "위즈": "KT",
             "NC": "NC", "NC 다이노스": "NC", "다이노스": "NC",
-            "SSG": "SK", "SK": "SK", "SSG 랜더스": "SK", "랜더스": "SK"
+            "SSG": "SSG", "SK": "SSG", "SSG 랜더스": "SSG", "랜더스": "SSG"
         }
+        
+        # DB에서 최신 매핑 로드
+        self._load_team_mappings()
+
+    def _load_team_mappings(self):
+        """OCI DB의 teams 테이블과 franchise_id를 활용하여 팀 매핑 정보를 동적으로 로드합니다."""
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            query = """
+                SELECT team_id, team_name, franchise_id, founded_year 
+                FROM teams 
+                WHERE franchise_id IS NOT NULL 
+                ORDER BY franchise_id, founded_year DESC;
+            """
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            
+            if rows:
+                logger.info(f"[GameQuery] Syncing {len(rows)} franchise entries from OCI")
+                
+                # 프랜차이즈별로 그룹화
+                franchises = {}
+                for row in rows:
+                    f_id = row['franchise_id']
+                    if f_id not in franchises:
+                        franchises[f_id] = []
+                    franchises[f_id].append(row)
+                
+                for f_id, members in franchises.items():
+                    # 1. 현대적 브랜드명 선정 (DESC 정렬이므로 첫 번째가 최신)
+                    modern_team = members[0]
+                    modern_name = modern_team['team_name']
+                    
+                    # 2. 경기(game) 테이블 매핑 원칙: 
+                    # SSG는 'SSG' 사용, KIA는 'HT' 사용, 키움은 'WO' 사용 확인됨
+                    if modern_name == "SSG 랜더스":
+                        target_code = "SSG"
+                    elif modern_name == "KIA 타이거즈":
+                        target_code = "HT"
+                    else:
+                        # 기본적으로는 members 중 가장 오래된 혹은 안정된 ID 선택 시도
+                        target_code = next((m['team_id'] for m in members if m['team_id'] in ['HT', 'WO', 'OB', 'SS', 'LT', 'HH', 'KT', 'NC', 'LG']), modern_team['team_id'])
+                    
+                    # 3. 매핑 데이터 업데이트
+                    for member in members:
+                        m_id = member['team_id']
+                        m_name = member['team_name']
+                        
+                        self.NAME_TO_CODE[m_id] = target_code
+                        self.NAME_TO_CODE[m_name] = target_code
+                        self.NAME_TO_CODE[m_name.split()[0]] = target_code
+                        
+                        self.TEAM_CODE_TO_NAME[m_id] = modern_name
+                        self.TEAM_CODE_TO_NAME[target_code] = modern_name
+                
+                logger.info("[GameQuery] Game Team codes synchronized using OCI franchise IDs.")
+            
+            cursor.close()
+        except Exception as e:
+            logger.warning(f"[GameQuery] Dynamic mapping failed from OCI: {e}. Using defaults.")
 
     def get_team_name(self, team_code: str) -> str:
         return self.TEAM_CODE_TO_NAME.get(team_code, team_code)
@@ -773,6 +835,67 @@ class GameQueryTool:
         except Exception as e:
             logger.error(f"[GameQuery] Lineup query error: {e}")
             result["error"] = f"라인업 조회 오류: {e}"
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+                
+        return result
+
+    def get_team_last_game_date(self, team_name: str, year: int, league_type: str = 'regular_season') -> Dict[str, Any]:
+        """
+        특정 팀의 마지막 경기 날짜를 조회합니다.
+        
+        Args:
+            team_name: 팀명
+            year: 시즌 년도
+            league_type: 'regular_season' 또는 'korean_series' 등
+            
+        Returns:
+            팀의 마지막 경기 날짜 정보
+        """
+        logger.info(f"[GameQuery] Getting last game date for {team_name} in {year} ({league_type})")
+        
+        normalized_team = self._normalize_team_name(team_name)
+        
+        result = {
+            "team_name": team_name,
+            "team_id": normalized_team,
+            "year": year,
+            "last_game_date": None,
+            "found": False,
+            "error": None
+        }
+        
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # 리그 타입 코드 매핑
+            league_code_map = {'regular_season': 0, 'korean_series': 5}
+            league_code = league_code_map.get(league_type, 0)
+            
+            query = """
+                SELECT MAX(g.game_date) as last_game_date
+                FROM game g
+                LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                WHERE ks.season_year = %s
+                  AND ks.league_type_code = %s
+                  AND (g.home_team = %s OR g.away_team = %s)
+                  AND g.game_status = 'COMPLETED';
+            """
+            
+            cursor.execute(query, (year, league_code, normalized_team, normalized_team))
+            row = cursor.fetchone()
+            
+            if row and row['last_game_date']:
+                result["last_game_date"] = row['last_game_date'].strftime('%Y-%m-%d')
+                result["found"] = True
+                logger.info(f"[GameQuery] Found last game for {team_name}: {result['last_game_date']}")
+            else:
+                logger.warning(f"[GameQuery] No last game found for {team_name} in {year} {league_type}")
+                
+        except Exception as e:
+            logger.error(f"[GameQuery] Team last game query error: {e}")
+            result["error"] = str(e)
         finally:
             if 'cursor' in locals():
                 cursor.close()

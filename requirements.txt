@@ -14,3 +14,4 @@ tqdm>=4.66.0
 firebase-admin>=6.5.0
 google-cloud-firestore>=2.14.0
 tenacity
+sentry-sdk[fastapi]

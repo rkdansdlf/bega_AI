@@ -77,7 +77,11 @@ class Settings(BaseSettings):
     default_search_limit: int = Field(3, env="DEFAULT_SEARCH_LIMIT")
 
     # --- SSE / 채팅 관련 설정 ---
-    max_output_tokens: int = Field(1024, env="MAX_OUTPUT_TOKENS")
+    # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
+    max_output_tokens: int = Field(4096, env="MAX_OUTPUT_TOKENS")
+
+    # --- Monitoring ---
+    sentry_dsn: Optional[str] = Field(None, env="SENTRY_DSN")
 
     @field_validator("embed_provider")
     def _validate_embed_provider(cls, value: str) -> str:

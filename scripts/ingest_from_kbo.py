@@ -45,7 +45,7 @@ from pathlib import Path
 
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 # get_settings().database_url로 Postgres 연결을 열고 쿼리 타임아웃을 막기 위해 SET statement_timeout TO 0; 적용. 각 테이블을 순서대로 처리.
 from app.config import get_settings
@@ -733,7 +733,7 @@ INSERT INTO rag_chunks (
     title,
     content,
     embedding
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+) VALUES %s
 ON CONFLICT (source_table, source_row_id)
 DO UPDATE SET
     meta = EXCLUDED.meta,
@@ -1059,10 +1059,11 @@ def flush_chunks(
             "[" + ",".join(f"{v:.8f}" for v in embedding) + "]" for embedding in embeddings
         ]
 
-    for item, vector_literal in zip(buffer, vector_literals):
-        cur.execute(
-            UPSERT_SQL,
-            (
+    if vector_literals:
+        # Prepare data for execute_values
+        data = []
+        for item, vector_literal in zip(buffer, vector_literals):
+            data.append((
                 json.dumps(item.meta, default=str) if item.meta else None,
                 item.season_year,
                 item.season_id,
@@ -1073,8 +1074,18 @@ def flush_chunks(
                 item.source_row_id,
                 item.title,
                 item.content,
-                vector_literal,
-            ),
+                vector_literal
+            ))
+            
+        # Bulk upsert using execute_values
+        # Note: Upsert with ON CONFLICT needs careful template if using complex UPSERT_SQL
+        # But here we can just use the VALUES part and append the ON CONFLICT clause
+        execute_values(
+            cur,
+            UPSERT_SQL,
+            data,
+            template=None, # default is %s, %s...
+            page_size=100
         )
 
     flushed = len(buffer)
