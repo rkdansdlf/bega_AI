@@ -285,7 +285,7 @@ async def chat_stream_get(
         agent=agent,
     )
 
-whisper_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY2"))
+whisper_client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY2"))
 
 @router.post("/voice")
 async def transcribe_audio(
@@ -305,8 +305,8 @@ async def transcribe_audio(
         
         logger.info("OpenAI Whisper API 호출 중...")
         
-        # 동기 호출인지 확인
-        response = whisper_client.audio.transcriptions.create(
+        # 비동기 호출로 변경
+        response = await whisper_client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
             language="ko",

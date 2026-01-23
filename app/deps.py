@@ -143,17 +143,17 @@ def get_agent(
     async def llm_generator(messages):
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required.")
-        
+
         headers = {
             "Authorization": f"Bearer {settings.openrouter_api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": settings.openrouter_referer or "",
             "X-Title": settings.openrouter_app_title or "",
         }
-        
+
         # Combine primary model with fallbacks
         models_to_try = [settings.openrouter_model] + settings.openrouter_fallback_models
-        
+
         last_exception = None
 
         for i, model in enumerate(models_to_try):
@@ -161,14 +161,17 @@ def get_agent(
                 "model": model,
                 "messages": messages,
                 "stream": True,
-                "temperature": 0.1
+                "temperature": 0.1,
+                "max_tokens": settings.max_output_tokens
             }
             is_fallback = i > 0
-            
+
             if is_fallback:
                 logger.warning(f"Switching to model {i}: {model} (Previous error: {last_exception})")
 
             try:
+                chunk_count = 0
+                total_chars = 0
                 # Reuse the same helper (retry on 5xx, fail fast on 429)
                 async for line in fetch_completion_stream(payload, headers):
                     if line.startswith("data: "):
@@ -179,16 +182,24 @@ def get_agent(
                             data = json.loads(data_str)
                             delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
                             if delta:
+                                chunk_count += 1
+                                total_chars += len(delta)
                                 yield delta
                         except json.JSONDecodeError:
                             continue
+
+                # 스트림 완료 후 청크 수 로깅
+                if chunk_count == 0:
+                    logger.warning(f"[LLM Generator] Stream completed but received 0 chunks from model {model}")
+                else:
+                    logger.debug(f"[LLM Generator] Stream completed: {chunk_count} chunks, {total_chars} chars from model {model}")
                 return # Success!
-                
+
             except Exception as e:
                 logger.error(f"Model {model} failed: {e}")
                 last_exception = e
                 # Continue to next model in loop
-        
+
         # If all models fail
         logger.error(f"All models failed. details: {last_exception}")
         raise last_exception

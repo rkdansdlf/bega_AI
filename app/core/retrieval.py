@@ -104,8 +104,15 @@ def similarity_search(
     # 순서: [벡터 문자열, (키워드), ...필터 값, LIMIT 값]
     final_params = [vector_str] + keyword_param + filter_params + [limit]
 
+    import time
+    start_time = time.perf_counter()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, final_params)
         rows = cur.fetchall()
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+    
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("[Search] Vector similarity search took %.2fms (results=%d)", elapsed_ms, len(rows))
         
     return [dict(row) for row in rows]

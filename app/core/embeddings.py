@@ -533,9 +533,14 @@ async def async_embed_query(
 
     cached = await _get_cached_query_embedding(cache_key)
     if cached is not None:
+        logger.debug("[Embeddings] Cache HIT for query (len=%d)", len(query))
         return cached
 
+    start_time = time.perf_counter()
     vectors = await async_embed_texts([query], settings, max_concurrency=max_concurrency)
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+    logger.info("[Embeddings] Query embedding took %.2fms (len=%d)", elapsed_ms, len(query))
+    
     if not vectors:
         return []
 

@@ -92,8 +92,10 @@ class RegulationQueryTool:
             """
             
             cursor.execute(text_search_query, (
-                search_pattern, # for title ILIKE
-                search_pattern, # for content ILIKE
+                search_pattern, # for similarity_score title
+                search_pattern, # for similarity_score content
+                search_pattern, # for WHERE content
+                search_pattern, # for WHERE title
                 limit
             ))
             
