@@ -12,7 +12,7 @@ from ..db import SCHEMA_SQL
 from ..deps import get_db_connection
 
 
-router = APIRouter(prefix="/ingest", tags=["ingest"])
+router = APIRouter(prefix="/ai/ingest", tags=["ingest"])
 
 
 class IngestPayload(BaseModel):
