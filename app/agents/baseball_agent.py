@@ -232,11 +232,50 @@ class BaseballStatisticsAgent:
             },
             self._tool_get_advanced_stats
         )
+
+        # WPA 리더보드 조회 도구
+        self.tool_caller.register_tool(
+            "get_player_wpa_leaders",
+            "WPA(Win Probability Added, 승리 확률 기여도) 순위를 조회합니다. 'WPA 최고', '승리 기여도 상위' 타자/투수 질문에 사용하세요. 주의: get_leaderboard는 WPA를 지원하지 않으므로 반드시 이 도구를 사용해야 합니다.",
+            {
+                "year": "시즌 년도",
+                "position": "batting(타자), pitching(투수), 또는 both(둘다, 기본값)",
+                "team_filter": "특정 팀만 조회 (선택적)",
+                "limit": "상위 몇 명까지 (선택적, 기본 10명)"
+            },
+            self._tool_get_player_wpa_leaders
+        )
+
+        # 클러치 모먼트 조회 도구
+        self.tool_caller.register_tool(
+            "get_clutch_moments",
+            "경기 중 승부처가 되었던 결정적인 순간(Critical Moments)들을 조회합니다. '결정적 장면', '중요한 순간', '승부처' 질문에 사용하세요.",
+            {
+                "game_id": "경기 ID (선택적)",
+                "date": "경기 날짜 (선택적)",
+                "year": "시즌 년도 (선택적)",
+                "team_filter": "특정 팀만 조회 (선택적)",
+                "limit": "조회할 개수 (선택적, 기본 10개)"
+            },
+            self._tool_get_clutch_moments
+        )
+
+        # 선수별 WPA 통계 조회 도구
+        self.tool_caller.register_tool(
+            "get_player_wpa_stats",
+            "특정 선수의 WPA(승리 확률 기여도) 상세 통계를 조회합니다. 특정 선수의 승리 기여도나 '클러치 능력' 분석 시 사용하세요.",
+            {
+                "player_name": "선수 이름",
+                "year": "시즌 년도",
+                "position": "batting(타자), pitching(투수), 또는 both(둘다, 기본값)"
+            },
+            self._tool_get_player_wpa_stats
+        )
         
         # KBO 규정 검색 도구
         self.tool_caller.register_tool(
             "search_regulations",
-            "KBO 규정을 검색합니다. 야구 규칙, 제도, 판정 기준 등의 질문에 사용하세요.",
+            "KBO 규정 및 문서를 검색합니다. 야구 규칙, 제도, 판정 기준, 용어 정의 등의 질문에 사용하세요. 주의: 통계 데이터(타율, WPA 등)는 이 도구가 아닌 DB 조회 도구를 사용하세요.",
             {
                 "query": "검색할 규정 내용 (예: 타이브레이크, FA 조건, 인필드 플라이)"
             },
@@ -420,6 +459,45 @@ class BaseballStatisticsAgent:
                 "limit": "반환할 최대 결과 수 (선택적, 기본값 10)"
             },
             self._tool_search_documents
+        )
+
+        # WPA 리더보드 조회 도구 (신규)
+        self.tool_caller.register_tool(
+            "get_player_wpa_leaders",
+            "WPA(승리 확률 기여도) 순위를 조회합니다. '누가 제일 결정적인가?', 'WPA 순위' 등의 질문에 사용하세요.",
+            {
+                "year": "시즌 년도",
+                "position": "batter(타자), pitcher(투수), 또는 both(둘다, 기본값)",
+                "team_filter": "특정 팀만 조회 (선택적)",
+                "limit": "상위 몇 명까지 (기본 10명)"
+            },
+            self._tool_get_player_wpa_leaders
+        )
+
+        # 클러치 모먼트(결정적 순간) 조회 도구 (신규)
+        self.tool_caller.register_tool(
+            "get_clutch_moments",
+            "경기의 결정적인 순간(클러치 상황)을 조회합니다. '어제 경기 최고 승부처는?', '이번 시즌 결정적 장면' 등의 질문에 사용하세요.",
+            {
+                "game_id": "경기 ID (선택적)",
+                "date": "경기 날짜 (YYYY-MM-DD, 선택적)",
+                "year": "시즌 년도 (선택적)",
+                "team_filter": "특정 팀만 조회 (선택적)",
+                "limit": "상위 몇 개까지 (기본 10개)"
+            },
+            self._tool_get_clutch_moments
+        )
+
+        # 선수별 WPA 통계조회 도구 (신규)
+        self.tool_caller.register_tool(
+            "get_player_wpa_stats",
+            "특정 선수의 WPA(승리 기여도) 상세 데이터를 조회합니다. '선수의 해결사 능력', '위기 상황 성적' 등의 질문에 사용하세요.",
+            {
+                "player_name": "선수명",
+                "year": "시즌 년도",
+                "position": "batter(타자), pitcher(투수), 또는 both(둘다, 기본값)"
+            },
+            self._tool_get_player_wpa_stats
         )
     
     def _tool_search_documents(self, query: str, limit: int = 10) -> ToolResult:
@@ -2355,3 +2433,79 @@ class BaseballStatisticsAgent:
                 "data_sources": [],
                 "error": f"답변 생성 오류: {e}"
             }
+
+    # ========================================
+    # WPA (Win Probability Added) Tool Wrappers
+    # ========================================
+
+    def _tool_get_player_wpa_leaders(
+        self,
+        year: int,
+        position: str = "both",
+        team_filter: Optional[str] = None,
+        limit: int = 10
+    ) -> ToolResult:
+        """WPA 리더보드 조회 도구의 래퍼"""
+        try:
+            result = self.db_query_tool.get_player_wpa_leaders(year, position, team_filter, limit)
+            if result.get("error"):
+                return ToolResult(success=False, data=result, message=f"WPA 조회 오류: {result['error']}")
+            if not result.get("found"):
+                return ToolResult(success=False, data=result, message=f"{year}년 WPA 리더보드 정보를 찾을 수 없습니다.")
+            
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"{year}년 WPA 순위를 성공적으로 조회했습니다."
+            )
+        except Exception as e:
+            logger.error(f"[BaseballAgent] WPA leaders tool error: {e}")
+            return ToolResult(success=False, data={}, message=f"WPA 순위 조회 중 오류 발생: {e}")
+
+    def _tool_get_clutch_moments(
+        self,
+        game_id: Optional[str] = None,
+        date: Optional[str] = None,
+        year: Optional[int] = None,
+        team_filter: Optional[str] = None,
+        limit: int = 10
+    ) -> ToolResult:
+        """클러치 모먼트 조회 도구의 래퍼"""
+        try:
+            result = self.db_query_tool.get_clutch_moments(game_id, date, year, team_filter, limit)
+            if result.get("error"):
+                return ToolResult(success=False, data=result, message=f"클러치 순간 조회 오류: {result['error']}")
+            if not result.get("found"):
+                return ToolResult(success=False, data=result, message="결정적인 순간 데이터를 찾을 수 없습니다.")
+            
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"결정적인 순간(클러치 상황) {len(result['clutch_moments'])}건을 조회했습니다."
+            )
+        except Exception as e:
+            logger.error(f"[BaseballAgent] Clutch moments tool error: {e}")
+            return ToolResult(success=False, data={}, message=f"결정적 순간 조회 중 오류 발생: {e}")
+
+    def _tool_get_player_wpa_stats(
+        self,
+        player_name: str,
+        year: int,
+        position: str = "both"
+    ) -> ToolResult:
+        """선수별 WPA 통계조회 도구의 래퍼"""
+        try:
+            result = self.db_query_tool.get_player_wpa_stats(player_name, year, position)
+            if result.get("error"):
+                return ToolResult(success=False, data=result, message=f"선수 WPA 조회 오류: {result['error']}")
+            if not result.get("found"):
+                return ToolResult(success=False, data=result, message=f"{year}년 {player_name} 선수의 WPA 기록을 찾을 수 없습니다.")
+            
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"{year}년 {result['player_name']} 선수의 WPA 통계를 성공적으로 조회했습니다."
+            )
+        except Exception as e:
+            logger.error(f"[BaseballAgent] Player WPA stats tool error: {e}")
+            return ToolResult(success=False, data={}, message=f"선수 WPA 조회 중 오류 발생: {e}")
