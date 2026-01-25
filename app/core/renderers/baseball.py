@@ -232,9 +232,9 @@ def render_batting_season(
     slg = _format_float(row.get("slg"), 3)
     games = _format_count(row.get("g") or row.get("games"), "경기")
     plate = _format_count(row.get("pa") or row.get("plate_appearances"), "타석")
-    home_runs = _format_count(row.get("hr") or row.get("home_runs"), "홈런")
-    rbi = _format_count(row.get("rbi"), "타점")
-    steals = _format_count(row.get("stolen_bases"), "도루")
+    home_runs = _format_count(row.get("hr") or row.get("home_runs"))
+    rbi = _format_count(row.get("rbi"))
+    steals = _format_count(row.get("stolen_bases"))
 
     headline = [header_text, subject]
     main = []
@@ -245,11 +245,11 @@ def render_batting_season(
     if ops:
         main.append(f"OPS {ops}")
     if home_runs:
-        main.append(home_runs)
+        main.append(f"홈런 {home_runs}")
     if rbi:
-        main.append(rbi)
+        main.append(f"타점 {rbi}")
     if steals:
-        main.append(steals)
+        main.append(f"도루 {steals}")
     tl_dr = _tl_dr(main if main else ["주요 기록이 제공되지 않았습니다."])
 
     first_sentence = [header_text, subject]
