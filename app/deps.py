@@ -93,54 +93,104 @@ def get_rag_pipeline(
 def get_agent(
     conn: PgConnection = Depends(get_db_connection),
 ) -> BaseballStatisticsAgent:
-    """Dependency to get an instance of the BaseballStatisticsAgent.
-    
-    NOTE: If called directly (outside FastAPI request context), 
-    conn will be a Depends object, not a connection. We detect this
-    and manually obtain a connection from the pool.
-    """
-    # Handle direct calls (not via FastAPI DI)
+    """Dependency to get an instance of the BaseballStatisticsAgent."""
     if isinstance(conn, DependsClass):
         pool_instance = get_connection_pool()
         conn = pool_instance.getconn()
         conn.autocommit = True
     settings = get_settings()
 
-    # tenacity settings
     from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception, before_sleep_log
     import httpx
     import logging
     import json
+    import asyncio
     
     logger = logging.getLogger("BaseballAgent")
 
     def is_server_error(exception):
-        """Return True if exception is a 5xx server error."""
         return (
             isinstance(exception, httpx.HTTPStatusError) and 
             exception.response.status_code >= 500
         )
 
-    @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(is_server_error),
-        before_sleep=before_sleep_log(logger, logging.WARNING)
-    )
-    async def fetch_completion_stream(payload, headers):
-        """Helper function to fetch stream with retry logic."""
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST",
-                f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                json=payload,
-                headers=headers,
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    yield line
-
     async def llm_generator(messages):
+        provider = settings.llm_provider
+        
+        if provider == "gemini":
+            import google.generativeai as genai
+            if not settings.gemini_api_key:
+                raise RuntimeError("Gemini API key is required.")
+            
+            genai.configure(api_key=settings.gemini_api_key)
+            
+            # Gemini format conversion
+            gemini_contents = []
+            system_instruction = ""
+            for msg in messages:
+                role = msg.get("role")
+                content = msg.get("content")
+                if role == "system":
+                    system_instruction += content + "\n"
+                elif role == "user":
+                    gemini_contents.append({"role": "user", "parts": [{"text": content}]})
+                elif role == "assistant":
+                    gemini_contents.append({"role": "model", "parts": [{"text": content}]})
+            
+            model_name = settings.gemini_model or "gemini-1.5-flash"
+            try:
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=system_instruction if system_instruction else None
+                )
+                
+                # generate_content stream=True returns a response iterative object
+                response = model.generate_content(
+                    gemini_contents,
+                    stream=True,
+                    generation_config={
+                        "max_output_tokens": settings.max_output_tokens,
+                        "temperature": 0.1,
+                    }
+                )
+                
+                for chunk in response:
+                    # In some SDK versions, chunk might have an attribute 'text'
+                    try:
+                        if chunk.text:
+                            yield chunk.text
+                    except Exception:
+                        # Sometimes text is not available if safety filters block it
+                        continue
+                return
+            except Exception as e:
+                logger.error(f"Gemini SDK streaming failed: {e}")
+                # Fallback to older format or simpler initialization
+                try:
+                    if system_instruction and gemini_contents:
+                        gemini_contents[0]["parts"][0]["text"] = f"System: {system_instruction}\n\n{gemini_contents[0]['parts'][0]['text']}"
+                    
+                    model = genai.GenerativeModel(model_name=model_name)
+                    response = model.generate_content(
+                        gemini_contents,
+                        stream=True,
+                        generation_config={
+                            "max_output_tokens": settings.max_output_tokens,
+                            "temperature": 0.1,
+                        }
+                    )
+                    for chunk in response:
+                        try:
+                            if chunk.text:
+                                yield chunk.text
+                        except Exception:
+                            continue
+                    return
+                except Exception as fallback_e:
+                    logger.error(f"Gemini SDK fallback failed: {fallback_e}")
+                    raise fallback_e
+
+        # Default to OpenRouter/OpenAI logic if provider is openrouter
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required.")
 
@@ -151,9 +201,25 @@ def get_agent(
             "X-Title": settings.openrouter_app_title or "",
         }
 
-        # Combine primary model with fallbacks
-        models_to_try = [settings.openrouter_model] + settings.openrouter_fallback_models
+        @retry(
+            stop=stop_after_attempt(5),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=retry_if_exception(is_server_error),
+            before_sleep=before_sleep_log(logger, logging.WARNING)
+        )
+        async def fetch_completion_stream(payload, headers):
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        yield line
 
+        models_to_try = [settings.openrouter_model] + settings.openrouter_fallback_models
         last_exception = None
 
         for i, model in enumerate(models_to_try):
@@ -164,15 +230,7 @@ def get_agent(
                 "temperature": 0.1,
                 "max_tokens": settings.max_output_tokens
             }
-            is_fallback = i > 0
-
-            if is_fallback:
-                logger.warning(f"Switching to model {i}: {model} (Previous error: {last_exception})")
-
             try:
-                chunk_count = 0
-                total_chars = 0
-                # Reuse the same helper (retry on 5xx, fail fast on 429)
                 async for line in fetch_completion_stream(payload, headers):
                     if line.startswith("data: "):
                         data_str = line[6:]
@@ -182,26 +240,14 @@ def get_agent(
                             data = json.loads(data_str)
                             delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
                             if delta:
-                                chunk_count += 1
-                                total_chars += len(delta)
                                 yield delta
                         except json.JSONDecodeError:
                             continue
-
-                # 스트림 완료 후 청크 수 로깅
-                if chunk_count == 0:
-                    logger.warning(f"[LLM Generator] Stream completed but received 0 chunks from model {model}")
-                else:
-                    logger.debug(f"[LLM Generator] Stream completed: {chunk_count} chunks, {total_chars} chars from model {model}")
-                return # Success!
-
+                return
             except Exception as e:
                 logger.error(f"Model {model} failed: {e}")
                 last_exception = e
-                # Continue to next model in loop
 
-        # If all models fail
-        logger.error(f"All models failed. details: {last_exception}")
         raise last_exception
 
     return BaseballStatisticsAgent(connection=conn, llm_generator=llm_generator)

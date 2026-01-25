@@ -419,6 +419,28 @@ def render_hitter_game(
 
     if avg:
         detailed.append(f"경기 타율은 {avg}입니다.")
+    
+    # 추가 비율 지표 (ISO, BABIP, OPS 등)
+    obp = _format_float(row.get("obp"), 3)
+    slg = _format_float(row.get("slg"), 3)
+    ops = _format_float(row.get("ops"), 3)
+    iso = _format_float(row.get("iso"), 3)
+    babip = _format_float(row.get("babip"), 3)
+    
+    if obp and slg:
+        detailed.append(f"출루율 {obp}, 장타율 {slg}로 OPS {ops or '정보 미상'}를 기록했습니다.")
+    if iso:
+        detailed.append(f"순수 장타율(ISO)은 {iso}입니다.")
+    if babip:
+        detailed.append(f"인플레이 타구 타율(BABIP)은 {babip}입니다.")
+        
+    # XR (추정 득점) 데이터 (extra_stats JSON에서 추출)
+    extra = row.get("extra_stats")
+    if isinstance(extra, dict) and "xr" in extra:
+        xr = _format_float(extra["xr"], 2)
+        if xr:
+            detailed.append(f"이 경기에서의 추정 득점 기여(XR)는 {xr}점입니다.")
+    
     if hits and at_bats:
         hit_count = int(float(row.get("hits", 0)))
         ab_count = int(float(row.get("at_bats", 1)))
@@ -516,6 +538,19 @@ def render_pitcher_game(
     if era:
         detailed.append(f"경기 평균자책점은 {era}입니다.")
     
+    # 추가 투구 효율 지표 (WHIP, K/9, BB/9, K/BB)
+    whip = _format_float(row.get("whip"), 2)
+    k9 = _format_float(row.get("k_per_nine"), 2)
+    bb9 = _format_float(row.get("bb_per_nine"), 2)
+    kbb = _format_float(row.get("kbb"), 2)
+    
+    if whip:
+        detailed.append(f"이닝당 출루 허용률(WHIP)은 {whip}입니다.")
+    if k9 and bb9:
+        detailed.append(f"9이닝당 탈삼진(K/9) {k9}개, 볼넷(BB/9) {bb9}개를 기록했습니다.")
+    if kbb:
+        detailed.append(f"삼진/볼넷 비율(K/BB)은 {kbb}입니다.")
+
     walks = _format_count(row.get("walks"), "볼넷")
     pitch_count = _format_count(row.get("pitch_count"), "구")
     if walks:
