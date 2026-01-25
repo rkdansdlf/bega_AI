@@ -323,7 +323,9 @@ _whisper_client: openai.AsyncOpenAI | None = None
 def _get_whisper_client() -> openai.AsyncOpenAI:
     api_key = os.getenv("OPENAI_API_KEY2") or os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY가 설정되지 않았습니다.")
+        raise HTTPException(
+            status_code=503, detail="OPENAI_API_KEY가 설정되지 않았습니다."
+        )
     global _whisper_client
     if _whisper_client is None:
         _whisper_client = openai.AsyncOpenAI(api_key=api_key)
