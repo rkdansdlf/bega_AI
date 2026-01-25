@@ -136,10 +136,6 @@ def _process_stat_doc_cached(source_table: str, meta_json: str) -> Tuple[Optiona
             "era_minus": era_minus_val,
             "fip_minus": fip_minus_val,
             "score": score,
-            "k_per_nine": _get_safe_stat(meta, "k_per_nine"),
-            "bb_per_nine": _get_safe_stat(meta, "bb_per_nine"),
-            "kbb": _get_safe_stat(meta, "kbb"),
-            "fip_extra": _get_safe_stat(meta, "fip") or (meta.get("extra_stats", {}).get("fip") if isinstance(meta.get("extra_stats"), dict) else None)
         }, None
 
     if source_table == "player_season_batting":
@@ -231,9 +227,8 @@ def _process_stat_doc_cached(source_table: str, meta_json: str) -> Tuple[Optiona
             "rbi": rbi,
             "steals": steals,
             "score": score,
-            "iso": _get_safe_stat(meta, "iso"),
-            "babip": _get_safe_stat(meta, "babip"),
-            "xr": meta.get("extra_stats", {}).get("xr") if isinstance(meta.get("extra_stats"), dict) else None
+            "steals": steals,
+            "score": score,
         }, None
 
     return None, None
@@ -662,10 +657,7 @@ class RAGPipeline:
             "승", "패", "세이브", "홀드", "삼진", "볼넷", "출루율", "장타율",
             "wrc+", "war", "fip", "babip", "몇위", "순위", "1위", "최고", 
             "상위", "리더", "기록", "통계", "성적", "몇개", "몇점", "얼마나",
-            "vs", "대", "비교", "누가", "더", "뛰어난", "우수한", "좋은", "맞대결",
-            # WPA/클러치 관련 키워드 추가
-            "wpa", "승리기여", "승리 기여", "클러치", "clutch", "결정적", "결정적 순간",
-            "승부사", "클러치히터", "클러치 히터"
+            "vs", "대", "비교", "누가", "더", "뛰어난", "우수한", "좋은", "맞대결"
         ]
         
         query_lower = query.lower()
