@@ -62,7 +62,7 @@ jobs:
           pip install pytest pytest-cov
       
       - name: Run tests
-        run: pytest --cov=./ --cov-report=xml --cov-report=html
+        run: pytest tests --cov=./ --cov-report=xml --cov-report=html
       
       - name: Upload test results
         if: always()
