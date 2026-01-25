@@ -23,32 +23,32 @@ def retry_failed_chunks(
     service_account_key_path: str,
     supabase_db_url: str,
     dry_run: bool = False,
-    skip_storage: bool = False
+    skip_storage: bool = False,
 ):
     """실패한 청크들을 재시도합니다."""
 
     # 진행 파일 읽기
-    progress_file = Path(__file__).parent / 'migration_progress.json'
+    progress_file = Path(__file__).parent / "migration_progress.json"
 
     if not progress_file.exists():
         print("❌ migration_progress.json 파일을 찾을 수 없습니다.")
         print("마이그레이션을 먼저 실행하세요.")
         return
 
-    with open(progress_file, 'r') as f:
+    with open(progress_file, "r") as f:
         progress = json.load(f)
 
-    failed_ids = progress.get('failed_ids', [])
+    failed_ids = progress.get("failed_ids", [])
 
     if not failed_ids:
         print("✓ 실패한 청크가 없습니다!")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"실패한 청크 재시도")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"실패한 청크 개수: {len(failed_ids)}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     if dry_run:
         print("⚠️  Dry Run 모드: 실제 데이터는 변경되지 않습니다.\n")
@@ -59,7 +59,7 @@ def retry_failed_chunks(
         supabase_db_url=supabase_db_url,
         batch_size=1,  # 한 번에 하나씩 처리
         dry_run=dry_run,
-        skip_storage=skip_storage
+        skip_storage=skip_storage,
     )
 
     # 실패한 청크들을 다시 시도
@@ -74,14 +74,17 @@ def retry_failed_chunks(
         # Supabase에서 청크 데이터 가져오기
         try:
             with migration.pg_conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         id, season_year, season_id, league_type_code,
                         team_id, player_id, source_table, source_row_id,
                         title, content, embedding, meta, created_at
                     FROM rag_chunks
                     WHERE id = %s
-                """, (chunk_id,))
+                """,
+                    (chunk_id,),
+                )
 
                 row = cur.fetchone()
 
@@ -92,19 +95,19 @@ def retry_failed_chunks(
 
                 # dict로 변환
                 chunk = {
-                    'id': row[0],
-                    'season_year': row[1],
-                    'season_id': row[2],
-                    'league_type_code': row[3],
-                    'team_id': row[4],
-                    'player_id': row[5],
-                    'source_table': row[6],
-                    'source_row_id': row[7],
-                    'title': row[8],
-                    'content': row[9],
-                    'embedding': row[10],
-                    'meta': row[11],
-                    'created_at': row[12],
+                    "id": row[0],
+                    "season_year": row[1],
+                    "season_id": row[2],
+                    "league_type_code": row[3],
+                    "team_id": row[4],
+                    "player_id": row[5],
+                    "source_table": row[6],
+                    "source_row_id": row[7],
+                    "title": row[8],
+                    "content": row[9],
+                    "embedding": row[10],
+                    "meta": row[11],
+                    "created_at": row[12],
                 }
 
                 # 마이그레이션 시도
@@ -120,9 +123,9 @@ def retry_failed_chunks(
             still_failed_ids.append(chunk_id)
 
     # 결과 출력
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"재시도 완료!")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"성공: {success_count}/{len(failed_ids)}")
     print(f"여전히 실패: {len(still_failed_ids)}")
 
@@ -132,14 +135,14 @@ def retry_failed_chunks(
         if len(still_failed_ids) > 20:
             print(f"... 외 {len(still_failed_ids) - 20}개")
 
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # progress 파일 업데이트
     if not dry_run:
-        progress['failed_ids'] = still_failed_ids
-        progress['migrated_count'] += success_count
+        progress["failed_ids"] = still_failed_ids
+        progress["migrated_count"] += success_count
 
-        with open(progress_file, 'w') as f:
+        with open(progress_file, "w") as f:
             json.dump(progress, f, indent=2)
 
         print(f"✓ 진행 상태 업데이트 완료")
@@ -152,41 +155,41 @@ def retry_failed_chunks(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='실패한 청크 재시도')
+    parser = argparse.ArgumentParser(description="실패한 청크 재시도")
     parser.add_argument(
-        '--service-account-key',
+        "--service-account-key",
         required=True,
-        help='Firebase 서비스 계정 키 JSON 파일 경로'
+        help="Firebase 서비스 계정 키 JSON 파일 경로",
     )
     parser.add_argument(
-        '--supabase-url',
-        default=os.getenv('OCI_DB_URL'),
-        help='Supabase PostgreSQL 연결 URL (기본값: 환경변수 OCI_DB_URL)'
+        "--supabase-url",
+        default=os.getenv("OCI_DB_URL"),
+        help="Supabase PostgreSQL 연결 URL (기본값: 환경변수 OCI_DB_URL)",
     )
     parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Dry run 모드 (실제 데이터 변경 없음)'
+        "--dry-run", action="store_true", help="Dry run 모드 (실제 데이터 변경 없음)"
     )
     parser.add_argument(
-        '--skip-storage',
-        action='store_true',
-        help='Firebase Storage 업로드 스킵 (Firestore에만 저장)'
+        "--skip-storage",
+        action="store_true",
+        help="Firebase Storage 업로드 스킵 (Firestore에만 저장)",
     )
 
     args = parser.parse_args()
 
     if not args.supabase_url:
-        print("오류: Supabase DB URL이 필요합니다. --supabase-url 또는 환경변수 OCI_DB_URL을 설정하세요.")
+        print(
+            "오류: Supabase DB URL이 필요합니다. --supabase-url 또는 환경변수 OCI_DB_URL을 설정하세요."
+        )
         sys.exit(1)
 
     retry_failed_chunks(
         service_account_key_path=args.service_account_key,
         supabase_db_url=args.supabase_url,
         dry_run=args.dry_run,
-        skip_storage=args.skip_storage
+        skip_storage=args.skip_storage,
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -9,6 +9,7 @@ from ..config import get_settings
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/moderation", tags=["moderation"])
 
+
 @router.post("/safety-check")
 async def safety_check(payload: Dict[str, Any] = Body(...)):
     """
@@ -20,8 +21,14 @@ async def safety_check(payload: Dict[str, Any] = Body(...)):
 
     settings = get_settings()
     if not settings.gemini_api_key:
-        logger.warning("GEMINI_API_KEY가 설정되지 않았습니다. 모든 콘텐츠를 허용합니다.")
-        return {"category": "SAFE", "reason": "API Key not configured", "action": "ALLOW"}
+        logger.warning(
+            "GEMINI_API_KEY가 설정되지 않았습니다. 모든 콘텐츠를 허용합니다."
+        )
+        return {
+            "category": "SAFE",
+            "reason": "API Key not configured",
+            "action": "ALLOW",
+        }
 
     try:
         genai.configure(api_key=settings.gemini_api_key)
@@ -48,10 +55,9 @@ async def safety_check(payload: Dict[str, Any] = Body(...)):
         """
 
         response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
+            prompt, generation_config={"response_mime_type": "application/json"}
         )
-        
+
         result = json.loads(response.text)
         logger.info(f"Moderation result for content: {result}")
         return result
@@ -60,7 +66,7 @@ async def safety_check(payload: Dict[str, Any] = Body(...)):
         logger.error(f"Moderation error: {str(e)}")
         # 에러 발생 시 시스템 중단을 방지하기 위해 SAFE로 반환 (Fail-open 전략)
         return {
-            "category": "SAFE", 
-            "reason": f"System error: {str(e)}", 
-            "action": "ALLOW"
+            "category": "SAFE",
+            "reason": f"System error: {str(e)}",
+            "action": "ALLOW",
         }

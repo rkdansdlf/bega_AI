@@ -17,6 +17,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 import psycopg2
@@ -24,7 +25,6 @@ from app.core.embeddings import embed_texts
 from app.core.retrieval import similarity_search as supabase_search
 from app.core.retrieval_firestore import similarity_search_firestore
 from app.config import Settings
-
 
 # 테스트 쿼리 세트
 TEST_QUERIES = [
@@ -41,10 +41,12 @@ TEST_QUERIES = [
 ]
 
 
-def benchmark_supabase(embeddings: List[List[float]], limit: int = 10) -> Dict[str, Any]:
+def benchmark_supabase(
+    embeddings: List[List[float]], limit: int = 10
+) -> Dict[str, Any]:
     """Supabase pgvector 성능 측정"""
     print("\n🔵 Supabase pgvector 벤치마크")
-    print("="*60)
+    print("=" * 60)
 
     supabase_url = os.getenv("OCI_DB_URL")
     if not supabase_url:
@@ -64,7 +66,7 @@ def benchmark_supabase(embeddings: List[List[float]], limit: int = 10) -> Dict[s
         times.append(elapsed)
         results_count.append(len(results))
 
-        print(f"  쿼리 {i:2d}: {elapsed*1000:6.1f}ms | {len(results):2d}개 결과")
+        print(f"  쿼리 {i:2d}: {elapsed * 1000:6.1f}ms | {len(results):2d}개 결과")
 
     conn.close()
 
@@ -78,10 +80,12 @@ def benchmark_supabase(embeddings: List[List[float]], limit: int = 10) -> Dict[s
     }
 
 
-def benchmark_firestore(embeddings: List[List[float]], limit: int = 10) -> Dict[str, Any]:
+def benchmark_firestore(
+    embeddings: List[List[float]], limit: int = 10
+) -> Dict[str, Any]:
     """Firestore Vector Search 성능 측정"""
     print("\n🟠 Firestore Vector Search 벤치마크")
-    print("="*60)
+    print("=" * 60)
 
     # Firebase 초기화 (환경 변수 설정)
     os.environ["USE_FIRESTORE_SEARCH"] = "true"
@@ -101,7 +105,7 @@ def benchmark_firestore(embeddings: List[List[float]], limit: int = 10) -> Dict[
         times.append(elapsed)
         results_count.append(len(results))
 
-        print(f"  쿼리 {i:2d}: {elapsed*1000:6.1f}ms | {len(results):2d}개 결과")
+        print(f"  쿼리 {i:2d}: {elapsed * 1000:6.1f}ms | {len(results):2d}개 결과")
 
     return {
         "평균 시간": statistics.mean(times) * 1000,
@@ -115,12 +119,12 @@ def benchmark_firestore(embeddings: List[List[float]], limit: int = 10) -> Dict[
 
 def main():
     """벤치마크 실행"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Supabase vs Firestore 성능 벤치마크")
-    print("="*60)
+    print("=" * 60)
     print(f"테스트 쿼리 수: {len(TEST_QUERIES)}")
     print(f"반환 결과 수: 10개")
-    print("="*60)
+    print("=" * 60)
 
     # 임베딩 생성 (공통)
     print("\n임베딩 생성 중...")
@@ -144,11 +148,11 @@ def main():
     firestore_stats = benchmark_firestore(embeddings, limit=10)
 
     # 결과 비교
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("📊 결과 비교")
-    print("="*60)
+    print("=" * 60)
     print(f"\n{'지표':<20} {'Supabase':>15} {'Firestore':>15} {'비율':>10}")
-    print("-"*65)
+    print("-" * 65)
 
     if supabase_stats and firestore_stats:
         for key in ["평균 시간", "중앙값", "최소 시간", "최대 시간", "표준편차"]:
@@ -156,13 +160,17 @@ def main():
             firestore_val = firestore_stats[key]
             ratio = firestore_val / supabase_val if supabase_val > 0 else 0
 
-            print(f"{key:<20} {supabase_val:>12.1f}ms {firestore_val:>12.1f}ms {ratio:>9.2f}x")
+            print(
+                f"{key:<20} {supabase_val:>12.1f}ms {firestore_val:>12.1f}ms {ratio:>9.2f}x"
+            )
 
-        print("-"*65)
-        print(f"{'평균 결과 수':<20} {supabase_stats['평균 결과 수']:>12.1f}개 {firestore_stats['평균 결과 수']:>12.1f}개")
+        print("-" * 65)
+        print(
+            f"{'평균 결과 수':<20} {supabase_stats['평균 결과 수']:>12.1f}개 {firestore_stats['평균 결과 수']:>12.1f}개"
+        )
 
-        print("\n" + "="*60)
-        avg_ratio = firestore_stats['평균 시간'] / supabase_stats['평균 시간']
+        print("\n" + "=" * 60)
+        avg_ratio = firestore_stats["평균 시간"] / supabase_stats["평균 시간"]
 
         if avg_ratio < 0.8:
             winner = "Firestore"
@@ -178,15 +186,15 @@ def main():
     else:
         print("⚠️  벤치마크 데이터 부족")
 
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     # 추가 분석
     print("💡 분석 및 권장사항:")
-    print("-"*60)
+    print("-" * 60)
 
     if supabase_stats and firestore_stats:
-        supabase_avg = supabase_stats['평균 시간']
-        firestore_avg = firestore_stats['평균 시간']
+        supabase_avg = supabase_stats["평균 시간"]
+        firestore_avg = firestore_stats["평균 시간"]
 
         print(f"• Supabase 평균 응답 시간: {supabase_avg:.1f}ms")
         print(f"• Firestore 평균 응답 시간: {firestore_avg:.1f}ms")
@@ -195,16 +203,16 @@ def main():
             print("\n✅ Firestore 성능 우수 (100ms 이하)")
             print("   → Firestore 사용 권장")
         elif firestore_avg < supabase_avg:
-            print(f"\n✅ Firestore가 {supabase_avg/firestore_avg:.1f}배 빠름")
+            print(f"\n✅ Firestore가 {supabase_avg / firestore_avg:.1f}배 빠름")
             print("   → Firestore 사용 권장")
         else:
-            print(f"\n⚠️  Supabase가 {firestore_avg/supabase_avg:.1f}배 빠름")
+            print(f"\n⚠️  Supabase가 {firestore_avg / supabase_avg:.1f}배 빠름")
             print("   → 추가 최적화 필요:")
             print("     1. Firestore 벡터 인덱스 확인")
             print("     2. 네트워크 레이턴시 확인")
             print("     3. 인스턴스 위치 (리전) 확인")
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
 
 
 if __name__ == "__main__":

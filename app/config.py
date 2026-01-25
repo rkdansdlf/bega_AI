@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     환경 변수나 .env 파일로부터 설정을 로드하며, 각 설정에 대한 타입 힌트와
     기본값, 유효성 검사를 제공합니다.
     """
+
     # Pydantic 모델 설정: .env 파일 사용, 추가 필드 무시 등
     model_config = SettingsConfigDict(
         extra="ignore",
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
     llm_provider: str = Field("gemini", env="LLM_PROVIDER")
     embed_provider: str = Field("gemini", env="EMBED_PROVIDER")
-    embed_model: str = Field("", env="EMBED_MODEL") # 특정 모델을 지정할 때 사용
+    embed_model: str = Field("", env="EMBED_MODEL")  # 특정 모델을 지정할 때 사용
 
     # --- Google Gemini 설정 ---
     gemini_api_key: Optional[str] = Field(None, env="GEMINI_API_KEY")
@@ -57,12 +58,17 @@ class Settings(BaseSettings):
     openrouter_model: str = Field("openai/gpt-oss-120b", env="OPENROUTER_MODEL")
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
     openrouter_fallback_models_raw: str = Field("", env="OPENROUTER_FALLBACK_MODELS")
-    
+
     @property
     def openrouter_fallback_models(self) -> List[str]:
         if not self.openrouter_fallback_models_raw:
             return []
-        return [m.strip() for m in self.openrouter_fallback_models_raw.split(",") if m.strip()]
+        return [
+            m.strip()
+            for m in self.openrouter_fallback_models_raw.split(",")
+            if m.strip()
+        ]
+
     openrouter_base_url: str = Field(
         "https://openrouter.ai/api/v1", env="OPENROUTER_BASE_URL"
     )
@@ -98,7 +104,9 @@ class Settings(BaseSettings):
         """`llm_provider` 필드의 값이 지원되는 프로바이더 중 하나인지 검증합니다."""
         allowed = {"gemini", "openrouter"}
         if value not in allowed:
-            raise ValueError(f"지원되지 않는 LLM_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}")
+            raise ValueError(
+                f"지원되지 않는 LLM_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
+            )
         return value
 
     @property

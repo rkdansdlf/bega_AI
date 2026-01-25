@@ -1,4 +1,3 @@
-
 import os
 import time
 import psycopg2
@@ -12,16 +11,16 @@ print(f"Connecting to: {dsn[:15]}...")
 try:
     conn = psycopg2.connect(dsn, connect_timeout=10)
     conn.autocommit = True
-    
+
     # 1536 dimension zero vector
     vector_str = "[" + ",".join("0.0" for _ in range(1536)) + "]"
-    
+
     sql = f"""
     SELECT id, (1 - (embedding <=> '{vector_str}'::vector)) as similarity
     FROM rag_chunks
     LIMIT 1
     """
-    
+
     print("Executing vector search...")
     start_q = time.time()
     with conn.cursor() as cur:

@@ -51,7 +51,11 @@ def _embed_signature(settings: Settings) -> str:
     embed_dim = str(env_dim) if env_dim else ""
 
     if provider == "openai":
-        model = settings.openai_embed_model or settings.embed_model or "text-embedding-3-small"
+        model = (
+            settings.openai_embed_model
+            or settings.embed_model
+            or "text-embedding-3-small"
+        )
         return f"{provider}:{model}:{embed_dim}"
     if provider == "openrouter":
         model = (
@@ -64,7 +68,9 @@ def _embed_signature(settings: Settings) -> str:
         model = settings.gemini_embed_model or settings.embed_model or ""
         return f"{provider}:{model}:{embed_dim}"
     if provider == "hf":
-        env_model = getattr(settings, "hf_embed_model", None) or os.getenv("HF_EMBED_MODEL")
+        env_model = getattr(settings, "hf_embed_model", None) or os.getenv(
+            "HF_EMBED_MODEL"
+        )
         model = settings.embed_model or env_model or "intfloat/multilingual-e5-large"
         return f"{provider}:{model}"
     if provider == "local":
@@ -115,7 +121,7 @@ async def _embed_local(texts: Sequence[str], settings: Settings) -> List[List[fl
     """로컬 테스트를 위해 결정론적인 사인파 기반 벡터를 생성합니다."""
     env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
     dim = int(env_dim) if env_dim else 1536
-    
+
     vectors: List[List[float]] = []
     for text in texts:
         seed = hash(text) % 1000
@@ -179,7 +185,9 @@ async def _embed_gemini(
     model_path = raw_model if raw_model.startswith("models/") else f"models/{raw_model}"
     env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
     embed_dim = int(env_dim) if env_dim else 1536
-    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv("EMBED_BATCH_SIZE")
+    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv(
+        "EMBED_BATCH_SIZE"
+    )
     batch_size = int(env_batch) if env_batch else 32
     if batch_size <= 0:
         batch_size = len(texts) or 1
@@ -189,7 +197,9 @@ async def _embed_gemini(
     min_delay = 60.0 / rpm if rpm > 0 else 0.0
     max_retries = 5
 
-    url = f"https://generativelanguage.googleapis.com/v1/{model_path}:batchEmbedContents"
+    url = (
+        f"https://generativelanguage.googleapis.com/v1/{model_path}:batchEmbedContents"
+    )
     params = {"key": settings.gemini_api_key}
     headers = {
         "Content-Type": "application/json",
@@ -263,7 +273,9 @@ async def _embed_gemini(
         return embeddings
 
     # 전체 텍스트를 배치 크기만큼 나누어 처리합니다.
-    batches = [list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)]
+    batches = [
+        list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)
+    ]
     results: List[List[float]] = []
     last_request_at = 0.0
 
@@ -331,20 +343,24 @@ async def _embed_openai(
     if not settings.openai_api_key:
         raise EmbeddingError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
 
-    model = settings.openai_embed_model or settings.embed_model or "text-embedding-3-small"
+    model = (
+        settings.openai_embed_model or settings.embed_model or "text-embedding-3-small"
+    )
     url = "https://api.openai.com/v1/embeddings"
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
     }
-    
-    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv("EMBED_BATCH_SIZE")
+
+    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv(
+        "EMBED_BATCH_SIZE"
+    )
     batch_size = int(env_batch) if env_batch else 32
     if batch_size <= 0:
         batch_size = len(texts) or 1
-    
+
     max_retries = 5
-    
+
     effective_concurrency = max(max_concurrency, 1)
     limits = httpx.Limits(
         max_connections=effective_concurrency,
@@ -352,7 +368,9 @@ async def _embed_openai(
     )
     timeout = httpx.Timeout(60.0, connect=10.0)
 
-    async def post_chunk(chunk: Sequence[str], client: httpx.AsyncClient) -> List[List[float]]:
+    async def post_chunk(
+        chunk: Sequence[str], client: httpx.AsyncClient
+    ) -> List[List[float]]:
         payload = {
             "model": model,
             "input": list(chunk),
@@ -361,9 +379,7 @@ async def _embed_openai(
 
         if response.status_code != 200:
             snippet = (response.text or "")[:300]
-            raise EmbeddingError(
-                f"OpenAI API 오류 {response.status_code}: {snippet}"
-            )
+            raise EmbeddingError(f"OpenAI API 오류 {response.status_code}: {snippet}")
 
         try:
             data = response.json()
@@ -379,12 +395,14 @@ async def _embed_openai(
 
         if not embeddings:
             raise EmbeddingError(f"OpenAI가 임베딩을 반환하지 않았습니다: {data}")
-        
+
         return embeddings
 
-    batches = [list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)]
+    batches = [
+        list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)
+    ]
     results: List[List[float]] = []
-    
+
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         for chunk in batches:
             attempt = 0
@@ -397,8 +415,10 @@ async def _embed_openai(
                 except (EmbeddingError, httpx.HTTPError) as exc:
                     attempt += 1
                     if attempt >= max_retries:
-                        raise EmbeddingError(f"OpenAI 임베딩 실패 후 최대 재시도 도달: {exc}") from exc
-                    
+                        raise EmbeddingError(
+                            f"OpenAI 임베딩 실패 후 최대 재시도 도달: {exc}"
+                        ) from exc
+
                     sleep_for = backoff + (0.1 * attempt)
                     logger.warning(
                         "OpenAI 임베딩 재시도 %s/%s. 원인: %s. %.1fs 후 재시도합니다.",
@@ -537,10 +557,14 @@ async def async_embed_query(
         return cached
 
     start_time = time.perf_counter()
-    vectors = await async_embed_texts([query], settings, max_concurrency=max_concurrency)
+    vectors = await async_embed_texts(
+        [query], settings, max_concurrency=max_concurrency
+    )
     elapsed_ms = (time.perf_counter() - start_time) * 1000
-    logger.info("[Embeddings] Query embedding took %.2fms (len=%d)", elapsed_ms, len(query))
-    
+    logger.info(
+        "[Embeddings] Query embedding took %.2fms (len=%d)", elapsed_ms, len(query)
+    )
+
     if not vectors:
         return []
 
@@ -562,19 +586,23 @@ def embed_texts(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-        
+
     if loop and loop.is_running():
         # 실행 중인 루프가 있으면 별도 스레드에서 실행
         from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
-                asyncio.run, 
-                async_embed_texts(texts, settings, max_concurrency=max_concurrency)
+                asyncio.run,
+                async_embed_texts(texts, settings, max_concurrency=max_concurrency),
             )
             return future.result()
     else:
         # 실행 중인 루프가 없으면 바로 실행
-        return asyncio.run(async_embed_texts(texts, settings, max_concurrency=max_concurrency))
+        return asyncio.run(
+            async_embed_texts(texts, settings, max_concurrency=max_concurrency)
+        )
+
 
 def _estimate_tokens(text: str) -> int:
     """간단한 토큰 수 추정 (4 글자 ≈ 1 토큰)."""

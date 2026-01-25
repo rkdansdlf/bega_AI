@@ -23,7 +23,7 @@ _connection_pool: Optional[pool.SimpleConnectionPool] = None
 def get_connection_pool() -> pool.SimpleConnectionPool:
     """커넥션 풀을 가져오거나 생성합니다."""
     global _connection_pool
-    
+
     if _connection_pool is None:
         settings = get_settings()
         _connection_pool = pool.ThreadedConnectionPool(
@@ -32,11 +32,11 @@ def get_connection_pool() -> pool.SimpleConnectionPool:
             dsn=settings.database_url,
             # TCP keepalive 옵션 추가
             keepalives=1,
-            keepalives_idle=30,      # 30초 유휴 후 keepalive 시작
+            keepalives_idle=30,  # 30초 유휴 후 keepalive 시작
             keepalives_interval=10,  # 10초마다 keepalive 패킷
-            keepalives_count=5       # 5번 실패하면 연결 끊김으로 판단
+            keepalives_count=5,  # 5번 실패하면 연결 끊김으로 판단
         )
-    
+
     return _connection_pool
 
 
@@ -54,17 +54,18 @@ async def lifespan(app):
     # 시작 시
     load_clf()
     get_connection_pool()  # 커넥션 풀 초기화
-    
+
     yield
-    
+
     # 종료 시
     close_connection_pool()  # 모든 커넥션 정리
+
 
 def get_db_connection() -> Generator[PgConnection, None, None]:
     """커넥션 풀에서 커넥션을 가져와서 사용 후 반환합니다."""
     pool_instance = get_connection_pool()
     conn = pool_instance.getconn()
-    
+
     # 연결 상태 확인 (stale connection 방지)
     try:
         # 간단한 쿼리로 연결이 살아있는지 확인
@@ -75,13 +76,14 @@ def get_db_connection() -> Generator[PgConnection, None, None]:
         # 연결이 끊어졌으면 풀에서 제거하고 새 연결 생성
         pool_instance.putconn(conn, close=True)
         conn = pool_instance.getconn()
-    
+
     conn.autocommit = True
-    
+
     try:
         yield conn
     finally:
         pool_instance.putconn(conn)
+
 
 def get_rag_pipeline(
     conn: PgConnection = Depends(get_db_connection),
@@ -94,8 +96,8 @@ def get_agent(
     conn: PgConnection = Depends(get_db_connection),
 ) -> BaseballStatisticsAgent:
     """Dependency to get an instance of the BaseballStatisticsAgent.
-    
-    NOTE: If called directly (outside FastAPI request context), 
+
+    NOTE: If called directly (outside FastAPI request context),
     conn will be a Depends object, not a connection. We detect this
     and manually obtain a connection from the pool.
     """
@@ -107,25 +109,31 @@ def get_agent(
     settings = get_settings()
 
     # tenacity settings
-    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception, before_sleep_log
+    from tenacity import (
+        retry,
+        stop_after_attempt,
+        wait_exponential,
+        retry_if_exception,
+        before_sleep_log,
+    )
     import httpx
     import logging
     import json
-    
+
     logger = logging.getLogger("BaseballAgent")
 
     def is_server_error(exception):
         """Return True if exception is a 5xx server error."""
         return (
-            isinstance(exception, httpx.HTTPStatusError) and 
-            exception.response.status_code >= 500
+            isinstance(exception, httpx.HTTPStatusError)
+            and exception.response.status_code >= 500
         )
 
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception(is_server_error),
-        before_sleep=before_sleep_log(logger, logging.WARNING)
+        before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     async def fetch_completion_stream(payload, headers):
         """Helper function to fetch stream with retry logic."""
@@ -152,7 +160,9 @@ def get_agent(
         }
 
         # Combine primary model with fallbacks
-        models_to_try = [settings.openrouter_model] + settings.openrouter_fallback_models
+        models_to_try = [
+            settings.openrouter_model
+        ] + settings.openrouter_fallback_models
 
         last_exception = None
 
@@ -162,12 +172,14 @@ def get_agent(
                 "messages": messages,
                 "stream": True,
                 "temperature": 0.1,
-                "max_tokens": settings.max_output_tokens
+                "max_tokens": settings.max_output_tokens,
             }
             is_fallback = i > 0
 
             if is_fallback:
-                logger.warning(f"Switching to model {i}: {model} (Previous error: {last_exception})")
+                logger.warning(
+                    f"Switching to model {i}: {model} (Previous error: {last_exception})"
+                )
 
             try:
                 chunk_count = 0
@@ -180,7 +192,11 @@ def get_agent(
                             break
                         try:
                             data = json.loads(data_str)
-                            delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            delta = (
+                                data.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content", "")
+                            )
                             if delta:
                                 chunk_count += 1
                                 total_chars += len(delta)
@@ -190,10 +206,14 @@ def get_agent(
 
                 # 스트림 완료 후 청크 수 로깅
                 if chunk_count == 0:
-                    logger.warning(f"[LLM Generator] Stream completed but received 0 chunks from model {model}")
+                    logger.warning(
+                        f"[LLM Generator] Stream completed but received 0 chunks from model {model}"
+                    )
                 else:
-                    logger.debug(f"[LLM Generator] Stream completed: {chunk_count} chunks, {total_chars} chars from model {model}")
-                return # Success!
+                    logger.debug(
+                        f"[LLM Generator] Stream completed: {chunk_count} chunks, {total_chars} chars from model {model}"
+                    )
+                return  # Success!
 
             except Exception as e:
                 logger.error(f"Model {model} failed: {e}")

@@ -102,7 +102,9 @@ def _build_aliases(row: Dict[str, Any]) -> List[str]:
     return [str(alias) for alias in aliases if alias not in NUMBER_SENTINELS]
 
 
-def _render_header(row: Dict[str, Any], *, season_field: str = "season_year") -> Tuple[str, str]:
+def _render_header(
+    row: Dict[str, Any], *, season_field: str = "season_year"
+) -> Tuple[str, str]:
     season = row.get(season_field) or row.get("season")
     team = row.get("team_name") or row.get("team_code")
     player = row.get("player_name")
@@ -202,9 +204,7 @@ def render_pitching_season(
 
     source = row.get("source_table", "player_season_pitching")
     row_id = row.get("source_row_id", "")
-    source_line = (
-        f"[출처] 2025 KBO 공식 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
-    )
+    source_line = f"[출처] 2025 KBO 공식 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
 
     return "\n".join(
         [
@@ -285,9 +285,7 @@ def render_batting_season(
 
     source = row.get("source_table", "player_season_batting")
     row_id = row.get("source_row_id", "")
-    source_line = (
-        f"[출처] 2025 KBO 공식 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
-    )
+    source_line = f"[출처] 2025 KBO 공식 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
 
     return "\n".join(
         [
@@ -299,16 +297,18 @@ def render_batting_season(
         ]
     )
 
-def _parse_position(position_str: Optional[str]) -> Tuple[Optional[str], str, Optional[str]]:
 
+def _parse_position(
+    position_str: Optional[str],
+) -> Tuple[Optional[str], str, Optional[str]]:
     if not position_str or position_str in NUMBER_SENTINELS:
         return (None, "정보 미상", None)
-    
+
     position_str = position_str.strip()
 
     MAIN_POSITION = {
         "一": "1루수",
-        "二": "2루수", 
+        "二": "2루수",
         "三": "3루수",
         "유": "유격수",
         "좌": "좌익수",
@@ -323,28 +323,29 @@ def _parse_position(position_str: Optional[str]) -> Tuple[Optional[str], str, Op
         "주": "대주자",
     }
 
-    #포지션 1글자 = 단일 포지션
+    # 포지션 1글자 = 단일 포지션
     if len(position_str) == 1:
         main = MAIN_POSITION.get(position_str, position_str)
         return (None, main, None)
-    #포지션 2글자
+    # 포지션 2글자
     if len(position_str) == 2:
         first = position_str[0]
         second = position_str[1]
 
-        #case 1: sub+main
+        # case 1: sub+main
         if first in SUB_POSITION and second in MAIN_POSITION:
             sub = SUB_POSITION[first]
             main = MAIN_POSITION[second]
             return (sub, main, None)
-        
-        #case 2: main+main
+
+        # case 2: main+main
         if first in MAIN_POSITION and second in MAIN_POSITION:
             main1 = MAIN_POSITION[first]
             main2 = MAIN_POSITION[second]
             return (None, main1, main2)
-    #파싱 실패 시 원본 반환
+    # 파싱 실패 시 원본 반환
     return (None, position_str, None)
+
 
 def render_hitter_game(
     row: Dict[str, Any],
@@ -370,7 +371,7 @@ def render_hitter_game(
     rbis = _format_count(row.get("rbis"), "타점")
     runs = _format_count(row.get("runs"), "득점")
     avg = _format_float(row.get("batting_average"), 3)
-    
+
     def _position_text() -> str:
         if sub_position and switched_position:
             return f"{sub_position}({main_position}↔{switched_position})"
@@ -380,7 +381,7 @@ def render_hitter_game(
             return f"{main_position}↔{switched_position}"
         else:
             return main_position
-    
+
     position_display = _position_text()
 
     main_stats = []
@@ -394,28 +395,32 @@ def render_hitter_game(
         main_stats.append(rbis)
     if runs:
         main_stats.append(runs)
-    
+
     tl_dr = _tl_dr(main_stats if main_stats else ["경기 기록이 제공되지 않았습니다."])
 
     first_sentence_parts = [f"{team}", subject]
     if batting_order:
         first_sentence_parts.append(f"{batting_order}번 {position_display}로 출전해")
-    
+
     if main_stats[1:]:
         first_sentence_parts.append(" ".join(main_stats[1:]))
     else:
         first_sentence_parts.append("기록이 없습니다")
-    
+
     core = "[핵심 문장] " + " ".join(first_sentence_parts) + "."
 
     detailed = []
 
     if sub_position and switched_position:
-        detailed.append(f"{sub_position} 역할로 {main_position}와 {switched_position} 수비를 교대로 맡았습니다.")
+        detailed.append(
+            f"{sub_position} 역할로 {main_position}와 {switched_position} 수비를 교대로 맡았습니다."
+        )
     elif sub_position:
         detailed.append(f"{sub_position} 역할로 {main_position} 수비를 맡았습니다.")
     elif switched_position:
-        detailed.append(f"{main_position}와 {switched_position} 포지션을 교체하며 뛰었습니다.")
+        detailed.append(
+            f"{main_position}와 {switched_position} 포지션을 교체하며 뛰었습니다."
+        )
 
     if avg:
         detailed.append(f"경기 타율은 {avg}입니다.")
@@ -424,9 +429,9 @@ def render_hitter_game(
         ab_count = int(float(row.get("at_bats", 1)))
         if hit_count > 0:
             detailed.append(f"{ab_count}타수 {hit_count}안타를 기록했습니다.")
-    
+
     detail_block = _detailed_lines(detailed)
-    
+
     meta = {
         "kind": "batting_game",
         "game_id": game_id,
@@ -439,20 +444,21 @@ def render_hitter_game(
         "position_raw": position_raw,
         "aliases": [player, team, str(row.get("player_id"))],
     }
-    
+
     source = row.get("source_table", "hitter_record")
     row_id = row.get("source_row_id", row.get("id", ""))
-    source_line = (
-        f"[출처] KBO 경기 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+    source_line = f"[출처] KBO 경기 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+
+    return "\n".join(
+        [
+            tl_dr,
+            core,
+            detail_block,
+            f"[META] {json.dumps(meta, ensure_ascii=False)}",
+            source_line,
+        ]
     )
-    
-    return "\n".join([
-        tl_dr,
-        core,
-        detail_block,
-        f"[META] {json.dumps(meta, ensure_ascii=False)}",
-        source_line,
-    ])
+
 
 def render_pitcher_game(
     row: Dict[str, Any],
@@ -462,15 +468,15 @@ def render_pitcher_game(
 ) -> str:
     """경기별 투수 기록 렌더링"""
     today = _today_fallback(today_str)
-    
+
     game_id = row.get("game_id", "정보 미상")
     player = row.get("player_name", f"선수 {row.get('player_id', '정보 미상')}")
     team = row.get("team_name") or row.get("team_code", "팀 정보 미상")
     appearance = row.get("appearance", "등판")
     result = row.get("result", "")
-    
+
     subject = josa(player, ("은", "는"))
-    
+
     innings = _format_ip(row.get("innings"))
     wins = _format_count(row.get("wins"), "승")
     losses = _format_count(row.get("losses"), "패")
@@ -480,7 +486,7 @@ def render_pitcher_game(
     runs = _format_count(row.get("runs_allowed"), "실점")
     earned_runs = _format_count(row.get("earned_runs"), "자책점")
     era = _format_float(row.get("era"), 2)
-    
+
     main_stats = []
     if appearance:
         main_stats.append(appearance)
@@ -493,9 +499,9 @@ def render_pitcher_game(
         main_stats.append(wls)
     if strikeouts:
         main_stats.append(strikeouts)
-    
+
     tl_dr = _tl_dr(main_stats if main_stats else ["경기 기록이 제공되지 않았습니다."])
-    
+
     first_sentence_parts = [f"{team}", subject]
     if appearance:
         first_sentence_parts.append(f"{appearance}으로 출전해")
@@ -503,9 +509,9 @@ def render_pitcher_game(
         first_sentence_parts.append(" ".join(main_stats[1:]))
     else:
         first_sentence_parts.append("기록이 없습니다")
-    
+
     core = "[핵심 문장] " + " ".join(first_sentence_parts) + "."
-    
+
     detailed = []
     if hits_allowed:
         detailed.append(f"{hits_allowed}을 허용했습니다.")
@@ -515,16 +521,16 @@ def render_pitcher_game(
         detailed.append(f"{earned_runs}을 기록했습니다.")
     if era:
         detailed.append(f"경기 평균자책점은 {era}입니다.")
-    
+
     walks = _format_count(row.get("walks"), "볼넷")
     pitch_count = _format_count(row.get("pitch_count"), "구")
     if walks:
         detailed.append(f"{walks}을 내줬습니다.")
     if pitch_count:
         detailed.append(f"총 {pitch_count}를 던졌습니다.")
-    
+
     detail_block = _detailed_lines(detailed)
-    
+
     meta = {
         "kind": "pitching_game",
         "game_id": game_id,
@@ -534,20 +540,20 @@ def render_pitcher_game(
         "result": result,
         "aliases": [player, team, str(row.get("player_id"))],
     }
-    
+
     source = row.get("source_table", "pitcher_record")
     row_id = row.get("source_row_id", row.get("id", ""))
-    source_line = (
-        f"[출처] KBO 경기 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+    source_line = f"[출처] KBO 경기 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+
+    return "\n".join(
+        [
+            tl_dr,
+            core,
+            detail_block,
+            f"[META] {json.dumps(meta, ensure_ascii=False)}",
+            source_line,
+        ]
     )
-    
-    return "\n".join([
-        tl_dr,
-        core,
-        detail_block,
-        f"[META] {json.dumps(meta, ensure_ascii=False)}",
-        source_line,
-    ])
 
 
 if __name__ == "__main__":  # pragma: no cover - simple manual sanity check

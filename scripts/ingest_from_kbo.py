@@ -74,67 +74,96 @@ class ChunkPayload:
     player_id: Optional[str]
     meta: Optional[Dict[str, Any]]
 
+
 # TABLE_PROFILES에 테이블별 메타가 있음: 설명, select_sql, 제목 구성용 필드(title_fields), 본문 하이라이트(highlights), 기본키 힌트(pk_hint), 전용 렌더러(renderer).
 TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
     "kbo_metrics_explained": {
         "description": "KBO 야구 기록 지표 설명",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_metrics_explained.md",
-        "source_table": "kbo_definitions", # A new source_table name for these definitions
-        "title": "KBO 야구 기록 지표 설명", # Fixed title for the chunks
-        "pk_hint": ["title"], # A simple PK hint, though not strictly needed for a single file
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_metrics_explained.md",
+        "source_table": "kbo_definitions",  # A new source_table name for these definitions
+        "title": "KBO 야구 기록 지표 설명",  # Fixed title for the chunks
+        "pk_hint": [
+            "title"
+        ],  # A simple PK hint, though not strictly needed for a single file
     },
     "kbo_regulations_basic": {
         "description": "KBO 기본 규정 (리그 구성, 경기 시간, 타이브레이크 등)",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "01_기본규정.md",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_regulations"
+        / "01_기본규정.md",
         "source_table": "kbo_regulations",
         "title": "KBO 기본 규정",
         "pk_hint": ["title"],
     },
     "kbo_regulations_player": {
         "description": "KBO 선수 규정 (등록, FA, 외국인선수, 드래프트 등)",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "02_선수규정.md",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_regulations"
+        / "02_선수규정.md",
         "source_table": "kbo_regulations",
         "title": "KBO 선수 규정",
         "pk_hint": ["title"],
     },
     "kbo_regulations_game": {
         "description": "KBO 경기 규정 (경기 진행, 방해, 보크, 홈런 등)",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "03_경기규정.md",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_regulations"
+        / "03_경기규정.md",
         "source_table": "kbo_regulations",
         "title": "KBO 경기 규정",
         "pk_hint": ["title"],
     },
     "kbo_regulations_technical": {
         "description": "KBO 기술 규정 (기록, 통계, 심판, 용품 등)",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "04_기술규정.md",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_regulations"
+        / "04_기술규정.md",
         "source_table": "kbo_regulations",
         "title": "KBO 기술 규정",
         "pk_hint": ["title"],
     },
     "kbo_regulations_discipline": {
         "description": "KBO 징계 규정 (폭력, 도박, 약물, 처벌 기준 등)",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "05_징계규정.md",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_regulations"
+        / "05_징계규정.md",
         "source_table": "kbo_regulations",
         "title": "KBO 징계 규정",
         "pk_hint": ["title"],
     },
     "kbo_regulations_postseason": {
         "description": "KBO 포스트시즌 규정 (플레이오프, 와일드카드, 한국시리즈 등)",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "06_포스트시즌.md",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_regulations"
+        / "06_포스트시즌.md",
         "source_table": "kbo_regulations",
         "title": "KBO 포스트시즌 규정",
         "pk_hint": ["title"],
     },
     "kbo_regulations_special": {
         "description": "KBO 특별 규정 (코로나19, 기상이변, 비상상황 등)",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "07_특별규정.md",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_regulations"
+        / "07_특별규정.md",
         "source_table": "kbo_regulations",
         "title": "KBO 특별 규정",
         "pk_hint": ["title"],
     },
     "kbo_regulations_terms": {
         "description": "KBO 야구 용어 정의 (기본 용어, 통계 지표, 포지션 등)",
-        "source_file": Path(__file__).parent.parent / "docs" / "kbo_regulations" / "08_용어정의.md",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_regulations"
+        / "08_용어정의.md",
         "source_table": "kbo_regulations",
         "title": "KBO 야구 용어 정의",
         "pk_hint": ["title"],
@@ -956,6 +985,7 @@ def build_content(
     lines.append(f"출처: {table}#{source_row_id}")
     return "\n".join(str(line) for line in lines)
 
+
 # build_select_query가 프로필의 select_sql이 있으면 그 SQL에 season_year 등 필터를 주입하고 ORDER BY/ LIMIT를 붙임. 커스텀 SQL이 없으면 SELECT * FROM <table> + PK 순 정렬.
 def build_select_query(
     table: str,
@@ -1020,7 +1050,9 @@ def build_select_query(
     return query, tuple(params)
 
 
-def batched(iterable: Sequence[ChunkPayload], size: int) -> Iterable[List[ChunkPayload]]:
+def batched(
+    iterable: Sequence[ChunkPayload], size: int
+) -> Iterable[List[ChunkPayload]]:
     total = len(iterable)
     for idx in range(0, total, size):
         yield list(iterable[idx : idx + size])
@@ -1056,27 +1088,30 @@ def flush_chunks(
         elapsed = time.perf_counter() - start
         stats["sleep_seconds"] = stats.get("sleep_seconds", 0.0) + elapsed
         vector_literals = [
-            "[" + ",".join(f"{v:.8f}" for v in embedding) + "]" for embedding in embeddings
+            "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
+            for embedding in embeddings
         ]
 
     if vector_literals:
         # Prepare data for execute_values
         data = []
         for item, vector_literal in zip(buffer, vector_literals):
-            data.append((
-                json.dumps(item.meta, default=str) if item.meta else None,
-                item.season_year,
-                item.season_id,
-                item.league_type_code,
-                item.team_id,
-                item.player_id,
-                item.table,
-                item.source_row_id,
-                item.title,
-                item.content,
-                vector_literal
-            ))
-            
+            data.append(
+                (
+                    json.dumps(item.meta, default=str) if item.meta else None,
+                    item.season_year,
+                    item.season_id,
+                    item.league_type_code,
+                    item.team_id,
+                    item.player_id,
+                    item.table,
+                    item.source_row_id,
+                    item.title,
+                    item.content,
+                    vector_literal,
+                )
+            )
+
         # Bulk upsert using execute_values
         # Note: Upsert with ON CONFLICT needs careful template if using complex UPSERT_SQL
         # But here we can just use the VALUES part and append the ON CONFLICT clause
@@ -1084,8 +1119,8 @@ def flush_chunks(
             cur,
             UPSERT_SQL,
             data,
-            template=None, # default is %s, %s...
-            page_size=100
+            template=None,  # default is %s, %s...
+            page_size=100,
         )
 
     flushed = len(buffer)
@@ -1132,7 +1167,10 @@ def ingest_table(
     with dest_conn.cursor() as cur:
         cur.execute("SET statement_timeout TO 0;")
 
-    with source_conn.cursor(cursor_factory=RealDictCursor) as read_cur, dest_conn.cursor() as write_cur:
+    with (
+        source_conn.cursor(cursor_factory=RealDictCursor) as read_cur,
+        dest_conn.cursor() as write_cur,
+    ):
         write_cur.execute("SET statement_timeout TO 0;")
 
         # --- NEW LOGIC FOR STATIC FILE ---
@@ -1147,7 +1185,9 @@ def ingest_table(
 
             chunks = smart_chunks(content)
             if not chunks:
-                print(f"오류: '{profile['source_file']}' 파일 내용에서 청크를 생성할 수 없습니다.")
+                print(
+                    f"오류: '{profile['source_file']}' 파일 내용에서 청크를 생성할 수 없습니다."
+                )
                 return 0
 
             for idx, chunk in enumerate(chunks, start=1):
@@ -1162,7 +1202,10 @@ def ingest_table(
                         league_type_code=0,
                         team_id=None,
                         player_id=None,
-                        meta={"source_file": str(profile["source_file"]), "chunk_index": idx},
+                        meta={
+                            "source_file": str(profile["source_file"]),
+                            "chunk_index": idx,
+                        },
                     )
                 )
             flushed = flush_chunks(
@@ -1175,7 +1218,7 @@ def ingest_table(
                 skip_embedding=skip_embedding,
             )
             total_chunks += flushed
-            dest_conn.commit() # Commit after static file ingestion
+            dest_conn.commit()  # Commit after static file ingestion
             if flushed > 0:
                 print(f"      총 {flushed}개 청크를 처리했습니다.", flush=True)
             return total_chunks
@@ -1283,16 +1326,16 @@ def ingest_table(
                                 season_id=season_id,
                                 league_type_code=league_type_code,
                                 team_id=str(team_id) if team_id is not None else None,
-                                player_id=str(player_id)
-                                if player_id is not None
-                                else None,
+                                player_id=(
+                                    str(player_id) if player_id is not None else None
+                                ),
                                 meta=row,
                             )
                         )
 
                 if len(buffer) >= embed_batch_size:
                     flushed = flush_chunks(
-                        write_cur, # Use write_cur for flushing
+                        write_cur,  # Use write_cur for flushing
                         settings,
                         buffer,
                         max_concurrency=max_concurrency,
@@ -1308,7 +1351,7 @@ def ingest_table(
                     )
 
         flushed = flush_chunks(
-            write_cur, # Use write_cur for flushing
+            write_cur,  # Use write_cur for flushing
             settings,
             buffer,
             max_concurrency=max_concurrency,
@@ -1323,7 +1366,7 @@ def ingest_table(
                 f"      현재까지 {processed_chunks}개 청크를 처리했습니다...",
                 flush=True,
             )
-        dest_conn.commit() # Commit on dest_conn
+        dest_conn.commit()  # Commit on dest_conn
 
     if processed_chunks:
         print(f"      총 {processed_chunks}개 청크를 처리했습니다.", flush=True)
@@ -1345,23 +1388,25 @@ def ingest(
     commit_interval: int,
 ) -> None:
     settings = get_settings()
-    
+
     # Connect to Source (Supabase) for reading data
     print(f"Connecting to Source DB (Supabase)...")
     if not settings.supabase_db_url:
         raise ValueError("SUPABASE_DB_URL is not set in environment variables.")
     source_conn = psycopg2.connect(settings.supabase_db_url)
-    
+
     # Connect to Destination (OCI) for writing vectors
     print(f"Connecting to Destination DB (OCI)...")
-    dest_conn = psycopg2.connect(settings.database_url) # settings.database_url maps to oci_db_url
-    
+    dest_conn = psycopg2.connect(
+        settings.database_url
+    )  # settings.database_url maps to oci_db_url
+
     original_autocommit = dest_conn.autocommit
     dest_conn.autocommit = True
     with dest_conn.cursor() as cur:
         cur.execute("SET statement_timeout TO 0;")
     dest_conn.autocommit = original_autocommit
-    
+
     ingested_total = 0
     try:
         for table in tables:
@@ -1373,8 +1418,8 @@ def ingest(
                 "since_commit": 0,
             }
             chunks = ingest_table(
-                source_conn, # Read from Source
-                dest_conn,   # Write to Dest
+                source_conn,  # Read from Source
+                dest_conn,  # Write to Dest
                 table,
                 limit=limit,
                 embed_batch_size=embed_batch_size,
@@ -1462,6 +1507,7 @@ def parse_args() -> argparse.Namespace:
         help="이 수만큼 청크를 쓰면 커밋을 수행합니다.",
     )
     return parser.parse_args()
+
 
 # 우선순위로 안전 변환(coerce_int/first_value).
 

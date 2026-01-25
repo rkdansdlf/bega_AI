@@ -11,7 +11,6 @@ from ..core.embeddings import async_embed_texts
 from ..db import SCHEMA_SQL
 from ..deps import get_db_connection
 
-
 router = APIRouter(prefix="/ai/ingest", tags=["ingest"])
 
 
@@ -54,6 +53,7 @@ async def ingest_document(payload: IngestPayload, conn=Depends(get_db_connection
             )
     return {"status": "ok", "chunks": len(chunks)}
 
+
 class RunIngestPayload(BaseModel):
     tables: Optional[list[str]] = None
     season_year: Optional[int] = None
@@ -68,17 +68,17 @@ class RunIngestPayload(BaseModel):
 
 @router.post("/run")
 async def run_ingestion_job(
-    payload: RunIngestPayload, 
+    payload: RunIngestPayload,
     background_tasks: BackgroundTasks,
-    settings=Depends(get_settings)
+    settings=Depends(get_settings),
 ):
     """KBO 데이터 인덱싱(Ingestion) 작업을 백그라운드에서 실행합니다."""
-    
+
     # Lazy import to avoid circular dependency issues at startup if scripts logic changes
     from scripts.ingest_from_kbo import ingest, DEFAULT_TABLES
 
     tables_to_run = payload.tables if payload.tables else DEFAULT_TABLES
-    
+
     # Remove rag_chunks if present (safety check)
     tables_to_run = [t for t in tables_to_run if t != "rag_chunks"]
 
@@ -92,7 +92,7 @@ async def run_ingestion_job(
                 read_batch_size=payload.read_batch_size,
                 season_year=payload.season_year,
                 use_legacy_renderer=payload.use_legacy_renderer,
-                since=None, # Incremental update via 'since' not yet exposed in payload for simplicity
+                since=None,  # Incremental update via 'since' not yet exposed in payload for simplicity
                 skip_embedding=payload.no_embed,
                 max_concurrency=payload.max_concurrency,
                 commit_interval=payload.commit_interval,
@@ -102,9 +102,9 @@ async def run_ingestion_job(
             print(f"[IngestWorker] Ingestion failed: {e}")
 
     background_tasks.add_task(_run_ingest_wrapper)
-    
+
     return {
-        "status": "accepted", 
+        "status": "accepted",
         "message": "Ingestion job started in background.",
-        "tables": tables_to_run
+        "tables": tables_to_run,
     }

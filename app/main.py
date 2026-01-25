@@ -22,13 +22,14 @@ def create_app() -> FastAPI:
 
     # Sentry Init
     import sentry_sdk
+
     if settings.sentry_dsn:
         sentry_sdk.init(
             dsn=settings.sentry_dsn,
             traces_sample_rate=1.0,
             profiles_sample_rate=1.0,
         )
-    
+
     # FastAPI 앱 인스턴스 생성 및 기본 설정
     app = FastAPI(
         title=settings.app_name,
@@ -61,5 +62,6 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     return app
+
 
 app = create_app()
