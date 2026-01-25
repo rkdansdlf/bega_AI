@@ -51,6 +51,10 @@ class ContextFormatter:
         if intent == "movement_lookup" or entity_filter.movement_type:
             return self._format_player_movement(processed_data, query, entity_filter, year)
 
+        # WPA/클러치 관련 질문
+        if intent == "wpa_lookup" or (entity_filter.stat_type and entity_filter.stat_type in ["wpa", "clutch"]):
+            return self._format_wpa_context(processed_data, query, entity_filter, year)
+
         # 기존 의도들
         if intent == "stats_lookup" or entity_filter.stat_type:
             return self._format_statistical_ranking(processed_data, query, entity_filter, year)
@@ -155,6 +159,12 @@ class ContextFormatter:
             context_parts.append(f"**WHIP**: {kbo_metrics.describe_metric_ko('WHIP', player_data['whip'])}")
             context_parts.append(f"**ERA-**: {kbo_metrics.describe_metric_ko('ERA-', player_data['era_minus'], 0)}")
             context_parts.append(f"**FIP-**: {kbo_metrics.describe_metric_ko('FIP-', player_data['fip_minus'], 0)}")
+            if player_data.get('k_per_nine'):
+                context_parts.append(f"**K/9**: {player_data['k_per_nine']:.2f} | **BB/9**: {player_data['bb_per_nine']:.2f}")
+            if player_data.get('kbb'):
+                context_parts.append(f"**K/BB**: {player_data['kbb']:.2f}")
+            if player_data.get('fip_extra'):
+                context_parts.append(f"**FIP**: {player_data['fip_extra']:.2f}")
             context_parts.append(f"**K-BB%**: {kbo_metrics.describe_metric_ko('K-BB%', player_data['kbb_pct'], 1)}%")
         else:
             context_parts.append(f"**포지션**: 타자")
@@ -177,6 +187,10 @@ class ContextFormatter:
                 context_parts.append(f"**OPS+**: {kbo_metrics.describe_metric_ko('OPS+', player_data['ops_plus'], 0)}")
             if player_data.get('wrc_plus'):
                 context_parts.append(f"**wRC+**: {kbo_metrics.describe_metric_ko('WRC+', player_data['wrc_plus'], 0)}")
+            if player_data.get('iso'):
+                context_parts.append(f"**ISO(순수장타율)**: {player_data['iso']:.3f} | **BABIP**: {player_data['babip']:.3f}")
+            if player_data.get('xr'):
+                context_parts.append(f"**XR(추정득점)**: {player_data['xr']:.2f}")
             if player_data.get('war'):
                 context_parts.append(f"**WAR**: {kbo_metrics.describe_metric_ko('WAR', player_data['war'], 2)}")
             
@@ -483,6 +497,20 @@ class ContextFormatter:
                     game_time = game.get("game_duration") or game.get("game_time")
                     if game_time:
                         context_parts.append(f"- 경기 시간: {game_time}")
+
+                    # 경기별 주요 활약 선수 (있을 경우)
+                    if "per_game_stats" in processed_data and game_id in processed_data["per_game_stats"]:
+                        stats = processed_data["per_game_stats"][game_id]
+                        if stats.get("batters"):
+                            context_parts.append("\n  * 주요 타자:")
+                            for b in stats["batters"][:3]:
+                                ops_str = f" | OPS {b['game_ops']:.3f}" if b.get('game_ops') else ""
+                                context_parts.append(f"    - {b['player_name']}: {b['hits']}안타 {b['home_runs']}홈런 {b['rbi']}타점{ops_str}")
+                        if stats.get("pitchers"):
+                            context_parts.append("  * 주요 투수:")
+                            for p in stats["pitchers"][:2]:
+                                fip_str = f" | FIP {p['fip']:.2f}" if p.get('fip') else ""
+                                context_parts.append(f"    - {p['player_name']}: {p['innings_pitched']}이닝 {p['strikeouts']}삼진 {p['runs_allowed']}실점{fip_str}")
         else:
             if game_date:
                 context_parts.append(f"\n{game_date} 경기 정보를 찾을 수 없습니다.")
@@ -556,4 +584,86 @@ class ContextFormatter:
         else:
             context_parts.append(f"\n{year}년 선수 이동 기록을 찾을 수 없습니다.")
 
+        return "\n".join(context_parts)
+
+    def _format_wpa_context(
+        self,
+        processed_data: Dict[str, Any],
+        query: str,
+        entity_filter,
+        year: int
+    ) -> str:
+        """WPA(승리 확률 기여도) 및 클러치 상황 관련 정보를 포맷합니다."""
+        context_parts = []
+        
+        # WPA 데이터 추출 (processed_data에서 wpa 관련 데이터 찾기)
+        wpa_data = processed_data.get("wpa_leaders", {})
+        clutch_moments = processed_data.get("clutch_moments", [])
+        player_wpa = processed_data.get("player_wpa", {})
+        
+        # 제목 설정
+        if entity_filter.player_name:
+            context_parts.append(f"### {entity_filter.player_name} 선수 {year}년 WPA(승리 기여도)")
+        elif entity_filter.stat_type == "clutch":
+            context_parts.append(f"### {year}년 KBO 결정적 순간 (클러치)")
+        else:
+            context_parts.append(f"### {year}년 KBO WPA(승리 확률 기여도) 리더")
+        
+        # 선수별 WPA 통계
+        if player_wpa and player_wpa.get("found"):
+            batting = player_wpa.get("batting_wpa")
+            pitching = player_wpa.get("pitching_wpa")
+            
+            if batting:
+                context_parts.append(f"\n**타자 WPA**")
+                context_parts.append(f"- 총 WPA: {batting['total_wpa']:+.3f}")
+                context_parts.append(f"- WPA+: {batting['wpa_positive']:+.3f} / WPA-: {batting['wpa_negative']:.3f}")
+                context_parts.append(f"- 클러치 안타 (WPA > 0.05): {batting.get('clutch_hits', 0)}번")
+                context_parts.append(f"- 타석당 평균 WPA: {batting.get('avg_wpa_per_pa', 0):.4f}")
+                if batting.get('best_moment_wpa'):
+                    context_parts.append(f"- 최고 기여 순간: +{batting['best_moment_wpa']:.3f}")
+            
+            if pitching:
+                context_parts.append(f"\n**투수 WPA**")
+                context_parts.append(f"- 총 WPA: {pitching['total_wpa']:+.3f}")
+                context_parts.append(f"- WPA+: {pitching['wpa_positive']:+.3f} / WPA-: {pitching['wpa_negative']:.3f}")
+                context_parts.append(f"- 클러치 아웃 (WPA > 0.05): {pitching.get('clutch_outs', 0)}번")
+                context_parts.append(f"- 타자당 평균 WPA: {pitching.get('avg_wpa_per_bf', 0):.4f}")
+        
+        # WPA 리더보드
+        if wpa_data:
+            batter_leaders = wpa_data.get("batter_leaders", [])
+            pitcher_leaders = wpa_data.get("pitcher_leaders", [])
+            
+            if batter_leaders:
+                context_parts.append(f"\n**타자 WPA 순위**")
+                for i, player in enumerate(batter_leaders[:10], 1):
+                    line = f"{i}. {player['player_name']}({player['team_name']}) - WPA {player['total_wpa']:+.3f}"
+                    context_parts.append(line)
+            
+            if pitcher_leaders:
+                context_parts.append(f"\n**투수 WPA 순위**")
+                for i, player in enumerate(pitcher_leaders[:10], 1):
+                    line = f"{i}. {player['player_name']}({player['team_name']}) - WPA {player['total_wpa']:+.3f}"
+                    context_parts.append(line)
+        
+        # 클러치 순간
+        if clutch_moments:
+            context_parts.append(f"\n**결정적 순간 TOP {min(5, len(clutch_moments))}**")
+            for i, moment in enumerate(clutch_moments[:5], 1):
+                inning_str = f"{moment['inning']}회 {moment.get('inning_half', '')}"
+                score_str = f"{moment['situation']['away_score']}-{moment['situation']['home_score']}"
+                wpa_str = f"WPA {moment['wpa']:+.3f}"
+                
+                context_parts.append(f"{i}. {moment.get('batter', 'N/A')} vs {moment.get('pitcher', 'N/A')}")
+                context_parts.append(f"   {inning_str}, {score_str}, {moment['situation']['runners']} | {wpa_str}")
+                if moment.get('event_type'):
+                    context_parts.append(f"   결과: {moment['event_type']}")
+        
+        # 데이터 없음 처리
+        if not wpa_data and not clutch_moments and not player_wpa:
+            context_parts.append(f"\n{year}년 WPA 데이터를 찾을 수 없습니다.")
+            context_parts.append("WPA는 각 플레이가 팀의 승리 확률에 얼마나 기여했는지를 나타내는 지표입니다.")
+            context_parts.append("양의 WPA는 팀 승리에 기여, 음의 WPA는 패배에 기여한 플레이를 의미합니다.")
+        
         return "\n".join(context_parts)
