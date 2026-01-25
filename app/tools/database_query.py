@@ -348,7 +348,7 @@ class DatabaseQueryTool:
                         psb.season,
                         psb.plate_appearances, psb.at_bats, psb.hits, psb.doubles, psb.triples, psb.home_runs,
                         psb.rbi, psb.runs, psb.walks, psb.strikeouts, psb.stolen_bases, psb.caught_stealing,
-                        psb.avg, psb.obp, psb.slg, psb.ops, psb.babip
+                        psb.avg, psb.obp, psb.slg, psb.ops, psb.babip, psb.iso, psb.extra_stats
                     FROM player_season_batting psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
                     JOIN kbo_seasons ks ON psb.season = ks.season_year
@@ -363,7 +363,12 @@ class DatabaseQueryTool:
                 batting_row = cursor.fetchone()
                 
                 if batting_row:
-                    result["batting_stats"] = dict(batting_row)
+                    batting_dict = dict(batting_row)
+                    # extra_stats에서 XR 추출
+                    if batting_dict.get('extra_stats') and isinstance(batting_dict['extra_stats'], dict):
+                        batting_dict['xr'] = batting_dict['extra_stats'].get('xr')
+                    
+                    result["batting_stats"] = batting_dict
                     result["found"] = True
                     logger.info(f"[DatabaseQuery] Found batting stats for {player_name}")
             
@@ -376,7 +381,8 @@ class DatabaseQueryTool:
                         psp.season,
                         psp.games, psp.games_started, psp.wins, psp.losses, psp.saves, psp.holds,
                         psp.innings_pitched, psp.hits_allowed, psp.runs_allowed, psp.earned_runs,
-                        psp.home_runs_allowed, psp.walks_allowed, psp.strikeouts, psp.era, psp.whip
+                        psp.home_runs_allowed, psp.walks_allowed, psp.strikeouts, psp.era, psp.whip,
+                        psp.k_per_nine, psp.bb_per_nine, psp.kbb, psp.extra_stats
                     FROM player_season_pitching psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
                     JOIN kbo_seasons ks ON psp.season = ks.season_year
@@ -391,7 +397,13 @@ class DatabaseQueryTool:
                 pitching_row = cursor.fetchone()
                 
                 if pitching_row:
-                    result["pitching_stats"] = dict(pitching_row)
+                    pitching_dict = dict(pitching_row)
+                    # extra_stats에서 FIP 추출 (독립 컬럼에 없을 경우 대비)
+                    if pitching_dict.get('extra_stats') and isinstance(pitching_dict['extra_stats'], dict):
+                        pitching_dict['fip_extra'] = pitching_dict['extra_stats'].get('fip')
+                        # 만약 fip가 독립 컬럼으로도 조회되게 하고 싶다면 쿼리에 추가 가능
+                    
+                    result["pitching_stats"] = pitching_dict
                     result["found"] = True
                     logger.info(f"[DatabaseQuery] Found pitching stats for {player_name}")
                     
@@ -1548,3 +1560,403 @@ class DatabaseQueryTool:
         finally:
             if 'cursor' in locals():
                 cursor.close()
+
+    # ========================================
+    # WPA (Win Probability Added) Query Methods
+    # ========================================
+    
+    def get_player_wpa_leaders(
+        self,
+        year: int,
+        position: str = "both",  # "batter", "pitcher", "both"
+        team_filter: Optional[str] = None,
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        WPA(승리 확률 기여도) 리더보드를 조회합니다.
+        
+        Args:
+            year: 시즌 년도
+            position: "batter", "pitcher", "both"
+            team_filter: 특정 팀만 필터링 (선택적)
+            limit: 상위 몇 명까지 조회할지
+            
+        Returns:
+            WPA 리더보드 딕셔너리
+        """
+        logger.info(f"[DatabaseQuery] Querying WPA leaders: {year}, {position}, team={team_filter}")
+        
+        result = {
+            "year": year,
+            "position": position,
+            "team_filter": team_filter,
+            "batter_leaders": [],
+            "pitcher_leaders": [],
+            "found": False,
+            "error": None
+        }
+        
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # 팀 필터 조건 구성
+            team_condition = ""
+            if team_filter:
+                team_code = self.get_team_code(team_filter)
+                team_condition = f"AND ge.team_code = '{team_code}'"
+            
+            # 타자 WPA 리더보드 (batter_id가 있는 이벤트)
+            if position in ["batter", "both"]:
+                batter_query = f"""
+                    SELECT 
+                        pb.name as player_name,
+                        ge.team_code,
+                        ROUND(SUM(ge.wpa)::numeric, 3) as total_wpa,
+                        ROUND(SUM(CASE WHEN ge.wpa > 0 THEN ge.wpa ELSE 0 END)::numeric, 3) as wpa_positive,
+                        ROUND(SUM(CASE WHEN ge.wpa < 0 THEN ge.wpa ELSE 0 END)::numeric, 3) as wpa_negative,
+                        COUNT(*) as plate_appearances,
+                        COUNT(CASE WHEN ge.wpa > 0.05 THEN 1 END) as clutch_plays
+                    FROM game_events ge
+                    JOIN game g ON ge.game_id = g.game_id
+                    JOIN player_basic pb ON ge.batter_id = pb.player_id
+                    WHERE g.season = %s
+                    AND ge.wpa IS NOT NULL
+                    AND ge.batter_id IS NOT NULL
+                    {team_condition}
+                    GROUP BY pb.player_id, pb.name, ge.team_code
+                    HAVING COUNT(*) >= 50
+                    ORDER BY SUM(ge.wpa) DESC
+                    LIMIT %s
+                """
+                cursor.execute(batter_query, (year, limit))
+                batter_rows = cursor.fetchall()
+                
+                for row in batter_rows:
+                    team_code = row.get("team_code")
+                    display_team_name = self.get_team_name(team_code) or team_code
+                    
+                    result["batter_leaders"].append({
+                        "player_name": row["player_name"],
+                        "team_name": display_team_name,
+                        "total_wpa": float(row["total_wpa"]),
+                        "wpa_positive": float(row["wpa_positive"]),
+                        "wpa_negative": float(row["wpa_negative"]),
+                        "plate_appearances": row["plate_appearances"],
+                        "clutch_plays": row["clutch_plays"]
+                    })
+                
+                if batter_rows:
+                    result["found"] = True
+            
+            # 투수 WPA 리더보드 (pitcher_id가 있는 이벤트)
+            if position in ["pitcher", "both"]:
+                pitcher_query = f"""
+                    SELECT 
+                        pb.name as player_name,
+                        ge.team_code,
+                        ROUND(SUM(-ge.wpa)::numeric, 3) as total_wpa,
+                        ROUND(SUM(CASE WHEN ge.wpa < 0 THEN -ge.wpa ELSE 0 END)::numeric, 3) as wpa_positive,
+                        ROUND(SUM(CASE WHEN ge.wpa > 0 THEN -ge.wpa ELSE 0 END)::numeric, 3) as wpa_negative,
+                        COUNT(*) as batters_faced,
+                        COUNT(CASE WHEN ge.wpa < -0.05 THEN 1 END) as clutch_outs
+                    FROM game_events ge
+                    JOIN game g ON ge.game_id = g.game_id
+                    JOIN player_basic pb ON ge.pitcher_id = pb.player_id
+                    WHERE g.season = %s
+                    AND ge.wpa IS NOT NULL
+                    AND ge.pitcher_id IS NOT NULL
+                    {team_condition}
+                    GROUP BY pb.player_id, pb.name, ge.team_code
+                    HAVING COUNT(*) >= 50
+                    ORDER BY SUM(-ge.wpa) DESC
+                    LIMIT %s
+                """
+                cursor.execute(pitcher_query, (year, limit))
+                pitcher_rows = cursor.fetchall()
+                
+                for row in pitcher_rows:
+                    team_code = row.get("team_code")
+                    display_team_name = self.get_team_name(team_code) or team_code
+                    
+                    result["pitcher_leaders"].append({
+                        "player_name": row["player_name"],
+                        "team_name": display_team_name,
+                        "total_wpa": float(row["total_wpa"]),
+                        "wpa_positive": float(row["wpa_positive"]),
+                        "wpa_negative": float(row["wpa_negative"]),
+                        "batters_faced": row["batters_faced"],
+                        "clutch_outs": row["clutch_outs"]
+                    })
+                
+                if pitcher_rows:
+                    result["found"] = True
+            
+            logger.info(f"[DatabaseQuery] Found {len(result['batter_leaders'])} batter leaders, {len(result['pitcher_leaders'])} pitcher leaders")
+            
+        except Exception as e:
+            logger.error(f"[DatabaseQuery] Error querying WPA leaders: {e}")
+            result["error"] = str(e)
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+        
+        return result
+    
+    def get_clutch_moments(
+        self,
+        game_id: Optional[str] = None,
+        date: Optional[str] = None,
+        year: Optional[int] = None,
+        team_filter: Optional[str] = None,
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        결정적인 순간(WPA가 높은 플레이)을 조회합니다.
+        
+        Args:
+            game_id: 특정 경기 ID (선택적)
+            date: 경기 날짜 YYYY-MM-DD (선택적)
+            year: 시즌 년도 (선택적)
+            team_filter: 특정 팀만 필터링 (선택적)
+            limit: 상위 몇 개까지 조회할지
+            
+        Returns:
+            클러치 순간 목록 딕셔너리
+        """
+        logger.info(f"[DatabaseQuery] Querying clutch moments: game_id={game_id}, date={date}, year={year}")
+        
+        result = {
+            "game_id": game_id,
+            "date": date,
+            "year": year,
+            "clutch_moments": [],
+            "found": False,
+            "error": None
+        }
+        
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # 조건 구성
+            conditions = ["ge.wpa IS NOT NULL"]
+            params = []
+            
+            if game_id:
+                conditions.append("ge.game_id = %s")
+                params.append(game_id)
+            if date:
+                conditions.append("g.game_date = %s")
+                params.append(date)
+            if year:
+                conditions.append("g.season = %s")
+                params.append(year)
+            if team_filter:
+                team_code = self.get_team_code(team_filter)
+                conditions.append("(g.home_team = %s OR g.away_team = %s)")
+                params.extend([team_code, team_code])
+            
+            where_clause = " AND ".join(conditions)
+            params.append(limit)
+            
+            query = f"""
+                SELECT 
+                    ge.game_id,
+                    g.game_date,
+                    g.home_team,
+                    g.away_team,
+                    pb.name as batter_name,
+                    pp.name as pitcher_name,
+                    ge.event_type,
+                    ge.event_description,
+                    ge.inning,
+                    ge.inning_half,
+                    ROUND(ge.wpa::numeric, 3) as wpa,
+                    ROUND(ge.win_expectancy_before::numeric, 3) as we_before,
+                    ROUND(ge.win_expectancy_after::numeric, 3) as we_after,
+                    ge.base_state,
+                    ge.home_score,
+                    ge.away_score,
+                    ge.score_diff
+                FROM game_events ge
+                JOIN game g ON ge.game_id = g.game_id
+                LEFT JOIN player_basic pb ON ge.batter_id = pb.player_id
+                LEFT JOIN player_basic pp ON ge.pitcher_id = pp.player_id
+                WHERE {where_clause}
+                ORDER BY ABS(ge.wpa) DESC
+                LIMIT %s
+            """
+            
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                # 주자 상황 해석
+                base_state = row.get("base_state", 0) or 0
+                runners = []
+                if base_state & 1:
+                    runners.append("1루")
+                if base_state & 2:
+                    runners.append("2루")
+                if base_state & 4:
+                    runners.append("3루")
+                runners_str = ", ".join(runners) if runners else "주자 없음"
+                
+                result["clutch_moments"].append({
+                    "game_id": row["game_id"],
+                    "game_date": str(row["game_date"]) if row["game_date"] else None,
+                    "home_team": self.get_team_name(row["home_team"]),
+                    "away_team": self.get_team_name(row["away_team"]),
+                    "batter": row["batter_name"],
+                    "pitcher": row["pitcher_name"],
+                    "event_type": row["event_type"],
+                    "description": row["event_description"],
+                    "inning": row["inning"],
+                    "inning_half": "초" if row["inning_half"] == "top" else "말",
+                    "wpa": float(row["wpa"]),
+                    "we_before": float(row["we_before"]) if row["we_before"] else None,
+                    "we_after": float(row["we_after"]) if row["we_after"] else None,
+                    "situation": {
+                        "home_score": row["home_score"],
+                        "away_score": row["away_score"],
+                        "score_diff": row["score_diff"],
+                        "runners": runners_str
+                    }
+                })
+            
+            if rows:
+                result["found"] = True
+                logger.info(f"[DatabaseQuery] Found {len(rows)} clutch moments")
+            
+        except Exception as e:
+            logger.error(f"[DatabaseQuery] Error querying clutch moments: {e}")
+            result["error"] = str(e)
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+        
+        return result
+    
+    def get_player_wpa_stats(
+        self,
+        player_name: str,
+        year: int,
+        position: str = "both"  # "batter", "pitcher", "both"
+    ) -> Dict[str, Any]:
+        """
+        특정 선수의 WPA 상세 통계를 조회합니다.
+        
+        Args:
+            player_name: 선수명
+            year: 시즌 년도
+            position: "batter", "pitcher", "both"
+            
+        Returns:
+            선수 WPA 통계 딕셔너리
+        """
+        logger.info(f"[DatabaseQuery] Querying player WPA stats: {player_name}, {year}")
+        
+        result = {
+            "player_name": player_name,
+            "year": year,
+            "batting_wpa": None,
+            "pitching_wpa": None,
+            "found": False,
+            "error": None
+        }
+        
+        try:
+            cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # 타자로서 WPA
+            if position in ["batter", "both"]:
+                batter_query = """
+                    SELECT 
+                        pb.name as player_name,
+                        ROUND(SUM(ge.wpa)::numeric, 3) as total_wpa,
+                        ROUND(SUM(CASE WHEN ge.wpa > 0 THEN ge.wpa ELSE 0 END)::numeric, 3) as wpa_positive,
+                        ROUND(SUM(CASE WHEN ge.wpa < 0 THEN ge.wpa ELSE 0 END)::numeric, 3) as wpa_negative,
+                        COUNT(*) as plate_appearances,
+                        COUNT(CASE WHEN ge.wpa > 0.05 THEN 1 END) as clutch_hits,
+                        COUNT(CASE WHEN ge.wpa < -0.05 THEN 1 END) as clutch_fails,
+                        ROUND(AVG(ge.wpa)::numeric, 4) as avg_wpa_per_pa,
+                        MAX(ge.wpa) as best_moment_wpa,
+                        MIN(ge.wpa) as worst_moment_wpa
+                    FROM game_events ge
+                    JOIN game g ON ge.game_id = g.game_id
+                    JOIN player_basic pb ON ge.batter_id = pb.player_id
+                    WHERE g.season = %s
+                    AND ge.wpa IS NOT NULL
+                    AND LOWER(pb.name) LIKE LOWER(%s)
+                    GROUP BY pb.player_id, pb.name
+                """
+                cursor.execute(batter_query, (year, f'%{player_name}%'))
+                batter_row = cursor.fetchone()
+                
+                if batter_row:
+                    result["batting_wpa"] = {
+                        "player_name": batter_row["player_name"],
+                        "total_wpa": float(batter_row["total_wpa"]),
+                        "wpa_positive": float(batter_row["wpa_positive"]),
+                        "wpa_negative": float(batter_row["wpa_negative"]),
+                        "plate_appearances": batter_row["plate_appearances"],
+                        "clutch_hits": batter_row["clutch_hits"],
+                        "clutch_fails": batter_row["clutch_fails"],
+                        "avg_wpa_per_pa": float(batter_row["avg_wpa_per_pa"]),
+                        "best_moment_wpa": float(batter_row["best_moment_wpa"]) if batter_row["best_moment_wpa"] else None,
+                        "worst_moment_wpa": float(batter_row["worst_moment_wpa"]) if batter_row["worst_moment_wpa"] else None
+                    }
+                    result["found"] = True
+            
+            # 투수로서 WPA (부호 반전: 타자의 WPA가 음수면 투수에게 긍정적)
+            if position in ["pitcher", "both"]:
+                pitcher_query = """
+                    SELECT 
+                        pb.name as player_name,
+                        ROUND(SUM(-ge.wpa)::numeric, 3) as total_wpa,
+                        ROUND(SUM(CASE WHEN ge.wpa < 0 THEN -ge.wpa ELSE 0 END)::numeric, 3) as wpa_positive,
+                        ROUND(SUM(CASE WHEN ge.wpa > 0 THEN -ge.wpa ELSE 0 END)::numeric, 3) as wpa_negative,
+                        COUNT(*) as batters_faced,
+                        COUNT(CASE WHEN ge.wpa < -0.05 THEN 1 END) as clutch_outs,
+                        COUNT(CASE WHEN ge.wpa > 0.05 THEN 1 END) as clutch_fails,
+                        ROUND(AVG(-ge.wpa)::numeric, 4) as avg_wpa_per_bf,
+                        MIN(ge.wpa) as best_moment_wpa,
+                        MAX(ge.wpa) as worst_moment_wpa
+                    FROM game_events ge
+                    JOIN game g ON ge.game_id = g.game_id
+                    JOIN player_basic pb ON ge.pitcher_id = pb.player_id
+                    WHERE g.season = %s
+                    AND ge.wpa IS NOT NULL
+                    AND LOWER(pb.name) LIKE LOWER(%s)
+                    GROUP BY pb.player_id, pb.name
+                """
+                cursor.execute(pitcher_query, (year, f'%{player_name}%'))
+                pitcher_row = cursor.fetchone()
+                
+                if pitcher_row:
+                    result["pitching_wpa"] = {
+                        "player_name": pitcher_row["player_name"],
+                        "total_wpa": float(pitcher_row["total_wpa"]),
+                        "wpa_positive": float(pitcher_row["wpa_positive"]),
+                        "wpa_negative": float(pitcher_row["wpa_negative"]),
+                        "batters_faced": pitcher_row["batters_faced"],
+                        "clutch_outs": pitcher_row["clutch_outs"],
+                        "clutch_fails": pitcher_row["clutch_fails"],
+                        "avg_wpa_per_bf": float(pitcher_row["avg_wpa_per_bf"]),
+                        "best_moment_wpa": float(-pitcher_row["best_moment_wpa"]) if pitcher_row["best_moment_wpa"] else None,
+                        "worst_moment_wpa": float(-pitcher_row["worst_moment_wpa"]) if pitcher_row["worst_moment_wpa"] else None
+                    }
+                    result["found"] = True
+            
+            if result["found"]:
+                logger.info(f"[DatabaseQuery] Found WPA stats for {player_name}")
+            else:
+                logger.warning(f"[DatabaseQuery] No WPA data found for {player_name} in {year}")
+            
+        except Exception as e:
+            logger.error(f"[DatabaseQuery] Error querying player WPA stats: {e}")
+            result["error"] = str(e)
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+        
+        return result
