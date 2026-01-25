@@ -112,14 +112,9 @@ async def _stream_response(
             
             # answer가 비동기 제너레이터인 경우 (스트리밍)
             if hasattr(answer, '__aiter__'):
-                try:
-                    async for delta in answer:
-                        yield {"event": "message", "data": json.dumps({"delta": delta}, ensure_ascii=False)}
-                except Exception as e:
-                    logger.exception("Streaming error occurred")
-                    yield {"event": "error", "data": json.dumps({"message": "streaming_error", "detail": str(e)}, ensure_ascii=False)}
-                    return
-
+                async for delta in answer:
+                    yield {"event": "message", "data": json.dumps({"delta": delta}, ensure_ascii=False)}
+                    
                 # 스트리밍 완료 후 전체 답변을 문자열로 결합하여 meta 데이터 준비 (옵션)
                 # 실제로는 meta 데이터만 보내면 됨
             
@@ -205,20 +200,10 @@ async def chat_completion(
         context={"filters": filters, "history": history},
     )
     
-    # 만약 answer가 비동기 제너레이터라면 문자열로 결합
-    answer_raw = result.get("answer")
-    if hasattr(answer_raw, '__aiter__'):
-        full_answer = ""
-        async for delta in answer_raw:
-            if delta:
-                full_answer += delta
-        result["answer"] = full_answer
-
     # ToolCall 등 커스텀 객체 직렬화 헬퍼
     def safe_serialize(obj):
         """JSON 직렬화 가능한 형태로 객체를 변환"""
         from datetime import datetime, date
-        import inspect
         
         if obj is None:
             return None
@@ -232,8 +217,6 @@ async def chat_completion(
             return {key: safe_serialize(value) for key, value in obj.items()}
         elif isinstance(obj, (list, tuple)):
             return [safe_serialize(item) for item in obj]
-        elif inspect.isasyncgen(obj) or inspect.isgenerator(obj):
-            return str(obj) # 이미 처리되어야 하지만 방어용
         else:
             if hasattr(obj, '__dict__'):
                 return {key: safe_serialize(value) for key, value in obj.__dict__.items()}
