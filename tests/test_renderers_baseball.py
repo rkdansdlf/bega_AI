@@ -30,9 +30,15 @@ def test_render_pitching_season_snapshot():
     snapshot = _normalize(rendered)
     assert snapshot.startswith("[TL;DR]"), "must start with TL;DR section"
     sections = [section.strip() for section in rendered.split("\n") if section.strip()]
-    assert any(line.startswith("[핵심 문장]") for line in sections), "core sentence missing"
-    assert any(section.startswith("[상세]") for section in sections), "detail section missing"
-    assert any(section.startswith("[META]") for section in sections), "meta section missing"
+    assert any(
+        line.startswith("[핵심 문장]") for line in sections
+    ), "core sentence missing"
+    assert any(
+        section.startswith("[상세]") for section in sections
+    ), "detail section missing"
+    assert any(
+        section.startswith("[META]") for section in sections
+    ), "meta section missing"
     assert sections[-1].startswith("[출처]"), "source section missing"
     assert "평균자책점 13.00" in rendered
     assert "WHIP 1.85" in rendered

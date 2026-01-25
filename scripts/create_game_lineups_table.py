@@ -1,4 +1,3 @@
-
 import os
 import psycopg2
 import logging
@@ -6,8 +5,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 def create_table():
-    db_url = os.environ.get('OCI_DB_URL')
+    db_url = os.environ.get("OCI_DB_URL")
     if not db_url:
         print("Error: OCI_DB_URL environment variable not set.")
         return
@@ -37,8 +37,9 @@ def create_table():
     except Exception as e:
         print(f"Error creating table: {e}")
     finally:
-        if 'conn' in locals():
+        if "conn" in locals():
             conn.close()
+
 
 if __name__ == "__main__":
     create_table()

@@ -1,11 +1,13 @@
-
 import os
 import psycopg2
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
+load_dotenv(
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
+)
 
-DB_URL = os.getenv('SUPABASE_DB_URL')
+DB_URL = os.getenv("SUPABASE_DB_URL")
+
 
 def setup_user_providers():
     print("Connecting to DB...")
@@ -24,7 +26,7 @@ def setup_user_providers():
                     UNIQUE(user_id, provider)  -- One provider account per user (e.g. one Google account per user)
                 );
             """)
-            
+
             # 2. Migrate existing data
             print("Migrating existing provider data...")
             cur.execute("""
@@ -37,12 +39,13 @@ def setup_user_providers():
                   AND providerid IS NOT NULL
                 ON CONFLICT (provider, providerid) DO NOTHING;
             """)
-            
+
             inserted = cur.rowcount
             print(f"Migrated {inserted} records.")
-            
+
             conn.commit()
             print("Setup successful!")
+
 
 if __name__ == "__main__":
     setup_user_providers()

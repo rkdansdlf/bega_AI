@@ -17,7 +17,7 @@ from ..config import Settings
 
 def _vector_literal(vector: Sequence[float]) -> str:
     """Python 리스트 형태의 벡터를 pgvector가 인식하는 문자열 형태로 변환합니다.
-    
+
     예: [0.1, 0.2, 0.3] -> '[0.10000000,0.20000000,0.30000000]'
     """
     return "[" + ",".join(f"{v:.8f}" for v in vector) + "]"
@@ -71,15 +71,17 @@ def similarity_search(
                 filter_params.append(value)
 
     where_clause = " AND ".join(filter_clauses)
-    
+
     # 벡터를 SQL 쿼리에 직접 삽입할 수 있는 문자열 형태로 변환합니다.
     vector_str = _vector_literal(embedding)
-    
+
     # 키워드 검색이 요청된 경우, 텍스트 검색 순위(ts_rank)를 계산하는 부분을 추가합니다.
     ts_part = ""
     keyword_param: List[str] = []
     if keyword:
-        ts_part = ", ts_rank(content_tsv, plainto_tsquery('simple', %s)) as keyword_rank"
+        ts_part = (
+            ", ts_rank(content_tsv, plainto_tsquery('simple', %s)) as keyword_rank"
+        )
         keyword_param.append(keyword)
 
     # 최종 SQL 쿼리를 구성합니다.
@@ -105,14 +107,20 @@ def similarity_search(
     final_params = [vector_str] + keyword_param + filter_params + [limit]
 
     import time
+
     start_time = time.perf_counter()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, final_params)
         rows = cur.fetchall()
     elapsed_ms = (time.perf_counter() - start_time) * 1000
-    
+
     import logging
+
     logger = logging.getLogger(__name__)
-    logger.info("[Search] Vector similarity search took %.2fms (results=%d)", elapsed_ms, len(rows))
-        
+    logger.info(
+        "[Search] Vector similarity search took %.2fms (results=%d)",
+        elapsed_ms,
+        len(rows),
+    )
+
     return [dict(row) for row in rows]
