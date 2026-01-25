@@ -63,15 +63,9 @@ STAT_MAPPING = {
     "득점권 타율": "scoring_position_avg", "득점권타율": "scoring_position_avg", "득타율": "scoring_position_avg",
     "승률": "win_rate", "홈 승률": "home_win_rate", "홈경기 승률": "home_win_rate", "안방 승률": "home_win_rate",
     
-    # WPA (승리 확률 기여도) 관련 지표
-    "WPA": "wpa", "wpa": "wpa", "승리기여도": "wpa", "승리확률기여도": "wpa", "승리 기여도": "wpa",
-    "클러치": "clutch", "clutch": "clutch", "결정적": "clutch", "결정적순간": "clutch", "결정적 순간": "clutch",
-    "클러치히터": "clutch", "클러치 히터": "clutch", "승부사": "clutch",
-    
     # 투수 지표
     "ERA": "era", "era": "era", "평균자책": "era", "평균자책점": "era", "방어율": "era",
     "WHIP": "whip", "whip": "whip",
-    "FIP": "fip", "fip": "fip",
     "승수": "wins", "W": "wins", "win": "wins",
     "세이브": "saves", "SV": "saves", "save": "saves",
     "삼진": "strikeouts", "K": "strikeouts", "SO": "strikeouts",
@@ -410,7 +404,7 @@ def extract_player_name(query: str) -> Optional[str]:
     "승률", "몇승", "몇패", "방어율", "평균자책", "평균자책점", "타율", "홈런", "타점", "도루",
     "포스트시즌", "준플레이오프", "플레이오프", "한국시리즈", "와일드카드",
     "누구", "어디", "언제", "어떻게", "얼마나", "어떠니", "궁금해", "그려줘", "표",
-    "상대", "특정", "결과", "대결", "승부", "위가", "경기", "데이터"
+    "상대", "특정", "결과", "대결", "승부", "위가", "경기"
             }
             if match not in common_terms:
                 return match
