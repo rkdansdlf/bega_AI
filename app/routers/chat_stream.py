@@ -317,7 +317,17 @@ async def chat_stream_get(
     )
 
 
-whisper_client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY2"))
+_whisper_client: openai.AsyncOpenAI | None = None
+
+
+def _get_whisper_client() -> openai.AsyncOpenAI:
+    api_key = os.getenv("OPENAI_API_KEY2") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY가 설정되지 않았습니다.")
+    global _whisper_client
+    if _whisper_client is None:
+        _whisper_client = openai.AsyncOpenAI(api_key=api_key)
+    return _whisper_client
 
 
 @router.post("/voice")
@@ -339,6 +349,7 @@ async def transcribe_audio(
 
         logger.info("OpenAI Whisper API 호출 중...")
 
+        whisper_client = _get_whisper_client()
         # 비동기 호출로 변경
         response = await whisper_client.audio.transcriptions.create(
             model="whisper-1",
