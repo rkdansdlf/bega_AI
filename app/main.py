@@ -64,4 +64,9 @@ def create_app() -> FastAPI:
     return app
 
 
+from .core.logging_config import configure_logging
+
+# 로깅 설정 초기화
+configure_logging()
+
 app = create_app()

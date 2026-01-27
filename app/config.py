@@ -31,33 +31,33 @@ class Settings(BaseSettings):
     cors_origins: List[str] = Field(default_factory=lambda: ["*"])
 
     # --- 데이터베이스 설정 (OCI/Postgres) ---
-    oci_db_url: str = Field(..., env="OCI_DB_URL")
-    supabase_db_url: Optional[str] = Field(None, env="SUPABASE_DB_URL")
+    oci_db_url: str = Field(..., validation_alias="OCI_DB_URL")
+    supabase_db_url: Optional[str] = Field(None, validation_alias="SUPABASE_DB_URL")
 
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
-    llm_provider: str = Field("gemini", env="LLM_PROVIDER")
-    embed_provider: str = Field("gemini", env="EMBED_PROVIDER")
-    embed_model: str = Field("", env="EMBED_MODEL")  # 특정 모델을 지정할 때 사용
+    llm_provider: str = Field("gemini", validation_alias="LLM_PROVIDER")
+    embed_provider: str = Field("gemini", validation_alias="EMBED_PROVIDER")
+    embed_model: str = Field("", validation_alias="EMBED_MODEL")  # 특정 모델을 지정할 때 사용
 
     # --- Google Gemini 설정 ---
-    gemini_api_key: Optional[str] = Field(None, env="GEMINI_API_KEY")
-    gemini_model: str = Field("gemini-2.5-flash", env="GEMINI_MODEL")
-    gemini_embed_model: str = Field("", env="GEMINI_EMBED_MODEL")
+    gemini_api_key: Optional[str] = Field(None, validation_alias="GEMINI_API_KEY")
+    gemini_model: str = Field("gemini-2.5-flash", validation_alias="GEMINI_MODEL")
+    gemini_embed_model: str = Field("", validation_alias="GEMINI_EMBED_MODEL")
     gemini_base_url: str = Field(
         "https://generativelanguage.googleapis.com/v1beta/openai",
-        env="GEMINI_BASE_URL",
+        validation_alias="GEMINI_BASE_URL",
     )
 
     # --- OpenAI 설정 ---
-    openai_api_key: Optional[str] = Field(None, env="OPENAI_API_KEY")
-    openai_embed_model: str = Field("text-embedding-3-small", env="OPENAI_EMBED_MODEL")
+    openai_api_key: Optional[str] = Field(None, validation_alias="OPENAI_API_KEY")
+    openai_embed_model: str = Field("text-embedding-3-small", validation_alias="OPENAI_EMBED_MODEL")
 
     # --- OpenRouter 설정 ---
-    openrouter_api_key: Optional[str] = Field(None, env="OPENROUTER_API_KEY")
-    openrouter_model: str = Field("openai/gpt-oss-120b", env="OPENROUTER_MODEL")
+    openrouter_api_key: Optional[str] = Field(None, validation_alias="OPENROUTER_API_KEY")
+    openrouter_model: str = Field("openai/gpt-oss-120b", validation_alias="OPENROUTER_MODEL")
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
-    openrouter_fallback_models_raw: str = Field("", env="OPENROUTER_FALLBACK_MODELS")
+    openrouter_fallback_models_raw: str = Field("", validation_alias="OPENROUTER_FALLBACK_MODELS")
 
     @property
     def openrouter_fallback_models(self) -> List[str]:
@@ -70,24 +70,24 @@ class Settings(BaseSettings):
         ]
 
     openrouter_base_url: str = Field(
-        "https://openrouter.ai/api/v1", env="OPENROUTER_BASE_URL"
+        "https://openrouter.ai/api/v1", validation_alias="OPENROUTER_BASE_URL"
     )
-    openrouter_referer: Optional[str] = Field(None, env="OPENROUTER_REFERER")
-    openrouter_app_title: Optional[str] = Field(None, env="OPENROUTER_APP_TITLE")
-    openrouter_embed_model: Optional[str] = Field(None, env="OPENROUTER_EMBED_MODEL")
+    openrouter_referer: Optional[str] = Field(None, validation_alias="OPENROUTER_REFERER")
+    openrouter_app_title: Optional[str] = Field(None, validation_alias="OPENROUTER_APP_TITLE")
+    openrouter_embed_model: Optional[str] = Field(None, validation_alias="OPENROUTER_EMBED_MODEL")
 
     # --- Function Calling / Chatbot 설정 ---
-    chatbot_model_name: Optional[str] = Field(None, env="CHATBOT_MODEL_NAME")
+    chatbot_model_name: Optional[str] = Field(None, validation_alias="CHATBOT_MODEL_NAME")
 
     # --- 검색(Retrieval) 관련 설정 ---
-    default_search_limit: int = Field(3, env="DEFAULT_SEARCH_LIMIT")
+    default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
 
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
-    max_output_tokens: int = Field(4096, env="MAX_OUTPUT_TOKENS")
+    max_output_tokens: int = Field(4096, validation_alias="MAX_OUTPUT_TOKENS")
 
     # --- Monitoring ---
-    sentry_dsn: Optional[str] = Field(None, env="SENTRY_DSN")
+    sentry_dsn: Optional[str] = Field(None, validation_alias="SENTRY_DSN")
 
     @field_validator("embed_provider")
     def _validate_embed_provider(cls, value: str) -> str:
