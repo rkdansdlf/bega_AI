@@ -8,6 +8,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 NUMBER_SENTINELS = {"", None, "null", "None"}
 
+from app.core import kbo_metrics
+
+_LEAGUE_CONTEXT = kbo_metrics.LeagueContext()
+
 
 def _has_final_consonant(word: str) -> bool:
     if not word:
@@ -70,18 +74,30 @@ def _format_count(value: Any, suffix: str = "") -> Optional[str]:
     return f"{number}{suffix}"
 
 
-def make_meta(row: Dict[str, Any], *, kind: str, aliases: Iterable[str]) -> str:
+def make_meta(
+    row: Dict[str, Any], 
+    *, 
+    kind: str, 
+    aliases: Iterable[str],
+    extra_stats: Optional[Dict[str, Any]] = None
+) -> str:
     meta = {
         "kind": kind,
         "season": row.get("season_year") or row.get("season"),
         "team": row.get("team_name") or row.get("team_code"),
         "player_id": row.get("player_id"),
+        "source_row_id": row.get("source_row_id", row.get("id")),
+        "player_name": row.get("player_name"),
         "aliases": [alias for alias in aliases if alias],
         "primary_stats": {},
     }
     for key in ("era", "avg", "ops", "whip", "ip"):
         if row.get(key) not in NUMBER_SENTINELS:
             meta["primary_stats"][key] = row[key]
+            
+    if extra_stats:
+        meta.update(extra_stats)
+        
     return json.dumps(meta, ensure_ascii=False)
 
 
@@ -196,10 +212,53 @@ def render_pitching_season(
             advanced.append(f"ERA 백분위는 상위 {era_pct}%입니다.")
     detailed_section = _detailed_lines(detailed + advanced)
 
+    # [Optimized] Pre-calculate metrics for RAG
+    extra_stats = {}
+    try:
+        ip_val = float(row.get("innings_pitched") or row.get("ip") or 0.0)
+        era_val = float(row.get("era") or 99.0)
+        whip_val = float(row.get("whip") or 99.0)
+        hr = int(float(row.get("home_runs_allowed") or 0))
+        bb = int(float(row.get("walks_allowed") or 0))
+        hbp = int(float(row.get("hit_batters") or 0))
+        k = int(float(row.get("strikeouts") or 0))
+        pa = int(float(row.get("tbf") or 0))
+        
+        fip_val = kbo_metrics.fip(hr, bb, hbp, k, ip_val, _LEAGUE_CONTEXT) or 99.0
+        era_minus_val = kbo_metrics.era_minus(era_val, _LEAGUE_CONTEXT) or 999.0
+        fip_minus_val = kbo_metrics.fip_minus(fip_val, _LEAGUE_CONTEXT) or 999.0
+        kbb_pct = kbo_metrics.k_minus_bb_pct(k, bb, pa) or -99.0
+        
+        score = kbo_metrics.pitcher_rank_score(
+            era_minus_val, fip_minus_val, kbb_pct, whip_val, ip_val
+        )
+        
+        extra_stats = {
+            "role": "SP" if ip_val >= 70 or int(float(row.get("games_started") or 0)) >= 10 else "RP",
+            "ip": ip_val,
+            "era": era_val,
+            "whip": whip_val,
+            "kbb_pct": kbb_pct,
+            "era_minus": era_minus_val,
+            "fip_minus": fip_minus_val,
+            "score": score,
+            # Add raw stats needed for display
+            "innings_pitched": ip_val,
+            "strikeouts": k,
+            "walks_allowed": bb,
+            "hit_batters": hbp,
+            "home_runs_allowed": hr,
+            "tbf": pa,
+            "games_started": int(float(row.get("games_started") or 0))
+        }
+    except Exception:
+        pass # Fallback to runtime calc if data missing
+
     meta = make_meta(
         row,
         kind="pitching_season",
         aliases=_build_aliases(row),
+        extra_stats=extra_stats
     )
 
     source = row.get("source_table", "player_season_pitching")
@@ -277,10 +336,80 @@ def render_batting_season(
             advanced.append(f"OPS 백분위는 상위 {ops_pct}%입니다.")
     detail_block = _detailed_lines(detailed + advanced)
 
+    # [Optimized] Pre-calculate metrics for RAG
+    extra_stats = {}
+    try:
+        pa_val = int(float(row.get("plate_appearances") or row.get("pa") or 0))
+        hits = int(float(row.get("hits") or 0))
+        doubles = int(float(row.get("doubles") or 0))
+        triples = int(float(row.get("triples") or 0))
+        hr = int(float(row.get("home_runs") or row.get("hr") or 0))
+        bb = int(float(row.get("walks") or 0))
+        ibb = int(float(row.get("intentional_walks") or 0))
+        hbp = int(float(row.get("hbp") or 0))
+        sf = int(float(row.get("sacrifice_flies") or 0))
+        ab = int(float(row.get("at_bats") or 0))
+        rbi_val = int(float(row.get("rbi") or 0))
+        sb = int(float(row.get("stolen_bases") or 0))
+        
+        avg_val = float(row.get("avg") or row.get("batting_avg") or 0.0)
+        ops_val = float(row.get("ops") or 0.0)
+        
+        # Recalculate if missing
+        if ops_val == 0.0:
+            ops_val = kbo_metrics.ops(hits, bb, hbp, ab, sf, doubles, triples, hr) or 0.0
+            
+        league_ops = (_LEAGUE_CONTEXT.lg_OBP + _LEAGUE_CONTEXT.lg_SLG)
+        ops_plus = ((ops_val / league_ops) * 100) if league_ops else None
+        
+        woba_val = kbo_metrics.woba(bb, ibb, hbp, hits, doubles, triples, hr, ab, sf, _LEAGUE_CONTEXT)
+        wrc_plus = None
+        if woba_val is not None and pa_val > 0:
+            wrc_plus = kbo_metrics.wrc_plus(woba_val, pa_val, _LEAGUE_CONTEXT)
+            
+        war = None
+        if woba_val is not None:
+            war = kbo_metrics.war_batter(woba_val, pa_val, 0.0, 0.0, 0.0, 0.0, _LEAGUE_CONTEXT)
+            
+        score = 0.0
+        if wrc_plus is not None: # Use simplified score calculation here to avoid circular dep or re-implementation
+             wrc_plus_score = wrc_plus
+             war_score = (war * 20) if war is not None else 0
+             score = 0.7 * wrc_plus_score + 0.3 * war_score
+        else:
+             score = 90.0 # Default
+             
+        extra_stats = {
+            "pa": pa_val,
+            "wrc_plus": wrc_plus,
+            "ops_plus": ops_plus,
+            "war": war,
+            "ops": ops_val,
+            "obp": float(row.get("obp") or 0.0),
+            "slg": float(row.get("slg") or 0.0),
+            "avg": avg_val,
+            "home_runs": hr,
+            "rbi": rbi_val,
+            "steals": sb,
+            "score": score,
+            # Raw stats for display
+            "hits": hits,
+            "doubles": doubles,
+            "triples": triples,
+            "walks": bb,
+            "intentional_walks": ibb,
+            "hbp": hbp,
+            "sacrifice_flies": sf,
+            "at_bats": ab,
+        }
+    except Exception:
+        pass
+
     meta = make_meta(
         row,
         kind="batting_season",
         aliases=_build_aliases(row),
+        extra_stats=extra_stats
     )
 
     source = row.get("source_table", "player_season_batting")
