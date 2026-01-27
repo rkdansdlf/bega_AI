@@ -100,11 +100,43 @@ def _meta_cache_key(meta: Dict[str, Any]) -> str:
         return str(meta)
 
 
+class MetaWrapper:
+    """
+    메타 데이터를 감싸서 효율적인 캐싱을 지원하는 래퍼 클래스입니다.
+    source_row_id가 있으면 이를 해시 키로 사용하고, 없으면 전체 메타 데이터의 JSON 문자열을 사용합니다.
+    """
+
+    def __init__(self, meta: Dict[str, Any]):
+        self.meta = meta
+        self._hash_key = self._generate_hash_key()
+
+    def _generate_hash_key(self) -> str:
+        # source_row_id가 있으면 가장 효율적인 키로 사용
+        row_id = self.meta.get("source_row_id")
+        if row_id:
+            return f"id:{row_id}"
+        
+        # 없으면 fallback: 전체 json 덤프
+        return _meta_cache_key(self.meta)
+
+    def __hash__(self):
+        return hash(self._hash_key)
+
+    def __eq__(self, other):
+        if not isinstance(other, MetaWrapper):
+            return False
+        return self._hash_key == other._hash_key
+
+
 @lru_cache(maxsize=_RAG_CACHE_MAX)
 def _process_stat_doc_cached(
-    source_table: str, meta_json: str
+    source_table: str, meta_wrapper: MetaWrapper
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    meta = json.loads(meta_json)
+    meta = meta_wrapper.meta  # Wrapper에서 직접 meta 접근
+
+    # [Optimized] If score is already pre-calculated in meta, use it directly
+    if "score" in meta:
+        return meta, None
 
     if source_table == "player_season_pitching":
         ip = _get_safe_stat(meta, "innings_pitched", 0.0)
@@ -162,7 +194,7 @@ def _process_stat_doc_cached(
         obp = _get_safe_stat(meta, "obp")
         slg = _get_safe_stat(meta, "slg")
         avg = _get_safe_stat(meta, "avg")
-
+        
         hits = _to_int(meta.get("hits"))
         doubles = _to_int(meta.get("doubles"))
         triples = _to_int(meta.get("triples"))
@@ -239,8 +271,6 @@ def _process_stat_doc_cached(
             "avg": avg,
             "home_runs": home_runs,
             "rbi": rbi,
-            "steals": steals,
-            "score": score,
             "steals": steals,
             "score": score,
         }, None
@@ -341,9 +371,11 @@ class RAGPipeline:
                     logger.info(
                         f"[RAG] Found pitcher: {meta.get('player_name')} - IP: {meta.get('innings_pitched')}, League: {league}"
                     )
-                meta_key = _meta_cache_key(meta)
+                
+                # [Optimized] Use MetaWrapper for efficient caching
+                meta_wrapper = MetaWrapper(meta)
                 processed, warning = _process_stat_doc_cached(
-                    doc.get("source_table"), meta_key
+                    doc.get("source_table"), meta_wrapper
                 )
                 if warning:
                     warnings.add(warning)
