@@ -7,8 +7,8 @@ KBO 규정 검색을 위한 전용 도구입니다.
 
 import logging
 from typing import Dict, List, Any, Optional
-from psycopg2.extensions import connection as PgConnection
-import psycopg2.extras
+import psycopg
+from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ class RegulationQueryTool:
     3. 추측이나 해석 없이 공식 규정만 인용
     """
 
-    def __init__(self, connection: PgConnection):
+    def __init__(self, connection: psycopg.Connection):
         self.connection = connection
 
         # 규정 카테고리별 키워드 매핑
@@ -89,9 +89,7 @@ class RegulationQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             # 검색 키워드 준비
             search_pattern = f"%{query}%"
@@ -186,9 +184,7 @@ class RegulationQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             # 카테고리별 키워드 가져오기
             keywords = self.regulation_categories.get(category, [])
@@ -300,9 +296,7 @@ class RegulationQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             query = """
                 SELECT 

@@ -1,5 +1,5 @@
 import os
-import psycopg2
+import psycopg
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +29,7 @@ def create_table():
     """
 
     try:
-        conn = psycopg2.connect(db_url)
+        conn = psycopg.connect(db_url)
         with conn.cursor() as cur:
             cur.execute(create_sql)
             conn.commit()

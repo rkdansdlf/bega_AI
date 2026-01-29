@@ -1,5 +1,5 @@
 import os
-import psycopg2
+import psycopg
 from dotenv import load_dotenv
 
 load_dotenv(
@@ -11,7 +11,7 @@ DB_URL = os.getenv("SUPABASE_DB_URL")
 
 def setup_user_providers():
     print("Connecting to DB...")
-    with psycopg2.connect(DB_URL) as conn:
+    with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             # 1. Create table
             print("Creating 'security.user_providers' table...")
