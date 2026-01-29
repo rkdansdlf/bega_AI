@@ -9,8 +9,8 @@
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from psycopg2.extensions import connection as PgConnection
-from psycopg2.extras import RealDictCursor
+import psycopg
+from psycopg.rows import dict_row
 
 from ..config import Settings
 
@@ -24,7 +24,7 @@ def _vector_literal(vector: Sequence[float]) -> str:
 
 
 def similarity_search(
-    conn: PgConnection,
+    conn: psycopg.Connection,
     embedding: Sequence[float],
     *,
     limit: int,
@@ -99,17 +99,19 @@ def similarity_search(
            {ts_part}
     FROM rag_chunks
     WHERE {where_clause}
-    ORDER BY similarity DESC
+    ORDER BY embedding <=> %s::vector ASC
     LIMIT %s
     """
     # SQL 쿼리에 사용될 파라미터를 최종적으로 조합합니다.
-    # 순서: [벡터 문자열, (키워드), ...필터 값, LIMIT 값]
-    final_params = [vector_str] + keyword_param + filter_params + [limit]
+    # 순서: [벡터 문자열, (키워드), 벡터 문자열(ORDER BY용), ...필터 값, LIMIT 값]
+    final_params = [vector_str] + keyword_param + [vector_str] + filter_params + [limit]
 
     import time
 
     start_time = time.perf_counter()
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
+        # HNSW 검색 정확도 튜닝 (Recall 향상)
+        cur.execute("SET LOCAL hnsw.ef_search = 100;")
         cur.execute(sql, final_params)
         rows = cur.fetchall()
     elapsed_ms = (time.perf_counter() - start_time) * 1000

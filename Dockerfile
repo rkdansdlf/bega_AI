@@ -1,5 +1,5 @@
 # Stage 1: Build - Install dependencies and create wheels
-FROM python:3.11-slim AS builder
+FROM python:3.14-rc-slim AS builder
 
 WORKDIR /build
 
@@ -17,11 +17,14 @@ COPY requirements.txt .
 RUN pip wheel --no-cache-dir -r requirements.txt -w /wheels
 
 # Stage 2: Runtime - Minimal production image
-FROM python:3.11-slim
+FROM python:3.14-rc-slim
+
+# Enable free-threading mode (Python 3.14+)
+ENV PYTHON_GIL=0
 
 WORKDIR /app
 
-# Install only runtime dependencies (libpq for psycopg2)
+# Install only runtime dependencies (libpq for psycopg3)
 RUN apt-get update && apt-get install -y \
     libpq5 \
     curl \

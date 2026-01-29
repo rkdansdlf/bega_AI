@@ -20,10 +20,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import psycopg2
+import psycopg
 from app.core.embeddings import embed_texts
 from app.core.retrieval import similarity_search as supabase_search
-from app.core.retrieval_firestore import similarity_search_firestore
+# from app.core.retrieval_firestore import similarity_search_firestore
 from app.config import Settings
 
 # 테스트 쿼리 세트
@@ -53,7 +53,7 @@ def benchmark_supabase(
         print("❌ OCI_DB_URL 환경변수가 설정되지 않았습니다.")
         return {}
 
-    conn = psycopg2.connect(supabase_url)
+    conn = psycopg.connect(supabase_url)
 
     times = []
     results_count = []
@@ -144,8 +144,8 @@ def main():
     # Supabase 벤치마크
     supabase_stats = benchmark_supabase(embeddings, limit=10)
 
-    # Firestore 벤치마크
-    firestore_stats = benchmark_firestore(embeddings, limit=10)
+    # Firestore 벤치마크 (제거됨)
+    firestore_stats = None
 
     # 결과 비교
     print("\n" + "=" * 60)

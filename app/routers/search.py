@@ -5,7 +5,6 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from psycopg2.extensions import connection as PgConnection
 
 from ..deps import get_db_connection, get_rag_pipeline
 from ..core.entity_extractor import enhance_search_strategy

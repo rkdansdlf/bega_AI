@@ -4,9 +4,8 @@ from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from typing import Optional
 
-import psycopg2
-from psycopg2 import pool
-from psycopg2.extensions import connection as PgConnection
+import psycopg
+from psycopg_pool import ConnectionPool
 from fastapi import Depends
 from fastapi.params import Depends as DependsClass
 
@@ -17,24 +16,27 @@ from .agents.baseball_agent import BaseballStatisticsAgent
 from .core.prompts import SYSTEM_PROMPT
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성)
-_connection_pool: Optional[pool.SimpleConnectionPool] = None
+_connection_pool: Optional[ConnectionPool] = None
 
 
-def get_connection_pool() -> pool.SimpleConnectionPool:
+def get_connection_pool() -> ConnectionPool:
     """커넥션 풀을 가져오거나 생성합니다."""
     global _connection_pool
 
     if _connection_pool is None:
         settings = get_settings()
-        _connection_pool = pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=30,
-            dsn=settings.database_url,
-            # TCP keepalive 옵션 추가
-            keepalives=1,
-            keepalives_idle=30,  # 30초 유휴 후 keepalive 시작
-            keepalives_interval=10,  # 10초마다 keepalive 패킷
-            keepalives_count=5,  # 5번 실패하면 연결 끊김으로 판단
+        _connection_pool = ConnectionPool(
+            conninfo=settings.database_url,
+            min_size=1,
+            max_size=30,
+            # TCP keepalive 옵션 및 기타 설정
+            kwargs={
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+                "autocommit": True,
+            }
         )
 
     return _connection_pool
@@ -44,7 +46,7 @@ def close_connection_pool():
     """앱 종료 시 커넥션 풀을 닫습니다."""
     global _connection_pool
     if _connection_pool is not None:
-        _connection_pool.closeall()
+        _connection_pool.close()
         _connection_pool = None
 
 
@@ -61,51 +63,29 @@ async def lifespan(app):
     close_connection_pool()  # 모든 커넥션 정리
 
 
-def get_db_connection() -> Generator[PgConnection, None, None]:
+def get_db_connection() -> Generator[psycopg.Connection, None, None]:
     """커넥션 풀에서 커넥션을 가져와서 사용 후 반환합니다."""
     pool_instance = get_connection_pool()
-    conn = pool_instance.getconn()
-
-    # 연결 상태 확인 (stale connection 방지)
-    try:
-        # 간단한 쿼리로 연결이 살아있는지 확인
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        conn.rollback()  # 트랜잭션 종료 (autocommit 설정 전에 필요)
-    except (psycopg2.OperationalError, psycopg2.InterfaceError):
-        # 연결이 끊어졌으면 풀에서 제거하고 새 연결 생성
-        pool_instance.putconn(conn, close=True)
-        conn = pool_instance.getconn()
-
-    conn.autocommit = True
-
-    try:
+    
+    # psycopg_pool은 context manager를 지원하여 안전하게 반환함
+    with pool_instance.connection() as conn:
+        # 연결 상태 확인은 psycopg3에서 더 지능적으로 처리되지만 
+        # 명시적인 확인이 필요한 경우 execute("SELECT 1") 등을 사용 가능
         yield conn
-    finally:
-        pool_instance.putconn(conn)
 
 
 def get_rag_pipeline(
-    conn: PgConnection = Depends(get_db_connection),
+    conn: psycopg.Connection = Depends(get_db_connection),
 ) -> RAGPipeline:
     settings = get_settings()
     return RAGPipeline(settings=settings, connection=conn)
 
 
 def get_agent(
-    conn: PgConnection = Depends(get_db_connection),
+    conn: psycopg.Connection = Depends(get_db_connection),
 ) -> BaseballStatisticsAgent:
-    """Dependency to get an instance of the BaseballStatisticsAgent.
-
-    NOTE: If called directly (outside FastAPI request context),
-    conn will be a Depends object, not a connection. We detect this
-    and manually obtain a connection from the pool.
-    """
-    # Handle direct calls (not via FastAPI DI)
-    if isinstance(conn, DependsClass):
-        pool_instance = get_connection_pool()
-        conn = pool_instance.getconn()
-        conn.autocommit = True
+    """Dependency to get an instance of the BaseballStatisticsAgent."""
+    # Note: depends handles the context manager yield for us.
     settings = get_settings()
 
     # tenacity settings
@@ -148,7 +128,7 @@ def get_agent(
                 async for line in response.aiter_lines():
                     yield line
 
-    async def llm_generator(messages):
+    async def openrouter_generator(messages):
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required.")
 
@@ -223,6 +203,57 @@ def get_agent(
         # If all models fail
         logger.error(f"All models failed. details: {last_exception}")
         raise last_exception
+
+    async def gemini_generator(messages):
+        import google.generativeai as genai
+        from google.generativeai.types import GenerationConfig
+
+        if not settings.gemini_api_key:
+            raise RuntimeError("Gemini API key is required.")
+
+        genai.configure(api_key=settings.gemini_api_key)
+        model = genai.GenerativeModel(settings.gemini_model)
+
+        # Convert messages to Gemini format
+        gemini_messages = []
+        system_instruction = ""
+        
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "system":
+                system_instruction = content
+            else:
+                gemini_role = "user" if role == "user" else "model"
+                gemini_messages.append({"role": gemini_role, "parts": [content]})
+
+        if system_instruction:
+            model = genai.GenerativeModel(
+                model_name=settings.gemini_model,
+                system_instruction=system_instruction
+            )
+
+        try:
+            response = await model.generate_content_async(
+                gemini_messages,
+                generation_config=GenerationConfig(
+                    temperature=0.1,
+                    max_output_tokens=settings.max_output_tokens,
+                ),
+                stream=True
+            )
+            async for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+        except Exception as e:
+            logger.error(f"Gemini generation failed: {e}")
+            raise e
+
+    # Select generator based on provider
+    if settings.llm_provider == "gemini":
+        llm_generator = gemini_generator
+    else:
+        llm_generator = openrouter_generator
 
     return BaseballStatisticsAgent(connection=conn, llm_generator=llm_generator)
 
