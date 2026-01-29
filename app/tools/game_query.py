@@ -7,8 +7,8 @@
 
 import logging
 from typing import Dict, List, Any, Optional
-from psycopg2.extensions import connection as PgConnection
-import psycopg2.extras
+import psycopg
+from psycopg.rows import dict_row
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ class GameQueryTool:
     3. 추측이나 해석 없이 실제 DB 데이터만 반환
     """
 
-    def __init__(self, connection: PgConnection):
+    def __init__(self, connection: psycopg.Connection):
         self.connection = connection
 
         # 기본 매핑 (폴백용)
@@ -92,7 +92,7 @@ class GameQueryTool:
         """OCI DB의 teams 테이블과 franchise_id를 활용하여 팀 매핑 정보를 동적으로 로드합니다."""
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
             query = """
                 SELECT team_id, team_name, franchise_id, founded_year 
@@ -252,7 +252,7 @@ class GameQueryTool:
 
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
 
             # 쿼리 조건 구성
@@ -420,7 +420,7 @@ class GameQueryTool:
 
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
 
             # 쿼리 조건 구성
@@ -504,7 +504,7 @@ class GameQueryTool:
 
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
 
             # 쿼리 조건 구성
@@ -612,7 +612,7 @@ class GameQueryTool:
 
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
 
             where_conditions = ["g.game_date BETWEEN %s AND %s"]
@@ -811,7 +811,7 @@ class GameQueryTool:
 
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
 
             query = """
@@ -963,7 +963,7 @@ class GameQueryTool:
 
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
 
             # 1. 경기 ID 찾기 (ID가 없는 경우)
@@ -1063,7 +1063,7 @@ class GameQueryTool:
 
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
 
             # 리그 타입 코드 매핑
@@ -1129,7 +1129,7 @@ class GameQueryTool:
 
         try:
             cursor = self.connection.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor
+                row_factory=dict_row
             )
 
             where_conditions = []

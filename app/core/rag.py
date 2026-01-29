@@ -14,7 +14,7 @@ import random
 import time
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from psycopg2.extensions import connection as PgConnection
+import psycopg
 import math
 
 import httpx
@@ -28,6 +28,7 @@ from .entity_extractor import enhance_search_strategy
 from .query_transformer import QueryTransformer, multi_query_retrieval
 from .context_formatter import ContextFormatter
 from ..agents.baseball_agent import BaseballStatisticsAgent
+from .wpa_calculator import WPACalculator
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +323,7 @@ class RAGPipeline:
         self,
         *,
         settings: Settings,
-        connection: PgConnection,
+        connection: psycopg.Connection,
     ) -> None:
         self.settings = settings
         self.connection = connection
@@ -330,6 +331,7 @@ class RAGPipeline:
         self.context_formatter = ContextFormatter()
         # 야구 통계 전용 에이전트 초기화
         self.baseball_agent = BaseballStatisticsAgent(connection, self._generate)
+        self.wpa_calculator = WPACalculator()
 
     async def _process_and_enrich_docs(
         self, docs: List[Dict[str, Any]], year: int

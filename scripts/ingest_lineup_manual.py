@@ -1,5 +1,5 @@
 import os
-import psycopg2
+import psycopg
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -58,7 +58,7 @@ def ingest_lineup():
     """
 
     try:
-        conn = psycopg2.connect(db_url)
+        conn = psycopg.connect(db_url)
         with conn.cursor() as cur:
             # Insert Lotte
             for order, name, pos in lotte_lineup:

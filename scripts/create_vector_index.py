@@ -5,7 +5,7 @@ OCI PostgreSQL 데이터베이스에 HNSW 벡터 인덱스를 생성하는 스�
 
 import os
 import time
-import psycopg2
+import psycopg
 from dotenv import load_dotenv
 
 load_dotenv("AI/.env")
@@ -14,8 +14,8 @@ dsn = os.getenv("OCI_DB_URL")
 print(f"Connecting to database...")
 
 try:
-    conn = psycopg2.connect(dsn, connect_timeout=30)
-    conn.autocommit = True
+    conn = psycopg.connect(dsn, connect_timeout=30, autocommit=True)
+
 
     with conn.cursor() as cur:
         # 1. Check if index already exists

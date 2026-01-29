@@ -7,9 +7,7 @@ Vector DB에서 문서(비정형 텍스트) 검색을 위한 전용 도구입니
 
 import logging
 from typing import Dict, List, Any, Optional
-from psycopg2.extensions import connection as PgConnection
-import psycopg2.extras
-
+import psycopg
 from ..core.embeddings import async_embed_texts, embed_texts
 from ..config import Settings
 from ..core.retrieval import similarity_search
@@ -22,7 +20,7 @@ class DocumentQueryTool:
     비정형 문서(Markdown 등) 검색 전용 도구
     """
 
-    def __init__(self, connection: PgConnection):
+    def __init__(self, connection: psycopg.Connection):
         self.connection = connection
         self.settings = Settings()
 

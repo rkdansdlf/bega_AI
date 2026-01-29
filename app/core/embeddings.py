@@ -276,54 +276,42 @@ async def _embed_gemini(
     batches = [
         list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)
     ]
+    results_map: Dict[int, List[List[float]]] = {}
+    semaphore = asyncio.Semaphore(effective_concurrency)
+
+    async def post_with_limit(idx: int, chunk: Sequence[str]):
+        async with semaphore:
+            # RPM 제한을 위한 대략적인 지연 (동시 요청들 사이의 간격)
+            if min_delay > 0:
+                await asyncio.sleep(min_delay * (idx % effective_concurrency))
+
+            attempt = 0
+            backoff = 1.0
+            while True:
+                try:
+                    chunk_vectors = await post_chunk(chunk)
+                    results_map[idx] = chunk_vectors
+                    break
+                except (EmbeddingError, httpx.HTTPError) as exc:
+                    attempt += 1
+                    if attempt >= max_retries:
+                        logger.error("Gemini batch %d failed after %d retries: %s", idx, max_retries, exc)
+                        raise
+                    sleep_for = backoff + (0.1 * attempt)
+                    logger.warning(
+                        "Gemini batch %d retry %d/%d. Cause: %s. %.1fs delay.",
+                        idx, attempt, max_retries, exc, sleep_for
+                    )
+                    await asyncio.sleep(sleep_for)
+                    backoff = min(backoff * 2, 30.0)
+
+    # 모든 배치를 병렬로 실행
+    await asyncio.gather(*(post_with_limit(i, chunk) for i, chunk in enumerate(batches)))
+
+    # 순서대로 결과 취합
     results: List[List[float]] = []
-    last_request_at = 0.0
-
-    # 각 배치를 순회하며 API 요청을 보냅니다.
-    for idx, chunk in enumerate(batches):
-        # RPM 제한을 준수하기 위해 필요한 경우 대기합니다.
-        if min_delay > 0 and idx > 0:
-            elapsed = time.perf_counter() - last_request_at
-            if elapsed < min_delay:
-                await asyncio.sleep(min_delay - elapsed)
-
-        # API 요청 실패 시 재시도 로직 (지수 백오프 사용)
-        attempt = 0
-        backoff = 1.0
-        while True:
-            try:
-                chunk_vectors = await post_chunk(chunk)
-                results.extend(chunk_vectors)
-                last_request_at = time.perf_counter()
-                break
-            except EmbeddingError as exc:
-                attempt += 1
-                if attempt >= max_retries:
-                    raise
-                sleep_for = backoff + (0.1 * attempt)
-                logger.warning(
-                    "Gemini 임베딩 재시도 %s/%s. 원인: %s. %.1fs 후 재시도합니다.",
-                    attempt,
-                    max_retries,
-                    exc,
-                    sleep_for,
-                )
-                await asyncio.sleep(sleep_for)
-                backoff = min(backoff * 2, 30.0)
-            except httpx.HTTPError as exc:  # pragma: no cover
-                attempt += 1
-                if attempt >= max_retries:
-                    raise EmbeddingError(f"Gemini HTTP 오류: {exc}") from exc
-                sleep_for = backoff + (0.1 * attempt)
-                logger.warning(
-                    "Gemini HTTP 오류 발생. %s/%s 재시도. %.1fs 후 재시도합니다. (%s)",
-                    attempt,
-                    max_retries,
-                    sleep_for,
-                    exc,
-                )
-                await asyncio.sleep(sleep_for)
-                backoff = min(backoff * 2, 30.0)
+    for i in range(len(batches)):
+        results.extend(results_map[i])
 
     if len(results) != len(texts):
         raise EmbeddingError(
@@ -401,34 +389,38 @@ async def _embed_openai(
     batches = [
         list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)
     ]
-    results: List[List[float]] = []
+    results_map: Dict[int, List[List[float]]] = {}
+    semaphore = asyncio.Semaphore(effective_concurrency)
 
-    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
-        for chunk in batches:
+    async def post_with_limit(idx: int, chunk: Sequence[str], client: httpx.AsyncClient):
+        async with semaphore:
             attempt = 0
             backoff = 1.0
             while True:
                 try:
                     chunk_vectors = await post_chunk(chunk, client)
-                    results.extend(chunk_vectors)
+                    results_map[idx] = chunk_vectors
                     break
                 except (EmbeddingError, httpx.HTTPError) as exc:
                     attempt += 1
                     if attempt >= max_retries:
-                        raise EmbeddingError(
-                            f"OpenAI 임베딩 실패 후 최대 재시도 도달: {exc}"
-                        ) from exc
-
+                        logger.error("OpenAI batch %d failed after %d retries: %s", idx, max_retries, exc)
+                        raise
                     sleep_for = backoff + (0.1 * attempt)
                     logger.warning(
-                        "OpenAI 임베딩 재시도 %s/%s. 원인: %s. %.1fs 후 재시도합니다.",
-                        attempt,
-                        max_retries,
-                        exc,
-                        sleep_for,
+                        "OpenAI batch %d retry %d/%d. Cause: %s. %.1fs delay.",
+                        idx, attempt, max_retries, exc, sleep_for
                     )
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, 30.0)
+
+    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+        await asyncio.gather(*(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches)))
+
+    # 순서대로 결과 취합
+    results: List[List[float]] = []
+    for i in range(len(batches)):
+        results.extend(results_map[i])
 
     if len(results) != len(texts):
         raise EmbeddingError(
@@ -470,46 +462,69 @@ async def _embed_openrouter(
     else:
         headers.setdefault("X-Title", "KBO-Embedding")
 
-    payload = {
-        "model": model,
-        "input": list(texts),
-    }
+    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv(
+        "EMBED_BATCH_SIZE"
+    )
+    batch_size = int(env_batch) if env_batch else 100
+    if batch_size <= 0:
+        batch_size = 100
 
-    timeout = httpx.Timeout(30.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        response = await client.post(url, json=payload, headers=headers)
+    batches = [
+        list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)
+    ]
+    results_map: Dict[int, List[List[float]]] = {}
+    effective_concurrency = max(max_concurrency, 1)
+    semaphore = asyncio.Semaphore(effective_concurrency)
 
-    content_type = response.headers.get("content-type", "")
-    if response.status_code != 200:
-        snippet = (response.text or "")[:300]
-        raise EmbeddingError(
-            f"OpenRouter 오류 {response.status_code} ({content_type}): {snippet}"
-        )
-    if "application/json" not in content_type:
-        snippet = (response.text or "")[:300]
-        raise EmbeddingError(
-            f"OpenRouter가 JSON이 아닌 응답을 반환했습니다: {content_type}: {snippet}"
-        )
+    async def post_with_limit(idx: int, chunk: Sequence[str]):
+        async with semaphore:
+            payload = {
+                "model": model,
+                "input": list(chunk),
+            }
+            timeout = httpx.Timeout(30.0, connect=10.0)
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+                response = await client.post(url, json=payload, headers=headers)
 
-    try:
-        data = response.json()
-    except Exception as exc:
-        snippet = (response.text or "")[:300]
-        raise EmbeddingError(f"OpenRouter JSON 파싱 실패: {snippet}") from exc
+            content_type = response.headers.get("content-type", "")
+            if response.status_code != 200:
+                snippet = (response.text or "")[:300]
+                raise EmbeddingError(
+                    f"OpenRouter 오류 {response.status_code} ({content_type}): {snippet}"
+                )
+            if "application/json" not in content_type:
+                snippet = (response.text or "")[:300]
+                raise EmbeddingError(
+                    f"OpenRouter가 JSON이 아닌 응답을 반환했습니다: {content_type}: {snippet}"
+                )
 
-    embeddings: List[List[float]] = []
-    for item in data.get("data", []):
-        vec = item.get("embedding")
-        if vec:
-            embeddings.append(list(map(float, vec)))
+            try:
+                data = response.json()
+            except Exception as exc:
+                snippet = (response.text or "")[:300]
+                raise EmbeddingError(f"OpenRouter JSON 파싱 실패: {snippet}") from exc
 
-    if not embeddings:
-        raise EmbeddingError(f"OpenRouter가 임베딩을 반환하지 않았습니다: {data}")
+            embeddings: List[List[float]] = []
+            for item in data.get("data", []):
+                vec = item.get("embedding")
+                if vec:
+                    embeddings.append(list(map(float, vec)))
+
+            if not embeddings:
+                raise EmbeddingError(f"OpenRouter가 임베딩을 반환하지 않았습니다: {data}")
+            results_map[idx] = embeddings
+
+    await asyncio.gather(*(post_with_limit(i, chunk) for i, chunk in enumerate(batches)))
+
+    # 순서대로 결과 취합
+    results: List[List[float]] = []
+    for i in range(len(batches)):
+        results.extend(results_map[i])
 
     env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
     expected_dim = int(env_dim) if env_dim else None
-    _ensure_dimension(embeddings, expected_dim)
-    return embeddings
+    _ensure_dimension(results, expected_dim)
+    return results
 
 
 async def async_embed_texts(
