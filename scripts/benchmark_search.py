@@ -80,41 +80,42 @@ def benchmark_supabase(
     }
 
 
-def benchmark_firestore(
-    embeddings: List[List[float]], limit: int = 10
-) -> Dict[str, Any]:
-    """Firestore Vector Search 성능 측정"""
-    print("\n🟠 Firestore Vector Search 벤치마크")
-    print("=" * 60)
-
-    # Firebase 초기화 (환경 변수 설정)
-    os.environ["USE_FIRESTORE_SEARCH"] = "true"
-    os.environ["FIREBASE_SERVICE_ACCOUNT_KEY"] = str(
-        project_root / "bega-186a7-firebase-adminsdk-fbsvc-bb50c006a7.json"
-    )
-    os.environ["FIRESTORE_DATABASE_ID"] = "begachatbot"
-
-    times = []
-    results_count = []
-
-    for i, embedding in enumerate(embeddings, 1):
-        start = time.time()
-        results = similarity_search_firestore(embedding, limit=limit)
-        elapsed = time.time() - start
-
-        times.append(elapsed)
-        results_count.append(len(results))
-
-        print(f"  쿼리 {i:2d}: {elapsed * 1000:6.1f}ms | {len(results):2d}개 결과")
-
-    return {
-        "평균 시간": statistics.mean(times) * 1000,
-        "중앙값": statistics.median(times) * 1000,
-        "최소 시간": min(times) * 1000,
-        "최대 시간": max(times) * 1000,
-        "표준편차": statistics.stdev(times) * 1000 if len(times) > 1 else 0,
-        "평균 결과 수": statistics.mean(results_count),
-    }
+# def benchmark_firestore(
+#     embeddings: List[List[float]], limit: int = 10
+# ) -> Dict[str, Any]:
+#     """Firestore Vector Search 성능 측정"""
+#     print("\n🟠 Firestore Vector Search 벤치마크")
+#     print("=" * 60)
+#
+#     # Firebase 초기화 (환경 변수 설정)
+#     os.environ["USE_FIRESTORE_SEARCH"] = "true"
+#     os.environ["FIREBASE_SERVICE_ACCOUNT_KEY"] = str(
+#         project_root / "bega-186a7-firebase-adminsdk-fbsvc-bb50c006a7.json"
+#     )
+#     os.environ["FIRESTORE_DATABASE_ID"] = "begachatbot"
+#
+#     times = []
+#     results_count = []
+#
+#     for i, embedding in enumerate(embeddings, 1):
+#         start = time.time()
+#         # results = similarity_search_firestore(embedding, limit=limit)
+#         # elapsed = time.time() - start
+#
+#         # times.append(elapsed)
+#         # results_count.append(len(results))
+#
+#         # print(f"  쿼리 {i:2d}: {elapsed * 1000:6.1f}ms | {len(results):2d}개 결과")
+#         pass
+#
+#     return {
+#         "평균 시간": 0, # statistics.mean(times) * 1000,
+#         "중앙값": 0, # statistics.median(times) * 1000,
+#         "최소 시간": 0, # min(times) * 1000,
+#         "최대 시간": 0, # max(times) * 1000,
+#         "표준편차": 0, # statistics.stdev(times) * 1000 if len(times) > 1 else 0,
+#         "평균 결과 수": 0, # statistics.mean(results_count),
+#     }
 
 
 def main():
