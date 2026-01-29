@@ -116,7 +116,7 @@ class MetaWrapper:
         row_id = self.meta.get("source_row_id")
         if row_id:
             return f"id:{row_id}"
-        
+
         # 없으면 fallback: 전체 json 덤프
         return _meta_cache_key(self.meta)
 
@@ -195,7 +195,7 @@ def _process_stat_doc_cached(
         obp = _get_safe_stat(meta, "obp")
         slg = _get_safe_stat(meta, "slg")
         avg = _get_safe_stat(meta, "avg")
-        
+
         hits = _to_int(meta.get("hits"))
         doubles = _to_int(meta.get("doubles"))
         triples = _to_int(meta.get("triples"))
@@ -373,7 +373,7 @@ class RAGPipeline:
                     logger.info(
                         f"[RAG] Found pitcher: {meta.get('player_name')} - IP: {meta.get('innings_pitched')}, League: {league}"
                     )
-                
+
                 # [Optimized] Use MetaWrapper for efficient caching
                 meta_wrapper = MetaWrapper(meta)
                 processed, warning = _process_stat_doc_cached(

@@ -38,7 +38,9 @@ class Settings(BaseSettings):
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
     llm_provider: str = Field("gemini", validation_alias="LLM_PROVIDER")
     embed_provider: str = Field("gemini", validation_alias="EMBED_PROVIDER")
-    embed_model: str = Field("", validation_alias="EMBED_MODEL")  # 특정 모델을 지정할 때 사용
+    embed_model: str = Field(
+        "", validation_alias="EMBED_MODEL"
+    )  # 특정 모델을 지정할 때 사용
 
     # --- Google Gemini 설정 ---
     gemini_api_key: Optional[str] = Field(None, validation_alias="GEMINI_API_KEY")
@@ -51,13 +53,21 @@ class Settings(BaseSettings):
 
     # --- OpenAI 설정 ---
     openai_api_key: Optional[str] = Field(None, validation_alias="OPENAI_API_KEY")
-    openai_embed_model: str = Field("text-embedding-3-small", validation_alias="OPENAI_EMBED_MODEL")
+    openai_embed_model: str = Field(
+        "text-embedding-3-small", validation_alias="OPENAI_EMBED_MODEL"
+    )
 
     # --- OpenRouter 설정 ---
-    openrouter_api_key: Optional[str] = Field(None, validation_alias="OPENROUTER_API_KEY")
-    openrouter_model: str = Field("openai/gpt-oss-120b", validation_alias="OPENROUTER_MODEL")
+    openrouter_api_key: Optional[str] = Field(
+        None, validation_alias="OPENROUTER_API_KEY"
+    )
+    openrouter_model: str = Field(
+        "openai/gpt-oss-120b", validation_alias="OPENROUTER_MODEL"
+    )
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
-    openrouter_fallback_models_raw: str = Field("", validation_alias="OPENROUTER_FALLBACK_MODELS")
+    openrouter_fallback_models_raw: str = Field(
+        "", validation_alias="OPENROUTER_FALLBACK_MODELS"
+    )
 
     @property
     def openrouter_fallback_models(self) -> List[str]:
@@ -72,12 +82,20 @@ class Settings(BaseSettings):
     openrouter_base_url: str = Field(
         "https://openrouter.ai/api/v1", validation_alias="OPENROUTER_BASE_URL"
     )
-    openrouter_referer: Optional[str] = Field(None, validation_alias="OPENROUTER_REFERER")
-    openrouter_app_title: Optional[str] = Field(None, validation_alias="OPENROUTER_APP_TITLE")
-    openrouter_embed_model: Optional[str] = Field(None, validation_alias="OPENROUTER_EMBED_MODEL")
+    openrouter_referer: Optional[str] = Field(
+        None, validation_alias="OPENROUTER_REFERER"
+    )
+    openrouter_app_title: Optional[str] = Field(
+        None, validation_alias="OPENROUTER_APP_TITLE"
+    )
+    openrouter_embed_model: Optional[str] = Field(
+        None, validation_alias="OPENROUTER_EMBED_MODEL"
+    )
 
     # --- Function Calling / Chatbot 설정 ---
-    chatbot_model_name: Optional[str] = Field(None, validation_alias="CHATBOT_MODEL_NAME")
+    chatbot_model_name: Optional[str] = Field(
+        None, validation_alias="CHATBOT_MODEL_NAME"
+    )
 
     # --- 검색(Retrieval) 관련 설정 ---
     default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
