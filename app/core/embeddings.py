@@ -21,7 +21,7 @@ import os
 import re
 import time
 from collections import OrderedDict
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
