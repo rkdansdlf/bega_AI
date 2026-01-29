@@ -43,9 +43,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from pathlib import Path
 
-import psycopg2
-from psycopg2 import sql
-from psycopg2.extras import RealDictCursor, execute_values
+import psycopg
+from psycopg import sql
+from psycopg.rows import dict_row
 
 # get_settings().database_url로 Postgres 연결을 열고 쿼리 타임아웃을 막기 위해 SET statement_timeout TO 0; 적용. 각 테이블을 순서대로 처리.
 from app.config import get_settings
@@ -707,6 +707,35 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["team_id", "id"],
         "season_filter_column": None,
     },
+    "game_summary": {
+        "description": "경기 요약 정보 (승리 타점, 홈런 등 주요 기록 설명)",
+        "title_fields": [
+            ["game_id"],
+            ["summary_type"],
+            ["player_name"],
+        ],
+        "select_sql": """
+            SELECT 
+                gs.*,
+                g.game_date,
+                ks.season_year,
+                ks.league_type_code,
+                t.team_name
+            FROM game_summary gs
+            LEFT JOIN game g ON g.game_id = gs.game_id
+            LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN teams t ON (t.team_id = g.home_team OR t.team_id = g.away_team)
+            ORDER BY g.game_date DESC, gs.game_id, gs.id
+        """,
+        "highlights": [
+            ("경기 ID", ["game_id"]),
+            ("구분", ["summary_type"]),
+            ("선수", ["player_name", "player_id"]),
+            ("내용", ["detail_text"]),
+        ],
+        "pk_hint": ["id"],
+        "season_filter_column": "ks.season_year",
+    },
 }
 
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
@@ -733,6 +762,7 @@ DEFAULT_TABLES = [
     # 경기별 기록 (가장 많은 데이터)
     "game_batting_stats",
     "game_pitching_stats",
+    "game_summary",
     # 정적 문서
     "kbo_metrics_explained",
     "kbo_regulations_basic",
@@ -762,7 +792,9 @@ INSERT INTO rag_chunks (
     title,
     content,
     embedding
-) VALUES %s
+) VALUES (
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector
+)
 ON CONFLICT (source_table, source_row_id)
 DO UPDATE SET
     meta = EXCLUDED.meta,
@@ -1112,15 +1144,10 @@ def flush_chunks(
                 )
             )
 
-        # Bulk upsert using execute_values
-        # Note: Upsert with ON CONFLICT needs careful template if using complex UPSERT_SQL
-        # But here we can just use the VALUES part and append the ON CONFLICT clause
-        execute_values(
-            cur,
+        # Bulk upsert using executemany
+        cur.executemany(
             UPSERT_SQL,
             data,
-            template=None,  # default is %s, %s...
-            page_size=100,
         )
 
     flushed = len(buffer)
@@ -1168,7 +1195,7 @@ def ingest_table(
         cur.execute("SET statement_timeout TO 0;")
 
     with (
-        source_conn.cursor(cursor_factory=RealDictCursor) as read_cur,
+        source_conn.cursor(row_factory=dict_row) as read_cur,
         dest_conn.cursor() as write_cur,
     ):
         write_cur.execute("SET statement_timeout TO 0;")
@@ -1235,7 +1262,6 @@ def ingest_table(
         )
 
         fetched_rows = 0
-        read_cur.itersize = read_batch_size
         read_cur.execute(query, params)
 
         while True:
@@ -1393,11 +1419,11 @@ def ingest(
     print(f"Connecting to Source DB (Supabase)...")
     if not settings.supabase_db_url:
         raise ValueError("SUPABASE_DB_URL is not set in environment variables.")
-    source_conn = psycopg2.connect(settings.supabase_db_url)
+    source_conn = psycopg.connect(settings.supabase_db_url)
 
     # Connect to Destination (OCI) for writing vectors
     print(f"Connecting to Destination DB (OCI)...")
-    dest_conn = psycopg2.connect(
+    dest_conn = psycopg.connect(
         settings.database_url
     )  # settings.database_url maps to oci_db_url
 
@@ -1463,8 +1489,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embed-batch-size",
         type=int,
-        default=32,
-        help="임베딩 API 호출당 청크 수 (기본 32).",
+        default=500,
+        help="임베딩 API 호출당 청크 수 (기본 500).",
     )
     parser.add_argument(
         "--read-batch-size",
@@ -1491,8 +1517,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-concurrency",
         type=int,
-        default=1,
-        help="임베딩 API 호출 동시성 (기본 1).",
+        default=5,
+        help="임베딩 API 호출 동시성 (기본 5).",
     )
     parser.add_argument(
         "--since",

@@ -9,8 +9,7 @@ import asyncio
 import os
 from typing import Generator
 
-import psycopg2
-from psycopg2.extensions import connection as PgConnection
+import psycopg
 
 # 프로젝트의 루트 디렉토리를 sys.path에 추가하여 모듈을 임포트할 수 있도록 함
 import sys
@@ -30,11 +29,10 @@ FILE_EXTENSION = ".md"
 SOURCE_TABLE_NAME = "markdown_docs"
 
 
-def get_db_connection() -> Generator[PgConnection, None, None]:
+def get_db_connection() -> Generator[psycopg.Connection, None, None]:
     """데이터베이스 연결을 생성하는 제너레이터 함수."""
     settings = get_settings()
-    conn = psycopg2.connect(settings.database_url)
-    conn.autocommit = True
+    conn = psycopg.connect(settings.database_url, autocommit=True)
     try:
         yield conn
     finally:
