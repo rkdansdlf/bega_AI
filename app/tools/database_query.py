@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import logging
 import psycopg
 from psycopg.rows import dict_row
+from psycopg import Connection as PgConnection
 
 logger = logging.getLogger(__name__)
 
