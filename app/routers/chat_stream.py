@@ -176,7 +176,9 @@ async def _stream_response(
                 "tool_results": tool_results_serialized,
                 "data_sources": result.get("data_sources", []),
                 "verified": result.get("verified", False),
-                "visualizations": result.get("visualizations", []),  # 시각화 데이터 전달
+                "visualizations": result.get(
+                    "visualizations", []
+                ),  # 시각화 데이터 전달
                 "style": style,
             }
             # 전체 payload를 안전하게 직렬화
@@ -228,6 +230,7 @@ async def chat_completion(
 
     # If the answer is an async generator, consume it for non-streaming response.
     import inspect
+
     answer_obj = result.get("answer")
     if inspect.isasyncgen(answer_obj) or hasattr(answer_obj, "__aiter__"):
         full_answer = ""

@@ -91,9 +91,7 @@ class GameQueryTool:
     def _load_team_mappings(self):
         """OCI DB의 teams 테이블과 franchise_id를 활용하여 팀 매핑 정보를 동적으로 로드합니다."""
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
             query = """
                 SELECT team_id, team_name, franchise_id, founded_year 
                 FROM teams 
@@ -251,9 +249,7 @@ class GameQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             # 쿼리 조건 구성
             where_conditions = []
@@ -419,9 +415,7 @@ class GameQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             # 쿼리 조건 구성
             where_conditions = ["DATE(g.game_date) = %s"]
@@ -503,9 +497,7 @@ class GameQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             # 쿼리 조건 구성
             where_conditions = [
@@ -611,9 +603,7 @@ class GameQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             where_conditions = ["g.game_date BETWEEN %s AND %s"]
             query_params = [start_date, end_date]
@@ -810,9 +800,7 @@ class GameQueryTool:
             return result
 
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             query = """
                 SELECT MAX(g.game_date) as final_game_date
@@ -962,9 +950,7 @@ class GameQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             # 1. 경기 ID 찾기 (ID가 없는 경우)
             if not game_id and date:
@@ -1062,9 +1048,7 @@ class GameQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             # 리그 타입 코드 매핑
             league_code_map = {"regular_season": 0, "korean_series": 5}
@@ -1128,9 +1112,7 @@ class GameQueryTool:
         }
 
         try:
-            cursor = self.connection.cursor(
-                row_factory=dict_row
-            )
+            cursor = self.connection.cursor(row_factory=dict_row)
 
             where_conditions = []
             query_params = []

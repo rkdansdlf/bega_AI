@@ -10,15 +10,18 @@ from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
+
 class MatchPredictor:
     def __init__(self, connection: psycopg.Connection):
         self.connection = connection
 
-    def _get_player_id_and_team(self, name: str, year: int) -> Optional[Tuple[str, str, str]]:
+    def _get_player_id_and_team(
+        self, name: str, year: int
+    ) -> Optional[Tuple[str, str, str]]:
         """선수 이름으로 ID, 팀, 포지션(투수/타자)을 조회합니다."""
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
-            
+
             # 1. 투수 확인
             query_pitcher = """
                 SELECT pb.player_id, t.team_name, 'pitcher' as role
@@ -31,7 +34,7 @@ class MatchPredictor:
             cursor.execute(query_pitcher, (name, year))
             row = cursor.fetchone()
             if row:
-                return row['player_id'], row['team_name'], 'pitcher'
+                return row["player_id"], row["team_name"], "pitcher"
 
             # 2. 타자 확인
             query_batter = """
@@ -45,8 +48,8 @@ class MatchPredictor:
             cursor.execute(query_batter, (name, year))
             row = cursor.fetchone()
             if row:
-                return row['player_id'], row['team_name'], 'batter'
-                
+                return row["player_id"], row["team_name"], "batter"
+
             return None
         except Exception as e:
             logger.error(f"[MatchPredictor] Player lookup failed: {e}")
@@ -54,11 +57,13 @@ class MatchPredictor:
         finally:
             cursor.close()
 
-    def _get_recent_form(self, player_id: str, role: str, limit: int = 5) -> Dict[str, Any]:
+    def _get_recent_form(
+        self, player_id: str, role: str, limit: int = 5
+    ) -> Dict[str, Any]:
         """최근 N경기 성적을 조회합니다."""
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
-            if role == 'batter':
+            if role == "batter":
                 query = """
                     SELECT 
                         SUM(hits) as hits, SUM(at_bats) as ab, 
@@ -92,7 +97,7 @@ class MatchPredictor:
                     WHERE gps.player_id = %s
                     ORDER BY g.game_date DESC LIMIT %s
                 """
-            
+
             cursor.execute(query, (player_id, limit))
             row = cursor.fetchone()
             return dict(row) if row else {}
@@ -119,20 +124,28 @@ class MatchPredictor:
             """
             cursor.execute(query, (pitcher_id, batter_id))
             row = cursor.fetchone()
-            if row and row['pa'] > 0:
-                avg = row['hits'] / (row['pa'] - row['bb']) if (row['pa'] - row['bb']) > 0 else 0.0
+            if row and row["pa"] > 0:
+                avg = (
+                    row["hits"] / (row["pa"] - row["bb"])
+                    if (row["pa"] - row["bb"]) > 0
+                    else 0.0
+                )
                 return {**dict(row), "avg": round(avg, 3)}
             return {"pa": 0, "message": "No record"}
         except Exception as e:
-            logger.warning(f"[MatchPredictor] Head-to-head query failed (Table might not exist): {e}")
+            logger.warning(
+                f"[MatchPredictor] Head-to-head query failed (Table might not exist): {e}"
+            )
             return {"pa": 0, "error": str(e)}
         finally:
             cursor.close()
 
-    def predict(self, pitcher_name: str, batter_name: str, year: int = 2024) -> Dict[str, Any]:
+    def predict(
+        self, pitcher_name: str, batter_name: str, year: int = 2024
+    ) -> Dict[str, Any]:
         """
         투수와 타자의 승부를 예측합니다.
-        
+
         Algorithm:
         1. Base Score: 50 (Neutral)
         2. Adjust for Head-to-Head (Weight: High)
@@ -146,18 +159,21 @@ class MatchPredictor:
             return {"error": f"Pitcher '{pitcher_name}' not found."}
         if not batter_info:
             return {"error": f"Batter '{batter_name}' not found."}
-            
+
         p_id, p_team, _ = pitcher_info
         b_id, b_team, _ = batter_info
-        
+
         if p_team == b_team and p_team is not None:
-             return {"result": "Same Team", "message": "같은 팀 선수끼리는 대결하지 않습니다."}
+            return {
+                "result": "Same Team",
+                "message": "같은 팀 선수끼리는 대결하지 않습니다.",
+            }
 
         # 1. Stats Lookup
         h2h = self._get_head_to_head(p_id, b_id)
-        p_recent = self._get_recent_form(p_id, 'pitcher')
-        b_recent = self._get_recent_form(b_id, 'batter')
-        
+        p_recent = self._get_recent_form(p_id, "pitcher")
+        b_recent = self._get_recent_form(b_id, "batter")
+
         # 2. Score Calculation (0-100, >50 means Batter Advantage)
         score = 50.0
         reasons = []
@@ -171,7 +187,7 @@ class MatchPredictor:
             elif avg < 0.200:
                 score -= 15
                 reasons.append(f"상대 전적 약세 (타율 {avg:.3f})")
-        
+
         # Recent Form Impact
         # Batter
         b_ab = b_recent.get("ab", 0)
@@ -183,7 +199,7 @@ class MatchPredictor:
             elif b_avg <= 0.150:
                 score -= 10
                 reasons.append(f"타자 최근 타격감 저조 (타율 {b_avg:.3f})")
-                
+
         # Pitcher
         p_ip = p_recent.get("ip", 0)
         if p_ip and p_ip > 5:
@@ -197,10 +213,10 @@ class MatchPredictor:
 
         # Result Generation
         prob = min(max(score, 10), 90) / 100.0  # Normalize to 0.1 - 0.9
-        
+
         winner = batter_name if score > 50 else pitcher_name
         win_prob = prob if score > 50 else (1 - prob)
-        
+
         return {
             "pitcher": pitcher_name,
             "batter": batter_name,
@@ -209,8 +225,5 @@ class MatchPredictor:
             "score": score,
             "reasons": reasons,
             "h2h_summary": h2h,
-            "recent_form": {
-                "batter": b_recent,
-                "pitcher": p_recent
-            }
+            "recent_form": {"batter": b_recent, "pitcher": p_recent},
         }

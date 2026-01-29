@@ -36,7 +36,7 @@ def get_connection_pool() -> ConnectionPool:
                 "keepalives_interval": 10,
                 "keepalives_count": 5,
                 "autocommit": True,
-            }
+            },
         )
 
     return _connection_pool
@@ -66,10 +66,10 @@ async def lifespan(app):
 def get_db_connection() -> Generator[psycopg.Connection, None, None]:
     """커넥션 풀에서 커넥션을 가져와서 사용 후 반환합니다."""
     pool_instance = get_connection_pool()
-    
+
     # psycopg_pool은 context manager를 지원하여 안전하게 반환함
     with pool_instance.connection() as conn:
-        # 연결 상태 확인은 psycopg3에서 더 지능적으로 처리되지만 
+        # 연결 상태 확인은 psycopg3에서 더 지능적으로 처리되지만
         # 명시적인 확인이 필요한 경우 execute("SELECT 1") 등을 사용 가능
         yield conn
 
@@ -217,7 +217,7 @@ def get_agent(
         # Convert messages to Gemini format
         gemini_messages = []
         system_instruction = ""
-        
+
         for msg in messages:
             role = msg["role"]
             content = msg["content"]
@@ -229,8 +229,7 @@ def get_agent(
 
         if system_instruction:
             model = genai.GenerativeModel(
-                model_name=settings.gemini_model,
-                system_instruction=system_instruction
+                model_name=settings.gemini_model, system_instruction=system_instruction
             )
 
         try:
@@ -240,7 +239,7 @@ def get_agent(
                     temperature=0.1,
                     max_output_tokens=settings.max_output_tokens,
                 ),
-                stream=True
+                stream=True,
             )
             async for chunk in response:
                 if chunk.text:
