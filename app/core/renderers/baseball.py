@@ -75,11 +75,11 @@ def _format_count(value: Any, suffix: str = "") -> Optional[str]:
 
 
 def make_meta(
-    row: Dict[str, Any], 
-    *, 
-    kind: str, 
+    row: Dict[str, Any],
+    *,
+    kind: str,
     aliases: Iterable[str],
-    extra_stats: Optional[Dict[str, Any]] = None
+    extra_stats: Optional[Dict[str, Any]] = None,
 ) -> str:
     meta = {
         "kind": kind,
@@ -94,10 +94,10 @@ def make_meta(
     for key in ("era", "avg", "ops", "whip", "ip"):
         if row.get(key) not in NUMBER_SENTINELS:
             meta["primary_stats"][key] = row[key]
-            
+
     if extra_stats:
         meta.update(extra_stats)
-        
+
     return json.dumps(meta, ensure_ascii=False)
 
 
@@ -223,18 +223,22 @@ def render_pitching_season(
         hbp = int(float(row.get("hit_batters") or 0))
         k = int(float(row.get("strikeouts") or 0))
         pa = int(float(row.get("tbf") or 0))
-        
+
         fip_val = kbo_metrics.fip(hr, bb, hbp, k, ip_val, _LEAGUE_CONTEXT) or 99.0
         era_minus_val = kbo_metrics.era_minus(era_val, _LEAGUE_CONTEXT) or 999.0
         fip_minus_val = kbo_metrics.fip_minus(fip_val, _LEAGUE_CONTEXT) or 999.0
         kbb_pct = kbo_metrics.k_minus_bb_pct(k, bb, pa) or -99.0
-        
+
         score = kbo_metrics.pitcher_rank_score(
             era_minus_val, fip_minus_val, kbb_pct, whip_val, ip_val
         )
-        
+
         extra_stats = {
-            "role": "SP" if ip_val >= 70 or int(float(row.get("games_started") or 0)) >= 10 else "RP",
+            "role": (
+                "SP"
+                if ip_val >= 70 or int(float(row.get("games_started") or 0)) >= 10
+                else "RP"
+            ),
             "ip": ip_val,
             "era": era_val,
             "whip": whip_val,
@@ -249,16 +253,16 @@ def render_pitching_season(
             "hit_batters": hbp,
             "home_runs_allowed": hr,
             "tbf": pa,
-            "games_started": int(float(row.get("games_started") or 0))
+            "games_started": int(float(row.get("games_started") or 0)),
         }
     except Exception:
-        pass # Fallback to runtime calc if data missing
+        pass  # Fallback to runtime calc if data missing
 
     meta = make_meta(
         row,
         kind="pitching_season",
         aliases=_build_aliases(row),
-        extra_stats=extra_stats
+        extra_stats=extra_stats,
     )
 
     source = row.get("source_table", "player_season_pitching")
@@ -351,34 +355,42 @@ def render_batting_season(
         ab = int(float(row.get("at_bats") or 0))
         rbi_val = int(float(row.get("rbi") or 0))
         sb = int(float(row.get("stolen_bases") or 0))
-        
+
         avg_val = float(row.get("avg") or row.get("batting_avg") or 0.0)
         ops_val = float(row.get("ops") or 0.0)
-        
+
         # Recalculate if missing
         if ops_val == 0.0:
-            ops_val = kbo_metrics.ops(hits, bb, hbp, ab, sf, doubles, triples, hr) or 0.0
-            
-        league_ops = (_LEAGUE_CONTEXT.lg_OBP + _LEAGUE_CONTEXT.lg_SLG)
+            ops_val = (
+                kbo_metrics.ops(hits, bb, hbp, ab, sf, doubles, triples, hr) or 0.0
+            )
+
+        league_ops = _LEAGUE_CONTEXT.lg_OBP + _LEAGUE_CONTEXT.lg_SLG
         ops_plus = ((ops_val / league_ops) * 100) if league_ops else None
-        
-        woba_val = kbo_metrics.woba(bb, ibb, hbp, hits, doubles, triples, hr, ab, sf, _LEAGUE_CONTEXT)
+
+        woba_val = kbo_metrics.woba(
+            bb, ibb, hbp, hits, doubles, triples, hr, ab, sf, _LEAGUE_CONTEXT
+        )
         wrc_plus = None
         if woba_val is not None and pa_val > 0:
             wrc_plus = kbo_metrics.wrc_plus(woba_val, pa_val, _LEAGUE_CONTEXT)
-            
+
         war = None
         if woba_val is not None:
-            war = kbo_metrics.war_batter(woba_val, pa_val, 0.0, 0.0, 0.0, 0.0, _LEAGUE_CONTEXT)
-            
+            war = kbo_metrics.war_batter(
+                woba_val, pa_val, 0.0, 0.0, 0.0, 0.0, _LEAGUE_CONTEXT
+            )
+
         score = 0.0
-        if wrc_plus is not None: # Use simplified score calculation here to avoid circular dep or re-implementation
-             wrc_plus_score = wrc_plus
-             war_score = (war * 20) if war is not None else 0
-             score = 0.7 * wrc_plus_score + 0.3 * war_score
+        if (
+            wrc_plus is not None
+        ):  # Use simplified score calculation here to avoid circular dep or re-implementation
+            wrc_plus_score = wrc_plus
+            war_score = (war * 20) if war is not None else 0
+            score = 0.7 * wrc_plus_score + 0.3 * war_score
         else:
-             score = 90.0 # Default
-             
+            score = 90.0  # Default
+
         extra_stats = {
             "pa": pa_val,
             "wrc_plus": wrc_plus,
@@ -406,10 +418,7 @@ def render_batting_season(
         pass
 
     meta = make_meta(
-        row,
-        kind="batting_season",
-        aliases=_build_aliases(row),
-        extra_stats=extra_stats
+        row, kind="batting_season", aliases=_build_aliases(row), extra_stats=extra_stats
     )
 
     source = row.get("source_table", "player_season_batting")

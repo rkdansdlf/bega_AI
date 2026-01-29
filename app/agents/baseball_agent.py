@@ -476,24 +476,33 @@ class BaseballStatisticsAgent:
     def _tool_check_bullpen(self, team_name: str, date: str = None) -> ToolResult:
         """불펜 가용성 확인 도구"""
         from ..core.game_strategist import GameStrategist
+
         try:
             strategist = GameStrategist(self.connection)
             result = strategist.check_bullpen_availability(team_name, date)
-            
+
             if "error" in result:
                 return ToolResult(success=False, data=result, message=result["error"])
-            
+
             # 메시지 포맷팅
             status_list = result.get("bullpen_status", [])
-            available = [p['name'] for p in status_list if p['status'] == 'Available']
-            warning = [f"{p['name']}({p['reason']})" for p in status_list if p['status'] == 'Warning']
-            unavailable = [f"{p['name']}({p['reason']})" for p in status_list if p['status'] in ['Unavailable', 'High Risk']]
-            
+            available = [p["name"] for p in status_list if p["status"] == "Available"]
+            warning = [
+                f"{p['name']}({p['reason']})"
+                for p in status_list
+                if p["status"] == "Warning"
+            ]
+            unavailable = [
+                f"{p['name']}({p['reason']})"
+                for p in status_list
+                if p["status"] in ["Unavailable", "High Risk"]
+            ]
+
             msg = f"[{result['team']} 불펜 현황]\n"
             msg += f"✅ 가용: {', '.join(available) if available else '없음'}\n"
             msg += f"⚠️ 주의: {', '.join(warning) if warning else '없음'}\n"
             msg += f"⛔ 불가: {', '.join(unavailable) if unavailable else '없음'}"
-            
+
             return ToolResult(success=True, data=result, message=msg)
         except Exception as e:
             logger.error(f"Bullpen check error: {e}")
@@ -502,88 +511,102 @@ class BaseballStatisticsAgent:
     def _tool_recommend_pitcher(self, team_name: str, situation: str) -> ToolResult:
         """투수 추천 도구"""
         from ..core.game_strategist import GameStrategist
+
         try:
             strategist = GameStrategist(self.connection)
             result = strategist.recommend_pitcher(team_name, situation)
-            
+
             if "error" in result:
                 return ToolResult(success=False, data=result, message=result["error"])
-                
+
             recs = result.get("recommended", [])
-            rec_names = ", ".join([p['name'] for p in recs])
-            
+            rec_names = ", ".join([p["name"] for p in recs])
+
             return ToolResult(
-                success=True, 
-                data=result, 
-                message=f"[{team_name} {situation} 상황 추천]\n추천 투수: {rec_names}\n(최근 휴식일과 기록을 고려한 추천입니다)"
+                success=True,
+                data=result,
+                message=f"[{team_name} {situation} 상황 추천]\n추천 투수: {rec_names}\n(최근 휴식일과 기록을 고려한 추천입니다)",
             )
         except Exception as e:
             logger.error(f"Pitcher recommendation error: {e}")
             return ToolResult(success=False, data={}, message=f"투수 추천 중 오류: {e}")
 
-
-    def _tool_predict_matchup(self, pitcher_name: str, batter_name: str, year: int = None) -> ToolResult:
+    def _tool_predict_matchup(
+        self, pitcher_name: str, batter_name: str, year: int = None
+    ) -> ToolResult:
         """투타 맞대결 예측 도구"""
         from ..core.match_predictor import MatchPredictor
-        
+
         if year is None:
             year = date.today().year
 
         try:
             predictor = MatchPredictor(self.connection)
             result = predictor.predict(pitcher_name, batter_name, year)
-            
+
             if "error" in result:
                 return ToolResult(success=False, data=result, message=result["error"])
-                
+
             winner = result["predicted_winner"]
             prob = result["win_probability"]
-            reasons = ", ".join(result["reasons"]) if result["reasons"] else "데이터 부족으로 인한 기본 확률"
-            
+            reasons = (
+                ", ".join(result["reasons"])
+                if result["reasons"]
+                else "데이터 부족으로 인한 기본 확률"
+            )
+
             msg = f"예측 결과: {winner} 우세 (확률 {prob:.0%})\n근거: {reasons}"
             return ToolResult(success=True, data=result, message=msg)
-            
+
         except Exception as e:
             logger.error(f"Matchup prediction error: {e}")
             return ToolResult(success=False, data={}, message=f"예측 중 오류 발생: {e}")
 
-
     def _tool_calculate_win_probability(
-        self, 
-        inning: int, 
-        is_top: bool, 
-        score_diff: int, 
-        outs: int, 
+        self,
+        inning: int,
+        is_top: bool,
+        score_diff: int,
+        outs: int,
         runner_on_1st: bool = False,
         runner_on_2nd: bool = False,
-        runner_on_3rd: bool = False
+        runner_on_3rd: bool = False,
     ) -> ToolResult:
         """승리 확률 계산 도구"""
         from ..core.wpa_calculator import WPACalculator
+
         try:
             calc = WPACalculator()
             runners = (runner_on_1st, runner_on_2nd, runner_on_3rd)
-            prob = calc.calculate_win_probability(inning, is_top, score_diff, outs, runners)
-            
-            situation_desc = f"{inning}회{'초' if is_top else '말'} {score_diff}점차 {outs}아웃"
+            prob = calc.calculate_win_probability(
+                inning, is_top, score_diff, outs, runners
+            )
+
+            situation_desc = (
+                f"{inning}회{'초' if is_top else '말'} {score_diff}점차 {outs}아웃"
+            )
             if any(runners):
                 r_desc = []
-                if runner_on_1st: r_desc.append("1루")
-                if runner_on_2nd: r_desc.append("2루")
-                if runner_on_3rd: r_desc.append("3루")
+                if runner_on_1st:
+                    r_desc.append("1루")
+                if runner_on_2nd:
+                    r_desc.append("2루")
+                if runner_on_3rd:
+                    r_desc.append("3루")
                 situation_desc += f" 주자 {'/'.join(r_desc)}"
             else:
                 situation_desc += " 주자 없음"
-                
+
             return ToolResult(
                 success=True,
                 data={"win_probability": prob, "percent": f"{prob:.1%}"},
-                message=f"[{situation_desc}] 상황의 홈팀 승리 확률은 약 {prob:.1%} 입니다."
+                message=f"[{situation_desc}] 상황의 홈팀 승리 확률은 약 {prob:.1%} 입니다.",
             )
         except Exception as e:
             logger.error(f"WPA tool error: {e}")
-            return ToolResult(success=False, data={}, message=f"승리 확률 계산 중 오류: {e}")
-
+            return ToolResult(
+                success=False, data={}, message=f"승리 확률 계산 중 오류: {e}"
+            )
 
     def _tool_search_documents(self, query: str, limit: int = 10) -> ToolResult:
         """문서 검색 도구의 래퍼 함수"""
@@ -2048,13 +2071,16 @@ class BaseballStatisticsAgent:
 
         # 1. 의도 파악 및 컨텍스트 설정
         from ..ml.intent_router import predict_intent
+
         intent = predict_intent(query)
         logger.info(f"[BaseballAgent] Predicted intent: {intent}")
 
         if intent == "match_prediction":
-            logger.info("[BaseballAgent] Match prediction intent detected. Setting specialized context.")
+            logger.info(
+                "[BaseballAgent] Match prediction intent detected. Setting specialized context."
+            )
             disclaimer = "\n\n[주의] 이 예측은 과거 데이터를 기반으로 한 확률적 추정일 뿐이며, 실제 경기 결과와 다를 수 있습니다. 도박이나 금전적 베팅의 근거로 사용할 수 없습니다."
-            
+
             # 답변 생성 시 사용할 프롬프트 오버라이드
             context["prompt_override"] = (
                 "당신은 KBO 승부 예측 AI입니다. 다음 도구 실행 결과(데이터)를 바탕으로 승부를 예측하세요.\n"
@@ -2064,12 +2090,12 @@ class BaseballStatisticsAgent:
             )
 
         if intent == "game_analysis":
-             # WPA 등 분석 요청 시
-             context["prompt_override"] = (
+            # WPA 등 분석 요청 시
+            context["prompt_override"] = (
                 "당신은 KBO 전문 데이터 분석가입니다. 제공된 WPA(승리 확률 기여도)나 클러치 데이터를 바탕으로 심층적인 분석을 제공하세요.\n"
                 "단순한 수치 나열보다는, 그 수치가 의미하는 경기 상황의 중요도나 선수의 해결사 능력을 설명하는 데 집중하세요.\n\n"
                 "질문: {question}\n\n데이터:\n{context}"
-             )
+            )
 
         # 1단계: 질문 분석 및 필요한 도구 결정
         analysis_result = await self._analyze_query_and_plan_tools(query, context)
@@ -2147,51 +2173,63 @@ class BaseballStatisticsAgent:
             "error": answer_result.get("error"),
         }
 
-    def _generate_visualizations(self, tool_results: List[ToolResult]) -> List[Dict[str, Any]]:
+    def _generate_visualizations(
+        self, tool_results: List[ToolResult]
+    ) -> List[Dict[str, Any]]:
         """도구 실행 결과를 바탕으로 프론트엔드용 시각화 데이터를 생성합니다."""
         viz_list = []
-        
+
         for res in tool_results:
             if not res.success or not res.data:
                 continue
-                
+
             # 1. 승부 예측 (Match Prediction) -> 확률형 차트
             if "win_probability" in res.data and "predicted_winner" in res.data:
-                viz_list.append({
-                    "type": "match_prediction",
-                    "title": "승부 예측 결과",
-                    "data": {
-                        "winner": res.data.get("predicted_winner"),
-                        "probability": res.data.get("win_probability"),
-                        "pitcher": res.data.get("pitcher"),
-                        "batter": res.data.get("batter"),
-                        "history": res.data.get("head_to_head_summary")
+                viz_list.append(
+                    {
+                        "type": "match_prediction",
+                        "title": "승부 예측 결과",
+                        "data": {
+                            "winner": res.data.get("predicted_winner"),
+                            "probability": res.data.get("win_probability"),
+                            "pitcher": res.data.get("pitcher"),
+                            "batter": res.data.get("batter"),
+                            "history": res.data.get("head_to_head_summary"),
+                        },
                     }
-                })
-                
+                )
+
             # 2. 불펜 현황 (Bullpen Status) -> 상태 리스트/게이지
             if "bullpen_status" in res.data:
-                viz_list.append({
-                    "type": "bullpen_status",
-                    "title": f"{res.data.get('team', '')} 불펜 가용성",
-                    "data": {
-                        "team": res.data.get("team"),
-                        "status_list": res.data.get("bullpen_status")
+                viz_list.append(
+                    {
+                        "type": "bullpen_status",
+                        "title": f"{res.data.get('team', '')} 불펜 가용성",
+                        "data": {
+                            "team": res.data.get("team"),
+                            "status_list": res.data.get("bullpen_status"),
+                        },
                     }
-                })
-                
+                )
+
             # 3. WPA (Win Probability) -> 게이지/텍스트
-            if "win_probability" in res.data and "inning" not in res.data: # MatchPrediction과 구분 (MatchPrediction도 win_prob가 있음)
-                 pass # MatchPrediction에서 처리됨
-            elif "win_probability" in res.data and isinstance(res.data.get("percent"), str): # WPA tool specific
-                 viz_list.append({
-                    "type": "wpa_gauge",
-                    "title": "승리 확률",
-                    "data": {
-                        "probability": res.data.get("win_probability"),
-                        "label": res.data.get("percent")
+            if (
+                "win_probability" in res.data and "inning" not in res.data
+            ):  # MatchPrediction과 구분 (MatchPrediction도 win_prob가 있음)
+                pass  # MatchPrediction에서 처리됨
+            elif "win_probability" in res.data and isinstance(
+                res.data.get("percent"), str
+            ):  # WPA tool specific
+                viz_list.append(
+                    {
+                        "type": "wpa_gauge",
+                        "title": "승리 확률",
+                        "data": {
+                            "probability": res.data.get("win_probability"),
+                            "label": res.data.get("percent"),
+                        },
                     }
-                 })
+                )
 
         return viz_list
 
@@ -2803,5 +2841,3 @@ class BaseballStatisticsAgent:
                 "data_sources": [],
                 "error": f"답변 생성 오류: {e}",
             }
-
-

@@ -23,6 +23,7 @@ load_dotenv()
 import psycopg
 from app.core.embeddings import embed_texts
 from app.core.retrieval import similarity_search as supabase_search
+
 # from app.core.retrieval_firestore import similarity_search_firestore
 from app.config import Settings
 

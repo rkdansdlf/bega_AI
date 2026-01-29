@@ -16,7 +16,6 @@ print(f"Connecting to database...")
 try:
     conn = psycopg.connect(dsn, connect_timeout=30, autocommit=True)
 
-
     with conn.cursor() as cur:
         # 1. Check if index already exists
         cur.execute("""

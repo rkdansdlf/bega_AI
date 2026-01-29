@@ -390,10 +390,7 @@ def describe_metric_ko(
 
 
 def clutch_factor(
-    avg_total: float,
-    avg_risp: float,
-    ops_total: float,
-    ops_high_leverage: float
+    avg_total: float, avg_risp: float, ops_total: float, ops_high_leverage: float
 ) -> Optional[float]:
     """
     Clutch Factor를 계산합니다.
@@ -402,21 +399,20 @@ def clutch_factor(
     """
     if avg_total == 0 or ops_total == 0:
         return None
-    
+
     # 가중치: OPS (0.7) > AVG (0.3)
     clutch_score = (ops_high_leverage / ops_total) * 0.7 + (avg_risp / avg_total) * 0.3
     return round(clutch_score, 3)
 
-def win_probability_added_batting(
-    wpa_total: float,
-    pa: int
-) -> Optional[float]:
+
+def win_probability_added_batting(wpa_total: float, pa: int) -> Optional[float]:
     """
     타자의 평균 승리 확률 기여도 (WPA/PA)
     """
     if pa == 0:
         return None
     return wpa_total / pa
+
 
 # 이닝 포맷
 def ip_to_outs(ip: float) -> int:
