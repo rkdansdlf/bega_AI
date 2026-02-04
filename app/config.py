@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     # --- Google Gemini 설정 ---
     gemini_api_key: Optional[str] = Field(None, validation_alias="GEMINI_API_KEY")
-    gemini_model: str = Field("gemini-2.5-flash", validation_alias="GEMINI_MODEL")
+    gemini_model: str = Field("gemini-2.0-flash", validation_alias="GEMINI_MODEL")
     gemini_embed_model: str = Field("", validation_alias="GEMINI_EMBED_MODEL")
     gemini_base_url: str = Field(
         "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     )
     openrouter_embed_model: Optional[str] = Field(
         None, validation_alias="OPENROUTER_EMBED_MODEL"
+    )
+    vision_model: str = Field(
+        "google/gemini-2.0-flash-001", validation_alias="VISION_MODEL"
     )
 
     # --- Function Calling / Chatbot 설정 ---

@@ -60,7 +60,7 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
                     "X-Title": "KBO Platform Ticket OCR",
                 },
                 json={
-                    "model": "google/gemini-3-flash-preview",
+                    "model": settings.vision_model,
                     "messages": [
                         {
                             "role": "user",

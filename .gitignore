@@ -20,3 +20,4 @@ scripts/migration_progress.json
 
 .migration.log
 migration.log
+server_log.txt
