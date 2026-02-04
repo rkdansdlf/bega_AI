@@ -451,6 +451,40 @@ class BaseballStatisticsAgent:
             self._tool_predict_matchup,
         )
 
+        # WPA 리더보드 조회 도구
+        self.tool_caller.register_tool(
+            "get_player_wpa_leaders",
+            "가장 높은 WPA(승리 확률 기여도)를 기록한 선수를 조회합니다. '클러치 히터', '해결사', 'WPA 1위' 등의 질문에 사용하세요.",
+            {
+                "year": "조회할 시즌 (기본값: current_year)",
+                "limit": "조회할 상위 선수 수 (기본값: 10)",
+                "team_name": "특정 팀 필터링 (선택 사항)",
+            },
+            self._tool_get_player_wpa_leaders,
+        )
+
+        # 클러치 상황 조회 도구
+        self.tool_caller.register_tool(
+            "get_clutch_moments",
+            "특정 경기에서 승부의 결정적인 순간(WPA 변화가 컸던 순간)들을 조회합니다. '승부처가 언제였어?', '어떤 상황이 결정적이었어?' 등의 질문에 사용하세요.",
+            {
+                "game_id": "경기 ID",
+                "limit": "조회할 상위 상황 수 (기본값: 5)",
+            },
+            self._tool_get_clutch_moments,
+        )
+
+        # 선수 개별 WPA 통계 조회 도구
+        self.tool_caller.register_tool(
+            "get_player_wpa_stats",
+            "특정 선수의 WPA 관련 통계를 상세 조회합니다. '김도영 선수가 중요한 순간에 잘 쳤어?', '이 선수의 WPA 어때?' 등의 질문에 사용하세요.",
+            {
+                "player_name": "선수 명",
+                "year": "조회할 시즌 (기본값: current_year)",
+            },
+            self._tool_get_player_wpa_stats,
+        )
+
         # 불펜 가용성 확인 도구 (신규 추가: Game Strategy)
         self.tool_caller.register_tool(
             "check_bullpen_availability",
@@ -2046,131 +2080,129 @@ class BaseballStatisticsAgent:
 """
         return None
 
-    async def process_query(
+    async def process_query_stream(
         self, query: str, context: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        통계 질문을 처리하고 실제 DB 데이터를 사용하여 답변을 생성합니다.
+        통계 질문을 처리하고 진행 상황(이벤트)을 스트리밍합니다.
         """
-        logger.info(f"[BaseballAgent] Processing query: {query}")
-
+        logger.info(f"[BaseballAgent] Processing query stream: {query}")
+        
         # --- 신규 추가: 일상 대화 처리기 ---
         if self._is_chitchat(query):
             response = self._get_chitchat_response(query)
             if response:
-                logger.info("[BaseballAgent] 일상 대화로 처리합니다.")
-                return {
-                    "answer": response,
-                    "tool_calls": [],
-                    "tool_results": [],
-                    "verified": True,
-                    "data_sources": ["predefined"],
-                    "error": None,
+                yield {"type": "answer_chunk", "content": response}
+                yield {
+                    "type": "metadata",
+                    "data": {
+                        "tool_calls": [],
+                        "tool_results": [],
+                        "verified": True,
+                        "data_sources": ["predefined"],
+                    }
                 }
-        # --- 일상 대화 처리기 끝 ---
+                return
 
-        # 1. 의도 파악 및 컨텍스트 설정
+        # 1. 의도 파악
         from ..ml.intent_router import predict_intent
-
         intent = predict_intent(query)
-        logger.info(f"[BaseballAgent] Predicted intent: {intent}")
-
+        
         if intent == "match_prediction":
-            logger.info(
-                "[BaseballAgent] Match prediction intent detected. Setting specialized context."
-            )
             disclaimer = "\n\n[주의] 이 예측은 과거 데이터를 기반으로 한 확률적 추정일 뿐이며, 실제 경기 결과와 다를 수 있습니다. 도박이나 금전적 베팅의 근거로 사용할 수 없습니다."
-
-            # 답변 생성 시 사용할 프롬프트 오버라이드
             context["prompt_override"] = (
                 "당신은 KBO 승부 예측 AI입니다. 다음 도구 실행 결과(데이터)를 바탕으로 승부를 예측하세요.\n"
                 "분석 결과와 승리 확률을 명확히 제시하고, 그 근거(최근 성적, 상대 전적 등)를 설명하세요.\n"
                 f"답변의 마지막에는 반드시 다음 면책 조항을 포함하세요: {disclaimer}\n\n"
                 "질문: {question}\n\n데이터:\n{context}"
             )
-
-        if intent == "game_analysis":
-            # WPA 등 분석 요청 시
+        elif intent == "game_analysis":
             context["prompt_override"] = (
                 "당신은 KBO 전문 데이터 분석가입니다. 제공된 WPA(승리 확률 기여도)나 클러치 데이터를 바탕으로 심층적인 분석을 제공하세요.\n"
                 "단순한 수치 나열보다는, 그 수치가 의미하는 경기 상황의 중요도나 선수의 해결사 능력을 설명하는 데 집중하세요.\n\n"
                 "질문: {question}\n\n데이터:\n{context}"
             )
 
-        # 1단계: 질문 분석 및 필요한 도구 결정
+        # 1단계: 도구 계획
+        yield {"type": "status", "message": "질문 의도를 분석하고 있습니다..."}
         analysis_result = await self._analyze_query_and_plan_tools(query, context)
 
         if analysis_result["error"]:
-            return {
-                "answer": "질문 분석 중 오류가 발생했습니다.",
-                "tool_calls": [],
-                "verified": False,
-                "error": analysis_result["error"],
-            }
+            yield {"type": "answer_chunk", "content": "질문 분석 중 오류가 발생했습니다."}
+            return
 
-        # 2단계: 도구 실행을 통한 데이터 수집
+        # 2단계: 도구 실행
         tool_results = []
-        valid_tool_calls = []
-
-        # --- 신규 추가: 매개변수 환각 필터링 (Defensive Validation) ---
-        hallucination_indicators = [
-            "추출된",
-            "결과",
-            "로부터",
-            "STEP",
-            "FROM",
-            "찾은",
-            "확인된",
-            "날짜",
-            "선수명",
-        ]
+        hallucination_indicators = ["추출된", "결과", "로부터", "STEP", "FROM", "찾은", "확인된", "날짜", "선수명"]
 
         for tool_call in analysis_result["tool_calls"]:
+            yield {"type": "tool_start", "tool": tool_call.tool_name, "params": tool_call.parameters}
+            
+            # Param Validation
             is_hallucination = False
             for param_val in tool_call.parameters.values():
-                if isinstance(param_val, str) and any(
-                    indicator in param_val.upper()
-                    for indicator in hallucination_indicators
-                ):
+                if isinstance(param_val, str) and any(ind in param_val.upper() for ind in hallucination_indicators):
                     is_hallucination = True
                     break
 
             if is_hallucination:
-                logger.warning(
-                    f"[BaseballAgent] Hallucination detected in {tool_call.tool_name} params: {tool_call.parameters}"
-                )
-                # 환각된 도구는 실행하지 않고 빈 결과/메시지만 남김
                 from .tool_caller import ToolResult
-
-                tool_results.append(
-                    ToolResult(
-                        success=False,
-                        data={},
-                        message=f"매개변수 오류: {tool_call.tool_name} 호출을 위한 유효한 데이터를 찾지 못했습니다.",
-                    )
-                )
+                result = ToolResult(success=False, data={}, message=f"매개변수 오류: {tool_call.tool_name}")
             else:
-                logger.info(f"[BaseballAgent] Executing tool: {tool_call.tool_name}")
                 result = self.tool_caller.execute_tool(tool_call)
-                tool_results.append(result)
-                valid_tool_calls.append(tool_call)
+            
+            tool_results.append(result)
+            yield {"type": "tool_result", "tool": tool_call.tool_name, "success": result.success, "message": result.message}
 
-        # 3단계: 수집된 실제 데이터를 바탕으로 답변 생성
-        answer_result = await self._generate_verified_answer(
-            query, tool_results, context
-        )
-
-        # 4단계: 시각화 데이터 생성 (신규)
-        visualizations = self._generate_visualizations(tool_results)
-
-        return {
-            "answer": answer_result["answer"],
+        # 3단계: 답변 생성
+        yield {"type": "status", "message": "분석된 데이터를 바탕으로 답변을 생성하고 있습니다..."}
+        
+        answer_result = await self._generate_verified_answer(query, tool_results, context)
+        
+        metadata = {
             "tool_calls": analysis_result["tool_calls"],
             "tool_results": tool_results,
-            "visualizations": visualizations,  # 시각화 추가
+            "visualizations": self._generate_visualizations(tool_results),
             "verified": answer_result["verified"],
             "data_sources": answer_result["data_sources"],
             "error": answer_result.get("error"),
+        }
+        
+        yield {"type": "metadata", "data": metadata}
+        
+        answer_content = answer_result["answer"]
+        if hasattr(answer_content, "__aiter__"):
+            async for chunk in answer_content:
+                yield {"type": "answer_chunk", "content": chunk}
+        else:
+            yield {"type": "answer_chunk", "content": str(answer_content)}
+
+    async def process_query(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Legacy wrapper for process_query_stream.
+        """
+        metadata = {}
+        stream = self.process_query_stream(query, context)
+        answer_chunks_buffer = []
+        
+        # Consume stream until metadata
+        async for event in stream:
+            if event["type"] == "metadata":
+                metadata.update(event["data"])
+                break
+            elif event["type"] == "answer_chunk":
+                answer_chunks_buffer.append(event["content"])
+        
+        async def combined_answer_generator():
+            for chunk in answer_chunks_buffer:
+                yield chunk
+            async for event in stream:
+                if event["type"] == "answer_chunk":
+                    yield event["content"]
+        
+        return {
+            "answer": combined_answer_generator(),
+            **metadata
         }
 
     def _generate_visualizations(
@@ -2841,3 +2873,61 @@ class BaseballStatisticsAgent:
                 "data_sources": [],
                 "error": f"답변 생성 오류: {e}",
             }
+    def _tool_get_player_wpa_leaders(
+        self, year: int = None, limit: int = 10, team_name: str = None
+    ) -> ToolResult:
+        """WPA 순위 조회 도구 wrapper"""
+        if year is None:
+            import datetime
+
+            year = datetime.datetime.now().year
+
+        try:
+            result = self.db_query_tool.get_player_wpa_leaders(
+                year=year, limit=limit, team_name=team_name
+            )
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"{year}년 WPA 순위를 성공적으로 조회했습니다.",
+            )
+        except Exception as e:
+            logger.error(f"Error in _tool_get_player_wpa_leaders: {e}")
+            return ToolResult(success=False, data={}, message=f"WPA 순위 조회 실패: {e}")
+
+    def _tool_get_clutch_moments(self, game_id: str, limit: int = 5) -> ToolResult:
+        """승부처 조회 도구 wrapper"""
+        try:
+            result = self.db_query_tool.get_clutch_moments(game_id=game_id, limit=limit)
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"경기 {game_id}의 결정적 순간들을 성공적으로 조회했습니다.",
+            )
+        except Exception as e:
+            logger.error(f"Error in _tool_get_clutch_moments: {e}")
+            return ToolResult(success=False, data={}, message=f"승부처 조회 실패: {e}")
+
+    def _tool_get_player_wpa_stats(
+        self, player_name: str, year: int = None
+    ) -> ToolResult:
+        """선수별 WPA 통계 조회 도구 wrapper"""
+        if year is None:
+            import datetime
+
+            year = datetime.datetime.now().year
+
+        try:
+            result = self.db_query_tool.get_player_wpa_stats(
+                player_name=player_name, year=year
+            )
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"{year}년 {player_name} 선수의 WPA 통계를 성공적으로 조회했습니다.",
+            )
+        except Exception as e:
+            logger.error(f"Error in _tool_get_player_wpa_stats: {e}")
+            return ToolResult(
+                success=False, data={}, message=f"선수 WPA 통계 조회 실패: {e}"
+            )

@@ -166,8 +166,14 @@ def get_agent(
                 total_chars = 0
                 # Reuse the same helper (retry on 5xx, fail fast on 429)
                 async for line in fetch_completion_stream(payload, headers):
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    # logger.debug(f"[OpenRouter Raw] {line}")
+                    
                     if line.startswith("data: "):
-                        data_str = line[6:]
+                        data_str = line[6:].strip()
                         if data_str == "[DONE]":
                             break
                         try:

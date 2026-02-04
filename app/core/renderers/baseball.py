@@ -195,23 +195,6 @@ def render_pitching_season(
     hits_allowed = _format_count(row.get("h") or row.get("hits"), "피안타")
     walk = _format_count(row.get("bb") or row.get("walks"), "볼넷")
     opponent_avg = _format_float(row.get("opponent_avg") or row.get("baopp"), 3)
-    detailed = []
-    if strikeouts:
-        detailed.append(f"{strikeouts}을 기록했습니다.")
-    if hits_allowed:
-        detailed.append(f"{hits_allowed}을 허용했습니다.")
-    if walk:
-        detailed.append(f"{walk}을 내줬습니다.")
-    if opponent_avg:
-        detailed.append(f"상대 타율은 {opponent_avg}입니다.")
-
-    advanced = []
-    if percentiles:
-        era_pct = percentiles.get("era")
-        if era_pct not in NUMBER_SENTINELS:
-            advanced.append(f"ERA 백분위는 상위 {era_pct}%입니다.")
-    detailed_section = _detailed_lines(detailed + advanced)
-
     # [Optimized] Pre-calculate metrics for RAG
     extra_stats = {}
     try:
@@ -241,7 +224,10 @@ def render_pitching_season(
             ),
             "ip": ip_val,
             "era": era_val,
-            "whip": whip_val,
+            "fip": fip_val,
+            "k_per_nine": kbo_metrics.k_per_nine(k, ip_val) or 0.0,
+            "bb_per_nine": kbo_metrics.bb_per_nine(bb, ip_val) or 0.0,
+            "k_bb_ratio": kbo_metrics.k_bb_ratio(k, bb) or 0.0,
             "kbb_pct": kbb_pct,
             "era_minus": era_minus_val,
             "fip_minus": fip_minus_val,
@@ -257,6 +243,36 @@ def render_pitching_season(
         }
     except Exception:
         pass  # Fallback to runtime calc if data missing
+
+    detailed = []
+    if strikeouts:
+        detailed.append(f"{strikeouts}을 기록했습니다.")
+    
+    # New metrics
+    k9 = _format_float(extra_stats.get("k_per_nine"), 2)
+    bb9 = _format_float(extra_stats.get("bb_per_nine"), 2)
+    kbb = _format_float(extra_stats.get("k_bb_ratio"), 2)
+    if k9:
+        detailed.append(f"9이닝당 탈삼진(K/9)은 {k9}입니다.")
+    if bb9:
+        detailed.append(f"9이닝당 볼넷(BB/9)은 {bb9}입니다.")
+    if kbb:
+        detailed.append(f"삼진/볼넷 비율(K/BB)은 {kbb}입니다.")
+
+    if hits_allowed:
+        detailed.append(f"{hits_allowed}을 허용했습니다.")
+    if walk:
+        detailed.append(f"{walk}을 내줬습니다.")
+    if opponent_avg:
+        detailed.append(f"상대 타율은 {opponent_avg}입니다.")
+
+    advanced = []
+    if percentiles:
+        era_pct = percentiles.get("era")
+        if era_pct not in NUMBER_SENTINELS:
+            advanced.append(f"ERA 백분위는 상위 {era_pct}%입니다.")
+    detailed_section = _detailed_lines(detailed + advanced)
+
 
     meta = make_meta(
         row,
@@ -322,24 +338,6 @@ def render_batting_season(
         first_sentence.append("등록된 시즌 주요 기록이 없습니다.")
     core = "[핵심 문장] " + " ".join(first_sentence) + "입니다."
 
-    detailed = []
-    if plate:
-        detailed.append(f"{plate}에 나섰습니다.")
-    if obp:
-        detailed.append(f"출루율은 {obp}입니다.")
-    if slg:
-        detailed.append(f"장타율은 {slg}입니다.")
-    if league_avg and avg and league_avg.get("avg") not in NUMBER_SENTINELS:
-        league_avg_avg = _format_float(league_avg.get("avg"), 3)
-        if league_avg_avg:
-            detailed.append(f"리그 평균 타율 {league_avg_avg}와 비교해 주세요.")
-    advanced = []
-    if percentiles:
-        ops_pct = percentiles.get("ops")
-        if ops_pct not in NUMBER_SENTINELS:
-            advanced.append(f"OPS 백분위는 상위 {ops_pct}%입니다.")
-    detail_block = _detailed_lines(detailed + advanced)
-
     # [Optimized] Pre-calculate metrics for RAG
     extra_stats = {}
     try:
@@ -355,6 +353,7 @@ def render_batting_season(
         ab = int(float(row.get("at_bats") or 0))
         rbi_val = int(float(row.get("rbi") or 0))
         sb = int(float(row.get("stolen_bases") or 0))
+        k = int(float(row.get("strikeouts") or 0))
 
         avg_val = float(row.get("avg") or row.get("batting_avg") or 0.0)
         ops_val = float(row.get("ops") or 0.0)
@@ -400,6 +399,9 @@ def render_batting_season(
             "obp": float(row.get("obp") or 0.0),
             "slg": float(row.get("slg") or 0.0),
             "avg": avg_val,
+            "iso": kbo_metrics.iso(hits, doubles, triples, hr, ab) or 0.0,
+            "babip": kbo_metrics.babip(hits, hr, ab, sf, k, 0) or 0.0,
+            "xr": kbo_metrics.xr(hits, doubles, triples, hr, bb, ibb, hbp, ab, sf, sb, 0) or 0.0,
             "home_runs": hr,
             "rbi": rbi_val,
             "steals": sb,
@@ -416,6 +418,36 @@ def render_batting_season(
         }
     except Exception:
         pass
+
+    detailed = []
+    if plate:
+        detailed.append(f"{plate}에 나섰습니다.")
+    if obp:
+        detailed.append(f"출루율은 {obp}입니다.")
+    if slg:
+        detailed.append(f"장타율은 {slg}입니다.")
+    
+    # New metrics
+    iso = _format_float(extra_stats.get("iso"), 3)
+    babip = _format_float(extra_stats.get("babip"), 3)
+    xr = _format_float(extra_stats.get("xr"), 2)
+    if iso:
+        detailed.append(f"순수장타율(ISO)은 {iso}입니다.")
+    if babip:
+        detailed.append(f"인플레이 타구 타율(BABIP)은 {babip}입니다.")
+    if xr:
+        detailed.append(f"추정 득점(XR)은 {xr}입니다.")
+
+    if league_avg and avg and league_avg.get("avg") not in NUMBER_SENTINELS:
+        league_avg_avg = _format_float(league_avg.get("avg"), 3)
+        if league_avg_avg:
+            detailed.append(f"리그 평균 타율 {league_avg_avg}와 비교해 주세요.")
+    advanced = []
+    if percentiles:
+        ops_pct = percentiles.get("ops")
+        if ops_pct not in NUMBER_SENTINELS:
+            advanced.append(f"OPS 백분위는 상위 {ops_pct}%입니다.")
+    detail_block = _detailed_lines(detailed + advanced)
 
     meta = make_meta(
         row, kind="batting_season", aliases=_build_aliases(row), extra_stats=extra_stats

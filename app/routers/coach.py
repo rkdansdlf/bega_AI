@@ -35,6 +35,7 @@ async def analyze_team(
 ):
     """
     특정 팀에 대한 심층 분석을 요청합니다. 'The Coach' 페르소나가 적용됩니다.
+    스트리밍(SSE) 응답을 지원합니다.
     """
     try:
         team_name = agent._convert_team_id_to_name(payload.team_id)
@@ -44,15 +45,14 @@ async def analyze_team(
             query = payload.question_override
         else:
             focus_text = ", ".join(payload.focus) if payload.focus else "종합적인 전력"
-
-            # Use centralized prompt from prompts.py
+            
+            # Use centralized prompt from prompts.py (COACH_PROMPT is handled inside agent based on persona)
             system_prompt = COACH_PROMPT
 
             query = (
                 f"{team_name}의 {focus_text}에 대해 냉철하고 다각적인 분석을 수행해줘."
             )
 
-            # 다각도 분석을 위해 기본적으로 포함될 수 있는 항목들 확장
             if "batting" in payload.focus or not payload.focus:
                 query += " 팀의 타격 생산성(OPS, wRC+)과 주요 타자들의 최근 클러치 능력을 진단해줘."
 
@@ -77,84 +77,64 @@ async def analyze_team(
 
         logger.info(f"[Coach Router] Analyzing for {team_name}: {query}")
 
-        # 에이전트 호출 (Coach 페르소나 적용)
         context_data = {"persona": "coach", "team_id": payload.team_id}
-        if "system_prompt" in locals():  # Only add if defined in the else block
-            context_data["system_message"] = system_prompt
+        # Note: system_prompt is passed implicitly via persona logic in _generate_verified_answer
+        # inside the agent, but we set it here if we want to force it in context
+        if "system_prompt" in locals():
+             context_data["system_message"] = system_prompt
 
-        final_answer = ""
-        tool_calls = []
-        verified = False
-        data_sources = []
+        async def event_generator():
+            # Use process_query_stream to get real-time events, including tool execution
+            async for event in agent.process_query_stream(query, context=context_data):
+                if event["type"] == "status":
+                    yield {
+                        "event": "status",
+                        "data": json.dumps({"message": event["message"]}, ensure_ascii=False)
+                    }
+                elif event["type"] == "tool_start":
+                    yield {
+                        "event": "tool_start",
+                        "data": json.dumps({"tool": event["tool"]}, ensure_ascii=False)
+                    }
+                elif event["type"] == "answer_chunk":
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({"delta": event["content"]}, ensure_ascii=False)
+                    }
+                elif event["type"] == "metadata":
+                     # Send metadata event
+                     def safe_serialize(obj):
+                        if hasattr(obj, "to_dict"):
+                            return obj.to_dict()
+                        if hasattr(obj, "__dict__"):
+                             return str(obj)
+                        return str(obj)
 
-        # 빈 응답에 대한 재시도 로직
-        for attempt in range(MAX_RETRY_ON_EMPTY + 1):
-            result = await agent.process_query(query, context=context_data)
+                     # Sanitize metadata (tool_calls, etc)
+                     # We need to serialize recursively potentially
+                     # For now, just pass what we can
+                     from ..routers.chat_stream import ChatPayload # Import helper if possible or just rely on json dump
+                     # Manually serializing for safety as in original code
+                     meta_payload = {
+                        "tool_calls": [tc.to_dict() for tc in event["data"]["tool_calls"]],
+                        "verified": event["data"]["verified"],
+                        "data_sources": event["data"]["data_sources"]
+                     }
+                     yield {
+                        "event": "meta",
+                        "data": json.dumps(meta_payload, ensure_ascii=False)
+                     }
+            
+            yield {"event": "done", "data": "[DONE]"}
 
-            # 스트리밍 응답(async_generator)일 경우 텍스트로 변환
-            answer = result.get("answer")
-            if hasattr(answer, "__aiter__"):
-                full_answer = ""
-                async for chunk in answer:
-                    if chunk:
-                        full_answer += chunk
-                result["answer"] = full_answer
-
-            final_answer = result.get("answer", "")
-            tool_calls = result.get("tool_calls", [])
-            verified = result.get("verified", False)
-            data_sources = result.get("data_sources", [])
-
-            # 빈 응답 체크
-            if final_answer.strip():
-                if attempt > 0:
-                    logger.info(
-                        f"[Coach Router] Retry {attempt} succeeded with {len(final_answer)} chars"
-                    )
-                break
-            else:
-                if attempt < MAX_RETRY_ON_EMPTY:
-                    logger.warning(
-                        f"[Coach Router] Empty response on attempt {attempt + 1}, retrying..."
-                    )
-                else:
-                    logger.error(
-                        f"[Coach Router] All {MAX_RETRY_ON_EMPTY + 1} attempts returned empty response"
-                    )
-
-        # 필수 섹션 검증 및 Preamble 제거: "## 🔍 AI 시즌 요약"으로 강제 시작
-        if "## 🔍 AI 시즌 요약" in final_answer:
-            final_answer = (
-                "## 🔍 AI 시즌 요약" + final_answer.split("## 🔍 AI 시즌 요약", 1)[1]
-            )
-        elif "AI 시즌 요약" in final_answer:
-            # ## 가 빠진 경우 보정
-            header_part = final_answer.split("AI 시즌 요약", 1)[1]
-            final_answer = "## 🔍 AI 시즌 요약" + header_part
-        elif not final_answer.strip():
-            # 모든 재시도 후에도 빈 응답인 경우 기본 오류 메시지 반환
-            logger.error(
-                "[Coach Router] AI response is completely EMPTY after all retries."
-            )
-            final_answer = """## 🔍 AI 시즌 요약
-### 분석 일시 불가
-AI 분석 서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해 주세요.
-
-| 상태 | 설명 |
-| :--- | :--- |
-| 오류 | 응답 생성 실패 |
-"""
-        else:
-            logger.warning(
-                f"[Coach Router] Missing required header. Length: {len(final_answer)}. Content start: {final_answer[:500]!r}"
-            )
-
-        return {
-            "answer": final_answer,
-            "tool_calls": tool_calls,
-            "verified": verified,
-            "data_sources": data_sources,
-        }
+        from sse_starlette.sse import EventSourceResponse
+        return EventSourceResponse(
+            event_generator(),
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     except Exception as e:
         logger.error(f"[Coach Router] Error: {e}")

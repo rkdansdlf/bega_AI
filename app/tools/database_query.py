@@ -277,16 +277,16 @@ class DatabaseQueryTool:
                         ROUND((CASE WHEN SUM(psb.at_bats) > 0 THEN SUM(psb.hits)::decimal / SUM(psb.at_bats) ELSE 0 END)::numeric, 3) as career_avg,
                         ROUND((CASE WHEN SUM(psb.at_bats + psb.walks + psb.hbp + psb.sacrifice_flies) > 0 
                                    THEN (SUM(psb.hits) + SUM(psb.walks) + SUM(psb.hbp))::decimal / 
-                                        SUM(psb.at_bats + psb.walks + psb.hbp + psb.sacrifice_flies) 
+                                         SUM(psb.at_bats + psb.walks + psb.hbp + psb.sacrifice_flies) 
                                    ELSE 0 END)::numeric, 3) as career_obp,
                         ROUND((CASE WHEN SUM(psb.at_bats) > 0 
                                    THEN (SUM(psb.hits) + SUM(psb.doubles) + 2*SUM(psb.triples) + 3*SUM(psb.home_runs))::decimal / SUM(psb.at_bats)
                                    ELSE 0 END)::numeric, 3) as career_slg
                     FROM player_season_batting psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
-                    JOIN kbo_seasons ks ON psb.season = ks.season_year
+                    JOIN (SELECT DISTINCT ON (season_year) * FROM kbo_seasons WHERE league_type_code = '0' ORDER BY season_year, season_id) ks 
+                        ON psb.season = ks.season_year
                     WHERE (LOWER(pb.name) = LOWER(%s) OR LOWER(pb.name) LIKE LOWER(%s))
-                    AND ks.league_type_code = '0'
                     AND psb.plate_appearances >= 10  -- 최소 기준
                     GROUP BY pb.player_id, pb.name
                     ORDER BY total_home_runs DESC
@@ -335,9 +335,9 @@ class DatabaseQueryTool:
                                    ELSE 0 END)::numeric, 2) as career_whip
                     FROM player_season_pitching psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
-                    JOIN kbo_seasons ks ON psp.season = ks.season_year
+                    JOIN (SELECT DISTINCT ON (season_year) * FROM kbo_seasons WHERE league_type_code = '0' ORDER BY season_year, season_id) ks 
+                        ON psp.season = ks.season_year
                     WHERE (LOWER(pb.name) = LOWER(%s) OR LOWER(pb.name) LIKE LOWER(%s))
-                    AND ks.league_type_code = '0'
                     AND psp.innings_pitched >= 1  -- 최소 기준
                     GROUP BY pb.player_id, pb.name
                     ORDER BY total_wins DESC
@@ -401,17 +401,15 @@ class DatabaseQueryTool:
                     SELECT DISTINCT
                         pb.name as player_name, 
                         t.team_name,
-                        psb.season,
+                        psb.season as season_year,
                         psb.plate_appearances, psb.at_bats, psb.hits, psb.doubles, psb.triples, psb.home_runs,
                         psb.rbi, psb.runs, psb.walks, psb.strikeouts, psb.stolen_bases, psb.caught_stealing,
                         psb.avg, psb.obp, psb.slg, psb.ops, psb.babip
                     FROM player_season_batting psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
-                    JOIN kbo_seasons ks ON psb.season = ks.season_year
                     LEFT JOIN teams t ON psb.team_code = t.team_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 
                     AND psb.season = %s 
-                    AND ks.league_type_code = '0'
                     ORDER BY psb.plate_appearances DESC
                     LIMIT 1
                 """
@@ -431,17 +429,15 @@ class DatabaseQueryTool:
                     SELECT DISTINCT
                         pb.name as player_name,
                         t.team_name,
-                        psp.season,
+                        psp.season as season_year,
                         psp.games, psp.games_started, psp.wins, psp.losses, psp.saves, psp.holds,
                         psp.innings_pitched, psp.hits_allowed, psp.runs_allowed, psp.earned_runs,
                         psp.home_runs_allowed, psp.walks_allowed, psp.strikeouts, psp.era, psp.whip
                     FROM player_season_pitching psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
-                    JOIN kbo_seasons ks ON psp.season = ks.season_year
                     LEFT JOIN teams t ON psp.team_code = t.team_id
                     WHERE LOWER(pb.name) LIKE LOWER(%s) 
                     AND psp.season = %s 
-                    AND ks.league_type_code = '0'
                     ORDER BY psp.innings_pitched DESC
                     LIMIT 1
                 """
@@ -588,7 +584,7 @@ class DatabaseQueryTool:
                 params.extend([min_pa, limit])
 
                 query = f"""
-                    SELECT 
+                    SELECT DISTINCT ON (pb.player_id, psb.team_code)
                         pb.name as player_name, 
                         psb.team_code, 
                         psb.{db_column} as stat_value,
@@ -600,13 +596,11 @@ class DatabaseQueryTool:
                         ORDER BY player_id, team_code, plate_appearances DESC
                     ) psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
-                    JOIN kbo_seasons ks ON psb.season = ks.season_year
                     WHERE psb.season = %s 
-                    AND ks.league_type_code = '0'
                     {team_condition}
                     AND psb.plate_appearances >= %s 
                     AND psb.{db_column} IS NOT NULL
-                    ORDER BY psb.{db_column} {sort_order}
+                    ORDER BY pb.player_id, psb.team_code, psb.{db_column} {sort_order}
                     LIMIT %s
                 """
                 # params order needs to be adjusted because season is used twice now
@@ -657,7 +651,7 @@ class DatabaseQueryTool:
                 params.extend([min_ip, limit])
 
                 query = f"""
-                    SELECT 
+                    SELECT DISTINCT ON (pb.player_id, psp.team_code)
                         pb.name as player_name, 
                         psp.team_code, 
                         psp.{db_column} as stat_value,
@@ -669,13 +663,11 @@ class DatabaseQueryTool:
                         ORDER BY player_id, team_code, innings_pitched DESC
                     ) psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
-                    JOIN kbo_seasons ks ON psp.season = ks.season_year
                     WHERE psp.season = %s 
-                    AND ks.league_type_code = '0'
                     {team_condition}
                     AND psp.innings_pitched >= %s 
                     AND psp.{db_column} IS NOT NULL
-                    ORDER BY psp.{db_column} {sort_order}
+                    ORDER BY pb.player_id, psp.team_code, psp.{db_column} {sort_order}
                     LIMIT %s
                 """
                 final_params = [year, year]
@@ -751,7 +743,6 @@ class DatabaseQueryTool:
                 LEFT JOIN teams t ON psb.team_code = t.team_id
                 WHERE LOWER(pb.name) LIKE LOWER(%s) 
                 AND psb.season = %s 
-                AND psb.league = 'REGULAR'
                 
                 UNION
                 
@@ -761,7 +752,6 @@ class DatabaseQueryTool:
                 LEFT JOIN teams t ON psp.team_code = t.team_id
                 WHERE LOWER(pb.name) LIKE LOWER(%s) 
                 AND psp.season = %s 
-                AND psp.league = 'REGULAR'
                 
                 ORDER BY player_name
             """

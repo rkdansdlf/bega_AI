@@ -20,7 +20,7 @@ RUN pip wheel --no-cache-dir -r requirements.txt -w /wheels
 FROM python:3.14-rc-slim
 
 # Enable free-threading mode (Python 3.14+)
-ENV PYTHON_GIL=0
+
 
 WORKDIR /app
 
