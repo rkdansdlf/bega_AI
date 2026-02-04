@@ -92,8 +92,9 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 기본 규정 (리그 구성, 경기 시간, 타이브레이크 등)",
         "source_file": Path(__file__).parent.parent
         / "docs"
-        / "kbo_regulations"
-        / "01_기본규정.md",
+        / "kbo_rulebook"
+        / "league_regulations"
+        / "01_regular_season.md",
         "source_table": "kbo_regulations",
         "title": "KBO 기본 규정",
         "pk_hint": ["title"],
@@ -102,8 +103,9 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 선수 규정 (등록, FA, 외국인선수, 드래프트 등)",
         "source_file": Path(__file__).parent.parent
         / "docs"
-        / "kbo_regulations"
-        / "02_선수규정.md",
+        / "kbo_rulebook"
+        / "player_regulations"
+        / "README.md",
         "source_table": "kbo_regulations",
         "title": "KBO 선수 규정",
         "pk_hint": ["title"],
@@ -112,8 +114,9 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 경기 규정 (경기 진행, 방해, 보크, 홈런 등)",
         "source_file": Path(__file__).parent.parent
         / "docs"
-        / "kbo_regulations"
-        / "03_경기규정.md",
+        / "kbo_rulebook"
+        / "baseball_rules"
+        / "README.md",
         "source_table": "kbo_regulations",
         "title": "KBO 경기 규정",
         "pk_hint": ["title"],
@@ -122,8 +125,9 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 기술 규정 (기록, 통계, 심판, 용품 등)",
         "source_file": Path(__file__).parent.parent
         / "docs"
-        / "kbo_regulations"
-        / "04_기술규정.md",
+        / "kbo_rulebook"
+        / "scoring_rules"
+        / "README.md",
         "source_table": "kbo_regulations",
         "title": "KBO 기술 규정",
         "pk_hint": ["title"],
@@ -132,8 +136,9 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 징계 규정 (폭력, 도박, 약물, 처벌 기준 등)",
         "source_file": Path(__file__).parent.parent
         / "docs"
-        / "kbo_regulations"
-        / "05_징계규정.md",
+        / "kbo_rulebook"
+        / "disciplinary_regulations"
+        / "README.md",
         "source_table": "kbo_regulations",
         "title": "KBO 징계 규정",
         "pk_hint": ["title"],
@@ -142,8 +147,9 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 포스트시즌 규정 (플레이오프, 와일드카드, 한국시리즈 등)",
         "source_file": Path(__file__).parent.parent
         / "docs"
-        / "kbo_regulations"
-        / "06_포스트시즌.md",
+        / "kbo_rulebook"
+        / "league_regulations"
+        / "02_postseason.md",
         "source_table": "kbo_regulations",
         "title": "KBO 포스트시즌 규정",
         "pk_hint": ["title"],
@@ -152,8 +158,9 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 특별 규정 (코로나19, 기상이변, 비상상황 등)",
         "source_file": Path(__file__).parent.parent
         / "docs"
-        / "kbo_regulations"
-        / "07_특별규정.md",
+        / "kbo_rulebook"
+        / "league_regulations"
+        / "03_special_regulations.md",
         "source_table": "kbo_regulations",
         "title": "KBO 특별 규정",
         "pk_hint": ["title"],
@@ -162,8 +169,8 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "KBO 야구 용어 정의 (기본 용어, 통계 지표, 포지션 등)",
         "source_file": Path(__file__).parent.parent
         / "docs"
-        / "kbo_regulations"
-        / "08_용어정의.md",
+        / "kbo_rulebook"
+        / "glossary.md",
         "source_table": "kbo_regulations",
         "title": "KBO 야구 용어 정의",
         "pk_hint": ["title"],
@@ -547,26 +554,23 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "select_sql": """
             SELECT
                 th.*,
-                th.start_season AS season_year,
-                s.stadium_name,
+                th.season AS season_year,
+                th.stadium AS stadium_name,
                 t.team_name AS current_team_name
             FROM team_history th
-            LEFT JOIN stadiums s
-              ON s.stadium_id = th.stadium_id
             LEFT JOIN teams t
               ON t.team_id = th.team_code
-            ORDER BY th.team_code, th.start_season
+            ORDER BY th.team_code, th.season
         """,
         "highlights": [
             ("구단", ["team_name", "team_code"]),
-            ("시작 시즌", ["start_season"]),
-            ("종료 시즌", ["end_season"]),
+            ("시즌", ["season", "season_year"]),
+            ("순위", ["ranking"]),
             ("도시", ["city"]),
-            ("주경기장", ["stadium_name"]),
-            ("현재 여부", ["is_current"]),
+            ("주경기장", ["stadium", "stadium_name"]),
         ],
-        "pk_hint": ["team_code", "start_season"],
-        "season_filter_column": "th.start_season",
+        "pk_hint": ["team_code", "season"],
+        "season_filter_column": "th.season",
     },
     "awards": {
         "description": "KBO 수상 기록 (MVP, 신인왕, 골든글러브)",
