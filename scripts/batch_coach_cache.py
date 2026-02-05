@@ -29,8 +29,7 @@ from app.core.coach_validator import parse_coach_response
 
 # 로깅 설정
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -68,7 +67,9 @@ def _format_coach_context_for_batch(tool_results: dict) -> str:
     team_summary = tool_results.get("team_summary", {})
     advanced = tool_results.get("advanced_metrics", {})
 
-    team_name = team_summary.get("team_name") or advanced.get("team_name", "알 수 없는 팀")
+    team_name = team_summary.get("team_name") or advanced.get(
+        "team_name", "알 수 없는 팀"
+    )
     year = team_summary.get("year") or advanced.get("year", SEASON_YEAR)
 
     parts.append(f"## {team_name} {year}시즌 분석 데이터\n")
@@ -84,11 +85,17 @@ def _format_coach_context_for_batch(tool_results: dict) -> str:
         rankings = advanced.get("rankings", {})
 
         if batting.get("ops") is not None:
-            parts.append(f"| 팀 OPS | {_safe_float(batting['ops']):.3f} | {rankings.get('batting_ops', 'N/A')} |")
+            parts.append(
+                f"| 팀 OPS | {_safe_float(batting['ops']):.3f} | {rankings.get('batting_ops', 'N/A')} |"
+            )
         if batting.get("avg") is not None:
-            parts.append(f"| 팀 타율 | {_safe_float(batting['avg']):.3f} | {rankings.get('batting_avg', 'N/A')} |")
+            parts.append(
+                f"| 팀 타율 | {_safe_float(batting['avg']):.3f} | {rankings.get('batting_avg', 'N/A')} |"
+            )
         if pitching.get("avg_era") is not None:
-            parts.append(f"| 팀 평균 ERA | {_safe_float(pitching['avg_era']):.2f} | {pitching.get('era_rank', 'N/A')} |")
+            parts.append(
+                f"| 팀 평균 ERA | {_safe_float(pitching['avg_era']):.2f} | {pitching.get('era_rank', 'N/A')} |"
+            )
         parts.append("")
 
     # 불펜 부담 지표
@@ -98,10 +105,12 @@ def _format_coach_context_for_batch(tool_results: dict) -> str:
     if fatigue:
         parts.append("### 불펜 부담 지표")
         parts.append(f"- **팀 불펜 비중**: {fatigue.get('bullpen_share', 'N/A')}")
-        parts.append(f"- **리그 평균 불펜 비중**: {league_avg.get('bullpen_share', 'N/A')}")
+        parts.append(
+            f"- **리그 평균 불펜 비중**: {league_avg.get('bullpen_share', 'N/A')}"
+        )
         try:
-            team_share = float(fatigue.get('bullpen_share', '0').replace('%', ''))
-            league_share = float(league_avg.get('bullpen_share', '0').replace('%', ''))
+            team_share = float(fatigue.get("bullpen_share", "0").replace("%", ""))
+            league_share = float(league_avg.get("bullpen_share", "0").replace("%", ""))
             diff = team_share - league_share
             parts.append(f"- **리그 평균 대비 차이**: {diff:+.1f}%p")
         except (ValueError, TypeError):
@@ -130,7 +139,12 @@ def _format_coach_context_for_batch(tool_results: dict) -> str:
         parts.append("### 주요 투수 (ERA 상위)")
         parts.append("| 선수 | 역할 | ERA | WHIP | 승 | 패 | SV | HLD |")
         parts.append("|------|------|-----|------|-----|-----|-----|-----|")
-        role_kr = {"starter": "선발", "closer": "마무리", "setup": "셋업", "middle_reliever": "중계"}
+        role_kr = {
+            "starter": "선발",
+            "closer": "마무리",
+            "setup": "셋업",
+            "middle_reliever": "중계",
+        }
         for p in top_pitchers[:8]:
             role = role_kr.get(p.get("role", ""), "")
             parts.append(
@@ -157,21 +171,28 @@ async def generate_and_cache_team(pool, team_id: str, year: int) -> dict:
     with pool.connection() as conn:
         row = conn.execute(
             "SELECT status, response_json FROM coach_analysis_cache WHERE cache_key = %s",
-            (cache_key,)
+            (cache_key,),
         ).fetchone()
 
         if row:
             status, cached_json = row
-            if status == 'COMPLETED' and cached_json:
+            if status == "COMPLETED" and cached_json:
                 logger.info(f"[{team_id}] Already cached, skipping")
-                return {"team": team_id, "status": "skipped", "reason": "already cached"}
+                return {
+                    "team": team_id,
+                    "status": "skipped",
+                    "reason": "already cached",
+                }
 
         # PENDING 상태로 삽입/업데이트
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO coach_analysis_cache (cache_key, team_id, year, prompt_version, model_name, status)
             VALUES (%s, %s, %s, %s, %s, 'PENDING')
             ON CONFLICT (cache_key) DO UPDATE SET status = 'PENDING', updated_at = now()
-        """, (cache_key, team_id, year, PROMPT_VERSION, MODEL_NAME))
+        """,
+            (cache_key, team_id, year, PROMPT_VERSION, MODEL_NAME),
+        )
         conn.commit()
 
     # 3. 도구 실행 (팀 요약 + 고급 지표)
@@ -181,18 +202,23 @@ async def generate_and_cache_team(pool, team_id: str, year: int) -> dict:
     with pool.connection() as conn:
         db_query = DatabaseQueryTool(conn)
         tool_results["team_summary"] = db_query.get_team_summary(team_id, year)
-        tool_results["advanced_metrics"] = db_query.get_team_advanced_metrics(team_id, year)
+        tool_results["advanced_metrics"] = db_query.get_team_advanced_metrics(
+            team_id, year
+        )
 
     # 데이터 확인
     team_summary = tool_results.get("team_summary", {})
     if not team_summary.get("found"):
         logger.warning(f"[{team_id}] No data found for {year}")
         with pool.connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 UPDATE coach_analysis_cache
                 SET status = 'FAILED', error_message = %s, updated_at = now()
                 WHERE cache_key = %s
-            """, (f"No data found for {team_id} {year}", cache_key))
+            """,
+                (f"No data found for {team_id} {year}", cache_key),
+            )
             conn.commit()
         return {"team": team_id, "status": "failed", "reason": "no data"}
 
@@ -204,7 +230,12 @@ async def generate_and_cache_team(pool, team_id: str, year: int) -> dict:
 
     coach_llm = get_coach_llm_generator()
     question = f"{team_id} {year}시즌 종합 분석"
-    messages = [{"role": "user", "content": COACH_PROMPT_V2.format(question=question, context=context)}]
+    messages = [
+        {
+            "role": "user",
+            "content": COACH_PROMPT_V2.format(question=question, context=context),
+        }
+    ]
 
     try:
         chunks = []
@@ -217,11 +248,14 @@ async def generate_and_cache_team(pool, team_id: str, year: int) -> dict:
     except Exception as e:
         logger.error(f"[{team_id}] LLM call failed: {e}")
         with pool.connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 UPDATE coach_analysis_cache
                 SET status = 'FAILED', error_message = %s, updated_at = now()
                 WHERE cache_key = %s
-            """, (str(e), cache_key))
+            """,
+                (str(e), cache_key),
+            )
             conn.commit()
         return {"team": team_id, "status": "failed", "reason": f"LLM error: {e}"}
 
@@ -231,20 +265,30 @@ async def generate_and_cache_team(pool, team_id: str, year: int) -> dict:
     with pool.connection() as conn:
         if parsed:
             response_json = json.dumps(parsed.model_dump(), ensure_ascii=False)
-            conn.execute("""
+            conn.execute(
+                """
                 UPDATE coach_analysis_cache
                 SET status = 'COMPLETED', response_json = %s, error_message = NULL, updated_at = now()
                 WHERE cache_key = %s
-            """, (response_json, cache_key))
+            """,
+                (response_json, cache_key),
+            )
             conn.commit()
             logger.info(f"[{team_id}] Successfully cached")
-            return {"team": team_id, "status": "success", "headline": parsed.headline[:50]}
+            return {
+                "team": team_id,
+                "status": "success",
+                "headline": parsed.headline[:50],
+            }
         else:
-            conn.execute("""
+            conn.execute(
+                """
                 UPDATE coach_analysis_cache
                 SET status = 'FAILED', error_message = %s, updated_at = now()
                 WHERE cache_key = %s
-            """, ("JSON parsing failed", cache_key))
+            """,
+                ("JSON parsing failed", cache_key),
+            )
             conn.commit()
             logger.warning(f"[{team_id}] Parsing failed")
             return {"team": team_id, "status": "failed", "reason": "parsing error"}
@@ -270,13 +314,17 @@ async def main():
             results[result["status"]] = results.get(result["status"], 0) + 1
             results["details"].append(result)
 
-            status_icon = {"success": "✓", "skipped": "⊘", "failed": "✗"}.get(result["status"], "?")
+            status_icon = {"success": "✓", "skipped": "⊘", "failed": "✗"}.get(
+                result["status"], "?"
+            )
             reason = result.get("headline") or result.get("reason", "")
             print(f"  {status_icon} {result['status']}: {reason}")
 
         except Exception as e:
             results["failed"] += 1
-            results["details"].append({"team": team, "status": "failed", "reason": str(e)})
+            results["details"].append(
+                {"team": team, "status": "failed", "reason": str(e)}
+            )
             print(f"  ✗ FAILED: {e}")
 
         # Rate limiting (OpenRouter API 보호)
@@ -300,7 +348,9 @@ async def main():
                 print(f"  - {detail['team']}: {detail.get('reason', 'unknown')}")
 
     print("\n캐시 확인 명령:")
-    print(f"  psql $SUPABASE_DB_URL -c \"SELECT team_id, status, updated_at FROM coach_analysis_cache WHERE year = {SEASON_YEAR} ORDER BY team_id\"")
+    print(
+        f'  psql $SUPABASE_DB_URL -c "SELECT team_id, status, updated_at FROM coach_analysis_cache WHERE year = {SEASON_YEAR} ORDER BY team_id"'
+    )
 
 
 if __name__ == "__main__":

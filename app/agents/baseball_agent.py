@@ -57,16 +57,15 @@ def clean_json_response(response: str) -> str:
     response = re.sub(r",(\s*[}\]])", r"\1", response)
 
     # 이중 중괄호 {{ }} 처리 (LLM 실수 보정)
-    # 단순히 replace를 하면 {{}} -> {} 가 되지만, 
-    # {{{...}}} 같은 경우도 고려해야 하므로, 
+    # 단순히 replace를 하면 {{}} -> {} 가 되지만,
+    # {{{...}}} 같은 경우도 고려해야 하므로,
     # 맨 앞과 맨 뒤의 {{, }} 만 제거하는 것이 안전합니다.
-    # 하지만 더 간단하고 강력한 방법은 json.tool 처럼 
+    # 하지만 더 간단하고 강력한 방법은 json.tool 처럼
     # 가장 바깥쪽의 { 와 } 를 찾는 것입니다.
     # 여기서는 간단히 이중 중괄호만 단일 중괄호로 치환합니다.
     # (내부 데이터에 {{ }} 가 있는 경우는 드물다고 가정)
     if response.startswith("{{") and response.endswith("}}"):
         response = response[1:-1]
-
 
     return response.strip()
 
@@ -2099,7 +2098,7 @@ class BaseballStatisticsAgent:
         통계 질문을 처리하고 진행 상황(이벤트)을 스트리밍합니다.
         """
         logger.info(f"[BaseballAgent] Processing query stream: {query}")
-        
+
         # --- 신규 추가: 일상 대화 처리기 ---
         if self._is_chitchat(query):
             response = self._get_chitchat_response(query)
@@ -2112,14 +2111,15 @@ class BaseballStatisticsAgent:
                         "tool_results": [],
                         "verified": True,
                         "data_sources": ["predefined"],
-                    }
+                    },
                 }
                 return
 
         # 1. 의도 파악
         from ..ml.intent_router import predict_intent
+
         intent = predict_intent(query)
-        
+
         if intent == "match_prediction":
             disclaimer = "\n\n[주의] 이 예측은 과거 데이터를 기반으로 한 확률적 추정일 뿐이며, 실제 경기 결과와 다를 수 있습니다. 도박이나 금전적 베팅의 근거로 사용할 수 없습니다."
             context["prompt_override"] = (
@@ -2140,37 +2140,71 @@ class BaseballStatisticsAgent:
         analysis_result = await self._analyze_query_and_plan_tools(query, context)
 
         if analysis_result["error"]:
-            yield {"type": "answer_chunk", "content": "질문 분석 중 오류가 발생했습니다."}
+            yield {
+                "type": "answer_chunk",
+                "content": "질문 분석 중 오류가 발생했습니다.",
+            }
             return
 
         # 2단계: 도구 실행
         tool_results = []
-        hallucination_indicators = ["추출된", "결과", "로부터", "STEP", "FROM", "찾은", "확인된", "날짜", "선수명"]
+        hallucination_indicators = [
+            "추출된",
+            "결과",
+            "로부터",
+            "STEP",
+            "FROM",
+            "찾은",
+            "확인된",
+            "날짜",
+            "선수명",
+        ]
 
         for tool_call in analysis_result["tool_calls"]:
-            yield {"type": "tool_start", "tool": tool_call.tool_name, "params": tool_call.parameters}
-            
+            yield {
+                "type": "tool_start",
+                "tool": tool_call.tool_name,
+                "params": tool_call.parameters,
+            }
+
             # Param Validation
             is_hallucination = False
             for param_val in tool_call.parameters.values():
-                if isinstance(param_val, str) and any(ind in param_val.upper() for ind in hallucination_indicators):
+                if isinstance(param_val, str) and any(
+                    ind in param_val.upper() for ind in hallucination_indicators
+                ):
                     is_hallucination = True
                     break
 
             if is_hallucination:
                 from .tool_caller import ToolResult
-                result = ToolResult(success=False, data={}, message=f"매개변수 오류: {tool_call.tool_name}")
+
+                result = ToolResult(
+                    success=False,
+                    data={},
+                    message=f"매개변수 오류: {tool_call.tool_name}",
+                )
             else:
                 result = self.tool_caller.execute_tool(tool_call)
-            
+
             tool_results.append(result)
-            yield {"type": "tool_result", "tool": tool_call.tool_name, "success": result.success, "message": result.message}
+            yield {
+                "type": "tool_result",
+                "tool": tool_call.tool_name,
+                "success": result.success,
+                "message": result.message,
+            }
 
         # 3단계: 답변 생성
-        yield {"type": "status", "message": "분석된 데이터를 바탕으로 답변을 생성하고 있습니다..."}
-        
-        answer_result = await self._generate_verified_answer(query, tool_results, context)
-        
+        yield {
+            "type": "status",
+            "message": "분석된 데이터를 바탕으로 답변을 생성하고 있습니다...",
+        }
+
+        answer_result = await self._generate_verified_answer(
+            query, tool_results, context
+        )
+
         metadata = {
             "tool_calls": analysis_result["tool_calls"],
             "tool_results": tool_results,
@@ -2179,9 +2213,9 @@ class BaseballStatisticsAgent:
             "data_sources": answer_result["data_sources"],
             "error": answer_result.get("error"),
         }
-        
+
         yield {"type": "metadata", "data": metadata}
-        
+
         answer_content = answer_result["answer"]
         if hasattr(answer_content, "__aiter__"):
             async for chunk in answer_content:
@@ -2189,14 +2223,16 @@ class BaseballStatisticsAgent:
         else:
             yield {"type": "answer_chunk", "content": str(answer_content)}
 
-    async def process_query(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def process_query(
+        self, query: str, context: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
         """
         Legacy wrapper for process_query_stream.
         """
         metadata = {}
         stream = self.process_query_stream(query, context)
         answer_chunks_buffer = []
-        
+
         # Consume stream until metadata
         async for event in stream:
             if event["type"] == "metadata":
@@ -2204,18 +2240,15 @@ class BaseballStatisticsAgent:
                 break
             elif event["type"] == "answer_chunk":
                 answer_chunks_buffer.append(event["content"])
-        
+
         async def combined_answer_generator():
             for chunk in answer_chunks_buffer:
                 yield chunk
             async for event in stream:
                 if event["type"] == "answer_chunk":
                     yield event["content"]
-        
-        return {
-            "answer": combined_answer_generator(),
-            **metadata
-        }
+
+        return {"answer": combined_answer_generator(), **metadata}
 
     def _generate_visualizations(
         self, tool_results: List[ToolResult]
@@ -2886,6 +2919,7 @@ class BaseballStatisticsAgent:
                 "data_sources": [],
                 "error": f"답변 생성 오류: {e}",
             }
+
     def _tool_get_player_wpa_leaders(
         self, year: int = None, limit: int = 10, team_name: str = None
     ) -> ToolResult:
@@ -2906,7 +2940,9 @@ class BaseballStatisticsAgent:
             )
         except Exception as e:
             logger.error(f"Error in _tool_get_player_wpa_leaders: {e}")
-            return ToolResult(success=False, data={}, message=f"WPA 순위 조회 실패: {e}")
+            return ToolResult(
+                success=False, data={}, message=f"WPA 순위 조회 실패: {e}"
+            )
 
     def _tool_get_clutch_moments(self, game_id: str, limit: int = 5) -> ToolResult:
         """승부처 조회 도구 wrapper"""

@@ -234,9 +234,7 @@ class ToolCaller:
                 )
                 processed_results.append(
                     ToolResult(
-                        success=False,
-                        data={},
-                        message=f"병렬 실행 중 오류: {result}"
+                        success=False, data={}, message=f"병렬 실행 중 오류: {result}"
                     )
                 )
             else:

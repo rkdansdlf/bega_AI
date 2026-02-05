@@ -56,7 +56,7 @@ async def lifespan(app):
     # 시작 시
     load_clf()
     pool = get_connection_pool()  # 커넥션 풀 초기화
-    
+
     # [Coach Caching] 캐시 테이블 자동 생성 (편의성)
     try:
         with pool.connection() as conn:
@@ -76,7 +76,7 @@ async def lifespan(app):
             CREATE INDEX IF NOT EXISTS idx_coach_cache_created_at ON coach_analysis_cache (created_at);
             CREATE INDEX IF NOT EXISTS idx_coach_cache_team_year ON coach_analysis_cache (team_id, year);
             """)
-            # psycopg3 in pool context might need explicit commit if autocommit is not set? 
+            # psycopg3 in pool context might need explicit commit if autocommit is not set?
             # connection pool is created with autocommit=True in get_connection_pool
     except Exception as e:
         print(f"[Warning] Failed to ensure coach_analysis_cache table: {e}")
@@ -153,11 +153,12 @@ def get_agent(
                 # Log error response body for 4xx errors before raising
                 if response.status_code >= 400 and response.status_code < 500:
                     error_body = await response.aread()
-                    logger.error(f"[OpenRouter 4xx] Status: {response.status_code}, Body: {error_body.decode('utf-8', errors='replace')}")
+                    logger.error(
+                        f"[OpenRouter 4xx] Status: {response.status_code}, Body: {error_body.decode('utf-8', errors='replace')}"
+                    )
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     yield line
-
 
     async def openrouter_generator(messages, max_tokens=None):
         """OpenRouter LLM generator with optional max_tokens override."""
@@ -178,21 +179,28 @@ def get_agent(
         # [PATCH] openrouter/free 제거 - 무료 라우터는 큐잉/속도 저하 심각
         primary_model = settings.openrouter_model
         fallback_models = [
-            m for m in settings.openrouter_fallback_models 
-            if m not in ('openrouter/free', 'openrouter/auto')
+            m
+            for m in settings.openrouter_fallback_models
+            if m not in ("openrouter/free", "openrouter/auto")
         ]
         models_to_try = [primary_model] + fallback_models
-        logger.info(f"[LLM] Models to try (filtered): {models_to_try}, max_tokens={effective_max_tokens}")
-        
+        logger.info(
+            f"[LLM] Models to try (filtered): {models_to_try}, max_tokens={effective_max_tokens}"
+        )
+
         last_exception = None
-        
+
         for i, model in enumerate(models_to_try):
             is_fallback = i > 0
             if is_fallback:
-                logger.warning(f"[LLM Fallback] Trying model {i+1}/{len(models_to_try)}: {model}")
+                logger.warning(
+                    f"[LLM Fallback] Trying model {i+1}/{len(models_to_try)}: {model}"
+                )
             else:
-                logger.info(f"[LLM] Primary: {model}, Fallbacks available: {fallback_models}")
-            
+                logger.info(
+                    f"[LLM] Primary: {model}, Fallbacks available: {fallback_models}"
+                )
+
             payload = {
                 "model": model,
                 "messages": messages,
@@ -200,16 +208,16 @@ def get_agent(
                 "temperature": 0.1,
                 "max_tokens": effective_max_tokens,
             }
-            
+
             try:
                 chunk_count = 0
                 total_chars = 0
-                
+
                 async for line in fetch_completion_stream(payload, headers):
                     line = line.strip()
                     if not line:
                         continue
-                        
+
                     if line.startswith("data: "):
                         data_str = line[6:].strip()
                         if data_str == "[DONE]":
@@ -248,9 +256,11 @@ def get_agent(
                 logger.error(f"[LLM] Model {model} failed: {e}")
                 last_exception = e
                 continue  # Try next model
-        
+
         # All models failed
-        logger.error(f"[LLM] All {len(models_to_try)} models failed. Last error: {last_exception}")
+        logger.error(
+            f"[LLM] All {len(models_to_try)} models failed. Last error: {last_exception}"
+        )
         raise last_exception or RuntimeError("All models failed")
 
     async def gemini_generator(messages, max_tokens=None):
@@ -320,7 +330,7 @@ def get_coach_llm_generator():
     import logging
     import json
     import httpx
-    
+
     logger = logging.getLogger("CoachLLM")
     settings = get_settings()
 
@@ -339,8 +349,9 @@ def get_coach_llm_generator():
         primary_model = settings.openrouter_model
         # [PATCH] openrouter/free 제거 - 무료 라우터는 빈 응답/큐잉 문제 발생
         fallback_models = [
-            m for m in settings.openrouter_fallback_models
-            if m not in ('openrouter/free', 'openrouter/auto')
+            m
+            for m in settings.openrouter_fallback_models
+            if m not in ("openrouter/free", "openrouter/auto")
         ]
         models_to_try = [primary_model] + fallback_models
 
@@ -415,16 +426,22 @@ def get_coach_llm_generator():
                                     continue
                             else:
                                 if line and not line.startswith(":"):
-                                    logger.info("[Coach OpenRouter Raw] %s: %s", model, line)
+                                    logger.info(
+                                        "[Coach OpenRouter Raw] %s: %s", model, line
+                                    )
                                     if "error" in line.lower():
-                                        logger.error("[Coach OpenRouter Error Detail] %s", line)
+                                        logger.error(
+                                            "[Coach OpenRouter Error Detail] %s", line
+                                        )
 
                 if chunk_count == 0:
                     error_msg = f"Empty response (0 chunks) from {model}."
                     logger.warning("[Coach LLM] %s", error_msg)
                     last_exception = RuntimeError(error_msg)
                     continue
-                logger.info("[Coach LLM] Success: %d chunks from %s", chunk_count, model)
+                logger.info(
+                    "[Coach LLM] Success: %d chunks from %s", chunk_count, model
+                )
                 return
             except Exception as e:
                 logger.error("[Coach LLM] OpenRouter model %s failed: %s", model, e)

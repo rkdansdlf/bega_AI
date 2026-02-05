@@ -19,8 +19,10 @@ logger = logging.getLogger(__name__)
 # Pydantic Models for Coach Response
 # ============================================================
 
+
 class KeyMetric(BaseModel):
     """핵심 지표 모델"""
+
     label: str = Field(..., max_length=30, description="지표명")
     # 문자열로 자동 변환 (LLM이 숫자로 주는 경우 대비)
     value: Annotated[Union[str, int, float], BeforeValidator(str)] = Field(
@@ -50,6 +52,7 @@ class KeyMetric(BaseModel):
 
 class RiskItem(BaseModel):
     """위험 요소 모델"""
+
     area: str = Field(..., description="영역 (bullpen/starter/batting/defense)")
     level: Literal[0, 1, 2] = Field(..., description="위험도 (0=위험, 1=주의, 2=양호)")
     description: str = Field(..., max_length=150, description="위험 설명 (최대 150자)")
@@ -62,17 +65,26 @@ class RiskItem(BaseModel):
             return "overall"
         normalized = v.lower().strip()
         area_mapping = {
-            "불펜": "bullpen", "bullpen": "bullpen", "릴리프": "bullpen",
-            "선발": "starter", "starter": "starter", "starting": "starter",
-            "타격": "batting", "batting": "batting", "타선": "batting",
-            "수비": "defense", "defense": "defense",
-            "전체": "overall", "overall": "overall"
+            "불펜": "bullpen",
+            "bullpen": "bullpen",
+            "릴리프": "bullpen",
+            "선발": "starter",
+            "starter": "starter",
+            "starting": "starter",
+            "타격": "batting",
+            "batting": "batting",
+            "타선": "batting",
+            "수비": "defense",
+            "defense": "defense",
+            "전체": "overall",
+            "overall": "overall",
         }
         return area_mapping.get(normalized, "overall")
 
 
 class AnalysisSection(BaseModel):
     """분석 섹션 모델"""
+
     strengths: List[str] = Field(default_factory=list, description="강점 목록")
     weaknesses: List[str] = Field(default_factory=list, description="약점 목록")
     risks: List[RiskItem] = Field(default_factory=list, description="위험 요소 목록")
@@ -84,12 +96,21 @@ class CoachResponse(BaseModel):
 
     COACH_PROMPT_V2의 JSON 스키마와 일치해야 합니다.
     """
-    headline: str = Field(..., min_length=5, max_length=60, description="한 줄 진단 (최대 60자)")
+
+    headline: str = Field(
+        ..., min_length=5, max_length=60, description="한 줄 진단 (최대 60자)"
+    )
     sentiment: Literal["positive", "negative", "neutral"] = Field(default="neutral")
-    key_metrics: List[KeyMetric] = Field(default_factory=list, description="핵심 지표 목록 (최대 6개)")
+    key_metrics: List[KeyMetric] = Field(
+        default_factory=list, description="핵심 지표 목록 (최대 6개)"
+    )
     analysis: AnalysisSection = Field(default_factory=AnalysisSection)
-    detailed_markdown: str = Field(default="", max_length=10000, description="상세 분석 마크다운 (최대 10000자)")
-    coach_note: str = Field(default="", max_length=2000, description="전략적 제언 (최대 2000자)")
+    detailed_markdown: str = Field(
+        default="", max_length=10000, description="상세 분석 마크다운 (최대 10000자)"
+    )
+    coach_note: str = Field(
+        default="", max_length=2000, description="전략적 제언 (최대 2000자)"
+    )
 
     @field_validator("headline", mode="before")
     @classmethod
@@ -98,19 +119,20 @@ class CoachResponse(BaseModel):
         if not isinstance(v, str) or not v.strip():
             raise ValueError("headline은 비어있을 수 없습니다.")
         v = v.strip()
-        
+
         # [Fix] "headline": "Title" 형태의 중복 키 패턴 제거
         # LLM이 JSON 형식을 값 안에 포함시키는 환각 방지
         import re
+
         dup_pattern = r'^"headline"\s*:\s*"(.*)"$'
         match = re.match(dup_pattern, v)
         if match:
             v = match.group(1)
-            
+
         # [Fix] 따옴표로 감싸진 경우 제거
         if v.startswith('"') and v.endswith('"'):
             v = v[1:-1]
-            
+
         if len(v) > 60:
             v = v[:57] + "..."
         return v
@@ -150,6 +172,7 @@ class CoachResponse(BaseModel):
 # Parser Functions
 # ============================================================
 
+
 def extract_json_from_response(raw_response: str) -> Optional[str]:
     """
     LLM 응답에서 JSON 부분을 추출합니다.
@@ -177,11 +200,11 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
     end_idx = -1
 
     for i, char in enumerate(text):
-        if char == '{':
+        if char == "{":
             if brace_count == 0:
                 start_idx = i
             brace_count += 1
-        elif char == '}':
+        elif char == "}":
             brace_count -= 1
             if brace_count == 0 and start_idx != -1:
                 end_idx = i + 1
@@ -210,22 +233,24 @@ def parse_coach_response(raw_response: str) -> Optional[CoachResponse]:
     try:
         # JSON 추출
         json_str = extract_json_from_response(raw_response)
-        
+
         # [Fix] JSON을 못 찾았지만, 텍스트가 "headline": ... 형태로 시작하는 경우 (Missing braces)
         # Solar Pro 모델이 가끔 여는 괄호를 빼먹는 경우 처리
         if not json_str and raw_response.strip().startswith('"headline"'):
-            logger.warning("[CoachValidator] Missing braces detected, attempting to wrap with {}")
+            logger.warning(
+                "[CoachValidator] Missing braces detected, attempting to wrap with {}"
+            )
             # 맨 뒤에 }가 있는지 확인하고 없으면 추가
             temp_json = "{" + raw_response.strip()
             if not temp_json.endswith("}"):
                 temp_json += "}"
-            
+
             # 다시 시도
             try:
                 data = json.loads(temp_json)
                 return CoachResponse(**data)
             except:
-                pass # 실패하면 원래 로직대로 진행
+                pass  # 실패하면 원래 로직대로 진행
 
         if not json_str:
             logger.warning("[CoachValidator] No JSON found in response")
@@ -262,30 +287,27 @@ def _create_fallback_response(error_reason: str, original_text: str) -> CoachRes
                 first_meaningful_line = cleaned[:100]  # 최대 100자
                 break
 
-
     headline = first_meaningful_line or "AI 분석 결과"
 
     # 원본 텍스트 정리 (마크다운 코드블록, JSON 잔해 제거)
     cleaned_text = original_text.strip() if original_text else ""
     for prefix in ["```json", "```", "{"]:
         if cleaned_text.startswith(prefix):
-            cleaned_text = cleaned_text[len(prefix):]
+            cleaned_text = cleaned_text[len(prefix) :]
     for suffix in ["```", "}"]:
         if cleaned_text.endswith(suffix):
-            cleaned_text = cleaned_text[:-len(suffix)]
+            cleaned_text = cleaned_text[: -len(suffix)]
     cleaned_text = cleaned_text.strip()
 
     return CoachResponse(
         headline=headline,
         sentiment="neutral",
         key_metrics=[],
-        analysis=AnalysisSection(
-            strengths=[],
-            weaknesses=[],
-            risks=[]
-        ),
+        analysis=AnalysisSection(strengths=[], weaknesses=[], risks=[]),
         detailed_markdown="",
-        coach_note=cleaned_text[:2000] if cleaned_text else f"형식 변환 실패: {error_reason}"
+        coach_note=(
+            cleaned_text[:2000] if cleaned_text else f"형식 변환 실패: {error_reason}"
+        ),
     )
 
 
@@ -301,7 +323,9 @@ def validate_coach_response(response: CoachResponse) -> List[str]:
     # 핵심 지표 개수 확인
     critical_count = sum(1 for m in response.key_metrics if m.is_critical)
     if critical_count > 2:
-        warnings.append(f"핵심 지표(is_critical=true)가 {critical_count}개입니다. 최대 2개를 권장합니다.")
+        warnings.append(
+            f"핵심 지표(is_critical=true)가 {critical_count}개입니다. 최대 2개를 권장합니다."
+        )
 
     # 분석 내용 확인
     if not response.analysis.strengths and not response.analysis.weaknesses:
@@ -315,12 +339,12 @@ def validate_coach_response(response: CoachResponse) -> List[str]:
     all_text = " ".join(response.analysis.strengths + response.analysis.weaknesses)
     if all_text:
         # 한글 이름 패턴 (2-4글자 한글 이름)
-        korean_name_pattern = r'[가-힣]{2,4}'
+        korean_name_pattern = r"[가-힣]{2,4}"
         if not re.search(korean_name_pattern, all_text):
             warnings.append("분석에 선수명이 포함되지 않았습니다. 구체성이 부족합니다.")
 
         # 수치 데이터 포함 여부 확인
-        number_pattern = r'\d+\.?\d*'
+        number_pattern = r"\d+\.?\d*"
         if not re.search(number_pattern, all_text):
             warnings.append("분석에 수치 데이터가 포함되지 않았습니다.")
 
