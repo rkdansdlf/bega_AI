@@ -8,7 +8,7 @@
 import re
 import json
 import logging
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 import psycopg
 from decimal import Decimal
 from datetime import date, datetime
