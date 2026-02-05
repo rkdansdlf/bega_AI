@@ -93,10 +93,10 @@ class GameQueryTool:
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
             query = """
-                SELECT team_id, team_name, franchise_id, founded_year 
-                FROM teams 
-                WHERE franchise_id IS NOT NULL 
-                ORDER BY franchise_id, founded_year DESC;
+                SELECT team_id, team_name, franchise_id, founded_year, is_active
+                FROM teams
+                WHERE franchise_id IS NOT NULL
+                ORDER BY franchise_id, is_active DESC, founded_year DESC;
             """
             cursor.execute(query)
             rows = cursor.fetchall()
@@ -119,33 +119,8 @@ class GameQueryTool:
                     modern_team = members[0]
                     modern_name = modern_team["team_name"]
 
-                    # 2. 경기(game) 테이블 매핑 원칙:
-                    # SSG는 'SSG' 사용, KIA는 'HT' 사용, 키움은 'WO' 사용 확인됨
-                    if modern_name == "SSG 랜더스":
-                        target_code = "SSG"
-                    elif modern_name == "KIA 타이거즈":
-                        target_code = "HT"
-                    else:
-                        # 기본적으로는 members 중 가장 오래된 혹은 안정된 ID 선택 시도
-                        target_code = next(
-                            (
-                                m["team_id"]
-                                for m in members
-                                if m["team_id"]
-                                in [
-                                    "HT",
-                                    "WO",
-                                    "OB",
-                                    "SS",
-                                    "LT",
-                                    "HH",
-                                    "KT",
-                                    "NC",
-                                    "LG",
-                                ]
-                            ),
-                            modern_team["team_id"],
-                        )
+                    # 2. 경기(game) 테이블 매핑 원칙: 정규 코드 유지
+                    target_code = modern_team["team_id"]
 
                     # 3. 매핑 데이터 업데이트
                     for member in members:

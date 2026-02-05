@@ -285,7 +285,7 @@ async def chat_completion(
 @router.post("/stream")
 async def chat_stream_post(
     payload: Dict[str, Any] = Body(...),
-    style: str = Query("markdown", regex="^(markdown|json|compact)$"),
+    style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
     agent: BaseballStatisticsAgent = Depends(get_agent),
     _: None = Depends(rate_limit_dependency),
     request: Request = None,
@@ -313,7 +313,7 @@ async def chat_stream_post(
 @router.get("/stream")
 async def chat_stream_get(
     q: str = Query("", description="질문 텍스트"),
-    style: str = Query("markdown", regex="^(markdown|json|compact)$"),
+    style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
     agent: BaseballStatisticsAgent = Depends(get_agent),
     _: None = Depends(rate_limit_dependency),
     request: Request = None,

@@ -710,8 +710,9 @@ class RAGPipeline:
 
                 if not parts or not parts[0].get("text"):
                     error_msg = f"Gemini 응답이 비어 있습니다. Content: {content}"
-                    logger.error(f"[Gemini] {error_msg}")
-                    raise RuntimeError(error_msg)
+                    logger.warning(f"[Gemini] {error_msg}")
+                    # 에러를 던지는 대신 구체적인 메시지 반환 또는 다음 단계로 유도
+                    return "Gemini가 응답을 생성하지 못했습니다. (빈 응답)"
 
                 result = parts[0]["text"]
                 logger.info(

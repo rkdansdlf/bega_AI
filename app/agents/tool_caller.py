@@ -197,6 +197,58 @@ class ToolCaller:
 
         return results
 
+    async def execute_multiple_tools_parallel(
+        self, tool_calls: List[ToolCall]
+    ) -> List[ToolResult]:
+        """
+        여러 도구를 병렬로 실행합니다.
+
+        독립적인 도구 호출들을 asyncio.gather()로 병렬 실행하여
+        총 대기 시간을 줄입니다.
+
+        Args:
+            tool_calls: 실행할 도구 호출 목록
+
+        Returns:
+            각 도구의 실행 결과 목록 (입력 순서 유지)
+        """
+        import asyncio
+
+        logger.info(f"[ToolCaller] Executing {len(tool_calls)} tools in parallel")
+
+        async def execute_single_async(tool_call: ToolCall) -> ToolResult:
+            """단일 도구를 비동기적으로 실행합니다."""
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self.execute_tool, tool_call)
+
+        # 병렬 실행
+        tasks = [execute_single_async(tc) for tc in tool_calls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 예외 처리
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(
+                    f"[ToolCaller] Parallel execution failed for {tool_calls[i].tool_name}: {result}"
+                )
+                processed_results.append(
+                    ToolResult(
+                        success=False,
+                        data={},
+                        message=f"병렬 실행 중 오류: {result}"
+                    )
+                )
+            else:
+                processed_results.append(result)
+
+        logger.info(
+            f"[ToolCaller] Parallel execution completed: "
+            f"{sum(1 for r in processed_results if r.success)}/{len(processed_results)} succeeded"
+        )
+
+        return processed_results
+
     def list_available_tools(self) -> List[str]:
         """사용 가능한 도구 목록을 반환합니다."""
         return list(self.tools.keys())

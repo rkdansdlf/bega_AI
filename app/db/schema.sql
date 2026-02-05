@@ -46,3 +46,21 @@ create index if not exists idx_rag_chunks_season_award on rag_chunks (season_yea
 
 -- Unique constraint for data integrity and upserts
 create unique index if not exists idx_rag_chunks_source on rag_chunks (source_table, source_row_id);
+
+-- Coach Analysis Cache Table
+create table if not exists coach_analysis_cache (
+  cache_key varchar(64) primary key,  -- SHA256 Hash of (team_id, year, focus, question)
+  team_id varchar(10) not null,
+  year int not null,
+  prompt_version varchar(10) not null, -- e.g. "v2"
+  model_name varchar(50) not null,     -- e.g. "solar-pro-3"
+  status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
+  response_json jsonb,                 -- Completed analysis result
+  error_message text,                  -- Failure reason
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+-- Index for expiration and lookup
+create index if not exists idx_coach_cache_created_at on coach_analysis_cache (created_at);
+create index if not exists idx_coach_cache_team_year on coach_analysis_cache (team_id, year);
