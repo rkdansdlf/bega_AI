@@ -55,7 +55,31 @@ async def lifespan(app):
     """앱 시작/종료 시 실행되는 lifespan 이벤트"""
     # 시작 시
     load_clf()
-    get_connection_pool()  # 커넥션 풀 초기화
+    pool = get_connection_pool()  # 커넥션 풀 초기화
+    
+    # [Coach Caching] 캐시 테이블 자동 생성 (편의성)
+    try:
+        with pool.connection() as conn:
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS coach_analysis_cache (
+                cache_key varchar(64) primary key,  -- SHA256 Hash of (team_id, year, focus, question)
+                team_id varchar(10) not null,
+                year int not null,
+                prompt_version varchar(10) not null, -- e.g. "v2"
+                model_name varchar(50) not null,     -- e.g. "solar-pro-3"
+                status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
+                response_json jsonb,                 -- Completed analysis result
+                error_message text,                  -- Failure reason
+                created_at timestamptz default now(),
+                updated_at timestamptz default now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_coach_cache_created_at ON coach_analysis_cache (created_at);
+            CREATE INDEX IF NOT EXISTS idx_coach_cache_team_year ON coach_analysis_cache (team_id, year);
+            """)
+            # psycopg3 in pool context might need explicit commit if autocommit is not set? 
+            # connection pool is created with autocommit=True in get_connection_pool
+    except Exception as e:
+        print(f"[Warning] Failed to ensure coach_analysis_cache table: {e}")
 
     yield
 
@@ -110,27 +134,38 @@ def get_agent(
         )
 
     @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(2),  # 5 -> 2: 빠른 실패
+        wait=wait_exponential(multiplier=1, min=1, max=5),
         retry=retry_if_exception(is_server_error),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     async def fetch_completion_stream(payload, headers):
         """Helper function to fetch stream with retry logic."""
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        # 타임아웃: read=10s, total=20s (기존 60s에서 대폭 단축)
+        timeout_config = httpx.Timeout(10.0, connect=5.0, read=10.0, pool=5.0)
+        async with httpx.AsyncClient(timeout=timeout_config) as client:
             async with client.stream(
                 "POST",
                 f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
                 json=payload,
                 headers=headers,
             ) as response:
+                # Log error response body for 4xx errors before raising
+                if response.status_code >= 400 and response.status_code < 500:
+                    error_body = await response.aread()
+                    logger.error(f"[OpenRouter 4xx] Status: {response.status_code}, Body: {error_body.decode('utf-8', errors='replace')}")
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     yield line
 
-    async def openrouter_generator(messages):
+
+    async def openrouter_generator(messages, max_tokens=None):
+        """OpenRouter LLM generator with optional max_tokens override."""
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required.")
+
+        # max_tokens 오버라이드 지원
+        effective_max_tokens = max_tokens or settings.max_output_tokens
 
         headers = {
             "Authorization": f"Bearer {settings.openrouter_api_key}",
@@ -139,39 +174,42 @@ def get_agent(
             "X-Title": settings.openrouter_app_title or "",
         }
 
-        # Combine primary model with fallbacks
-        models_to_try = [
-            settings.openrouter_model
-        ] + settings.openrouter_fallback_models
-
+        # Build list of models to try: primary + fallbacks
+        # [PATCH] openrouter/free 제거 - 무료 라우터는 큐잉/속도 저하 심각
+        primary_model = settings.openrouter_model
+        fallback_models = [
+            m for m in settings.openrouter_fallback_models 
+            if m not in ('openrouter/free', 'openrouter/auto')
+        ]
+        models_to_try = [primary_model] + fallback_models
+        logger.info(f"[LLM] Models to try (filtered): {models_to_try}, max_tokens={effective_max_tokens}")
+        
         last_exception = None
-
+        
         for i, model in enumerate(models_to_try):
+            is_fallback = i > 0
+            if is_fallback:
+                logger.warning(f"[LLM Fallback] Trying model {i+1}/{len(models_to_try)}: {model}")
+            else:
+                logger.info(f"[LLM] Primary: {model}, Fallbacks available: {fallback_models}")
+            
             payload = {
                 "model": model,
                 "messages": messages,
                 "stream": True,
                 "temperature": 0.1,
-                "max_tokens": settings.max_output_tokens,
+                "max_tokens": effective_max_tokens,
             }
-            is_fallback = i > 0
-
-            if is_fallback:
-                logger.warning(
-                    f"Switching to model {i}: {model} (Previous error: {last_exception})"
-                )
-
+            
             try:
                 chunk_count = 0
                 total_chars = 0
-                # Reuse the same helper (retry on 5xx, fail fast on 429)
+                
                 async for line in fetch_completion_stream(payload, headers):
                     line = line.strip()
                     if not line:
                         continue
                         
-                    # logger.debug(f"[OpenRouter Raw] {line}")
-                    
                     if line.startswith("data: "):
                         data_str = line[6:].strip()
                         if data_str == "[DONE]":
@@ -189,33 +227,42 @@ def get_agent(
                                 yield delta
                         except json.JSONDecodeError:
                             continue
+                    else:
+                        # Log non-data lines (might be errors or metadata)
+                        if line and not line.startswith(":"):
+                            logger.info(f"[OpenRouter Raw] {model}: {line}")
+                            if "error" in line.lower():
+                                logger.error(f"[OpenRouter Error Detail] {line}")
 
-                # 스트림 완료 후 청크 수 로깅
+                # Check if we got a valid response
                 if chunk_count == 0:
-                    logger.warning(
-                        f"[LLM Generator] Stream completed but received 0 chunks from model {model}"
-                    )
+                    error_msg = f"Empty response (0 chunks) from {model}. Check filters or token limits."
+                    logger.warning(f"[LLM] {error_msg}")
+                    last_exception = RuntimeError(error_msg)
+                    continue  # Try next model
                 else:
-                    logger.debug(
-                        f"[LLM Generator] Stream completed: {chunk_count} chunks, {total_chars} chars from model {model}"
-                    )
-                return  # Success!
+                    logger.info(f"[LLM] Success: {chunk_count} chunks from {model}")
+                    return  # Success, exit the loop
 
             except Exception as e:
-                logger.error(f"Model {model} failed: {e}")
+                logger.error(f"[LLM] Model {model} failed: {e}")
                 last_exception = e
-                # Continue to next model in loop
+                continue  # Try next model
+        
+        # All models failed
+        logger.error(f"[LLM] All {len(models_to_try)} models failed. Last error: {last_exception}")
+        raise last_exception or RuntimeError("All models failed")
 
-        # If all models fail
-        logger.error(f"All models failed. details: {last_exception}")
-        raise last_exception
-
-    async def gemini_generator(messages):
+    async def gemini_generator(messages, max_tokens=None):
+        """Gemini LLM generator with optional max_tokens override."""
         import google.generativeai as genai
         from google.generativeai.types import GenerationConfig
 
         if not settings.gemini_api_key:
             raise RuntimeError("Gemini API key is required.")
+
+        # max_tokens 오버라이드 지원
+        effective_max_tokens = max_tokens or settings.max_output_tokens
 
         genai.configure(api_key=settings.gemini_api_key)
         model = genai.GenerativeModel(settings.gemini_model)
@@ -243,7 +290,7 @@ def get_agent(
                 gemini_messages,
                 generation_config=GenerationConfig(
                     temperature=0.1,
-                    max_output_tokens=settings.max_output_tokens,
+                    max_output_tokens=effective_max_tokens,
                 ),
                 stream=True,
             )
@@ -261,6 +308,149 @@ def get_agent(
         llm_generator = openrouter_generator
 
     return BaseballStatisticsAgent(connection=conn, llm_generator=llm_generator)
+
+
+def get_coach_llm_generator():
+    """
+    Coach 전용 LLM generator를 반환합니다.
+
+    OpenRouter만 지원합니다. openrouter_model 및 openrouter_fallback_models
+    설정을 통해 사용할 모델을 지정할 수 있습니다.
+    """
+    import logging
+    import json
+    import httpx
+    
+    logger = logging.getLogger("CoachLLM")
+    settings = get_settings()
+
+    async def coach_openrouter_generator(messages, max_tokens: int):
+        """Coach 전용 OpenRouter generator."""
+        if not settings.openrouter_api_key:
+            raise RuntimeError("OpenRouter API key is required for Coach.")
+
+        headers = {
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": settings.openrouter_referer or "",
+            "X-Title": settings.openrouter_app_title or "",
+        }
+
+        primary_model = settings.openrouter_model
+        # [PATCH] openrouter/free 제거 - 무료 라우터는 빈 응답/큐잉 문제 발생
+        fallback_models = [
+            m for m in settings.openrouter_fallback_models
+            if m not in ('openrouter/free', 'openrouter/auto')
+        ]
+        models_to_try = [primary_model] + fallback_models
+
+        logger.info(
+            "[Coach LLM] OpenRouter models=%s, max_tokens=%d",
+            models_to_try,
+            max_tokens,
+        )
+
+        last_exception = None
+        for i, model in enumerate(models_to_try):
+            is_fallback = i > 0
+            if is_fallback:
+                logger.warning(
+                    "[Coach LLM Fallback] Trying model %d/%d: %s",
+                    i + 1,
+                    len(models_to_try),
+                    model,
+                )
+
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "temperature": 0.1,
+                "top_p": 0.5,
+                "max_tokens": max_tokens,
+            }
+
+            try:
+                chunk_count = 0
+                timeout_config = httpx.Timeout(
+                    settings.coach_llm_read_timeout,
+                    connect=5.0,
+                    read=settings.coach_llm_read_timeout,
+                    pool=5.0,
+                )
+                async with httpx.AsyncClient(timeout=timeout_config) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                    ) as response:
+                        if response.status_code >= 400 and response.status_code < 500:
+                            error_body = await response.aread()
+                            logger.error(
+                                "[Coach OpenRouter 4xx] Status: %s, Body: %s",
+                                response.status_code,
+                                error_body.decode("utf-8", errors="replace"),
+                            )
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    data = json.loads(data_str)
+                                    delta = (
+                                        data.get("choices", [{}])[0]
+                                        .get("delta", {})
+                                        .get("content", "")
+                                    )
+                                    if delta:
+                                        chunk_count += 1
+                                        yield delta
+                                except json.JSONDecodeError:
+                                    continue
+                            else:
+                                if line and not line.startswith(":"):
+                                    logger.info("[Coach OpenRouter Raw] %s: %s", model, line)
+                                    if "error" in line.lower():
+                                        logger.error("[Coach OpenRouter Error Detail] %s", line)
+
+                if chunk_count == 0:
+                    error_msg = f"Empty response (0 chunks) from {model}."
+                    logger.warning("[Coach LLM] %s", error_msg)
+                    last_exception = RuntimeError(error_msg)
+                    continue
+                logger.info("[Coach LLM] Success: %d chunks from %s", chunk_count, model)
+                return
+            except Exception as e:
+                logger.error("[Coach LLM] OpenRouter model %s failed: %s", model, e)
+                last_exception = e
+                continue
+
+        raise last_exception or RuntimeError("All OpenRouter models failed")
+
+    async def coach_llm(messages, max_tokens=None):
+        """Coach LLM entrypoint (OpenRouter only).
+
+        Note: Coach feature only supports OpenRouter. The openrouter_model and
+        openrouter_fallback_models settings control which models are used.
+        """
+        effective_max_tokens = max_tokens or settings.coach_max_output_tokens
+
+        try:
+            async for chunk in coach_openrouter_generator(
+                messages, effective_max_tokens
+            ):
+                yield chunk
+        except Exception as e:
+            logger.error("[Coach LLM] OpenRouter failed: %s", e)
+            raise
+
+    return coach_llm
 
 
 def get_intent_router():

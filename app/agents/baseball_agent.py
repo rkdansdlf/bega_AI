@@ -56,6 +56,18 @@ def clean_json_response(response: str) -> str:
     # 후행 쉼표 제거
     response = re.sub(r",(\s*[}\]])", r"\1", response)
 
+    # 이중 중괄호 {{ }} 처리 (LLM 실수 보정)
+    # 단순히 replace를 하면 {{}} -> {} 가 되지만, 
+    # {{{...}}} 같은 경우도 고려해야 하므로, 
+    # 맨 앞과 맨 뒤의 {{, }} 만 제거하는 것이 안전합니다.
+    # 하지만 더 간단하고 강력한 방법은 json.tool 처럼 
+    # 가장 바깥쪽의 { 와 } 를 찾는 것입니다.
+    # 여기서는 간단히 이중 중괄호만 단일 중괄호로 치환합니다.
+    # (내부 데이터에 {{ }} 가 있는 경우는 드물다고 가정)
+    if response.startswith("{{") and response.endswith("}}"):
+        response = response[1:-1]
+
+
     return response.strip()
 
 
@@ -2375,7 +2387,8 @@ class BaseballStatisticsAgent:
                     import datetime as dt
 
                     entity_filter = extract_entities_from_query(query)
-                    current_year = dt.datetime.now().year
+                    now = dt.datetime.now()
+                    current_year = now.year
 
                     # 명시적으로 추출된 연도가 있는 경우 (예: "작년" -> 2025)
                     if entity_filter.season_year:

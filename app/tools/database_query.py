@@ -7,11 +7,101 @@
 
 from typing import Dict, List, Any, Optional, Tuple
 import logging
+import time
+import threading
 import psycopg
 from psycopg.rows import dict_row
 from psycopg import Connection as PgConnection
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# TTL Cache for Coach Performance Optimization
+# ============================================================
+
+class TTLCache:
+    """
+    Thread-safe TTL (Time-To-Live) 캐시.
+
+    팀 통계와 같이 자주 변경되지 않는 데이터를 캐싱하여
+    반복적인 DB 쿼리를 줄입니다.
+
+    사용 예:
+        cache = TTLCache(ttl_seconds=3600)  # 1시간
+        cache.set("team_summary:KIA:2024", data)
+        cached = cache.get("team_summary:KIA:2024")
+    """
+
+    def __init__(self, ttl_seconds: int = 3600, max_size: int = 100):
+        self.ttl = ttl_seconds
+        self.max_size = max_size
+        self._cache: Dict[str, Tuple[Any, float]] = {}
+        self._lock = threading.RLock()
+
+    def get(self, key: str) -> Optional[Any]:
+        """캐시에서 값을 조회합니다. 만료된 경우 None 반환."""
+        with self._lock:
+            if key in self._cache:
+                value, timestamp = self._cache[key]
+                if time.time() - timestamp < self.ttl:
+                    logger.debug(f"[TTLCache] Hit: {key}")
+                    return value
+                else:
+                    # 만료된 항목 제거
+                    del self._cache[key]
+                    logger.debug(f"[TTLCache] Expired: {key}")
+            return None
+
+    def set(self, key: str, value: Any) -> None:
+        """캐시에 값을 저장합니다."""
+        with self._lock:
+            # 캐시 크기 제한
+            if len(self._cache) >= self.max_size:
+                self._evict_oldest()
+            self._cache[key] = (value, time.time())
+            logger.debug(f"[TTLCache] Set: {key}")
+
+    def _evict_oldest(self) -> None:
+        """가장 오래된 항목을 제거합니다."""
+        if not self._cache:
+            return
+        oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][1])
+        del self._cache[oldest_key]
+        logger.debug(f"[TTLCache] Evicted: {oldest_key}")
+
+    def clear(self) -> None:
+        """캐시를 비웁니다."""
+        with self._lock:
+            self._cache.clear()
+            logger.info("[TTLCache] Cache cleared")
+
+    def stats(self) -> Dict[str, Any]:
+        """캐시 통계를 반환합니다."""
+        with self._lock:
+            now = time.time()
+            valid_count = sum(1 for _, (_, ts) in self._cache.items() if now - ts < self.ttl)
+            return {
+                "total_entries": len(self._cache),
+                "valid_entries": valid_count,
+                "expired_entries": len(self._cache) - valid_count,
+                "ttl_seconds": self.ttl,
+                "max_size": self.max_size,
+            }
+
+
+# 전역 캐시 인스턴스 (Coach 최적화용)
+_coach_cache = TTLCache(ttl_seconds=3600, max_size=100)  # 1시간 TTL
+
+
+def get_coach_cache() -> TTLCache:
+    """전역 Coach 캐시 인스턴스를 반환합니다."""
+    return _coach_cache
+
+
+def clear_coach_cache() -> None:
+    """Coach 캐시를 비웁니다."""
+    _coach_cache.clear()
 
 
 class DatabaseQueryTool:
@@ -29,14 +119,14 @@ class DatabaseQueryTool:
         self.connection = connection
 
         # 1. NAME_TO_STATS_CODE: 통계 테이블(player_season_stats 등) 조회용
-        # KBO 통계 관례상 SK, HT, WO, OB 등을 선호함
+        # 정규 코드(SS, LT, LG, OB, HT, WO, HH, SSG, NC, KT) 기준
         self.NAME_TO_STATS_CODE = {
             "KIA": "HT",
             "기아": "HT",
             "HT": "HT",
             "LG": "LG",
-            "SSG": "SK",
-            "SK": "SK",
+            "SSG": "SSG",
+            "SK": "SSG",
             "NC": "NC",
             "두산": "OB",
             "OB": "OB",
@@ -52,7 +142,7 @@ class DatabaseQueryTool:
         }
 
         # 2. NAME_TO_GAME_CODE: 경기/순위 테이블(game 등) 조회용
-        # game 테이블 PK인 SSG, HT, WO 등을 선호함
+        # 정규 코드(SS, LT, LG, OB, HT, WO, HH, SSG, NC, KT) 기준
         self.NAME_TO_GAME_CODE = {
             "KIA": "HT",
             "HT": "HT",
@@ -107,10 +197,10 @@ class DatabaseQueryTool:
 
             # franchise_id가 있는 팀들 조회 (최신 창단순 정렬)
             query = """
-                SELECT team_id, team_name, franchise_id, founded_year 
-                FROM teams 
-                WHERE franchise_id IS NOT NULL 
-                ORDER BY franchise_id, founded_year DESC;
+                SELECT team_id, team_name, franchise_id, founded_year, is_active
+                FROM teams
+                WHERE franchise_id IS NOT NULL
+                ORDER BY franchise_id, is_active DESC, founded_year DESC;
             """
             cursor.execute(query)
             rows = cursor.fetchall()
@@ -134,44 +224,45 @@ class DatabaseQueryTool:
                     modern_name = modern_team["team_name"]
                     modern_id = modern_team["team_id"]
 
-                    # 2. 코드 라우팅 전략
-                    # (A) 통계용: SK, HT, WO, OB 유지 시도
-                    stats_code = next(
-                        (
-                            m["team_id"]
-                            for m in members
-                            if m["team_id"] in ["SK", "HT", "WO", "OB"]
-                        ),
-                        modern_id,
-                    )
+                    # 2. 통계 테이블용 코드 결정
+                    # 기존 하드코딩된 매핑이 있으면 그것을 사용 (통계 테이블 코드가 일관되지 않음)
+                    # 예: LG 프랜차이즈 - MBC(1982), LG(1990) 중 통계는 LG 사용
+                    #     한화 프랜차이즈 - BE(1986), HH(1993) 중 통계는 HH 사용
+                    existing_stats_code = self.NAME_TO_STATS_CODE.get(modern_id)
+                    if existing_stats_code:
+                        stats_code = existing_stats_code
+                    else:
+                        # 하드코딩된 매핑이 없으면 modern_id 사용
+                        stats_code = modern_id
 
-                    # (B) 경기/순위용: SSG, HT, WO 등 최신 테이블 PK 기준
-                    game_code = modern_id if modern_id != "SK" else "SSG"
-                    if modern_name == "KIA 타이거즈":
-                        game_code = "HT"
-                    if modern_name == "키움 히어로즈":
-                        game_code = "WO"
+                    game_code = stats_code
 
-                    # 3. 매핑 데이터 업데이트
+                    # 3. 매핑 데이터 업데이트 (기존 매핑 덮어쓰지 않음)
                     for member in members:
                         m_id = member["team_id"]
 
-                        # (1) 통계 쿼리용 (NAME_TO_STATS_CODE)
-                        self.NAME_TO_STATS_CODE[m_id] = stats_code
+                        # (1) 통계 쿼리용 - 기존 매핑이 없을 때만 추가
+                        if m_id not in self.NAME_TO_STATS_CODE:
+                            self.NAME_TO_STATS_CODE[m_id] = stats_code
 
-                        # (2) 경기/순위 쿼리용 (NAME_TO_GAME_CODE)
-                        self.NAME_TO_GAME_CODE[m_id] = game_code
+                        # (2) 경기/순위 쿼리용 - 기존 매핑이 없을 때만 추가
+                        if m_id not in self.NAME_TO_GAME_CODE:
+                            self.NAME_TO_GAME_CODE[m_id] = game_code
 
-                        # (3) 표시용 (TEAM_CODE_TO_NAME)
+                        # (3) 표시용 (TEAM_CODE_TO_NAME) - 항상 현대 이름으로 업데이트
                         self.TEAM_CODE_TO_NAME[m_id] = modern_name
                         self.TEAM_CODE_TO_NAME[stats_code] = modern_name
-                        self.TEAM_CODE_TO_NAME[game_code] = modern_name
 
-                    # 수동 추가: 이름 매칭 강화
-                    self.NAME_TO_STATS_CODE[modern_name] = stats_code
-                    self.NAME_TO_STATS_CODE[modern_name.split()[0]] = stats_code
-                    self.NAME_TO_GAME_CODE[modern_name] = game_code
-                    self.NAME_TO_GAME_CODE[modern_name.split()[0]] = game_code
+                    # 수동 추가: 이름 매칭 강화 (기존 매핑이 없을 때만)
+                    if modern_name not in self.NAME_TO_STATS_CODE:
+                        self.NAME_TO_STATS_CODE[modern_name] = stats_code
+                    short_name = modern_name.split()[0]
+                    if short_name not in self.NAME_TO_STATS_CODE:
+                        self.NAME_TO_STATS_CODE[short_name] = stats_code
+                    if modern_name not in self.NAME_TO_GAME_CODE:
+                        self.NAME_TO_GAME_CODE[modern_name] = game_code
+                    if short_name not in self.NAME_TO_GAME_CODE:
+                        self.NAME_TO_GAME_CODE[short_name] = game_code
 
                 logger.info(
                     "[DatabaseQuery] SQL Team mappings (Stats vs Game) synchronized using OCI."
@@ -185,6 +276,24 @@ class DatabaseQueryTool:
 
     def get_team_name(self, team_code: str) -> str:
         return self.TEAM_CODE_TO_NAME.get(team_code, team_code)
+
+    def safe_float(self, value: Any, default: float = 0.0) -> float:
+        """NULL 값을 안전하게 float로 변환합니다."""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
+    def safe_int(self, value: Any, default: int = 0) -> int:
+        """NULL 값을 안전하게 int로 변환합니다."""
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
 
     def get_team_code(self, team_input: str) -> str:
         """통계 테이블용 코드를 반환합니다 (기본값)"""
@@ -534,6 +643,10 @@ class DatabaseQueryTool:
                 unsupported_cols = ["scoring_position_avg", "wrc_plus"]
                 db_column, sort_order, min_pa = stat_mapping[stat_name.lower()]
 
+                # Defense-in-depth: validate sort_order even though it comes from whitelist
+                if sort_order not in ("ASC", "DESC"):
+                    raise ValueError(f"Invalid sort order: {sort_order}")
+
                 if db_column == "home_win_rate":
                     # 홈 승률 계산용 특수 쿼리 (팀별)
                     query = """
@@ -639,6 +752,10 @@ class DatabaseQueryTool:
                     return result
 
                 db_column, sort_order, min_ip = stat_mapping[stat_name.lower()]
+
+                # Defense-in-depth: validate sort_order even though it comes from whitelist
+                if sort_order not in ("ASC", "DESC"):
+                    raise ValueError(f"Invalid sort order: {sort_order}")
 
                 # 팀 필터 조건 구성
                 team_condition = ""
@@ -1200,6 +1317,13 @@ class DatabaseQueryTool:
         """
         logger.info(f"[DatabaseQuery] Querying team summary: {team_name}, {year}")
 
+        # TTL 캐시 확인 (Coach 최적화)
+        cache_key = f"team_summary:{team_name}:{year}"
+        cached_result = _coach_cache.get(cache_key)
+        if cached_result is not None:
+            logger.info(f"[DatabaseQuery] Cache hit for team summary: {team_name}, {year}")
+            return cached_result
+
         team_code = self.get_team_code(team_name) if team_name else None
         full_team_name = self.get_team_name(team_code) if team_code else None
 
@@ -1215,19 +1339,25 @@ class DatabaseQueryTool:
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
 
-            # 팀 상위 타자들 조회 (OPS 기준)
+            # 팀 상위 타자들 조회 (OPS 기준, 역할 분류 포함)
             batters_query = """
-                SELECT pb.name as player_name, psb.avg, psb.obp, psb.slg, psb.ops, psb.home_runs, psb.rbi, psb.plate_appearances
+                SELECT pb.name as player_name, psb.avg, psb.obp, psb.slg, psb.ops,
+                       psb.home_runs, psb.rbi, psb.plate_appearances,
+                       CASE
+                           WHEN psb.plate_appearances >= 400 THEN 'regular'
+                           WHEN psb.plate_appearances >= 200 THEN 'platoon'
+                           ELSE 'bench'
+                       END as role
                 FROM player_season_batting psb
                 JOIN player_basic pb ON psb.player_id = pb.player_id
                 LEFT JOIN teams t ON psb.team_code = t.team_id
-                WHERE psb.team_code = %s 
-                AND psb.season = %s 
+                WHERE psb.team_code = %s
+                AND psb.season = %s
                 AND psb.league = 'REGULAR'
-                AND psb.plate_appearances >= 100
+                AND psb.plate_appearances >= 50
                 AND psb.ops IS NOT NULL
                 ORDER BY psb.ops DESC
-                LIMIT 5
+                LIMIT 8
             """
             cursor.execute(batters_query, (team_code, year))
             batters = cursor.fetchall()
@@ -1240,18 +1370,26 @@ class DatabaseQueryTool:
                     result["top_batters"].append(player_data)
                 result["found"] = True
 
-            # 팀 상위 투수들 조회 (ERA 기준)
+            # 팀 상위 투수들 조회 (ERA 기준, 역할 분류 포함)
             pitchers_query = """
-                SELECT pb.name as player_name, psp.era, psp.whip, psp.wins, psp.losses, psp.saves, psp.innings_pitched, psp.strikeouts
+                SELECT pb.name as player_name, psp.era, psp.whip, psp.wins, psp.losses,
+                       psp.saves, psp.holds, psp.innings_pitched, psp.strikeouts,
+                       psp.games_started,
+                       CASE
+                           WHEN psp.games_started >= 10 THEN 'starter'
+                           WHEN psp.saves >= 5 THEN 'closer'
+                           WHEN psp.holds >= 10 THEN 'setup'
+                           ELSE 'middle_reliever'
+                       END as role
                 FROM player_season_pitching psp
                 JOIN player_basic pb ON psp.player_id = pb.player_id
-                WHERE psp.team_code = %s 
-                AND psp.season = %s 
+                WHERE psp.team_code = %s
+                AND psp.season = %s
                 AND psp.league = 'REGULAR'
-                AND psp.innings_pitched >= 30
+                AND psp.innings_pitched >= 20
                 AND psp.era IS NOT NULL
                 ORDER BY psp.era ASC
-                LIMIT 5
+                LIMIT 8
             """
             cursor.execute(pitchers_query, (team_code, year))
             pitchers = cursor.fetchall()
@@ -1273,6 +1411,10 @@ class DatabaseQueryTool:
         finally:
             if "cursor" in locals():
                 cursor.close()
+
+        # 성공적인 결과만 캐시 (Coach 최적화)
+        if result.get("found") and not result.get("error"):
+            _coach_cache.set(cache_key, result)
 
         return result
 
@@ -1530,6 +1672,13 @@ class DatabaseQueryTool:
             f"[DatabaseQuery] Querying advanced metrics for {team_name} in {year}"
         )
 
+        # TTL 캐시 확인 (Coach 최적화)
+        cache_key = f"team_advanced_metrics:{team_name}:{year}"
+        cached_result = _coach_cache.get(cache_key)
+        if cached_result is not None:
+            logger.info(f"[DatabaseQuery] Cache hit for advanced metrics: {team_name}, {year}")
+            return cached_result
+
         team_code = self.get_team_code(team_name)
         result = {
             "team_name": self.get_team_name(team_code),
@@ -1569,10 +1718,10 @@ class DatabaseQueryTool:
             bat_row = cursor.fetchone()
             if bat_row:
                 result["metrics"]["batting"] = {
-                    "avg": float(bat_row["avg"]),
-                    "ops": float(bat_row["ops"]),
-                    "total_hr": int(bat_row["total_hr"]),
-                    "total_rbi": int(bat_row["total_rbi"]),
+                    "avg": self.safe_float(bat_row["avg"]),
+                    "ops": self.safe_float(bat_row["ops"]),
+                    "total_hr": self.safe_int(bat_row["total_hr"]),
+                    "total_rbi": self.safe_int(bat_row["total_rbi"]),
                 }
                 result["rankings"]["batting_ops"] = f"{bat_row['ops_rank']}위"
                 result["rankings"]["batting_avg"] = f"{bat_row['avg_rank']}위"
@@ -1616,9 +1765,9 @@ class DatabaseQueryTool:
             pitch_row = cursor.fetchone()
             if pitch_row:
                 result["metrics"]["pitching"] = {
-                    "era_rank": f"{pitch_row['era_rank']}위",
-                    "qs_rate": f"{pitch_row['qs_rate']}%",
-                    "avg_era": float(pitch_row["avg_era"]),
+                    "era_rank": f"{pitch_row['era_rank']}위" if pitch_row['era_rank'] else "-",
+                    "qs_rate": f"{pitch_row['qs_rate']}%" if pitch_row['qs_rate'] else "0%",
+                    "avg_era": self.safe_float(pitch_row["avg_era"]),
                 }
                 result["fatigue_index"] = {
                     "bullpen_share": f"{pitch_row['bullpen_share']}%",
@@ -1644,9 +1793,11 @@ class DatabaseQueryTool:
             if l_avg:
                 result["league_averages"][
                     "bullpen_share"
-                ] = f"{l_avg['avg_bullpen_share']}%"
-                result["league_averages"]["era"] = float(l_avg["avg_league_era"])
+                ] = f"{l_avg['avg_bullpen_share']}%" if l_avg['avg_bullpen_share'] else "0%"
+                result["league_averages"]["era"] = float(l_avg["avg_league_era"]) if l_avg["avg_league_era"] is not None else 0.0
 
+            # 성공적인 결과 캐시 (Coach 최적화)
+            _coach_cache.set(cache_key, result)
             return result
 
         except Exception as e:

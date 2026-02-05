@@ -65,8 +65,10 @@ class Settings(BaseSettings):
         "openai/gpt-oss-120b", validation_alias="OPENROUTER_MODEL"
     )
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
+    # Default: openrouter/free - intelligent router that auto-selects available free models
     openrouter_fallback_models_raw: str = Field(
-        "", validation_alias="OPENROUTER_FALLBACK_MODELS"
+        "openrouter/free",
+        validation_alias="OPENROUTER_FALLBACK_MODELS"
     )
 
     @property
@@ -93,6 +95,15 @@ class Settings(BaseSettings):
     )
     vision_model: str = Field(
         "google/gemini-2.0-flash-001", validation_alias="VISION_MODEL"
+    )
+
+    # --- Coach LLM 설정 ---
+    coach_llm_provider: str = Field("openrouter", validation_alias="COACH_LLM_PROVIDER")
+    coach_max_output_tokens: int = Field(
+        2000, validation_alias="COACH_MAX_OUTPUT_TOKENS"
+    )  # 2000 tokens recommended per COACH_PROMPT_V2
+    coach_llm_read_timeout: float = Field(
+        60.0, validation_alias="COACH_LLM_READ_TIMEOUT"
     )
 
     # --- Function Calling / Chatbot 설정 ---
@@ -127,6 +138,20 @@ class Settings(BaseSettings):
         if value not in allowed:
             raise ValueError(
                 f"지원되지 않는 LLM_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
+            )
+        return value
+
+
+    @field_validator("coach_llm_provider")
+    def _validate_coach_llm_provider(cls, value: str) -> str:
+        """`coach_llm_provider` 필드의 값이 지원되는 프로바이더 중 하나인지 검증합니다.
+
+        Note: Coach feature only supports OpenRouter (via openrouter_model setting).
+        """
+        allowed = {"openrouter"}
+        if value not in allowed:
+            raise ValueError(
+                f"지원되지 않는 COACH_LLM_PROVIDER '{value}'입니다. Coach는 OpenRouter만 지원합니다."
             )
         return value
 
