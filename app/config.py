@@ -67,8 +67,7 @@ class Settings(BaseSettings):
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
     # Default: openrouter/free - intelligent router that auto-selects available free models
     openrouter_fallback_models_raw: str = Field(
-        "openrouter/free",
-        validation_alias="OPENROUTER_FALLBACK_MODELS"
+        "openrouter/free", validation_alias="OPENROUTER_FALLBACK_MODELS"
     )
 
     @property
@@ -140,7 +139,6 @@ class Settings(BaseSettings):
                 f"지원되지 않는 LLM_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
             )
         return value
-
 
     @field_validator("coach_llm_provider")
     def _validate_coach_llm_provider(cls, value: str) -> str:

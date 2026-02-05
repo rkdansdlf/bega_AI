@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # TTL Cache for Coach Performance Optimization
 # ============================================================
 
+
 class TTLCache:
     """
     Thread-safe TTL (Time-To-Live) 캐시.
@@ -80,7 +81,9 @@ class TTLCache:
         """캐시 통계를 반환합니다."""
         with self._lock:
             now = time.time()
-            valid_count = sum(1 for _, (_, ts) in self._cache.items() if now - ts < self.ttl)
+            valid_count = sum(
+                1 for _, (_, ts) in self._cache.items() if now - ts < self.ttl
+            )
             return {
                 "total_entries": len(self._cache),
                 "valid_entries": valid_count,
@@ -1321,7 +1324,9 @@ class DatabaseQueryTool:
         cache_key = f"team_summary:{team_name}:{year}"
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
-            logger.info(f"[DatabaseQuery] Cache hit for team summary: {team_name}, {year}")
+            logger.info(
+                f"[DatabaseQuery] Cache hit for team summary: {team_name}, {year}"
+            )
             return cached_result
 
         team_code = self.get_team_code(team_name) if team_name else None
@@ -1676,7 +1681,9 @@ class DatabaseQueryTool:
         cache_key = f"team_advanced_metrics:{team_name}:{year}"
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
-            logger.info(f"[DatabaseQuery] Cache hit for advanced metrics: {team_name}, {year}")
+            logger.info(
+                f"[DatabaseQuery] Cache hit for advanced metrics: {team_name}, {year}"
+            )
             return cached_result
 
         team_code = self.get_team_code(team_name)
@@ -1765,8 +1772,12 @@ class DatabaseQueryTool:
             pitch_row = cursor.fetchone()
             if pitch_row:
                 result["metrics"]["pitching"] = {
-                    "era_rank": f"{pitch_row['era_rank']}위" if pitch_row['era_rank'] else "-",
-                    "qs_rate": f"{pitch_row['qs_rate']}%" if pitch_row['qs_rate'] else "0%",
+                    "era_rank": (
+                        f"{pitch_row['era_rank']}위" if pitch_row["era_rank"] else "-"
+                    ),
+                    "qs_rate": (
+                        f"{pitch_row['qs_rate']}%" if pitch_row["qs_rate"] else "0%"
+                    ),
                     "avg_era": self.safe_float(pitch_row["avg_era"]),
                 }
                 result["fatigue_index"] = {
@@ -1791,10 +1802,16 @@ class DatabaseQueryTool:
             cursor.execute(league_avg_query, (year,))
             l_avg = cursor.fetchone()
             if l_avg:
-                result["league_averages"][
-                    "bullpen_share"
-                ] = f"{l_avg['avg_bullpen_share']}%" if l_avg['avg_bullpen_share'] else "0%"
-                result["league_averages"]["era"] = float(l_avg["avg_league_era"]) if l_avg["avg_league_era"] is not None else 0.0
+                result["league_averages"]["bullpen_share"] = (
+                    f"{l_avg['avg_bullpen_share']}%"
+                    if l_avg["avg_bullpen_share"]
+                    else "0%"
+                )
+                result["league_averages"]["era"] = (
+                    float(l_avg["avg_league_era"])
+                    if l_avg["avg_league_era"] is not None
+                    else 0.0
+                )
 
             # 성공적인 결과 캐시 (Coach 최적화)
             _coach_cache.set(cache_key, result)

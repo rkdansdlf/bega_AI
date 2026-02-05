@@ -9,14 +9,15 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Testing vision_model from env
 VISION_MODEL = os.getenv("VISION_MODEL", "openrouter/free")
 
+
 async def test_vision():
     print(f"Testing Vision Model: {VISION_MODEL}")
-    
+
     # Simple 1x1 black pixel image in base64
     base64_image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-    
+
     prompt = "What is in this image?"
-    
+
     payload = {
         "model": VISION_MODEL,
         "messages": [
@@ -26,15 +27,13 @@ async def test_vision():
                     {"type": "text", "text": prompt},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{base64_image}"
-                        },
+                        "image_url": {"url": f"data:image/png;base64,{base64_image}"},
                     },
                 ],
             }
         ],
     }
-    
+
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
@@ -45,7 +44,7 @@ async def test_vision():
             response = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
-                json=payload
+                json=payload,
             )
             print(f"Status: {response.status_code}")
             if response.status_code == 200:
@@ -56,6 +55,8 @@ async def test_vision():
         except Exception as e:
             print(f"Request failed: {e}")
 
+
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(test_vision())

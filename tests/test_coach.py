@@ -10,10 +10,10 @@ import asyncio
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from datetime import datetime
 
-
 # ============================================================
 # Coach Validator Tests
 # ============================================================
+
 
 class TestCoachValidator:
     """Coach 응답 검증기 테스트"""
@@ -31,13 +31,13 @@ class TestCoachValidator:
         """코드 블록에서 JSON 추출 테스트"""
         from app.core.coach_validator import extract_json_from_response
 
-        raw = '''여기 분석 결과입니다:
+        raw = """여기 분석 결과입니다:
 
 ```json
 {"headline": "선발 붕괴가 불펜 과부하로 직결", "sentiment": "negative"}
 ```
 
-위 분석을 참고하세요.'''
+위 분석을 참고하세요."""
 
         result = extract_json_from_response(raw)
         assert result is not None
@@ -49,9 +49,9 @@ class TestCoachValidator:
         """혼합 텍스트에서 JSON 추출 테스트"""
         from app.core.coach_validator import extract_json_from_response
 
-        raw = '''분석 시작
+        raw = """분석 시작
 {"headline": "테스트 헤드라인", "sentiment": "positive", "key_metrics": []}
-분석 종료'''
+분석 종료"""
 
         result = extract_json_from_response(raw)
         assert result is not None
@@ -62,7 +62,7 @@ class TestCoachValidator:
         """유효한 Coach 응답 파싱 테스트"""
         from app.core.coach_validator import parse_coach_response
 
-        raw = '''{
+        raw = """{
             "headline": "KIA 타이거즈 선발진 안정화 필요",
             "sentiment": "negative",
             "key_metrics": [
@@ -75,7 +75,7 @@ class TestCoachValidator:
             },
             "detailed_markdown": "## 상세 분석\\n테스트 내용",
             "coach_note": "선발 로테이션 재정비가 시급합니다."
-        }'''
+        }"""
 
         response = parse_coach_response(raw)
         assert response is not None
@@ -96,7 +96,12 @@ class TestCoachValidator:
 
     def test_validate_coach_response_warnings(self):
         """Coach 응답 검증 경고 테스트"""
-        from app.core.coach_validator import CoachResponse, validate_coach_response, KeyMetric, AnalysisSection
+        from app.core.coach_validator import (
+            CoachResponse,
+            validate_coach_response,
+            KeyMetric,
+            AnalysisSection,
+        )
 
         # 핵심 지표가 4개 이상인 경우 경고
         response = CoachResponse(
@@ -107,7 +112,7 @@ class TestCoachValidator:
                 for i in range(4)
             ],
             analysis=AnalysisSection(),
-            coach_note="짧음"  # 20자 미만
+            coach_note="짧음",  # 20자 미만
         )
 
         warnings = validate_coach_response(response)
@@ -116,23 +121,32 @@ class TestCoachValidator:
     def test_format_coach_response_as_markdown(self):
         """Coach 응답 마크다운 변환 테스트"""
         from app.core.coach_validator import (
-            CoachResponse, format_coach_response_as_markdown,
-            KeyMetric, AnalysisSection, RiskItem
+            CoachResponse,
+            format_coach_response_as_markdown,
+            KeyMetric,
+            AnalysisSection,
+            RiskItem,
         )
 
         response = CoachResponse(
             headline="팀 상태 양호",
             sentiment="positive",
             key_metrics=[
-                KeyMetric(label="OPS", value=".850", status="양호", trend="up", is_critical=True)
+                KeyMetric(
+                    label="OPS",
+                    value=".850",
+                    status="양호",
+                    trend="up",
+                    is_critical=True,
+                )
             ],
             analysis=AnalysisSection(
                 strengths=["강력한 타선"],
                 weaknesses=["불펜 불안"],
-                risks=[RiskItem(area="불펜", level=1, description="주의 필요")]
+                risks=[RiskItem(area="불펜", level=1, description="주의 필요")],
             ),
             detailed_markdown="## 상세 분석\n테스트 내용",
-            coach_note="지속적인 모니터링을 권장합니다."
+            coach_note="지속적인 모니터링을 권장합니다.",
         )
 
         markdown = format_coach_response_as_markdown(response)
@@ -145,6 +159,7 @@ class TestCoachValidator:
 # ============================================================
 # TTL Cache Tests
 # ============================================================
+
 
 class TestTTLCache:
     """TTL 캐시 테스트"""
@@ -215,6 +230,7 @@ class TestTTLCache:
 # Tool Caller Parallel Execution Tests
 # ============================================================
 
+
 class TestToolCallerParallel:
     """병렬 도구 실행 테스트"""
 
@@ -251,13 +267,13 @@ class TestToolCallerParallel:
             "tracking_tool_1",
             "Tracking tool 1",
             {"param1": "Parameter 1"},
-            tracking_tool_1
+            tracking_tool_1,
         )
         caller.register_tool(
             "tracking_tool_2",
             "Tracking tool 2",
             {"param2": "Parameter 2"},
-            tracking_tool_2
+            tracking_tool_2,
         )
 
         # 병렬 실행
@@ -276,7 +292,9 @@ class TestToolCallerParallel:
         # [P3 Fix] 동시성 검증: 두 도구가 거의 동시에 시작되었는지 확인
         # 순차 실행이면 0.1초 이상 차이, 병렬이면 0.05초 이내
         time_diff = abs(call_times[0][1] - call_times[1][1])
-        assert time_diff < 0.05, f"Tools not started concurrently: {time_diff:.3f}s apart"
+        assert (
+            time_diff < 0.05
+        ), f"Tools not started concurrently: {time_diff:.3f}s apart"
 
     @pytest.mark.asyncio
     async def test_parallel_execution_with_failure(self):
@@ -309,6 +327,7 @@ class TestToolCallerParallel:
 # Coach Fast Path Integration Tests
 # ============================================================
 
+
 class TestCoachFastPath:
     """Coach Fast Path 통합 테스트"""
 
@@ -335,33 +354,43 @@ class TestCoachFastPath:
                 "team_name": "KIA 타이거즈",
                 "year": 2024,
                 "top_batters": [
-                    {"player_name": "김도영", "avg": 0.312, "obp": 0.380, "slg": 0.520, "ops": 0.900, "home_runs": 25, "rbi": 80}
+                    {
+                        "player_name": "김도영",
+                        "avg": 0.312,
+                        "obp": 0.380,
+                        "slg": 0.520,
+                        "ops": 0.900,
+                        "home_runs": 25,
+                        "rbi": 80,
+                    }
                 ],
                 "top_pitchers": [
-                    {"player_name": "양현종", "era": 3.45, "whip": 1.12, "wins": 12, "losses": 5, "saves": 0, "innings_pitched": 150.0}
+                    {
+                        "player_name": "양현종",
+                        "era": 3.45,
+                        "whip": 1.12,
+                        "wins": 12,
+                        "losses": 5,
+                        "saves": 0,
+                        "innings_pitched": 150.0,
+                    }
                 ],
-                "found": True
+                "found": True,
             },
             "advanced_metrics": {
                 "team_name": "KIA 타이거즈",
                 "year": 2024,
                 "metrics": {
                     "batting": {"ops": 0.750, "avg": 0.280},
-                    "pitching": {"avg_era": 4.20, "qs_rate": "45%", "era_rank": "5위"}
+                    "pitching": {"avg_era": 4.20, "qs_rate": "45%", "era_rank": "5위"},
                 },
                 "fatigue_index": {
                     "bullpen_share": "35%",
-                    "bullpen_load_rank": "3위 (높을수록 과부하)"
+                    "bullpen_load_rank": "3위 (높을수록 과부하)",
                 },
-                "league_averages": {
-                    "bullpen_share": "30%",
-                    "era": 4.00
-                },
-                "rankings": {
-                    "batting_ops": "4위",
-                    "batting_avg": "3위"
-                }
-            }
+                "league_averages": {"bullpen_share": "30%", "era": 4.00},
+                "rankings": {"batting_ops": "4위", "batting_avg": "3위"},
+            },
         }
 
         context = _format_coach_context(tool_results, ["batting", "bullpen"])
