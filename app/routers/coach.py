@@ -20,7 +20,12 @@ from pydantic import BaseModel
 
 from psycopg_pool import ConnectionPool
 
-from ..deps import get_agent, get_db_connection, get_connection_pool, get_coach_llm_generator
+from ..deps import (
+    get_agent,
+    get_db_connection,
+    get_connection_pool,
+    get_coach_llm_generator,
+)
 from ..agents.baseball_agent import BaseballStatisticsAgent
 from ..core.prompts import COACH_PROMPT_V2
 from ..core.coach_validator import (
@@ -65,12 +70,14 @@ def _normalize_cached_response(cached_data: dict) -> dict:
         logger.warning(f"[Coach Cache] Failed to normalize legacy data: {e}")
         return cached_data
 
+
 router = APIRouter(prefix="/coach", tags=["coach"])
 
 
 # ============================================================
 # Fast Path Helper Functions
 # ============================================================
+
 
 def _build_coach_query(team_name: str, focus: List[str]) -> str:
     """focus 영역에 따라 Coach 질문을 구성합니다."""
@@ -79,7 +86,9 @@ def _build_coach_query(team_name: str, focus: List[str]) -> str:
     query = f"{team_name}의 {focus_text}에 대해 냉철하고 다각적인 분석을 수행해줘."
 
     if "batting" in focus or not focus:
-        query += " 팀의 타격 생산성(OPS, wRC+)과 주요 타자들의 최근 클러치 능력을 진단해줘."
+        query += (
+            " 팀의 타격 생산성(OPS, wRC+)과 주요 타자들의 최근 클러치 능력을 진단해줘."
+        )
 
     if "bullpen" in focus:
         query += " 불펜진의 하이 레버리지 상황 처리 능력과 과부하 지표를 분석해줘."
@@ -99,10 +108,7 @@ def _build_coach_query(team_name: str, focus: List[str]) -> str:
 
 
 async def _execute_coach_tools_parallel(
-    pool: ConnectionPool,
-    team_code: str,
-    year: int,
-    focus: List[str]
+    pool: ConnectionPool, team_code: str, year: int, focus: List[str]
 ) -> Dict[str, Any]:
     """
     Coach에 필요한 도구들을 병렬로 실행합니다.
@@ -134,8 +140,16 @@ async def _execute_coach_tools_parallel(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     tool_results = {
-        "team_summary": results[0] if not isinstance(results[0], Exception) else {"error": str(results[0])},
-        "advanced_metrics": results[1] if not isinstance(results[1], Exception) else {"error": str(results[1])},
+        "team_summary": (
+            results[0]
+            if not isinstance(results[0], Exception)
+            else {"error": str(results[0])}
+        ),
+        "advanced_metrics": (
+            results[1]
+            if not isinstance(results[1], Exception)
+            else {"error": str(results[1])}
+        ),
     }
 
     return tool_results
@@ -180,7 +194,7 @@ def _remove_duplicate_json_start(text: str) -> str:
     """
     import re
 
-    if not text or '{' not in text:
+    if not text or "{" not in text:
         return text
 
     # headline 필드 패턴 찾기
@@ -195,19 +209,21 @@ def _remove_duplicate_json_start(text: str) -> str:
     second_match = matches[1]
 
     # 두 headline 값이 동일한지 확인
-    first_value = text[first_match.start():first_match.end()]
-    second_value = text[second_match.start():second_match.end()]
+    first_value = text[first_match.start() : first_match.end()]
+    second_value = text[second_match.start() : second_match.end()]
 
     if first_value == second_value:
         # 중복 발견 - 두 번째 headline 이후 내용만 유지
-        logger.warning("[Coach] Duplicate JSON start detected, removing first occurrence")
+        logger.warning(
+            "[Coach] Duplicate JSON start detected, removing first occurrence"
+        )
 
         # { + 두 번째 headline부터의 내용
-        brace_pos = text.index('{')
-        clean_text = text[brace_pos:brace_pos + 1]  # '{'
+        brace_pos = text.index("{")
+        clean_text = text[brace_pos : brace_pos + 1]  # '{'
 
         # 두 번째 headline 이후 내용
-        after_second = text[second_match.start():]
+        after_second = text[second_match.start() :]
         clean_text += after_second
 
         return clean_text
@@ -216,9 +232,7 @@ def _remove_duplicate_json_start(text: str) -> str:
 
 
 def _format_coach_context(
-    tool_results: Dict[str, Any],
-    focus: List[str],
-    game_context: Optional[str] = None
+    tool_results: Dict[str, Any], focus: List[str], game_context: Optional[str] = None
 ) -> str:
     """
     Coach 전용 컨텍스트를 포맷합니다.
@@ -235,7 +249,9 @@ def _format_coach_context(
     # 경기별 분석 모드일 경우 안내 추가
     if game_context:
         parts.append("## ⚠️ 특정 경기 분석 모드")
-        parts.append("이 분석은 특정 경기에 대한 것입니다. 아래 팀 시즌 통계는 **참고용**입니다.")
+        parts.append(
+            "이 분석은 특정 경기에 대한 것입니다. 아래 팀 시즌 통계는 **참고용**입니다."
+        )
         parts.append(f"**분석 대상**: {game_context}")
         parts.append("")
         parts.append("분석 시 다음에 집중하세요:")
@@ -247,7 +263,9 @@ def _format_coach_context(
     team_summary = tool_results.get("team_summary", {})
     advanced = tool_results.get("advanced_metrics", {})
 
-    team_name = team_summary.get("team_name") or advanced.get("team_name", "알 수 없는 팀")
+    team_name = team_summary.get("team_name") or advanced.get(
+        "team_name", "알 수 없는 팀"
+    )
     year = team_summary.get("year") or advanced.get("year", datetime.now().year)
 
     parts.append(f"## {team_name} {year}시즌 분석 데이터\n")
@@ -263,11 +281,17 @@ def _format_coach_context(
         rankings = advanced.get("rankings", {})
 
         if batting.get("ops") is not None:
-            parts.append(f"| 팀 OPS | {_safe_float(batting['ops']):.3f} | {rankings.get('batting_ops', 'N/A')} |")
+            parts.append(
+                f"| 팀 OPS | {_safe_float(batting['ops']):.3f} | {rankings.get('batting_ops', 'N/A')} |"
+            )
         if batting.get("avg") is not None:
-            parts.append(f"| 팀 타율 | {_safe_float(batting['avg']):.3f} | {rankings.get('batting_avg', 'N/A')} |")
+            parts.append(
+                f"| 팀 타율 | {_safe_float(batting['avg']):.3f} | {rankings.get('batting_avg', 'N/A')} |"
+            )
         if pitching.get("avg_era") is not None:
-            parts.append(f"| 팀 평균 ERA | {_safe_float(pitching['avg_era']):.2f} | {pitching.get('era_rank', 'N/A')} |")
+            parts.append(
+                f"| 팀 평균 ERA | {_safe_float(pitching['avg_era']):.2f} | {pitching.get('era_rank', 'N/A')} |"
+            )
         if pitching.get("qs_rate"):
             parts.append(f"| QS 비율 | {pitching['qs_rate']} | - |")
         parts.append("")
@@ -279,13 +303,15 @@ def _format_coach_context(
     if fatigue or "bullpen" in focus:
         parts.append("### 불펜 부담 지표 (핵심)")
         parts.append(f"- **팀 불펜 비중**: {fatigue.get('bullpen_share', 'N/A')}")
-        parts.append(f"- **리그 평균 불펜 비중**: {league_avg.get('bullpen_share', 'N/A')}")
+        parts.append(
+            f"- **리그 평균 불펜 비중**: {league_avg.get('bullpen_share', 'N/A')}"
+        )
         parts.append(f"- **불펜 부담 순위**: {fatigue.get('bullpen_load_rank', 'N/A')}")
 
         # 리그 평균 대비 차이 (원시 데이터만, LLM이 판단하도록)
         try:
-            team_share = float(fatigue.get('bullpen_share', '0').replace('%', ''))
-            league_share = float(league_avg.get('bullpen_share', '0').replace('%', ''))
+            team_share = float(fatigue.get("bullpen_share", "0").replace("%", ""))
+            league_share = float(league_avg.get("bullpen_share", "0").replace("%", ""))
             diff = team_share - league_share
             parts.append(f"- **리그 평균 대비 차이**: {diff:+.1f}%p")
         except (ValueError, TypeError):
@@ -315,7 +341,12 @@ def _format_coach_context(
         parts.append("### 주요 투수 (ERA 상위)")
         parts.append("| 선수 | 역할 | ERA | WHIP | 승 | 패 | SV | HLD | 이닝 |")
         parts.append("|------|------|-----|------|-----|-----|-----|-----|------|")
-        role_kr = {"starter": "선발", "closer": "마무리", "setup": "셋업", "middle_reliever": "중계"}
+        role_kr = {
+            "starter": "선발",
+            "closer": "마무리",
+            "setup": "셋업",
+            "middle_reliever": "중계",
+        }
         for p in top_pitchers[:8]:
             role = role_kr.get(p.get("role", ""), "")
             parts.append(
@@ -364,7 +395,7 @@ async def analyze_team(
     """
     from sse_starlette.sse import EventSourceResponse
     import psycopg
-    import hashlib # Added for cache key generation
+    import hashlib  # Added for cache key generation
 
     try:
         request_id = uuid.uuid4().hex[:8]
@@ -393,7 +424,7 @@ async def analyze_team(
             str(year),
             ",".join(sorted(payload.focus)),
             payload.question_override or "",
-            "v3_prompt" # 프롬프트 버전 (변경 시 업데이트 필요)
+            "v3_prompt",  # 프롬프트 버전 (변경 시 업데이트 필요)
         ]
         cache_key = hashlib.sha256("|".join(cache_components).encode()).hexdigest()
 
@@ -403,7 +434,7 @@ async def analyze_team(
             request_id,
             year,
             query[:100],
-            cache_key
+            cache_key,
         )
 
         async def event_generator():
@@ -415,7 +446,10 @@ async def analyze_team(
                 phase1_start = perf_counter()
                 yield {
                     "event": "status",
-                    "data": json.dumps({"message": "팀 데이터를 수집하고 있습니다..."}, ensure_ascii=False)
+                    "data": json.dumps(
+                        {"message": "팀 데이터를 수집하고 있습니다..."},
+                        ensure_ascii=False,
+                    ),
                 }
 
                 # [P1 Fix] DB 연결 풀 사용 - 병렬 실행 시 각 작업이 별도 connection 사용
@@ -437,24 +471,29 @@ async def analyze_team(
                             SET cache_key = coach_analysis_cache.cache_key  -- no-op update to trigger RETURNING
                         RETURNING status, response_json, (xmax = 0) AS inserted
                         """,
-                        (cache_key, payload.team_id, year, "v3_prompt", "solar-pro-3")
+                        (cache_key, payload.team_id, year, "v3_prompt", "solar-pro-3"),
                     ).fetchone()
                     conn.commit()
 
                     if row:
                         status, cached_json, was_inserted = row
-                        if status == 'COMPLETED' and cached_json:
+                        if status == "COMPLETED" and cached_json:
                             cached_data = cached_json
                             logger.info("[Coach] Cache HIT for %s", cache_key)
                         elif was_inserted:
                             # We successfully inserted PENDING - we should compute
                             should_compute = True
-                            logger.info("[Coach] Cache MISS, inserted PENDING for %s", cache_key)
-                        elif status == 'PENDING':
+                            logger.info(
+                                "[Coach] Cache MISS, inserted PENDING for %s", cache_key
+                            )
+                        elif status == "PENDING":
                             # Another request is computing - proceed anyway (duplicate work but reliable)
                             # In production, could implement polling/waiting here
                             should_compute = True
-                            logger.warning("[Coach] Cache PENDING by another request for %s, proceeding anyway", cache_key)
+                            logger.warning(
+                                "[Coach] Cache PENDING by another request for %s, proceeding anyway",
+                                cache_key,
+                            )
 
                 if cached_data:
                     # 레거시 캐시 데이터 정규화 (한글 status/area → 영어)
@@ -462,23 +501,29 @@ async def analyze_team(
 
                     yield {
                         "event": "status",
-                        "data": json.dumps({"message": "저장된 분석 결과를 불러옵니다..."}, ensure_ascii=False)
+                        "data": json.dumps(
+                            {"message": "저장된 분석 결과를 불러옵니다..."},
+                            ensure_ascii=False,
+                        ),
                     }
                     # 캐시된 JSON을 텍스트 스트림처럼 전송 (프론트엔드 호환성)
                     json_str = json.dumps(cached_data, ensure_ascii=False, indent=2)
                     yield {
                         "event": "message",
-                        "data": json.dumps({"delta": json_str}, ensure_ascii=False)
+                        "data": json.dumps({"delta": json_str}, ensure_ascii=False),
                     }
                     yield {
                         "event": "meta",
-                        "data": json.dumps({
-                            "validation_status": "success",
-                            "structured_response": cached_data,
-                            "fast_path": True,
-                            "cached": True,
-                            "verified": True
-                        }, ensure_ascii=False)
+                        "data": json.dumps(
+                            {
+                                "validation_status": "success",
+                                "structured_response": cached_data,
+                                "fast_path": True,
+                                "cached": True,
+                                "verified": True,
+                            },
+                            ensure_ascii=False,
+                        ),
                     }
                     yield {"event": "done", "data": "[DONE]"}
                     return
@@ -486,11 +531,15 @@ async def analyze_team(
                 # 도구 실행 시작 알림
                 yield {
                     "event": "tool_start",
-                    "data": json.dumps({"tool": "get_team_summary"}, ensure_ascii=False)
+                    "data": json.dumps(
+                        {"tool": "get_team_summary"}, ensure_ascii=False
+                    ),
                 }
                 yield {
                     "event": "tool_start",
-                    "data": json.dumps({"tool": "get_team_advanced_metrics"}, ensure_ascii=False)
+                    "data": json.dumps(
+                        {"tool": "get_team_advanced_metrics"}, ensure_ascii=False
+                    ),
                 }
 
                 # 병렬 도구 실행 (각 도구가 별도 connection 사용)
@@ -509,19 +558,25 @@ async def analyze_team(
                 advanced_metrics_result = tool_results.get("advanced_metrics", {})
                 yield {
                     "event": "tool_result",
-                    "data": json.dumps({
-                        "tool": "get_team_summary",
-                        "success": team_summary_result.get("found", False),
-                        "message": "팀 요약 데이터 조회 완료"
-                    }, ensure_ascii=False)
+                    "data": json.dumps(
+                        {
+                            "tool": "get_team_summary",
+                            "success": team_summary_result.get("found", False),
+                            "message": "팀 요약 데이터 조회 완료",
+                        },
+                        ensure_ascii=False,
+                    ),
                 }
                 yield {
                     "event": "tool_result",
-                    "data": json.dumps({
-                        "tool": "get_team_advanced_metrics",
-                        "success": advanced_metrics_result.get("found", False),
-                        "message": "팀 고급 지표 조회 완료"
-                    }, ensure_ascii=False)
+                    "data": json.dumps(
+                        {
+                            "tool": "get_team_advanced_metrics",
+                            "success": advanced_metrics_result.get("found", False),
+                            "message": "팀 고급 지표 조회 완료",
+                        },
+                        ensure_ascii=False,
+                    ),
                 }
 
                 # ============================================================
@@ -530,13 +585,19 @@ async def analyze_team(
                 phase2_start = perf_counter()
                 yield {
                     "event": "status",
-                    "data": json.dumps({"message": "데이터를 분석하고 있습니다..."}, ensure_ascii=False)
+                    "data": json.dumps(
+                        {"message": "데이터를 분석하고 있습니다..."}, ensure_ascii=False
+                    ),
                 }
 
                 # question_override가 있으면 경기별 분석 모드로 처리
-                game_context = payload.question_override if payload.question_override else None
-                context = _format_coach_context(tool_results, payload.focus, game_context)
-                
+                game_context = (
+                    payload.question_override if payload.question_override else None
+                )
+                context = _format_coach_context(
+                    tool_results, payload.focus, game_context
+                )
+
                 # [Pre-season Notice] 컨텍스트에 추가
                 if pre_season_notice:
                     context = f"## 중요 알림\n{pre_season_notice}\n\n" + context
@@ -554,43 +615,55 @@ async def analyze_team(
                 # ============================================================
                 team_summary = tool_results.get("team_summary", {})
                 advanced_metrics = tool_results.get("advanced_metrics", {})
-                
+
                 # 핵심 데이터가 없으면 LLM 호출 스킵
                 has_batters = len(team_summary.get("top_batters", [])) > 0
                 has_pitchers = len(team_summary.get("top_pitchers", [])) > 0
                 has_metrics = bool(advanced_metrics.get("metrics"))
-                
+
                 if not has_batters and not has_pitchers and not has_metrics:
                     logger.warning("[Coach] Data validation failed - skipping LLM call")
-                    
+
                     # [Cache Fail] 데이터 부족으로 실패 처리
                     with pool.connection() as conn:
                         conn.execute(
                             "UPDATE coach_analysis_cache SET status = 'FAILED', error_message = %s, updated_at = now() WHERE cache_key = %s",
-                            ("Data insufficient", cache_key)
+                            ("Data insufficient", cache_key),
                         )
                         conn.commit()
 
                     # 즉시 안전한 응답 반환
-                    fallback_response = json.dumps({
-                        "headline": f"{team_name} 데이터를 현재 확인할 수 없습니다",
-                        "sentiment": "neutral",
-                        "key_metrics": [],
-                        "analysis": {"strengths": [], "weaknesses": [], "risks": []},
-                        "detailed_markdown": "## 데이터 부족\n\n현재 해당 팀의 시즌 데이터가 DB에 없거나 조회에 실패했습니다.",
-                        "coach_note": "데이터가 확보되면 다시 분석을 요청해 주세요."
-                    }, ensure_ascii=False)
+                    fallback_response = json.dumps(
+                        {
+                            "headline": f"{team_name} 데이터를 현재 확인할 수 없습니다",
+                            "sentiment": "neutral",
+                            "key_metrics": [],
+                            "analysis": {
+                                "strengths": [],
+                                "weaknesses": [],
+                                "risks": [],
+                            },
+                            "detailed_markdown": "## 데이터 부족\n\n현재 해당 팀의 시즌 데이터가 DB에 없거나 조회에 실패했습니다.",
+                            "coach_note": "데이터가 확보되면 다시 분석을 요청해 주세요.",
+                        },
+                        ensure_ascii=False,
+                    )
                     yield {
                         "event": "message",
-                        "data": json.dumps({"delta": fallback_response}, ensure_ascii=False)
+                        "data": json.dumps(
+                            {"delta": fallback_response}, ensure_ascii=False
+                        ),
                     }
                     yield {
                         "event": "meta",
-                        "data": json.dumps({
-                            "validation_status": "data_insufficient",
-                            "fast_path": True,
-                            "llm_skipped": True
-                        }, ensure_ascii=False)
+                        "data": json.dumps(
+                            {
+                                "validation_status": "data_insufficient",
+                                "fast_path": True,
+                                "llm_skipped": True,
+                            },
+                            ensure_ascii=False,
+                        ),
                     }
                     yield {"event": "done", "data": "[DONE]"}
                     return
@@ -601,14 +674,14 @@ async def analyze_team(
                 phase3_start = perf_counter()
                 yield {
                     "event": "status",
-                    "data": json.dumps({"message": "AI 코치가 분석 중입니다..."}, ensure_ascii=False)
+                    "data": json.dumps(
+                        {"message": "AI 코치가 분석 중입니다..."}, ensure_ascii=False
+                    ),
                 }
 
                 # [P2 Fix] COACH_PROMPT_V2 사용 (JSON 스키마 기반)
                 coach_prompt = COACH_PROMPT_V2.format(question=query, context=context)
-                messages = [
-                    {"role": "user", "content": coach_prompt}
-                ]
+                messages = [{"role": "user", "content": coach_prompt}]
                 logger.info(
                     "[Coach Timing] %s prompt_chars=%d",
                     request_id,
@@ -618,7 +691,7 @@ async def analyze_team(
                 # [근본 해결책 #1] Coach 전용 LLM generator 사용 (설정 기반)
                 # Gemini/OpenRouter 자동 선택 + 폴백 지원
                 coach_llm = get_coach_llm_generator()
-                
+
                 # LLM 스트리밍 답변 생성 + 전체 응답 수집
                 # max_tokens는 config.py의 coach_max_output_tokens 사용 (기본 2000)
                 # Use list + join for O(n) performance instead of string concatenation O(n²)
@@ -635,7 +708,7 @@ async def analyze_team(
                     response_chunks.append(chunk)
                     yield {
                         "event": "message",
-                        "data": json.dumps({"delta": chunk}, ensure_ascii=False)
+                        "data": json.dumps({"delta": chunk}, ensure_ascii=False),
                     }
                 full_response = "".join(response_chunks)
                 phase3_end = perf_counter()
@@ -655,42 +728,65 @@ async def analyze_team(
                 phase4_start = perf_counter()
                 meta_payload = {
                     "tool_calls": [
-                        {"tool_name": "get_team_summary", "parameters": {"team_name": payload.team_id, "year": year}},
-                        {"tool_name": "get_team_advanced_metrics", "parameters": {"team_name": payload.team_id, "year": year}},
+                        {
+                            "tool_name": "get_team_summary",
+                            "parameters": {"team_name": payload.team_id, "year": year},
+                        },
+                        {
+                            "tool_name": "get_team_advanced_metrics",
+                            "parameters": {"team_name": payload.team_id, "year": year},
+                        },
                     ],
                     "verified": True,
-                    "data_sources": ["player_season_batting", "player_season_pitching", "teams"],
-                    "fast_path": True  # Fast Path 사용 표시
+                    "data_sources": [
+                        "player_season_batting",
+                        "player_season_pitching",
+                        "teams",
+                    ],
+                    "fast_path": True,  # Fast Path 사용 표시
                 }
 
                 # [P2 Fix] 응답 완료 후 JSON 파싱 시도
                 parsed_response = parse_coach_response(full_response)
-                
+
                 # [Cache Update] 결과 저장 or 실패 처리
                 with pool.connection() as conn:
                     if parsed_response:
                         conn.execute(
                             "UPDATE coach_analysis_cache SET status = 'COMPLETED', response_json = %s, updated_at = now() WHERE cache_key = %s",
-                            (json.dumps(parsed_response.model_dump(), ensure_ascii=False), cache_key)
+                            (
+                                json.dumps(
+                                    parsed_response.model_dump(), ensure_ascii=False
+                                ),
+                                cache_key,
+                            ),
                         )
                         conn.commit()
-                        
+
                         meta_payload["validation_status"] = "success"
-                        meta_payload["structured_response"] = parsed_response.model_dump()
-                        logger.info("[Coach Router] Response validated and CACHED successfully")
+                        meta_payload["structured_response"] = (
+                            parsed_response.model_dump()
+                        )
+                        logger.info(
+                            "[Coach Router] Response validated and CACHED successfully"
+                        )
                     else:
                         # 파싱 실패 - 캐시를 FAILED로 마킹 (재요청 시 재시도하도록)
                         conn.execute(
                             "UPDATE coach_analysis_cache SET status = 'FAILED', error_message = %s, updated_at = now() WHERE cache_key = %s",
-                            ("Validation failed", cache_key)
+                            ("Validation failed", cache_key),
                         )
                         conn.commit()
-                        
+
                         # 클라이언트에는 fallback 응답 제공 (UX 유지)
-                        fallback = _create_fallback_response("JSON 파싱 실패", full_response)
+                        fallback = _create_fallback_response(
+                            "JSON 파싱 실패", full_response
+                        )
                         meta_payload["validation_status"] = "fallback"
                         meta_payload["structured_response"] = fallback.model_dump()
-                        logger.warning("[Coach Router] Validation failed, serving fallback response")
+                        logger.warning(
+                            "[Coach Router] Validation failed, serving fallback response"
+                        )
 
                 phase4_end = perf_counter()
                 logger.info(
@@ -707,7 +803,7 @@ async def analyze_team(
 
                 yield {
                     "event": "meta",
-                    "data": json.dumps(meta_payload, ensure_ascii=False)
+                    "data": json.dumps(meta_payload, ensure_ascii=False),
                 }
 
                 yield {"event": "done", "data": "[DONE]"}
@@ -720,17 +816,20 @@ async def analyze_team(
                     with pool.connection() as conn:
                         conn.execute(
                             "UPDATE coach_analysis_cache SET status = 'FAILED', error_message = %s, updated_at = now() WHERE cache_key = %s",
-                            (str(e), cache_key)
+                            (str(e), cache_key),
                         )
                         conn.commit()
                 except Exception as db_e:
-                    logger.error(f"[Coach Cache Error] Failed to update failure status: {db_e}")
+                    logger.error(
+                        f"[Coach Cache Error] Failed to update failure status: {db_e}"
+                    )
 
                 import traceback
+
                 logger.error(traceback.format_exc())
                 yield {
                     "event": "error",
-                    "data": json.dumps({"error": str(e)}, ensure_ascii=False)
+                    "data": json.dumps({"error": str(e)}, ensure_ascii=False),
                 }
 
         return EventSourceResponse(
@@ -749,6 +848,7 @@ async def analyze_team(
 # ============================================================
 # Legacy endpoint (기존 방식 유지, 필요 시 사용)
 # ============================================================
+
 
 @router.post("/analyze-legacy")
 async def analyze_team_legacy(
@@ -776,50 +876,64 @@ async def analyze_team_legacy(
 
         async def event_generator():
             try:
-                async for event in agent.process_query_stream(query, context=context_data):
+                async for event in agent.process_query_stream(
+                    query, context=context_data
+                ):
                     if event["type"] == "status":
                         yield {
                             "event": "status",
-                            "data": json.dumps({"message": event["message"]}, ensure_ascii=False)
+                            "data": json.dumps(
+                                {"message": event["message"]}, ensure_ascii=False
+                            ),
                         }
                     elif event["type"] == "tool_start":
                         yield {
                             "event": "tool_start",
-                            "data": json.dumps({"tool": event["tool"]}, ensure_ascii=False)
+                            "data": json.dumps(
+                                {"tool": event["tool"]}, ensure_ascii=False
+                            ),
                         }
                     elif event["type"] == "tool_result":
                         yield {
                             "event": "tool_result",
-                            "data": json.dumps({
-                                "tool": event["tool"],
-                                "success": event["success"],
-                                "message": event["message"]
-                            }, ensure_ascii=False)
+                            "data": json.dumps(
+                                {
+                                    "tool": event["tool"],
+                                    "success": event["success"],
+                                    "message": event["message"],
+                                },
+                                ensure_ascii=False,
+                            ),
                         }
                     elif event["type"] == "answer_chunk":
                         yield {
                             "event": "message",
-                            "data": json.dumps({"delta": event["content"]}, ensure_ascii=False)
+                            "data": json.dumps(
+                                {"delta": event["content"]}, ensure_ascii=False
+                            ),
                         }
                     elif event["type"] == "metadata":
                         meta_payload = {
-                            "tool_calls": [tc.to_dict() for tc in event["data"]["tool_calls"]],
+                            "tool_calls": [
+                                tc.to_dict() for tc in event["data"]["tool_calls"]
+                            ],
                             "verified": event["data"]["verified"],
-                            "data_sources": event["data"]["data_sources"]
+                            "data_sources": event["data"]["data_sources"],
                         }
                         yield {
                             "event": "meta",
-                            "data": json.dumps(meta_payload, ensure_ascii=False)
+                            "data": json.dumps(meta_payload, ensure_ascii=False),
                         }
 
                 yield {"event": "done", "data": "[DONE]"}
             except Exception as e:
                 logger.error(f"[Coach Legacy Streaming Error] {e}")
                 import traceback
+
                 logger.error(traceback.format_exc())
                 yield {
                     "event": "error",
-                    "data": json.dumps({"error": str(e)}, ensure_ascii=False)
+                    "data": json.dumps({"error": str(e)}, ensure_ascii=False),
                 }
 
         return EventSourceResponse(

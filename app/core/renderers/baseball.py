@@ -247,7 +247,7 @@ def render_pitching_season(
     detailed = []
     if strikeouts:
         detailed.append(f"{strikeouts}을 기록했습니다.")
-    
+
     # New metrics
     k9 = _format_float(extra_stats.get("k_per_nine"), 2)
     bb9 = _format_float(extra_stats.get("bb_per_nine"), 2)
@@ -272,7 +272,6 @@ def render_pitching_season(
         if era_pct not in NUMBER_SENTINELS:
             advanced.append(f"ERA 백분위는 상위 {era_pct}%입니다.")
     detailed_section = _detailed_lines(detailed + advanced)
-
 
     meta = make_meta(
         row,
@@ -401,7 +400,10 @@ def render_batting_season(
             "avg": avg_val,
             "iso": kbo_metrics.iso(hits, doubles, triples, hr, ab) or 0.0,
             "babip": kbo_metrics.babip(hits, hr, ab, sf, k, 0) or 0.0,
-            "xr": kbo_metrics.xr(hits, doubles, triples, hr, bb, ibb, hbp, ab, sf, sb, 0) or 0.0,
+            "xr": kbo_metrics.xr(
+                hits, doubles, triples, hr, bb, ibb, hbp, ab, sf, sb, 0
+            )
+            or 0.0,
             "home_runs": hr,
             "rbi": rbi_val,
             "steals": sb,
@@ -426,7 +428,7 @@ def render_batting_season(
         detailed.append(f"출루율은 {obp}입니다.")
     if slg:
         detailed.append(f"장타율은 {slg}입니다.")
-    
+
     # New metrics
     iso = _format_float(extra_stats.get("iso"), 3)
     babip = _format_float(extra_stats.get("babip"), 3)
