@@ -10,7 +10,7 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 VISION_MODEL = os.getenv("VISION_MODEL", "openrouter/free")
 
 
-async def test_vision():
+async def _test_vision():
     print(f"Testing Vision Model: {VISION_MODEL}")
 
     # Simple 1x1 black pixel image in base64
@@ -56,7 +56,12 @@ async def test_vision():
             print(f"Request failed: {e}")
 
 
+def test_vision():
+    import asyncio
+    asyncio.run(_test_vision())
+
+
 if __name__ == "__main__":
     import asyncio
 
-    asyncio.run(test_vision())
+    asyncio.run(_test_vision())

@@ -399,7 +399,7 @@ def render_batting_season(
             "slg": float(row.get("slg") or 0.0),
             "avg": avg_val,
             "iso": kbo_metrics.iso(hits, doubles, triples, hr, ab) or 0.0,
-            "babip": kbo_metrics.babip(hits, hr, ab, sf, k, 0) or 0.0,
+            "babip": kbo_metrics.babip(hits, ab, hr, k, sf) or 0.0,
             "xr": kbo_metrics.xr(
                 hits, doubles, triples, hr, bb, ibb, hbp, ab, sf, sb, 0
             )
