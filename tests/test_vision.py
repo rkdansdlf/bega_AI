@@ -58,6 +58,7 @@ async def _test_vision():
 
 def test_vision():
     import asyncio
+
     asyncio.run(_test_vision())
 
 

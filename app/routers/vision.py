@@ -19,6 +19,9 @@ class TicketInfo(BaseModel):
     section: Optional[str] = None
     row: Optional[str] = None
     seat: Optional[str] = None
+    peopleCount: Optional[int] = None
+    price: Optional[int] = None
+    reservationNumber: Optional[str] = None
 
 
 @router.post("/ticket", response_model=TicketInfo)
@@ -44,6 +47,9 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
         - section (Block/Zone name)
         - row
         - seat (Seat number)
+        - peopleCount (Number of people/tickets in this booking, e.g., '2매' -> 2)
+        - price (Price per ticket/person, integer value)
+        - reservationNumber (Booking/Reservation number, usually a long string of numbers)
 
         If any field is missing or illegible, set it to null.
         Return ONLY the JSON object, no markdown formatting.
