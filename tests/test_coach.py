@@ -77,7 +77,7 @@ class TestCoachValidator:
             "coach_note": "선발 로테이션 재정비가 시급합니다."
         }"""
 
-        response = parse_coach_response(raw)
+        response, error = parse_coach_response(raw)
         assert response is not None
         assert response.headline == "KIA 타이거즈 선발진 안정화 필요"
         assert response.sentiment == "negative"
@@ -91,8 +91,10 @@ class TestCoachValidator:
         from app.core.coach_validator import parse_coach_response
 
         raw = "이것은 JSON이 아닙니다."
-        response = parse_coach_response(raw)
+        raw = "이것은 JSON이 아닙니다."
+        response, error = parse_coach_response(raw)
         assert response is None
+        assert error is not None
 
     def test_validate_coach_response_warnings(self):
         """Coach 응답 검증 경고 테스트"""
@@ -234,93 +236,97 @@ class TestTTLCache:
 class TestToolCallerParallel:
     """병렬 도구 실행 테스트"""
 
-    @pytest.mark.asyncio
-    async def test_execute_multiple_tools_parallel(self):
+    def test_execute_multiple_tools_parallel(self):
         """
         병렬 도구 실행 테스트
 
         [P3 Fix] 시간 기반 검증 대신 Mock 기반 동시성 검증으로 수정.
         두 도구가 거의 동시에 시작되었는지 확인하여 CI 환경에서도 안정적으로 통과.
         """
-        import time
-        import threading
-        from app.agents.tool_caller import ToolCaller, ToolCall, ToolResult
+        async def _async_test():
+            import time
+            import threading
+            from app.agents.tool_caller import ToolCaller, ToolCall, ToolResult
+    
+            caller = ToolCaller()
+            call_times = []
+            call_lock = threading.Lock()
+    
+            # 시작 시간을 기록하는 추적 도구
+            def tracking_tool_1(param1: str) -> dict:
+                with call_lock:
+                    call_times.append(("tool_1", time.time()))
+                time.sleep(0.1)  # 작업 시뮬레이션
+                return {"result": f"tool1: {param1}"}
+    
+            def tracking_tool_2(param2: str) -> dict:
+                with call_lock:
+                    call_times.append(("tool_2", time.time()))
+                time.sleep(0.1)  # 작업 시뮬레이션
+                return {"result": f"tool2: {param2}"}
+    
+            caller.register_tool(
+                "tracking_tool_1",
+                "Tracking tool 1",
+                {"param1": "Parameter 1"},
+                tracking_tool_1,
+            )
+            caller.register_tool(
+                "tracking_tool_2",
+                "Tracking tool 2",
+                {"param2": "Parameter 2"},
+                tracking_tool_2,
+            )
+    
+            # 병렬 실행
+            tool_calls = [
+                ToolCall("tracking_tool_1", {"param1": "test1"}),
+                ToolCall("tracking_tool_2", {"param2": "test2"}),
+            ]
+    
+            results = await caller.execute_multiple_tools_parallel(tool_calls)
+    
+            # 검증: 두 도구 모두 호출됨
+            assert len(call_times) == 2
+            assert len(results) == 2
+            assert all(r.success for r in results)
+    
+            # [P3 Fix] 동시성 검증: 두 도구가 거의 동시에 시작되었는지 확인
+            # 순차 실행이면 0.1초 이상 차이, 병렬이면 0.05초 이내
+            time_diff = abs(call_times[0][1] - call_times[1][1])
+            assert (
+                time_diff < 0.05
+            ), f"Tools not started concurrently: {time_diff:.3f}s apart"
+        
+        asyncio.run(_async_test())
 
-        caller = ToolCaller()
-        call_times = []
-        call_lock = threading.Lock()
-
-        # 시작 시간을 기록하는 추적 도구
-        def tracking_tool_1(param1: str) -> dict:
-            with call_lock:
-                call_times.append(("tool_1", time.time()))
-            time.sleep(0.1)  # 작업 시뮬레이션
-            return {"result": f"tool1: {param1}"}
-
-        def tracking_tool_2(param2: str) -> dict:
-            with call_lock:
-                call_times.append(("tool_2", time.time()))
-            time.sleep(0.1)  # 작업 시뮬레이션
-            return {"result": f"tool2: {param2}"}
-
-        caller.register_tool(
-            "tracking_tool_1",
-            "Tracking tool 1",
-            {"param1": "Parameter 1"},
-            tracking_tool_1,
-        )
-        caller.register_tool(
-            "tracking_tool_2",
-            "Tracking tool 2",
-            {"param2": "Parameter 2"},
-            tracking_tool_2,
-        )
-
-        # 병렬 실행
-        tool_calls = [
-            ToolCall("tracking_tool_1", {"param1": "test1"}),
-            ToolCall("tracking_tool_2", {"param2": "test2"}),
-        ]
-
-        results = await caller.execute_multiple_tools_parallel(tool_calls)
-
-        # 검증: 두 도구 모두 호출됨
-        assert len(call_times) == 2
-        assert len(results) == 2
-        assert all(r.success for r in results)
-
-        # [P3 Fix] 동시성 검증: 두 도구가 거의 동시에 시작되었는지 확인
-        # 순차 실행이면 0.1초 이상 차이, 병렬이면 0.05초 이내
-        time_diff = abs(call_times[0][1] - call_times[1][1])
-        assert (
-            time_diff < 0.05
-        ), f"Tools not started concurrently: {time_diff:.3f}s apart"
-
-    @pytest.mark.asyncio
-    async def test_parallel_execution_with_failure(self):
+    def test_parallel_execution_with_failure(self):
         """병렬 실행 중 일부 실패 처리 테스트"""
-        from app.agents.tool_caller import ToolCaller, ToolCall
-
-        caller = ToolCaller()
-
-        def success_tool() -> dict:
-            return {"status": "ok"}
-
-        def fail_tool() -> dict:
-            raise ValueError("Intentional failure")
-
-        caller.register_tool("success_tool", "Success", {}, success_tool)
-        caller.register_tool("fail_tool", "Fail", {}, fail_tool)
-
-        tool_calls = [
-            ToolCall("success_tool", {}),
-            ToolCall("fail_tool", {}),
-        ]
-
-        results = await caller.execute_multiple_tools_parallel(tool_calls)
-
-        assert results[0].success is True
-        assert results[1].success is False
+        async def _async_test():
+            from app.agents.tool_caller import ToolCaller, ToolCall
+    
+            caller = ToolCaller()
+    
+            def success_tool() -> dict:
+                return {"status": "ok"}
+    
+            def fail_tool() -> dict:
+                raise ValueError("Intentional failure")
+    
+            caller.register_tool("success_tool", "Success", {}, success_tool)
+            caller.register_tool("fail_tool", "Fail", {}, fail_tool)
+    
+            tool_calls = [
+                ToolCall("success_tool", {}),
+                ToolCall("fail_tool", {}),
+            ]
+    
+            results = await caller.execute_multiple_tools_parallel(tool_calls)
+    
+            assert results[0].success is True
+            assert results[1].success is False
+            
+        asyncio.run(_async_test())
 
 
 # ============================================================

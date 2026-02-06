@@ -488,6 +488,44 @@ def k_minus_bb_pct(K: int, BB: int, PA: int) -> Optional[float]:
     return 100.0 * (Kp - BBp)
 
 
+def k_bb_ratio(K: int, BB: int) -> Optional[float]:
+    """삼진/볼넷 비율 (K/BB)"""
+    if BB == 0:
+        return None  # Or K if we want to handle infinity, but None is safer for strict calc
+    return K / BB
+
+
+def xr(
+    H: int,
+    _2B: int,
+    _3B: int,
+    HR: int,
+    BB: int,
+    IBB: int,
+    HBP: int,
+    AB: int,
+    SF: int,
+    SB: int,
+    CS: int,
+) -> float:
+    """XR (Extrapolated Runs) Basic Version"""
+    _1B = H - _2B - _3B - HR
+    # Basic XR derivation
+    val = (
+        0.50 * _1B
+        + 0.72 * _2B
+        + 1.04 * _3B
+        + 1.44 * HR
+        + 0.34 * (BB + HBP - IBB)
+        + 0.25 * IBB
+        + 0.18 * SB
+        - 0.32 * CS
+        - 0.09 * (AB - H)  # Outs (ignoring K split)
+        + 0.37 * SF
+    )
+    return val
+
+
 def ops_plus(OBP: float, SLG: float, ctx: LeagueContext) -> Optional[float]:
     """
     Simplified OPS+: 100 * ( (OBP/lgOBP + SLG/lgSLG - 1) / park_factor )

@@ -93,16 +93,14 @@ def _build_coach_query(team_name: str, focus: List[str]) -> str:
     if "bullpen" in focus:
         query += " 불펜진의 하이 레버리지 상황 처리 능력과 과부하 지표를 분석해줘."
 
-    # [P2-2 Fix] recent_form 데이터 소스 미구현 - 환각 방지를 위해 비활성화
-    # TODO: get_team_recent_form 구현 후 재활성화
-    # if "recent_form" in focus or not focus:
-    #     query += " 최근 5~10경기 승패 패턴과 득실점 효율성(Pythagorean Win %)을 포함해줘."
+    if "recent_form" in focus or not focus:
+        query += " 최근 10경기 승패 트렌드와 득실점 마진을 보고 팀의 상승세/하락세를 진단해줘."
 
     if "starter" in focus:
         query += " 선발 로테이션의 이닝 소화력과 QS 비율, 구속 변화를 분석해줘."
 
     if "matchup" in focus:
-        query += " 리그 내 특정 라이벌 팀들과의 상성 패턴을 분석해줘."
+        query += " 주요 라이벌 팀들과의 상대 전적(승률, 득실 등)을 비교 분석해줘."
 
     return query
 
@@ -132,10 +130,39 @@ async def _execute_coach_tools_parallel(
             db_query = DatabaseQueryTool(conn)
             return db_query.get_team_advanced_metrics(team_code, year)
 
+    def get_team_recent_form_sync():
+        """별도 connection으로 최근 성적 조회"""
+        with pool.connection() as conn:
+            db_query = DatabaseQueryTool(conn)
+            # recent_form이 focus에 있거나 focus가 없으면 기본 조회
+            if "recent_form" in focus or not focus:
+                return db_query.get_team_recent_form(team_name, year)
+            return {}
+
+    def get_team_matchup_stats_sync():
+        """별도 connection으로 상대 전적 조회"""
+        with pool.connection() as conn:
+            db_query = DatabaseQueryTool(conn)
+            if "matchup" in focus:
+                return db_query.get_team_matchup_stats(team_name, year)
+            return {}
+
+    # 팀 이름이 필요하므로 먼저 코드로 이름을 변환하거나, 쿼리 도구 내부에서 처리하도록 해야 함.
+    # DatabaseQueryTool의 메서드들은 team_name(str)을 인자로 받으므로, team_code가 아닌 team_name을 넘겨야 함.
+    # 하지만 현재 함수 인자는 team_code임.
+    # _execute_coach_tools_parallel 의 인자로 team_code가 들어오지만,
+    # DatabaseQueryTool.get_team_summary 등은 team_name을 받음 (내부에서 get_team_code 호출).
+    # 따라서 team_code를 그대로 넘겨도 get_team_code가 처리해줄 것임.
+    # (DatabaseQueryTool.get_team_code는 입력값을 그대로 반환하거나 매핑된 값을 반환)
+    # 안전을 위해 team_name 변수를 정의
+    team_name = team_code # DatabaseQueryTool handles code/name flexible
+
     # 병렬 실행 (각각 별도 connection 사용)
     tasks = [
         loop.run_in_executor(None, get_team_summary_sync),
         loop.run_in_executor(None, get_team_advanced_metrics_sync),
+        loop.run_in_executor(None, get_team_recent_form_sync),
+        loop.run_in_executor(None, get_team_matchup_stats_sync),
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -149,6 +176,16 @@ async def _execute_coach_tools_parallel(
             results[1]
             if not isinstance(results[1], Exception)
             else {"error": str(results[1])}
+        ),
+        "recent_form": (
+            results[2]
+            if not isinstance(results[2], Exception)
+            else {"error": str(results[2])}
+        ),
+        "matchup_stats": (
+            results[3]
+            if not isinstance(results[3], Exception)
+            else {"error": str(results[3])}
         ),
     }
 
@@ -367,7 +404,44 @@ def _format_coach_context(
             parts.append(f"- 리그 평균 불펜 비중: {league_avg['bullpen_share']}")
         parts.append("")
 
-    return "\n".join(parts)
+    return "\n".join(parts) + _format_extended_context(tool_results)
+
+
+def _format_extended_context(tool_results: Dict[str, Any]) -> str:
+    """추가된 데이터(최근 성적, 상대 전적)를 포맷팅합니다."""
+    parts = []
+    
+    # 6. 최근 경기 성적 (New)
+    recent = tool_results.get("recent_form", {})
+    if recent.get("found"):
+        parts.append("### 최근 10경기 성적")
+        summary = recent.get("summary", {})
+        parts.append(f"- **전적**: {summary.get('wins')}승 {summary.get('losses')}패 {summary.get('draws')}무 (승률 {summary.get('win_rate')})")
+        parts.append(f"- **득실마진**: {summary.get('run_diff'):+d}점")
+        
+        parts.append("| 날짜 | 상대 | 결과 | 스코어 | 득실 |")
+        parts.append("|------|------|------|--------|------|")
+        for g in recent.get("games", [])[:5]: # 최근 5경기만 상세 표시
+            parts.append(f"| {g['date']} | {g['opponent']} | {g['result']} | {g['score']} | {g['run_diff']:+d} |")
+        parts.append("")
+
+    # 7. 상대 전적 (New)
+    matchup = tool_results.get("matchup_stats", {})
+    if matchup.get("found"):
+        parts.append("### 주요 상대 전적 (승률순)")
+        parts.append("| 상대팀 | 경기수 | 승 | 패 | 무 | 승률 |")
+        parts.append("|--------|--------|----|----|----|------|")
+        
+        # 승률 높은 순 3팀, 낮은 순 3팀 표시 or 전체 표시
+        # 여기서는 상위/하위 3개씩 보여주는 대신 전체 리스트 중 승률 순 정렬된거 상위 5개만 예시로
+        matchups = matchup.get("matchups", {})
+        sorted_opps = sorted(matchups.items(), key=lambda x: x[1]['win_rate'], reverse=True)
+        
+        for opp_name, data in sorted_opps:
+             parts.append(f"| {opp_name} | {data['games']} | {data['wins']} | {data['losses']} | {data['draws']} | {data['win_rate']:.3f} |")
+        parts.append("")
+
+    return "\n" + "\n".join(parts)
 
 
 class AnalyzeRequest(BaseModel):
@@ -418,12 +492,13 @@ async def analyze_team(
         year = target_year
 
         # Cache Key 생성
-        # Key 구성: team_id + year + focus(sorted) + query_override(optional) + model_version
+        # Key 구성: team_id + year + focus(sorted) + query_override(optional) + game_id(optional) + model_version
         cache_components = [
             payload.team_id,
             str(year),
             ",".join(sorted(payload.focus)),
             payload.question_override or "",
+            payload.game_id or "",
             "v3_prompt",  # 프롬프트 버전 (변경 시 업데이트 필요)
         ]
         cache_key = hashlib.sha256("|".join(cache_components).encode()).hexdigest()
@@ -460,6 +535,9 @@ async def analyze_team(
                 # ============================================================
                 # Atomic upsert: INSERT or get existing row in single query
                 # This prevents race conditions where two requests both see "no cache"
+                # 캐시 TTL 설정 (48시간)
+                CACHE_TTL_HOURS = 48
+
                 cached_data = None
                 should_compute = False
                 with pool.connection() as conn:
@@ -469,17 +547,32 @@ async def analyze_team(
                         VALUES (%s, %s, %s, %s, %s, 'PENDING')
                         ON CONFLICT (cache_key) DO UPDATE
                             SET cache_key = coach_analysis_cache.cache_key  -- no-op update to trigger RETURNING
-                        RETURNING status, response_json, (xmax = 0) AS inserted
+                        RETURNING status, response_json, (xmax = 0) AS inserted,
+                                  (updated_at > now() - interval '48 hours') AS is_valid
                         """,
                         (cache_key, payload.team_id, year, "v3_prompt", "solar-pro-3"),
                     ).fetchone()
                     conn.commit()
 
                     if row:
-                        status, cached_json, was_inserted = row
-                        if status == "COMPLETED" and cached_json:
+                        status, cached_json, was_inserted, is_valid = row
+                        if status == "COMPLETED" and cached_json and is_valid:
+                            # 48시간 이내 유효한 캐시
                             cached_data = cached_json
                             logger.info("[Coach] Cache HIT for %s", cache_key)
+                        elif status == "COMPLETED" and cached_json and not is_valid:
+                            # 캐시 만료 - PENDING으로 변경 후 재계산
+                            conn.execute(
+                                "UPDATE coach_analysis_cache SET status = 'PENDING', updated_at = now() WHERE cache_key = %s",
+                                (cache_key,),
+                            )
+                            conn.commit()
+                            should_compute = True
+                            logger.info(
+                                "[Coach] Cache EXPIRED (>%dh), recomputing for %s",
+                                CACHE_TTL_HOURS,
+                                cache_key,
+                            )
                         elif was_inserted:
                             # We successfully inserted PENDING - we should compute
                             should_compute = True
@@ -594,6 +687,23 @@ async def analyze_team(
                 game_context = (
                     payload.question_override if payload.question_override else None
                 )
+                
+                # game_id가 있으면 경기 세부 정보 가져오기
+                if payload.game_id:
+                    with pool.connection() as conn:
+                        db_query = DatabaseQueryTool(conn)
+                        game_info = db_query.get_game_info(payload.game_id)
+                        if game_info.get("found"):
+                            game_summary_text = f"{game_info['date']} {game_info['home_team_name']} vs {game_info['away_team_name']} (@{game_info['stadium']})"
+                            if game_info.get("home_score") is not None:
+                                game_summary_text += f" [스코어 {game_info['home_score']}:{game_info['away_score']}]"
+                            
+                            # 만약 기존 game_context(question_override)가 있다면 병합, 없으면 생성
+                            if game_context:
+                                game_context = f"{game_summary_text}\n(사용자 질문: {game_context})"
+                            else:
+                                game_context = game_summary_text
+
                 context = _format_coach_context(
                     tool_results, payload.focus, game_context
                 )
@@ -747,7 +857,7 @@ async def analyze_team(
                 }
 
                 # [P2 Fix] 응답 완료 후 JSON 파싱 시도
-                parsed_response = parse_coach_response(full_response)
+                parsed_response, parse_error = parse_coach_response(full_response)
 
                 # [Cache Update] 결과 저장 or 실패 처리
                 with pool.connection() as conn:
@@ -772,9 +882,10 @@ async def analyze_team(
                         )
                     else:
                         # 파싱 실패 - 캐시를 FAILED로 마킹 (재요청 시 재시도하도록)
+                        error_reason = parse_error or "Validation failed"
                         conn.execute(
                             "UPDATE coach_analysis_cache SET status = 'FAILED', error_message = %s, updated_at = now() WHERE cache_key = %s",
-                            ("Validation failed", cache_key),
+                            (error_reason, cache_key),
                         )
                         conn.commit()
 

@@ -216,7 +216,9 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
     return None
 
 
-def parse_coach_response(raw_response: str) -> Optional[CoachResponse]:
+from typing import List, Literal, Optional, Union, Tuple
+
+def parse_coach_response(raw_response: str) -> Tuple[Optional[CoachResponse], Optional[str]]:
     """
     LLM 응답을 파싱하여 CoachResponse 객체로 변환합니다.
 
@@ -227,8 +229,7 @@ def parse_coach_response(raw_response: str) -> Optional[CoachResponse]:
         CoachResponse 객체. 파싱 실패 시 None 반환 (캐시 FAILED 처리용).
     """
     if not raw_response or not raw_response.strip():
-        logger.warning("[CoachValidator] Empty response received")
-        return None
+        return None, "Empty response"
 
     try:
         # JSON 추출
@@ -248,27 +249,31 @@ def parse_coach_response(raw_response: str) -> Optional[CoachResponse]:
             # 다시 시도
             try:
                 data = json.loads(temp_json)
-                return CoachResponse(**data)
-            except:
+                return CoachResponse(**data), None
+            except Exception as e:
+                logger.warning(f"Fallback parsing failed: {e}")
                 pass  # 실패하면 원래 로직대로 진행
 
         if not json_str:
-            logger.warning("[CoachValidator] No JSON found in response")
-            return None
+            return None, "No JSON found"
 
         # JSON 파싱
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
             logger.warning(f"[CoachValidator] JSON decode error: {e}")
-            return None
+            return None, f"JSON decode error: {e}"
 
         # Pydantic 검증
-        return CoachResponse(**data)
+        try:
+            return CoachResponse(**data), None
+        except Exception as e:
+            logger.warning(f"[CoachValidator] Pydantic validation error: {e}")
+            return None, f"Validation error: {e}"
 
     except Exception as e:
         logger.error(f"[CoachValidator] Failed to parse coach response: {e}")
-        return None
+        return None, f"Unknown error: {e}"
 
 
 def _create_fallback_response(error_reason: str, original_text: str) -> CoachResponse:
