@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_RETENTION_DAYS = 7
+DEFAULT_RETENTION_DAYS = 14
 
 
 def cleanup_expired_cache(retention_days: int, dry_run: bool = False) -> dict:
@@ -54,7 +54,7 @@ def cleanup_expired_cache(retention_days: int, dry_run: bool = False) -> dict:
             """
             SELECT cache_key, team_id, year, status, updated_at
             FROM coach_analysis_cache
-            WHERE updated_at < now() - interval '%s days'
+            WHERE updated_at < now() - make_interval(days => %s)
             ORDER BY updated_at
             """,
             (retention_days,),
@@ -86,7 +86,7 @@ def cleanup_expired_cache(retention_days: int, dry_run: bool = False) -> dict:
         deleted = conn.execute(
             """
             DELETE FROM coach_analysis_cache
-            WHERE updated_at < now() - interval '%s days'
+            WHERE updated_at < now() - make_interval(days => %s)
             """,
             (retention_days,),
         ).rowcount

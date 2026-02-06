@@ -1827,6 +1827,7 @@ class DatabaseQueryTool:
         finally:
             if "cursor" in locals():
                 cursor.close()
+
     def get_game_info(self, game_id: str) -> Dict[str, Any]:
         """
         특정 경기의 상세 정보(대진, 스코어, 일시, 장소 등)를 조회합니다.
@@ -1860,18 +1861,20 @@ class DatabaseQueryTool:
             row = self.conn.execute(query, (game_id,)).fetchone()
 
             if row:
-                result.update({
-                    "found": True,
-                    "date": row[0].strftime("%Y-%m-%d") if row[0] else None,
-                    "home_team": row[1],
-                    "away_team": row[2],
-                    "home_score": row[3],
-                    "away_score": row[4],
-                    "status": row[5],
-                    "home_team_name": row[6],
-                    "away_team_name": row[7],
-                    "stadium": row[8],
-                })
+                result.update(
+                    {
+                        "found": True,
+                        "date": row[0].strftime("%Y-%m-%d") if row[0] else None,
+                        "home_team": row[1],
+                        "away_team": row[2],
+                        "home_score": row[3],
+                        "away_score": row[4],
+                        "status": row[5],
+                        "home_team_name": row[6],
+                        "away_team_name": row[7],
+                        "stadium": row[8],
+                    }
+                )
 
                 # 2. 선발 투수 정보 조회 (있을 경우)
                 pitcher_query = """
@@ -1903,39 +1906,48 @@ class DatabaseQueryTool:
         except Exception as e:
             logger.error(f"[DatabaseQueryTool] Error fetching game info: {e}")
             return result
-    def get_team_recent_form(self, team_name: str, year: int, limit: int = 10) -> Dict[str, Any]:
+
+    def get_team_recent_form(
+        self, team_name: str, year: int, limit: int = 10
+    ) -> Dict[str, Any]:
         """
         팀의 최근 경기 결과(승패, 득실점)를 조회합니다.
-        
+
         Args:
             team_name: 팀명
             year: 시즌 년도
             limit: 최근 n경기 (기본 10)
-            
+
         Returns:
             최근 경기 결과 요약
         """
         logger.info(f"[DatabaseQuery] Querying recent form for {team_name} in {year}")
-        
+
         # TTL 캐시 확인
         cache_key = f"recent_form:{team_name}:{year}:{limit}"
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
-             return cached_result
+            return cached_result
 
         team_code = self.get_team_code(team_name)
         result = {
             "team_name": self.get_team_name(team_code),
             "year": year,
             "games": [],
-            "summary": {"wins": 0, "losses": 0, "draws": 0, "win_rate": 0.0, "run_diff": 0},
+            "summary": {
+                "wins": 0,
+                "losses": 0,
+                "draws": 0,
+                "win_rate": 0.0,
+                "run_diff": 0,
+            },
             "found": False,
-            "error": None
+            "error": None,
         }
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
-            
+
             # 최근 경기 조회 (완료된 경기만)
             query = """
                 SELECT 
@@ -1962,35 +1974,42 @@ class DatabaseQueryTool:
                 LIMIT %s
             """
             season_pattern = f"{year}%"
-            
-            cursor.execute(query, (team_code, team_code, team_code, team_code, season_pattern, limit))
+
+            cursor.execute(
+                query,
+                (team_code, team_code, team_code, team_code, season_pattern, limit),
+            )
             games = cursor.fetchall()
-            
+
             if games:
                 wins = 0
                 losses = 0
                 draws = 0
                 total_runs = 0
                 total_allowed = 0
-                
+
                 for g in games:
                     game_data = {
                         "date": g["game_date"].strftime("%Y-%m-%d"),
                         "opponent": g["opponent"],
                         "score": "",
                         "result": "",
-                        "run_diff": 0
+                        "run_diff": 0,
                     }
-                    
-                    my_score = g["home_score"] if g["side"] == "home" else g["away_score"]
-                    opp_score = g["away_score"] if g["side"] == "home" else g["home_score"]
-                    
+
+                    my_score = (
+                        g["home_score"] if g["side"] == "home" else g["away_score"]
+                    )
+                    opp_score = (
+                        g["away_score"] if g["side"] == "home" else g["home_score"]
+                    )
+
                     game_data["score"] = f"{my_score}:{opp_score}"
                     game_data["run_diff"] = my_score - opp_score
-                    
+
                     total_runs += my_score
                     total_allowed += opp_score
-                    
+
                     if g["winning_team"] == team_code:
                         game_data["result"] = "Win"
                         wins += 1
@@ -2000,44 +2019,46 @@ class DatabaseQueryTool:
                     else:
                         game_data["result"] = "Loss"
                         losses += 1
-                        
+
                     result["games"].append(game_data)
-                
+
                 result["summary"]["wins"] = wins
                 result["summary"]["losses"] = losses
                 result["summary"]["draws"] = draws
                 result["summary"]["run_diff"] = total_runs - total_allowed
                 total_games = wins + losses + draws
                 if total_games > 0:
-                    result["summary"]["win_rate"] = round(wins / (wins + losses) if (wins + losses) > 0 else 0, 3)
-                
+                    result["summary"]["win_rate"] = round(
+                        wins / (wins + losses) if (wins + losses) > 0 else 0, 3
+                    )
+
                 result["found"] = True
-                
+
                 _coach_cache.set(cache_key, result)
-            
+
         except Exception as e:
             logger.error(f"[DatabaseQuery] Error querying recent form: {e}")
             result["error"] = str(e)
-            
+
         return result
 
     def get_team_monthly_trend(self, team_name: str, year: int) -> Dict[str, Any]:
         """
         팀의 월별 승률 트렌드를 조회합니다.
-        
+
         Args:
             team_name: 팀명
             year: 시즌 년도
-            
+
         Returns:
             월별 트렌드 데이터
         """
         logger.info(f"[DatabaseQuery] Querying monthly trend for {team_name} in {year}")
-        
+
         cache_key = f"monthly_trend:{team_name}:{year}"
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
-             return cached_result
+            return cached_result
 
         team_code = self.get_team_code(team_name)
         result = {
@@ -2045,12 +2066,12 @@ class DatabaseQueryTool:
             "year": year,
             "monthly_stats": [],
             "found": False,
-            "error": None
+            "error": None,
         }
-        
+
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
-            
+
             # Using EXTRACT(MONTH) for filtering
             query = """
                 SELECT 
@@ -2073,44 +2094,63 @@ class DatabaseQueryTool:
                 ORDER BY month
             """
             season_pattern = f"{year}%"
-            cursor.execute(query, (team_code, team_code, team_code, team_code, team_code, team_code, season_pattern))
+            cursor.execute(
+                query,
+                (
+                    team_code,
+                    team_code,
+                    team_code,
+                    team_code,
+                    team_code,
+                    team_code,
+                    season_pattern,
+                ),
+            )
             rows = cursor.fetchall()
-            
+
             if rows:
                 for row in rows:
                     month_data = dict(row)
                     total_decisions = month_data["wins"] + month_data["losses"]
-                    month_data["win_rate"] = round(month_data["wins"] / total_decisions, 3) if total_decisions > 0 else 0.0
-                    month_data["avg_runs_scored"] = round(float(month_data["avg_runs_scored"]), 1)
-                    month_data["avg_runs_allowed"] = round(float(month_data["avg_runs_allowed"]), 1)
+                    month_data["win_rate"] = (
+                        round(month_data["wins"] / total_decisions, 3)
+                        if total_decisions > 0
+                        else 0.0
+                    )
+                    month_data["avg_runs_scored"] = round(
+                        float(month_data["avg_runs_scored"]), 1
+                    )
+                    month_data["avg_runs_allowed"] = round(
+                        float(month_data["avg_runs_allowed"]), 1
+                    )
                     result["monthly_stats"].append(month_data)
-                
+
                 result["found"] = True
                 _coach_cache.set(cache_key, result)
-                
+
         except Exception as e:
             logger.error(f"[DatabaseQuery] Error querying monthly trend: {e}")
             result["error"] = str(e)
-            
+
         return result
 
     def get_team_matchup_stats(self, team_name: str, year: int) -> Dict[str, Any]:
         """
         특정 팀의 상대 전적을 조회합니다.
-        
+
         Args:
             team_name: 팀명
             year: 시즌 년도
-            
+
         Returns:
             상대 팀별 전적
         """
         logger.info(f"[DatabaseQuery] Querying matchup stats for {team_name} in {year}")
-        
+
         cache_key = f"matchup_stats:{team_name}:{year}"
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
-             return cached_result
+            return cached_result
 
         team_code = self.get_team_code(team_name)
         result = {
@@ -2118,12 +2158,12 @@ class DatabaseQueryTool:
             "year": year,
             "matchups": {},
             "found": False,
-            "error": None
+            "error": None,
         }
-        
+
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
-            
+
             query = """
                 SELECT 
                     CASE 
@@ -2144,22 +2184,27 @@ class DatabaseQueryTool:
                 ORDER BY wins DESC
             """
             season_pattern = f"{year}%"
-            cursor.execute(query, (team_code, team_code, team_code, team_code, team_code, season_pattern))
+            cursor.execute(
+                query,
+                (team_code, team_code, team_code, team_code, team_code, season_pattern),
+            )
             rows = cursor.fetchall()
-            
+
             if rows:
                 for row in rows:
                     opp = row["opponent"]
                     data = dict(row)
                     total = data["wins"] + data["losses"]
-                    data["win_rate"] = round(data["wins"] / total, 3) if total > 0 else 0.0
+                    data["win_rate"] = (
+                        round(data["wins"] / total, 3) if total > 0 else 0.0
+                    )
                     result["matchups"][opp] = data
-                
+
                 result["found"] = True
                 _coach_cache.set(cache_key, result)
-        
+
         except Exception as e:
             logger.error(f"[DatabaseQuery] Error querying matchup stats: {e}")
             result["error"] = str(e)
-            
+
         return result

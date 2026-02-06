@@ -106,10 +106,10 @@ class CoachResponse(BaseModel):
     )
     analysis: AnalysisSection = Field(default_factory=AnalysisSection)
     detailed_markdown: str = Field(
-        default="", max_length=10000, description="상세 분석 마크다운 (최대 10000자)"
+        default="", max_length=500, description="상세 분석 마크다운 (최대 500자)"
     )
     coach_note: str = Field(
-        default="", max_length=2000, description="전략적 제언 (최대 2000자)"
+        default="", max_length=120, description="전략적 제언 (최대 120자)"
     )
 
     @field_validator("headline", mode="before")
@@ -140,23 +140,23 @@ class CoachResponse(BaseModel):
     @field_validator("detailed_markdown", mode="before")
     @classmethod
     def truncate_markdown(cls, v: str) -> str:
-        """detailed_markdown 길이 제한"""
+        """detailed_markdown 길이 제한 (프롬프트 규칙: 최대 500자)"""
         if not isinstance(v, str):
             return ""
         v = v.strip()
-        if len(v) > 10000:
-            v = v[:9997] + "..."
+        if len(v) > 500:
+            v = v[:497] + "..."
         return v
 
     @field_validator("coach_note", mode="before")
     @classmethod
     def truncate_coach_note(cls, v: str) -> str:
-        """coach_note 길이 제한"""
+        """coach_note 길이 제한 (프롬프트 규칙: 최대 120자)"""
         if not isinstance(v, str):
             return ""
         v = v.strip()
-        if len(v) > 2000:
-            v = v[:1997] + "..."
+        if len(v) > 120:
+            v = v[:117] + "..."
         return v
 
     @field_validator("key_metrics", mode="before")
@@ -218,7 +218,10 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
 
 from typing import List, Literal, Optional, Union, Tuple
 
-def parse_coach_response(raw_response: str) -> Tuple[Optional[CoachResponse], Optional[str]]:
+
+def parse_coach_response(
+    raw_response: str,
+) -> Tuple[Optional[CoachResponse], Optional[str]]:
     """
     LLM 응답을 파싱하여 CoachResponse 객체로 변환합니다.
 
