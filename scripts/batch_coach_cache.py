@@ -26,6 +26,7 @@ from app.deps import get_connection_pool, get_coach_llm_generator
 from app.tools.database_query import DatabaseQueryTool
 from app.core.prompts import COACH_PROMPT_V2
 from app.core.coach_validator import parse_coach_response
+from app.routers.coach import _remove_duplicate_json_start
 
 # 로깅 설정
 logging.basicConfig(
@@ -259,12 +260,13 @@ async def generate_and_cache_team(pool, team_id: str, year: int) -> dict:
             conn.commit()
         return {"team": team_id, "status": "failed", "reason": f"LLM error: {e}"}
 
-    # 6. 파싱 및 저장
-    parsed = parse_coach_response(full_response)
+    # 6. 중복 JSON 시작 제거 + 파싱 및 저장
+    full_response = _remove_duplicate_json_start(full_response)
+    response, error = parse_coach_response(full_response)
 
     with pool.connection() as conn:
-        if parsed:
-            response_json = json.dumps(parsed.model_dump(), ensure_ascii=False)
+        if response:
+            response_json = json.dumps(response.model_dump(), ensure_ascii=False)
             conn.execute(
                 """
                 UPDATE coach_analysis_cache
@@ -278,20 +280,21 @@ async def generate_and_cache_team(pool, team_id: str, year: int) -> dict:
             return {
                 "team": team_id,
                 "status": "success",
-                "headline": parsed.headline[:50],
+                "headline": response.headline[:50],
             }
         else:
+            error_msg = error or "JSON parsing failed"
             conn.execute(
                 """
                 UPDATE coach_analysis_cache
                 SET status = 'FAILED', error_message = %s, updated_at = now()
                 WHERE cache_key = %s
             """,
-                ("JSON parsing failed", cache_key),
+                (error_msg, cache_key),
             )
             conn.commit()
-            logger.warning(f"[{team_id}] Parsing failed")
-            return {"team": team_id, "status": "failed", "reason": "parsing error"}
+            logger.warning(f"[{team_id}] Parsing failed: {error_msg}")
+            return {"team": team_id, "status": "failed", "reason": error_msg}
 
 
 async def main():

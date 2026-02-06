@@ -155,7 +155,7 @@ async def _execute_coach_tools_parallel(
     # 따라서 team_code를 그대로 넘겨도 get_team_code가 처리해줄 것임.
     # (DatabaseQueryTool.get_team_code는 입력값을 그대로 반환하거나 매핑된 값을 반환)
     # 안전을 위해 team_name 변수를 정의
-    team_name = team_code # DatabaseQueryTool handles code/name flexible
+    team_name = team_code  # DatabaseQueryTool handles code/name flexible
 
     # 병렬 실행 (각각 별도 connection 사용)
     tasks = [
@@ -410,19 +410,23 @@ def _format_coach_context(
 def _format_extended_context(tool_results: Dict[str, Any]) -> str:
     """추가된 데이터(최근 성적, 상대 전적)를 포맷팅합니다."""
     parts = []
-    
+
     # 6. 최근 경기 성적 (New)
     recent = tool_results.get("recent_form", {})
     if recent.get("found"):
         parts.append("### 최근 10경기 성적")
         summary = recent.get("summary", {})
-        parts.append(f"- **전적**: {summary.get('wins')}승 {summary.get('losses')}패 {summary.get('draws')}무 (승률 {summary.get('win_rate')})")
+        parts.append(
+            f"- **전적**: {summary.get('wins')}승 {summary.get('losses')}패 {summary.get('draws')}무 (승률 {summary.get('win_rate')})"
+        )
         parts.append(f"- **득실마진**: {summary.get('run_diff'):+d}점")
-        
+
         parts.append("| 날짜 | 상대 | 결과 | 스코어 | 득실 |")
         parts.append("|------|------|------|--------|------|")
-        for g in recent.get("games", [])[:5]: # 최근 5경기만 상세 표시
-            parts.append(f"| {g['date']} | {g['opponent']} | {g['result']} | {g['score']} | {g['run_diff']:+d} |")
+        for g in recent.get("games", [])[:5]:  # 최근 5경기만 상세 표시
+            parts.append(
+                f"| {g['date']} | {g['opponent']} | {g['result']} | {g['score']} | {g['run_diff']:+d} |"
+            )
         parts.append("")
 
     # 7. 상대 전적 (New)
@@ -431,14 +435,18 @@ def _format_extended_context(tool_results: Dict[str, Any]) -> str:
         parts.append("### 주요 상대 전적 (승률순)")
         parts.append("| 상대팀 | 경기수 | 승 | 패 | 무 | 승률 |")
         parts.append("|--------|--------|----|----|----|------|")
-        
+
         # 승률 높은 순 3팀, 낮은 순 3팀 표시 or 전체 표시
         # 여기서는 상위/하위 3개씩 보여주는 대신 전체 리스트 중 승률 순 정렬된거 상위 5개만 예시로
         matchups = matchup.get("matchups", {})
-        sorted_opps = sorted(matchups.items(), key=lambda x: x[1]['win_rate'], reverse=True)
-        
+        sorted_opps = sorted(
+            matchups.items(), key=lambda x: x[1]["win_rate"], reverse=True
+        )
+
         for opp_name, data in sorted_opps:
-             parts.append(f"| {opp_name} | {data['games']} | {data['wins']} | {data['losses']} | {data['draws']} | {data['win_rate']:.3f} |")
+            parts.append(
+                f"| {opp_name} | {data['games']} | {data['wins']} | {data['losses']} | {data['draws']} | {data['win_rate']:.3f} |"
+            )
         parts.append("")
 
     return "\n" + "\n".join(parts)
@@ -522,7 +530,7 @@ async def analyze_team(
                 yield {
                     "event": "status",
                     "data": json.dumps(
-                        {"message": "팀 데이터를 수집하고 있습니다..."},
+                        {"message": "상대팀 정보 몰래 캐는 중..."},
                         ensure_ascii=False,
                     ),
                 }
@@ -535,8 +543,8 @@ async def analyze_team(
                 # ============================================================
                 # Atomic upsert: INSERT or get existing row in single query
                 # This prevents race conditions where two requests both see "no cache"
-                # 캐시 TTL 설정 (48시간)
-                CACHE_TTL_HOURS = 48
+                # 캐시 TTL 설정 (7일)
+                CACHE_TTL_HOURS = 168
 
                 cached_data = None
                 should_compute = False
@@ -548,7 +556,7 @@ async def analyze_team(
                         ON CONFLICT (cache_key) DO UPDATE
                             SET cache_key = coach_analysis_cache.cache_key  -- no-op update to trigger RETURNING
                         RETURNING status, response_json, (xmax = 0) AS inserted,
-                                  (updated_at > now() - interval '48 hours') AS is_valid
+                                  (updated_at > now() - interval '7 days') AS is_valid
                         """,
                         (cache_key, payload.team_id, year, "v3_prompt", "solar-pro-3"),
                     ).fetchone()
@@ -557,7 +565,7 @@ async def analyze_team(
                     if row:
                         status, cached_json, was_inserted, is_valid = row
                         if status == "COMPLETED" and cached_json and is_valid:
-                            # 48시간 이내 유효한 캐시
+                            # 7일 이내 유효한 캐시
                             cached_data = cached_json
                             logger.info("[Coach] Cache HIT for %s", cache_key)
                         elif status == "COMPLETED" and cached_json and not is_valid:
@@ -679,7 +687,7 @@ async def analyze_team(
                 yield {
                     "event": "status",
                     "data": json.dumps(
-                        {"message": "데이터를 분석하고 있습니다..."}, ensure_ascii=False
+                        {"message": "숫자들이랑 씨름하는 중..."}, ensure_ascii=False
                     ),
                 }
 
@@ -687,7 +695,7 @@ async def analyze_team(
                 game_context = (
                     payload.question_override if payload.question_override else None
                 )
-                
+
                 # game_id가 있으면 경기 세부 정보 가져오기
                 if payload.game_id:
                     with pool.connection() as conn:
@@ -697,7 +705,7 @@ async def analyze_team(
                             game_summary_text = f"{game_info['date']} {game_info['home_team_name']} vs {game_info['away_team_name']} (@{game_info['stadium']})"
                             if game_info.get("home_score") is not None:
                                 game_summary_text += f" [스코어 {game_info['home_score']}:{game_info['away_score']}]"
-                            
+
                             # 만약 기존 game_context(question_override)가 있다면 병합, 없으면 생성
                             if game_context:
                                 game_context = f"{game_summary_text}\n(사용자 질문: {game_context})"
@@ -785,7 +793,8 @@ async def analyze_team(
                 yield {
                     "event": "status",
                     "data": json.dumps(
-                        {"message": "AI 코치가 분석 중입니다..."}, ensure_ascii=False
+                        {"message": "AI 코치가 작전판에 열심히 낙서 중..."},
+                        ensure_ascii=False,
                     ),
                 }
 
