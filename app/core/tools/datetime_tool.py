@@ -2,9 +2,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, Any
 
+
 def get_current_datetime() -> Dict[str, Any]:
     """현재 날짜와 시간을 반환합니다 (한국 시간 기준)"""
-    kst = ZoneInfo('Asia/Seoul')
+    kst = ZoneInfo("Asia/Seoul")
     now = datetime.now(kst)
 
     return {
@@ -16,12 +17,13 @@ def get_current_datetime() -> Dict[str, Any]:
         "month": now.month,
         "day": now.day,
         "hour": now.hour,
-        "minute": now.minute
+        "minute": now.minute,
     }
+
 
 def get_baseball_season_info() -> Dict[str, Any]:
     """현재 야구 시즌 정보를 반환합니다"""
-    kst = ZoneInfo('Asia/Seoul')
+    kst = ZoneInfo("Asia/Seoul")
     now = datetime.now(kst)
 
     # KBO 시즌은 보통 3월~10월
@@ -35,6 +37,5 @@ def get_baseball_season_info() -> Dict[str, Any]:
     return {
         "current_year": now.year,
         "season_status": season_status,
-        "is_season_active": 3 <= now.month <= 10
+        "is_season_active": 3 <= now.month <= 10,
     }
-

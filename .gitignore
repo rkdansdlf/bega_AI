@@ -2,11 +2,25 @@
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
 .env
 .env.*
+!.env.example
 venv/
 .venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Firebase
+firebase-service-account.json
+*-service-account.json
+
+# Migration
+scripts/migration_progress.json
+
+.migration.log
+migration.log
+server_log.txt
+*.txt
