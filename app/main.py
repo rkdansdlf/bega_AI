@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .deps import lifespan
-from .routers import chat_stream, search, ingest
+from .routers import chat_stream, search, ingest, vision, coach, moderation
 
 
 def create_app() -> FastAPI:
@@ -19,7 +19,17 @@ def create_app() -> FastAPI:
         구성된 FastAPI 애플리케이션 인스턴스.
     """
     settings = get_settings()  # 애플리케이션 설정 로드
-    
+
+    # Sentry Init
+    import sentry_sdk
+
+    if settings.sentry_dsn:
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            traces_sample_rate=1.0,
+            profiles_sample_rate=1.0,
+        )
+
     # FastAPI 앱 인스턴스 생성 및 기본 설정
     app = FastAPI(
         title=settings.app_name,
@@ -42,6 +52,9 @@ def create_app() -> FastAPI:
     app.include_router(chat_stream.router)
     app.include_router(search.router)
     app.include_router(ingest.router)
+    app.include_router(vision.router)
+    app.include_router(coach.router)
+    app.include_router(moderation.router)
 
     @app.get("/health", tags=["system"])
     async def health():
@@ -49,3 +62,11 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     return app
+
+
+from .core.logging_config import configure_logging
+
+# 로깅 설정 초기화
+configure_logging()
+
+app = create_app()

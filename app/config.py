@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     환경 변수나 .env 파일로부터 설정을 로드하며, 각 설정에 대한 타입 힌트와
     기본값, 유효성 검사를 제공합니다.
     """
+
     # Pydantic 모델 설정: .env 파일 사용, 추가 필드 무시 등
     model_config = SettingsConfigDict(
         extra="ignore",
@@ -29,46 +30,95 @@ class Settings(BaseSettings):
     debug: bool = False
     cors_origins: List[str] = Field(default_factory=lambda: ["*"])
 
-    # --- 데이터베이스 설정 (Supabase/Postgres) ---
-    supabase_db_url: str = Field(..., env="SUPABASE_DB_URL")
+    # --- 데이터베이스 설정 (OCI/Postgres) ---
+    oci_db_url: str = Field(..., validation_alias="OCI_DB_URL")
+    supabase_db_url: Optional[str] = Field(None, validation_alias="SUPABASE_DB_URL")
 
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
-    llm_provider: str = Field("gemini", env="LLM_PROVIDER")
-    embed_provider: str = Field("gemini", env="EMBED_PROVIDER")
-    embed_model: str = Field("", env="EMBED_MODEL") # 특정 모델을 지정할 때 사용
+    llm_provider: str = Field("gemini", validation_alias="LLM_PROVIDER")
+    embed_provider: str = Field("gemini", validation_alias="EMBED_PROVIDER")
+    embed_model: str = Field(
+        "", validation_alias="EMBED_MODEL"
+    )  # 특정 모델을 지정할 때 사용
 
     # --- Google Gemini 설정 ---
-    gemini_api_key: Optional[str] = Field(None, env="GEMINI_API_KEY")
-    gemini_model: str = Field("gemini-2.5-flash", env="GEMINI_MODEL")
-    gemini_embed_model: str = Field("text-embedding-004", env="GEMINI_EMBED_MODEL")
+    gemini_api_key: Optional[str] = Field(None, validation_alias="GEMINI_API_KEY")
+    gemini_model: str = Field("gemini-2.0-flash", validation_alias="GEMINI_MODEL")
+    gemini_embed_model: str = Field("", validation_alias="GEMINI_EMBED_MODEL")
     gemini_base_url: str = Field(
         "https://generativelanguage.googleapis.com/v1beta/openai",
-        env="GEMINI_BASE_URL",
+        validation_alias="GEMINI_BASE_URL",
     )
 
     # --- OpenAI 설정 ---
-    openai_api_key: Optional[str] = Field(None, env="OPENAI_API_KEY")
-    openai_embed_model: str = Field("text-embedding-3-small", env="OPENAI_EMBED_MODEL")
+    openai_api_key: Optional[str] = Field(None, validation_alias="OPENAI_API_KEY")
+    openai_embed_model: str = Field(
+        "text-embedding-3-small", validation_alias="OPENAI_EMBED_MODEL"
+    )
 
     # --- OpenRouter 설정 ---
-    openrouter_api_key: Optional[str] = Field(None, env="OPENROUTER_API_KEY")
-    openrouter_model: str = Field("openai/gpt-4o-mini", env="OPENROUTER_MODEL")
-    openrouter_base_url: str = Field(
-        "https://openrouter.ai/api/v1", env="OPENROUTER_BASE_URL"
+    openrouter_api_key: Optional[str] = Field(
+        None, validation_alias="OPENROUTER_API_KEY"
     )
-    openrouter_referer: Optional[str] = Field(None, env="OPENROUTER_REFERER")
-    openrouter_app_title: Optional[str] = Field(None, env="OPENROUTER_APP_TITLE")
-    openrouter_embed_model: Optional[str] = Field(None, env="OPENROUTER_EMBED_MODEL")
+    openrouter_model: str = Field(
+        "openai/gpt-oss-120b", validation_alias="OPENROUTER_MODEL"
+    )
+    # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
+    # Default: openrouter/free - intelligent router that auto-selects available free models
+    openrouter_fallback_models_raw: str = Field(
+        "openrouter/free", validation_alias="OPENROUTER_FALLBACK_MODELS"
+    )
+
+    @property
+    def openrouter_fallback_models(self) -> List[str]:
+        if not self.openrouter_fallback_models_raw:
+            return []
+        return [
+            m.strip()
+            for m in self.openrouter_fallback_models_raw.split(",")
+            if m.strip()
+        ]
+
+    openrouter_base_url: str = Field(
+        "https://openrouter.ai/api/v1", validation_alias="OPENROUTER_BASE_URL"
+    )
+    openrouter_referer: Optional[str] = Field(
+        None, validation_alias="OPENROUTER_REFERER"
+    )
+    openrouter_app_title: Optional[str] = Field(
+        None, validation_alias="OPENROUTER_APP_TITLE"
+    )
+    openrouter_embed_model: Optional[str] = Field(
+        None, validation_alias="OPENROUTER_EMBED_MODEL"
+    )
+    vision_model: str = Field(
+        "google/gemini-2.0-flash-001", validation_alias="VISION_MODEL"
+    )
+
+    # --- Coach LLM 설정 ---
+    coach_llm_provider: str = Field("openrouter", validation_alias="COACH_LLM_PROVIDER")
+    coach_max_output_tokens: int = Field(
+        2000, validation_alias="COACH_MAX_OUTPUT_TOKENS"
+    )  # 2000 tokens recommended per COACH_PROMPT_V2
+    coach_llm_read_timeout: float = Field(
+        60.0, validation_alias="COACH_LLM_READ_TIMEOUT"
+    )
 
     # --- Function Calling / Chatbot 설정 ---
-    chatbot_model_name: Optional[str] = Field(None, env="CHATBOT_MODEL_NAME")
+    chatbot_model_name: Optional[str] = Field(
+        None, validation_alias="CHATBOT_MODEL_NAME"
+    )
 
     # --- 검색(Retrieval) 관련 설정 ---
-    default_search_limit: int = Field(3, env="DEFAULT_SEARCH_LIMIT")
+    default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
 
     # --- SSE / 채팅 관련 설정 ---
-    max_output_tokens: int = Field(1024, env="MAX_OUTPUT_TOKENS")
+    # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
+    max_output_tokens: int = Field(4096, validation_alias="MAX_OUTPUT_TOKENS")
+
+    # --- Monitoring ---
+    sentry_dsn: Optional[str] = Field(None, validation_alias="SENTRY_DSN")
 
     @field_validator("embed_provider")
     def _validate_embed_provider(cls, value: str) -> str:
@@ -85,7 +135,22 @@ class Settings(BaseSettings):
         """`llm_provider` 필드의 값이 지원되는 프로바이더 중 하나인지 검증합니다."""
         allowed = {"gemini", "openrouter"}
         if value not in allowed:
-            raise ValueError(f"지원되지 않는 LLM_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}")
+            raise ValueError(
+                f"지원되지 않는 LLM_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
+            )
+        return value
+
+    @field_validator("coach_llm_provider")
+    def _validate_coach_llm_provider(cls, value: str) -> str:
+        """`coach_llm_provider` 필드의 값이 지원되는 프로바이더 중 하나인지 검증합니다.
+
+        Note: Coach feature only supports OpenRouter (via openrouter_model setting).
+        """
+        allowed = {"openrouter"}
+        if value not in allowed:
+            raise ValueError(
+                f"지원되지 않는 COACH_LLM_PROVIDER '{value}'입니다. Coach는 OpenRouter만 지원합니다."
+            )
         return value
 
     @property
@@ -96,7 +161,7 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """데이터베이스 연결 URL을 반환합니다."""
-        return self.supabase_db_url
+        return self.oci_db_url
 
     @property
     def function_calling_model(self) -> str:
