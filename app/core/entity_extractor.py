@@ -31,20 +31,23 @@ class EntityFilter:
 
 # KBO 팀명 매핑 테이블 (사용자 입력 → 실제 DB team_id)
 TEAM_MAPPING = {
-    # KIA (DB: HT)
-    "KIA": "HT",
-    "기아": "HT",
-    "타이거즈": "HT",
-    "기아타이거즈": "HT",
+    # KIA (DB: KIA)
+    "KIA": "KIA",
+    "기아": "KIA",
+    "타이거즈": "KIA",
+    "기아타이거즈": "KIA",
+    "HT": "KIA",
     # LG (DB: LG)
     "LG": "LG",
     "엘지": "LG",
     "트윈스": "LG",
     "LG트윈스": "LG",
-    # 두산 (DB: OB)
-    "두산": "OB",
-    "베어스": "OB",
-    "두산베어스": "OB",
+    # 두산 (DB: DB)
+    "두산": "DB",
+    "베어스": "DB",
+    "두산베어스": "DB",
+    "DO": "DB",
+    "OB": "DB",
     # 롯데 (DB: LT)
     "롯데": "LT",
     "자이언츠": "LT",
@@ -55,11 +58,16 @@ TEAM_MAPPING = {
     "라이온즈": "SS",
     "삼성라이온즈": "SS",
     "사자": "SS",
-    # 키움 (DB: WO)
-    "키움": "WO",
-    "히어로즈": "WO",
-    "키움히어로즈": "WO",
-    "영웅": "WO",
+    # 키움 (DB: KH)
+    "키움": "KH",
+    "히어로즈": "KH",
+    "키움 히어로즈": "KH",
+    "영웅": "KH",
+    "넥센": "KH",
+    "넥센히어로즈": "KH",
+    "KI": "KH",
+    "NX": "KH",
+    "WO": "KH",
     # 한화 (DB: HH)
     "한화": "HH",
     "이글스": "HH",
@@ -76,8 +84,9 @@ TEAM_MAPPING = {
     "NC다이노스": "NC",
     "공룡": "NC",
     "엔씨": "NC",
-    # SSG (DB: SSG)
+    # SSG 랜더스 (DB: SSG)
     "SSG": "SSG",
+    "SK": "SSG",
     "랜더스": "SSG",
     "SSG랜더스": "SSG",
     "에스에스지": "SSG",

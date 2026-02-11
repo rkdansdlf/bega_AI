@@ -35,7 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # KBO 10개 팀
-TEAMS = ["KIA", "LG", "SSG", "NC", "두산", "KT", "롯데", "삼성", "한화", "키움"]
+TEAMS = ["KIA", "LG", "SSG", "NC", "DB", "KT", "LT", "SS", "HH", "KH"]
 SEASON_YEAR = 2025
 PROMPT_VERSION = "v3_prompt"
 MODEL_NAME = "solar-pro-3"

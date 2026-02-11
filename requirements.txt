@@ -18,3 +18,4 @@ tenacity
 
 sentry-sdk[fastapi]
 structlog>=24.1.0
+Pillow

@@ -122,16 +122,20 @@ class DatabaseQueryTool:
         self.connection = connection
 
         # 1. NAME_TO_STATS_CODE: 통계 테이블(player_season_stats 등) 조회용
-        # 정규 코드(SS, LT, LG, OB, HT, WO, HH, SSG, NC, KT) 기준
+        # 정규 코드(SS, LT, LG, DB, KIA, KH, HH, SSG, NC, KT) 기준
+        # NOTICE: OCI DB 테이블(player_season_*)이 아직 Legacy Code(HT, OB, WO, SK)를 사용하므로
+        #         쿼리용 코드는 Legacy로 매핑합니다.
         self.NAME_TO_STATS_CODE = {
             "KIA": "HT",
             "기아": "HT",
             "HT": "HT",
             "LG": "LG",
-            "SSG": "SSG",
-            "SK": "SSG",
+            "SSG": "SK",
+            "SK": "SK",
             "NC": "NC",
             "두산": "OB",
+            "DB": "OB",
+            "DO": "OB",
             "OB": "OB",
             "KT": "KT",
             "롯데": "LT",
@@ -141,27 +145,42 @@ class DatabaseQueryTool:
             "한화": "HH",
             "HH": "HH",
             "키움": "WO",
+            "넥센": "WO",
+            "KH": "WO",
+            "KI": "WO",
             "WO": "WO",
+            "NX": "WO",
         }
 
         # 2. NAME_TO_GAME_CODE: 경기/순위 테이블(game 등) 조회용
-        # 정규 코드(SS, LT, LG, OB, HT, WO, HH, SSG, NC, KT) 기준
+        # 정규 코드(SS, LT, LG, DB, KIA, KH, HH, SSG, NC, KT) 기준
+        # NOTICE: game 테이블도 Legacy Code를 사용 중
         self.NAME_TO_GAME_CODE = {
             "KIA": "HT",
             "HT": "HT",
-            "SSG": "SSG",
-            "SK": "SSG",
+            "SSG": "SK",
+            "SK": "SK",
             "키움": "WO",
+            "넥센": "WO",
+            "KH": "WO",
+            "KI": "WO",
             "WO": "WO",
+            "NX": "WO",
+            "두산": "OB",
+            "DB": "OB",
+            "DO": "OB",
+            "OB": "OB",
         }
 
         self.TEAM_CODE_TO_NAME = {
-            "HT": "KIA 타이거즈",
             "KIA": "KIA 타이거즈",
+            "HT": "KIA 타이거즈",
             "LG": "LG 트윈스",
             "SSG": "SSG 랜더스",
             "SK": "SSG 랜더스",
             "NC": "NC 다이노스",
+            "DB": "두산 베어스",
+            "DO": "두산 베어스",
             "OB": "두산 베어스",
             "두산": "두산 베어스",
             "KT": "kt wiz",
@@ -171,8 +190,11 @@ class DatabaseQueryTool:
             "삼성": "삼성 라이온즈",
             "HH": "한화 이글스",
             "한화": "한화 이글스",
+            "KH": "키움 히어로즈",
+            "KI": "키움 히어로즈",
             "WO": "키움 히어로즈",
             "키움": "키움 히어로즈",
+            "NX": "키움 히어로즈",
         }
 
         # DB에서 최신 매핑 로드하여 위 딕셔너리 정밀 업데이트
@@ -307,7 +329,10 @@ class DatabaseQueryTool:
 
     def get_game_team_code(self, team_input: str) -> str:
         """경기/순위 테이블용 코드를 반환합니다"""
-        return self.NAME_TO_GAME_CODE.get(team_input, team_input)
+        code = self.NAME_TO_GAME_CODE.get(team_input)
+        if not code:
+            code = self.NAME_TO_GAME_CODE.get(team_input.upper())
+        return code or team_input
 
     def get_player_career_stats(
         self,
