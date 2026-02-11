@@ -37,16 +37,25 @@ logger = logging.getLogger(__name__)
 
 TEAM_MAP = {
     "KIA": "KIA 타이거즈",
+    "HT": "KIA 타이거즈",
     "기아": "KIA 타이거즈",
     "LG": "LG 트윈스",
+    "DB": "두산 베어스",
+    "DO": "두산 베어스",
+    "OB": "두산 베어스",
     "두산": "두산 베어스",
     "롯데": "롯데 자이언츠",
     "삼성": "삼성 라이온즈",
     "키움": "키움 히어로즈",
+    "KH": "키움 히어로즈",
+    "KI": "키움 히어로즈",
+    "WO": "키움 히어로즈",
+    "NX": "키움 히어로즈",
     "한화": "한화 이글스",
     "KT": "KT 위즈",
     "NC": "NC 다이노스",
     "SSG": "SSG 랜더스",
+    "SK": "SSG 랜더스",
 }
 MIN_IP_SP = 70
 MIN_IP_RP = 30
@@ -1005,7 +1014,7 @@ class RAGPipeline:
         )
 
         # 팀 vs 팀 패턴
-        team_vs_pattern = r"(KIA|기아|LG|두산|롯데|삼성|키움|한화|KT|NC|SSG).*(vs|대|vs\.|대전|맞대결).*(KIA|기아|LG|두산|롯데|삼성|키움|한화|KT|NC|SSG)"
+        team_vs_pattern = r"(KIA|HT|LG|DB|DO|OB|두산|LT|롯데|SS|삼성|KH|KI|WO|NX|키움|HH|한화|KT|NC|SSG|SK).*(vs|대|vs\.|대전|맞대결).*(KIA|HT|LG|DB|DO|OB|두산|LT|롯데|SS|삼성|KH|KI|WO|NX|키움|HH|한화|KT|NC|SSG|SK)"
         has_team_vs_pattern = bool(re.search(team_vs_pattern, query, re.IGNORECASE))
 
         return has_game_keywords or has_date_pattern or has_team_vs_pattern
