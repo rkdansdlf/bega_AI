@@ -358,47 +358,49 @@ class TestCoachFastPath:
         from app.routers.coach import _format_coach_context
 
         tool_results = {
-            "team_summary": {
-                "team_name": "KIA 타이거즈",
-                "year": 2024,
-                "top_batters": [
-                    {
-                        "player_name": "김도영",
-                        "avg": 0.312,
-                        "obp": 0.380,
-                        "slg": 0.520,
-                        "ops": 0.900,
-                        "home_runs": 25,
-                        "rbi": 80,
-                    }
-                ],
-                "top_pitchers": [
-                    {
-                        "player_name": "양현종",
-                        "era": 3.45,
-                        "whip": 1.12,
-                        "wins": 12,
-                        "losses": 5,
-                        "saves": 0,
-                        "innings_pitched": 150.0,
-                    }
-                ],
-                "found": True,
-            },
-            "advanced_metrics": {
-                "team_name": "KIA 타이거즈",
-                "year": 2024,
-                "metrics": {
-                    "batting": {"ops": 0.750, "avg": 0.280},
-                    "pitching": {"avg_era": 4.20, "qs_rate": "45%", "era_rank": "5위"},
+            "home": {
+                "summary": {
+                    "team_name": "KIA 타이거즈",
+                    "year": 2024,
+                    "top_batters": [
+                        {
+                            "player_name": "김도영",
+                            "avg": 0.312,
+                            "obp": 0.380,
+                            "slg": 0.520,
+                            "ops": 0.900,
+                            "home_runs": 25,
+                            "rbi": 80,
+                        }
+                    ],
+                    "top_pitchers": [
+                        {
+                            "player_name": "양현종",
+                            "era": 3.45,
+                            "whip": 1.12,
+                            "wins": 12,
+                            "losses": 5,
+                            "saves": 0,
+                            "innings_pitched": 150.0,
+                        }
+                    ],
+                    "found": True,
                 },
-                "fatigue_index": {
-                    "bullpen_share": "35%",
-                    "bullpen_load_rank": "3위 (높을수록 과부하)",
+                "advanced": {
+                    "team_name": "KIA 타이거즈",
+                    "year": 2024,
+                    "metrics": {
+                        "batting": {"ops": 0.750, "avg": 0.280},
+                        "pitching": {"avg_era": 4.20, "qs_rate": "45%", "era_rank": "5위"},
+                    },
+                    "fatigue_index": {
+                        "bullpen_share": "35%",
+                        "bullpen_load_rank": "3위 (높을수록 과부하)",
+                    },
+                    "league_averages": {"bullpen_share": "30%", "era": 4.00},
+                    "rankings": {"batting_ops": "4위", "batting_avg": "3위"},
                 },
-                "league_averages": {"bullpen_share": "30%", "era": 4.00},
-                "rankings": {"batting_ops": "4위", "batting_avg": "3위"},
-            },
+            }
         }
 
         context = _format_coach_context(tool_results, ["batting", "bullpen"])
@@ -406,9 +408,8 @@ class TestCoachFastPath:
         assert "KIA 타이거즈" in context
         assert "김도영" in context
         assert "양현종" in context
-        assert "불펜 부담 지표" in context
+        assert "불펜 비중" in context
         assert "35%" in context  # 팀 불펜 비중
-        assert "30%" in context  # 리그 평균
 
 
 # ============================================================
