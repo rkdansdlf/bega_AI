@@ -26,7 +26,7 @@ class KeyMetric(BaseModel):
     label: str = Field(..., max_length=30, description="지표명")
     # 문자열로 자동 변환 (LLM이 숫자로 주는 경우 대비)
     value: Annotated[Union[str, int, float], BeforeValidator(str)] = Field(
-        ..., max_length=20, description="수치"
+        ..., max_length=50, description="수치"
     )
     status: Literal["good", "warning", "danger"] = Field(
         default="warning", description="평가 (good/warning/danger)"
