@@ -829,8 +829,8 @@ async def analyze_team(
                 logger.error(f"[Coach Streaming Error] {e}")
                 # Cache fail logic
                 try:
-                    pool = get_connection_pool()
-                    with pool.connection() as conn:
+                    fallback_pool = get_connection_pool()
+                    with fallback_pool.connection() as conn:
                         conn.execute(
                             "UPDATE coach_analysis_cache SET status = 'FAILED', error_message = %s, updated_at = now() WHERE cache_key = %s",
                             (str(e), cache_key),
