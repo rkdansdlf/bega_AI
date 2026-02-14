@@ -918,6 +918,8 @@ async def analyze_team(
             },
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Coach Router] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1028,6 +1030,8 @@ async def analyze_team_legacy(
             },
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Coach Router Legacy] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
