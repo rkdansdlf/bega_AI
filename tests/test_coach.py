@@ -480,7 +480,11 @@ class TestCoachFastPath:
                     "year": 2024,
                     "metrics": {
                         "batting": {"ops": 0.750, "avg": 0.280},
-                        "pitching": {"avg_era": 4.20, "qs_rate": "45%", "era_rank": "5위"},
+                        "pitching": {
+                            "avg_era": 4.20,
+                            "qs_rate": "45%",
+                            "era_rank": "5위",
+                        },
                     },
                     "fatigue_index": {
                         "bullpen_share": "35%",

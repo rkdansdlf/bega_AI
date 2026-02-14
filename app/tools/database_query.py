@@ -243,7 +243,9 @@ class DatabaseQueryTool:
             found=bool(result.get("found")),
             error=result.get("error"),
         )
-        self.team_resolution_metrics.maybe_log(logger, f"DatabaseQueryTool.{query_name}")
+        self.team_resolution_metrics.maybe_log(
+            logger, f"DatabaseQueryTool.{query_name}"
+        )
 
     @staticmethod
     def _canonical_team_expr(column_name: str) -> str:
@@ -656,7 +658,7 @@ class DatabaseQueryTool:
                 # 팀 필터 조건 구성
                 team_condition = ""
                 params = [year]
-                
+
                 if team_filter:
                     # Dual-State Support: Use IN clause with variants
                     variants = self.get_team_variants(team_filter, year)
@@ -730,7 +732,7 @@ class DatabaseQueryTool:
                 # 팀 필터 조건 구성
                 team_condition = ""
                 params = [year]
-                
+
                 if team_filter:
                     # Dual-State Support: Use IN clause with variants
                     variants = self.get_team_variants(team_filter, year)
@@ -1879,7 +1881,9 @@ class DatabaseQueryTool:
                 )
 
             # 성공적인 결과 캐시 (Coach 최적화)
-            result["found"] = bool(result["metrics"] or result["rankings"] or result["fatigue_index"])
+            result["found"] = bool(
+                result["metrics"] or result["rankings"] or result["fatigue_index"]
+            )
             _coach_cache.set(cache_key, result)
             self._record_team_query_result(
                 "get_team_advanced_metrics", team_name, year, result
@@ -2023,7 +2027,9 @@ class DatabaseQueryTool:
                 team_name,
                 self.team_resolver.resolve_canonical(team_name),
             )
-            self._record_team_query_result("get_team_recent_form", team_name, year, result)
+            self._record_team_query_result(
+                "get_team_recent_form", team_name, year, result
+            )
             return result
 
         team_code = self.get_team_code(team_name, year)
@@ -2257,7 +2263,9 @@ class DatabaseQueryTool:
             logger.error(f"[DatabaseQuery] Error querying monthly trend: {e}")
             result["error"] = str(e)
 
-        self._record_team_query_result("get_team_monthly_trend", team_name, year, result)
+        self._record_team_query_result(
+            "get_team_monthly_trend", team_name, year, result
+        )
         return result
 
     def get_team_matchup_stats(self, team_name: str, year: int) -> Dict[str, Any]:
@@ -2296,7 +2304,9 @@ class DatabaseQueryTool:
                 team_name,
                 self.team_resolver.resolve_canonical(team_name),
             )
-            self._record_team_query_result("get_team_matchup_stats", team_name, year, result)
+            self._record_team_query_result(
+                "get_team_matchup_stats", team_name, year, result
+            )
             return result
 
         team_code = self.get_team_code(team_name, year)
@@ -2363,5 +2373,7 @@ class DatabaseQueryTool:
             logger.error(f"[DatabaseQuery] Error querying matchup stats: {e}")
             result["error"] = str(e)
 
-        self._record_team_query_result("get_team_matchup_stats", team_name, year, result)
+        self._record_team_query_result(
+            "get_team_matchup_stats", team_name, year, result
+        )
         return result

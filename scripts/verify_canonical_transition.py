@@ -33,7 +33,6 @@ from app.config import get_settings
 from app.tools.database_query import DatabaseQueryTool, clear_coach_cache
 from app.tools.game_query import GameQueryTool
 
-
 CANONICAL_TEAMS = ["SS", "LT", "LG", "DB", "KIA", "KH", "HH", "SSG", "NC", "KT"]
 LEGACY_CODES = ["SK", "OB", "HT", "WO", "DO", "KI", "KW"]
 
@@ -127,13 +126,17 @@ def evaluate_canonical_window(
                 },
             ]
         )
-        failed_required = [c["name"] for c in checks if c["enforced"] and not c["passed"]]
+        failed_required = [
+            c["name"] for c in checks if c["enforced"] and not c["passed"]
+        ]
         return {
             "passed": len(failed_required) == 0,
             "strict_canonical_window": strict_canonical_window,
             "strict_legacy_residual": strict_legacy_residual,
             "failed_required_checks": failed_required,
-            "failed_optional_checks": [c["name"] for c in checks if (not c["enforced"]) and (not c["passed"])],
+            "failed_optional_checks": [
+                c["name"] for c in checks if (not c["enforced"]) and (not c["passed"])
+            ],
             "checks": checks,
             "cases": 0,
             "all_ok": 0,
@@ -172,7 +175,9 @@ def evaluate_canonical_window(
     )
 
     failed_required = [c["name"] for c in checks if c["enforced"] and not c["passed"]]
-    failed_optional = [c["name"] for c in checks if (not c["enforced"]) and (not c["passed"])]
+    failed_optional = [
+        c["name"] for c in checks if (not c["enforced"]) and (not c["passed"])
+    ]
     return {
         "passed": len(failed_required) == 0,
         "strict_canonical_window": strict_canonical_window,
@@ -204,12 +209,16 @@ def evaluate_outside_regression(
                 "details": "outside_regression result missing",
             }
         )
-        failed_required = [c["name"] for c in checks if c["enforced"] and not c["passed"]]
+        failed_required = [
+            c["name"] for c in checks if c["enforced"] and not c["passed"]
+        ]
         return {
             "passed": len(failed_required) == 0,
             "strict_outside_regression": strict_outside_regression,
             "failed_required_checks": failed_required,
-            "failed_optional_checks": [c["name"] for c in checks if (not c["enforced"]) and (not c["passed"])],
+            "failed_optional_checks": [
+                c["name"] for c in checks if (not c["enforced"]) and (not c["passed"])
+            ],
             "checks": checks,
             "total_cases": 0,
             "additional_miss_count": 0,
@@ -239,7 +248,9 @@ def evaluate_outside_regression(
     )
 
     failed_required = [c["name"] for c in checks if c["enforced"] and not c["passed"]]
-    failed_optional = [c["name"] for c in checks if (not c["enforced"]) and (not c["passed"])]
+    failed_optional = [
+        c["name"] for c in checks if (not c["enforced"]) and (not c["passed"])
+    ]
     return {
         "passed": len(failed_required) == 0,
         "strict_outside_regression": strict_outside_regression,
@@ -407,7 +418,9 @@ def run_canonical_window_smoke(
 
                 summary = db_tool.get_team_summary(team, year)
                 advanced = db_tool.get_team_advanced_metrics(team, year)
-                last_game = game_tool.get_team_last_game_date(team, year, "regular_season")
+                last_game = game_tool.get_team_last_game_date(
+                    team, year, "regular_season"
+                )
 
                 ok_summary = bool(summary.get("found")) and not summary.get("error")
                 ok_advanced = bool(advanced.get("found")) and not advanced.get("error")
@@ -500,7 +513,16 @@ def run_canonical_window_smoke(
         with conn.cursor() as cur:
             for table, query in queries.items():
                 if table == "game":
-                    cur.execute(query, (window_start, window_end, LEGACY_CODES, LEGACY_CODES, LEGACY_CODES))
+                    cur.execute(
+                        query,
+                        (
+                            window_start,
+                            window_end,
+                            LEGACY_CODES,
+                            LEGACY_CODES,
+                            LEGACY_CODES,
+                        ),
+                    )
                 else:
                     cur.execute(query, (window_start, window_end, LEGACY_CODES))
                 result["legacy_residuals"][table] = int(cur.fetchone()[0])
@@ -664,7 +686,10 @@ def main() -> int:
 
     teams = [token.strip() for token in args.teams.split(",") if token.strip()]
     window_years = list(
-        range(min(args.window_start, args.window_end), max(args.window_start, args.window_end) + 1)
+        range(
+            min(args.window_start, args.window_end),
+            max(args.window_start, args.window_end) + 1,
+        )
     )
     outside_years = parse_year_ranges(args.outside_years)
 

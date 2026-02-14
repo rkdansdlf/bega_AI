@@ -86,7 +86,9 @@ def parse_teams(teams_arg: str | None, resolver: TeamCodeResolver) -> List[str]:
         if canonical in CANONICAL_CODES and canonical not in parsed:
             parsed.append(canonical)
         else:
-            logger.warning("Ignoring unsupported regular team input: %s -> %s", raw, canonical)
+            logger.warning(
+                "Ignoring unsupported regular team input: %s -> %s", raw, canonical
+            )
 
     if not parsed:
         raise ValueError("no valid canonical regular teams were resolved from --teams")
@@ -129,7 +131,9 @@ def collect_regular_aliases(resolver: TeamCodeResolver) -> List[str]:
     return sorted(aliases)
 
 
-def cleanup_cache_rows(pool, options: RunOptions, resolver: TeamCodeResolver) -> Dict[str, Any]:
+def cleanup_cache_rows(
+    pool, options: RunOptions, resolver: TeamCodeResolver
+) -> Dict[str, Any]:
     max_year = datetime.now().year + 1
     legacy_aliases = collect_regular_aliases(resolver)
 
@@ -232,9 +236,15 @@ def format_batch_context(tool_results: Dict[str, Any], year: int) -> str:
     rankings = advanced.get("rankings", {})
 
     lines.append("### 핵심 지표")
-    lines.append(f"- OPS: {batting.get('ops', 'N/A')} (rank={rankings.get('batting_ops', 'N/A')})")
-    lines.append(f"- 팀 타율: {batting.get('avg', 'N/A')} (rank={rankings.get('batting_avg', 'N/A')})")
-    lines.append(f"- 팀 ERA: {pitching.get('avg_era', 'N/A')} (rank={pitching.get('era_rank', 'N/A')})")
+    lines.append(
+        f"- OPS: {batting.get('ops', 'N/A')} (rank={rankings.get('batting_ops', 'N/A')})"
+    )
+    lines.append(
+        f"- 팀 타율: {batting.get('avg', 'N/A')} (rank={rankings.get('batting_avg', 'N/A')})"
+    )
+    lines.append(
+        f"- 팀 ERA: {pitching.get('avg_era', 'N/A')} (rank={pitching.get('era_rank', 'N/A')})"
+    )
     lines.append("")
 
     if recent.get("found"):
@@ -390,7 +400,9 @@ async def generate_and_cache_team(
         return result
 
     full_response = _remove_duplicate_json_start(full_response)
-    parsed_response, parse_error, parse_meta = parse_coach_response_with_meta(full_response)
+    parsed_response, parse_error, parse_meta = parse_coach_response_with_meta(
+        full_response
+    )
     result["normalization_applied"] = bool(parse_meta.get("normalization_applied"))
     result["normalization_reasons"] = list(parse_meta.get("normalization_reasons", []))
 
@@ -408,7 +420,9 @@ async def generate_and_cache_team(
             conn.commit()
 
             warnings = validate_coach_response(parsed_response)
-            critical_count = sum(1 for metric in parsed_response.key_metrics if metric.is_critical)
+            critical_count = sum(
+                1 for metric in parsed_response.key_metrics if metric.is_critical
+            )
 
             result["status"] = "success"
             result["headline"] = parsed_response.headline
@@ -428,10 +442,9 @@ async def generate_and_cache_team(
             )
             conn.commit()
             result["reason"] = error_msg
-            result["failure_category"] = (
-                parse_meta.get("error_code")
-                or classify_parse_error(error_msg)
-            )
+            result["failure_category"] = parse_meta.get(
+                "error_code"
+            ) or classify_parse_error(error_msg)
             result["validator_hard_fail"] = True
 
     result["elapsed_seconds"] = (datetime.now() - start).total_seconds()
@@ -451,7 +464,9 @@ def summarize_results(
     skipped = sum(1 for row in rows if row["status"] == "skipped")
     failed = sum(1 for row in rows if row["status"] == "failed")
 
-    warnings_total = sum(int(row.get("warnings_count", 0)) for row in rows if row["status"] == "success")
+    warnings_total = sum(
+        int(row.get("warnings_count", 0)) for row in rows if row["status"] == "success"
+    )
     critical_over_limit_count = sum(1 for row in rows if row.get("critical_over_limit"))
     validator_fail_count = sum(1 for row in rows if row.get("validator_hard_fail"))
     parse_success_count = sum(1 for row in rows if row.get("json_parse_ok"))
@@ -500,11 +515,15 @@ def summarize_results(
         "target_teams": options.teams,
         "game_type": options.game_type.upper(),
         "coverage_rate": round(cases_ok / total, 4) if total else 0.0,
-        "json_parse_success_rate": round(parse_success_count / total, 4) if total else 0.0,
+        "json_parse_success_rate": (
+            round(parse_success_count / total, 4) if total else 0.0
+        ),
         "validator_fail_count": validator_fail_count,
         "normalization_applied_count": normalization_applied_count,
         "warning_rate": round(warnings_total / success, 4) if success else 0.0,
-        "critical_over_limit_rate": round(critical_over_limit_count / success, 4) if success else 0.0,
+        "critical_over_limit_rate": (
+            round(critical_over_limit_count / success, 4) if success else 0.0
+        ),
         "cache_hit_rate": round(skipped / total, 4) if total else 0.0,
         "runtime_seconds": round(elapsed_total, 3),
         "cache_invalid_year_count": int(invalid_year_rows),
@@ -528,7 +547,9 @@ def summarize_results(
 
 
 def parse_args() -> RunOptions:
-    parser = argparse.ArgumentParser(description="Coach batch cache generator with quality report")
+    parser = argparse.ArgumentParser(
+        description="Coach batch cache generator with quality report"
+    )
     parser.add_argument(
         "--years",
         default="2025",
@@ -594,8 +615,12 @@ async def async_main(options: RunOptions) -> int:
     print("Coach 배치 캐시 시작")
     print(f"Years: {options.years}")
     print(f"Teams: {options.teams}")
-    print(f"Prompt: {PROMPT_VERSION} | Schema: {CACHE_SCHEMA_VERSION} | GameType: {options.game_type}")
-    print(f"Options: only_missing={options.only_missing}, force_rebuild={options.force_rebuild}")
+    print(
+        f"Prompt: {PROMPT_VERSION} | Schema: {CACHE_SCHEMA_VERSION} | GameType: {options.game_type}"
+    )
+    print(
+        f"Options: only_missing={options.only_missing}, force_rebuild={options.force_rebuild}"
+    )
     print("=" * 72)
 
     cleanup_result = cleanup_cache_rows(pool, options, resolver)
