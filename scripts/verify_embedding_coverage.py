@@ -316,13 +316,29 @@ def _load_actual_ids(
                 break
             payload = []
             for row in rows:
+                raw_source_row_id = row[0]
                 normalized_id = normalize_actual_source_row_id(
                     row[0],
                     target.table,
                     row[1],
                     legacy_aliases,
                 )
-                payload.append((normalized_id,))
+                candidate_ids = {normalized_id}
+
+                base = raw_source_row_id.split("#part", 1)[0]
+                pairs = _parse_row_id_pairs(base)
+                canonical_keys = CANONICAL_SOURCE_ROW_KEYS.get(target.table)
+                if canonical_keys and len(pairs) == len(canonical_keys):
+                    has_all_canonical_keys = all(key in pairs for key in canonical_keys)
+                    if has_all_canonical_keys:
+                        canonical_from_base = _build_canonical_from_mapping(
+                            pairs, target.table
+                        )
+                        if canonical_from_base:
+                            candidate_ids.add(canonical_from_base)
+
+                for candidate_id in candidate_ids:
+                    payload.append((candidate_id,))
             dest_cur.executemany(insert_sql, payload)
 
     dest_cur.execute("SELECT count(*) FROM actual_ids")
