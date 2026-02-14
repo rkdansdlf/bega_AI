@@ -493,6 +493,8 @@ async def _embed_openrouter(
     if batch_size <= 0:
         batch_size = 100
 
+    max_retries = 6
+
     batches = [
         list(texts[i : i + batch_size]) for i in range(0, len(texts), batch_size)
     ]
@@ -500,51 +502,91 @@ async def _embed_openrouter(
     effective_concurrency = max(max_concurrency, 1)
     semaphore = asyncio.Semaphore(effective_concurrency)
 
-    async def post_with_limit(idx: int, chunk: Sequence[str]):
-        async with semaphore:
-            payload = {
-                "model": model,
-                "input": list(chunk),
-            }
-            timeout = httpx.Timeout(30.0, connect=10.0)
-            async with httpx.AsyncClient(
-                timeout=timeout, follow_redirects=False
-            ) as client:
-                response = await client.post(url, json=payload, headers=headers)
-
-            content_type = response.headers.get("content-type", "")
-            if response.status_code != 200:
-                snippet = (response.text or "")[:300]
-                raise EmbeddingError(
-                    f"OpenRouter 오류 {response.status_code} ({content_type}): {snippet}"
-                )
-            if "application/json" not in content_type:
-                snippet = (response.text or "")[:300]
-                raise EmbeddingError(
-                    f"OpenRouter가 JSON이 아닌 응답을 반환했습니다: {content_type}: {snippet}"
-                )
-
-            try:
-                data = response.json()
-            except Exception as exc:
-                snippet = (response.text or "")[:300]
-                raise EmbeddingError(f"OpenRouter JSON 파싱 실패: {snippet}") from exc
-
-            embeddings: List[List[float]] = []
-            for item in data.get("data", []):
-                vec = item.get("embedding")
-                if vec:
-                    embeddings.append(list(map(float, vec)))
-
-            if not embeddings:
-                raise EmbeddingError(
-                    f"OpenRouter가 임베딩을 반환하지 않았습니다: {data}"
-                )
-            results_map[idx] = embeddings
-
-    await asyncio.gather(
-        *(post_with_limit(i, chunk) for i, chunk in enumerate(batches))
+    limits = httpx.Limits(
+        max_connections=effective_concurrency,
+        max_keepalive_connections=1,
     )
+    timeout = httpx.Timeout(60.0, connect=10.0)
+
+    async def post_chunk(
+        chunk: Sequence[str], client: httpx.AsyncClient
+    ) -> List[List[float]]:
+        payload = {
+            "model": model,
+            "input": list(chunk),
+        }
+        response = await client.post(url, json=payload, headers=headers)
+
+        content_type = response.headers.get("content-type", "")
+        if response.status_code != 200:
+            snippet = (response.text or "")[:300]
+            raise EmbeddingError(
+                f"OpenRouter 오류 {response.status_code} ({content_type}): {snippet}"
+            )
+        if "application/json" not in content_type:
+            snippet = (response.text or "")[:300]
+            raise EmbeddingError(
+                f"OpenRouter가 JSON이 아닌 응답을 반환했습니다: {content_type}: {snippet}"
+            )
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            snippet = (response.text or "")[:300]
+            raise EmbeddingError(f"OpenRouter JSON 파싱 실패: {snippet}") from exc
+
+        embeddings: List[List[float]] = []
+        for item in data.get("data", []):
+            vec = item.get("embedding")
+            if vec:
+                embeddings.append(list(map(float, vec)))
+
+        if not embeddings:
+            raise EmbeddingError(
+                f"OpenRouter가 임베딩을 반환하지 않았습니다: {data}"
+            )
+        return embeddings
+
+    async def post_with_limit(
+        idx: int, chunk: Sequence[str], client: httpx.AsyncClient
+    ) -> None:
+        async with semaphore:
+            attempt = 0
+            backoff = 1.0
+            while True:
+                try:
+                    results_map[idx] = await post_chunk(chunk, client)
+                    break
+                except (EmbeddingError, httpx.HTTPError) as exc:
+                    attempt += 1
+                    if attempt >= max_retries:
+                        logger.error(
+                            "OpenRouter batch %d failed after %d retries: %s",
+                            idx,
+                            max_retries,
+                            exc,
+                        )
+                        raise
+                    sleep_for = backoff + (0.1 * attempt)
+                    logger.warning(
+                        "OpenRouter batch %d retry %d/%d. Cause: %s. %.1fs delay.",
+                        idx,
+                        attempt,
+                        max_retries,
+                        exc,
+                        sleep_for,
+                    )
+                    await asyncio.sleep(sleep_for)
+                    backoff = min(backoff * 2, 30.0)
+
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        limits=limits,
+        follow_redirects=False,
+    ) as client:
+        await asyncio.gather(
+            *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
+        )
 
     # 순서대로 결과 취합
     results: List[List[float]] = []

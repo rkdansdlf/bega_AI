@@ -8,11 +8,15 @@ LLM 출력의 일관성을 보장하고, 잘못된 형식의 응답을 감지합
 import json
 import logging
 import re
-from typing import List, Literal, Optional, Union
+from copy import deepcopy
+from typing import Any, Dict, List, Literal, Optional, Union, Tuple
 from pydantic import BaseModel, Field, field_validator, BeforeValidator
 from typing_extensions import Annotated
 
 logger = logging.getLogger(__name__)
+MAX_KEY_METRIC_VALUE_LENGTH = 50
+MAX_CRITICAL_METRICS = 2
+FALLBACK_HEADLINE = "AI 코치 분석 요약"
 
 
 # ============================================================
@@ -26,7 +30,7 @@ class KeyMetric(BaseModel):
     label: str = Field(..., max_length=30, description="지표명")
     # 문자열로 자동 변환 (LLM이 숫자로 주는 경우 대비)
     value: Annotated[Union[str, int, float], BeforeValidator(str)] = Field(
-        ..., max_length=50, description="수치"
+        ..., max_length=MAX_KEY_METRIC_VALUE_LENGTH, description="수치"
     )
     status: Literal["good", "warning", "danger"] = Field(
         default="warning", description="평가 (good/warning/danger)"
@@ -216,7 +220,200 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
     return None
 
 
-from typing import List, Literal, Optional, Union, Tuple
+def derive_headline(data: Dict[str, Any]) -> str:
+    """헤드라인 누락 시 대체 헤드라인을 생성합니다."""
+    raw_headline = data.get("headline")
+    if isinstance(raw_headline, str) and raw_headline.strip():
+        return raw_headline.strip()
+
+    key_metrics = data.get("key_metrics")
+    if isinstance(key_metrics, list) and key_metrics:
+        first_metric = key_metrics[0]
+        if isinstance(first_metric, dict):
+            label = str(first_metric.get("label", "")).strip()
+            value = str(first_metric.get("value", "")).strip()
+            if label and value:
+                return f"{label} {value} 중심 분석"
+            if label:
+                return f"{label} 중심 분석"
+
+    analysis = data.get("analysis")
+    if isinstance(analysis, dict):
+        for key in ("strengths", "weaknesses"):
+            items = analysis.get(key)
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
+
+    return FALLBACK_HEADLINE
+
+
+def normalize_key_metric_values(data: Dict[str, Any]) -> List[str]:
+    """key_metrics[].value를 문자열화하고 길이를 제한합니다."""
+    reasons: List[str] = []
+    metrics = data.get("key_metrics")
+    if not isinstance(metrics, list):
+        return reasons
+
+    for idx, metric in enumerate(metrics):
+        if not isinstance(metric, dict):
+            continue
+        if "value" not in metric:
+            continue
+        value = str(metric.get("value", "")).strip()
+        if len(value) > MAX_KEY_METRIC_VALUE_LENGTH:
+            metric["value"] = value[: MAX_KEY_METRIC_VALUE_LENGTH - 3] + "..."
+            reasons.append(f"truncate_key_metrics_value_{idx}")
+        else:
+            metric["value"] = value
+    return reasons
+
+
+def normalize_critical_flags(
+    data: Dict[str, Any], max_critical: int = MAX_CRITICAL_METRICS
+) -> List[str]:
+    """is_critical=true를 최대 개수만 유지합니다."""
+    reasons: List[str] = []
+    metrics = data.get("key_metrics")
+    if not isinstance(metrics, list):
+        return reasons
+
+    critical_indices: List[int] = []
+    for idx, metric in enumerate(metrics):
+        if isinstance(metric, dict) and bool(metric.get("is_critical")):
+            critical_indices.append(idx)
+
+    if len(critical_indices) > max_critical:
+        for idx in critical_indices[max_critical:]:
+            metric = metrics[idx]
+            if isinstance(metric, dict):
+                metric["is_critical"] = False
+        reasons.append(f"reduce_is_critical_{len(critical_indices)}_to_{max_critical}")
+    return reasons
+
+
+def normalize_coach_payload(data: dict) -> Tuple[dict, List[str]]:
+    """LLM 응답 payload를 검증 전에 정규화합니다."""
+    if not isinstance(data, dict):
+        return data, []
+
+    normalized = deepcopy(data)
+    reasons: List[str] = []
+
+    if not isinstance(normalized.get("key_metrics"), list):
+        normalized["key_metrics"] = []
+        reasons.append("coerce_key_metrics_to_empty_list")
+
+    headline = normalized.get("headline")
+    if not isinstance(headline, str) or not headline.strip():
+        normalized["headline"] = derive_headline(normalized)
+        reasons.append("derive_headline")
+
+    reasons.extend(normalize_key_metric_values(normalized))
+    reasons.extend(normalize_critical_flags(normalized))
+    return normalized, reasons
+
+
+def classify_parse_error(error_message: Optional[str]) -> str:
+    """파싱 실패 메시지를 표준 카테고리로 분류합니다."""
+    if not error_message:
+        return "unknown"
+
+    lowered = error_message.lower()
+    if "empty response" in lowered:
+        return "empty_response"
+    if "no json found" in lowered:
+        return "no_json_found"
+    if "json decode error" in lowered:
+        return "json_decode_error"
+    if "headline" in lowered and "field required" in lowered:
+        return "schema_missing_headline"
+    if "key_metrics" in lowered and "value" in lowered and (
+        "at most 50" in lowered or "too_long" in lowered
+    ):
+        return "metric_value_too_long"
+    if "validation error" in lowered:
+        return "schema_validation_error"
+    return "unknown"
+
+
+def parse_coach_response_with_meta(
+    raw_response: str,
+) -> Tuple[Optional[CoachResponse], Optional[str], Dict[str, Any]]:
+    """
+    parse_coach_response의 확장 버전입니다.
+    정규화 적용 여부와 실패 카테고리를 메타데이터로 함께 반환합니다.
+    """
+    meta: Dict[str, Any] = {
+        "normalization_applied": False,
+        "normalization_reasons": [],
+        "error_code": None,
+    }
+
+    if not raw_response or not raw_response.strip():
+        error = "Empty response"
+        meta["error_code"] = classify_parse_error(error)
+        return None, error, meta
+
+    try:
+        json_str = extract_json_from_response(raw_response)
+
+        if not json_str and raw_response.strip().startswith('"headline"'):
+            logger.warning(
+                "[CoachValidator] Missing braces detected, attempting to wrap with {}"
+            )
+            temp_json = "{" + raw_response.strip()
+            if not temp_json.endswith("}"):
+                temp_json += "}"
+            try:
+                data = json.loads(temp_json)
+                if not isinstance(data, dict):
+                    error = "Validation error: root JSON must be an object"
+                    meta["error_code"] = classify_parse_error(error)
+                    return None, error, meta
+                normalized_data, reasons = normalize_coach_payload(data)
+                meta["normalization_reasons"] = reasons
+                meta["normalization_applied"] = len(reasons) > 0
+                return CoachResponse(**normalized_data), None, meta
+            except Exception as e:
+                logger.warning(f"Fallback parsing failed: {e}")
+
+        if not json_str:
+            error = "No JSON found"
+            meta["error_code"] = classify_parse_error(error)
+            return None, error, meta
+
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"[CoachValidator] JSON decode error: {e}")
+            error = f"JSON decode error: {e}"
+            meta["error_code"] = classify_parse_error(error)
+            return None, error, meta
+
+        if not isinstance(data, dict):
+            error = "Validation error: root JSON must be an object"
+            meta["error_code"] = classify_parse_error(error)
+            return None, error, meta
+
+        normalized_data, reasons = normalize_coach_payload(data)
+        meta["normalization_reasons"] = reasons
+        meta["normalization_applied"] = len(reasons) > 0
+
+        try:
+            return CoachResponse(**normalized_data), None, meta
+        except Exception as e:
+            logger.warning(f"[CoachValidator] Pydantic validation error: {e}")
+            error = f"Validation error: {e}"
+            meta["error_code"] = classify_parse_error(error)
+            return None, error, meta
+
+    except Exception as e:
+        logger.error(f"[CoachValidator] Failed to parse coach response: {e}")
+        error = f"Unknown error: {e}"
+        meta["error_code"] = classify_parse_error(error)
+        return None, error, meta
 
 
 def parse_coach_response(
@@ -231,52 +428,8 @@ def parse_coach_response(
     Returns:
         CoachResponse 객체. 파싱 실패 시 None 반환 (캐시 FAILED 처리용).
     """
-    if not raw_response or not raw_response.strip():
-        return None, "Empty response"
-
-    try:
-        # JSON 추출
-        json_str = extract_json_from_response(raw_response)
-
-        # [Fix] JSON을 못 찾았지만, 텍스트가 "headline": ... 형태로 시작하는 경우 (Missing braces)
-        # Solar Pro 모델이 가끔 여는 괄호를 빼먹는 경우 처리
-        if not json_str and raw_response.strip().startswith('"headline"'):
-            logger.warning(
-                "[CoachValidator] Missing braces detected, attempting to wrap with {}"
-            )
-            # 맨 뒤에 }가 있는지 확인하고 없으면 추가
-            temp_json = "{" + raw_response.strip()
-            if not temp_json.endswith("}"):
-                temp_json += "}"
-
-            # 다시 시도
-            try:
-                data = json.loads(temp_json)
-                return CoachResponse(**data), None
-            except Exception as e:
-                logger.warning(f"Fallback parsing failed: {e}")
-                pass  # 실패하면 원래 로직대로 진행
-
-        if not json_str:
-            return None, "No JSON found"
-
-        # JSON 파싱
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.warning(f"[CoachValidator] JSON decode error: {e}")
-            return None, f"JSON decode error: {e}"
-
-        # Pydantic 검증
-        try:
-            return CoachResponse(**data), None
-        except Exception as e:
-            logger.warning(f"[CoachValidator] Pydantic validation error: {e}")
-            return None, f"Validation error: {e}"
-
-    except Exception as e:
-        logger.error(f"[CoachValidator] Failed to parse coach response: {e}")
-        return None, f"Unknown error: {e}"
+    response, error, _ = parse_coach_response_with_meta(raw_response)
+    return response, error
 
 
 def _create_fallback_response(error_reason: str, original_text: str) -> CoachResponse:

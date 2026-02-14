@@ -6,7 +6,52 @@ on:
       - main
 
 jobs:
+  guard:
+    name: Canonical Guard
+    runs-on: ubuntu-latest
+    env:
+      TEAM_CODE_READ_MODE: canonical_only
+      TEAM_CODE_CANONICAL_WINDOW_START: "2021"
+      TEAM_CODE_CANONICAL_WINDOW_END: "2025"
+      TEAM_CODE_OUTSIDE_WINDOW_MODE: dual
+      CANONICAL_GUARD_DB_URL_RO: ${{ secrets.CANONICAL_GUARD_DB_URL_RO }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify canonical window guard
+        run: |
+          if [ -z "${CANONICAL_GUARD_DB_URL_RO}" ]; then
+            echo "CANONICAL_GUARD_DB_URL_RO is required for deploy guard"
+            exit 1
+          fi
+          python scripts/verify_canonical_transition.py \
+            --mode canonical_window \
+            --strict-canonical-window \
+            --strict-legacy-residual \
+            --output canonical_guard.json
+
+      - name: Upload guard report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-canonical-guard-report
+          path: canonical_guard.json
+
   deploy:
+    needs: guard
     runs-on: ubuntu-latest
     
     steps:

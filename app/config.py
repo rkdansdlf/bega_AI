@@ -30,8 +30,9 @@ class Settings(BaseSettings):
     debug: bool = False
     cors_origins: List[str] = Field(default_factory=lambda: ["*"])
 
-    # --- 데이터베이스 설정 (OCI/Postgres) ---
-    oci_db_url: str = Field(..., validation_alias="OCI_DB_URL")
+    # --- 데이터베이스 설정 (PostgreSQL 단일 경로) ---
+    postgres_db_url: str = Field(..., validation_alias="POSTGRES_DB_URL")
+    # 별도 소스 DB를 읽는 배치 스크립트에서만 사용
     supabase_db_url: Optional[str] = Field(None, validation_alias="SUPABASE_DB_URL")
 
     # --- LLM / 임베딩 프로바이더 설정 ---
@@ -160,8 +161,8 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """데이터베이스 연결 URL을 반환합니다."""
-        return self.oci_db_url
+        """AI 서비스가 사용할 PostgreSQL 연결 URL을 반환합니다."""
+        return self.postgres_db_url
 
     @property
     def function_calling_model(self) -> str:

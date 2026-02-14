@@ -1,5 +1,5 @@
 """
-OCI PostgreSQL 데이터베이스에 HNSW 벡터 인덱스를 생성하는 스크립트입니다.
+PostgreSQL 데이터베이스에 HNSW 벡터 인덱스를 생성하는 스크립트입니다.
 이 인덱스는 벡터 유사도 검색 속도를 크게 향상시킵니다.
 """
 
@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv("AI/.env")
 
-dsn = os.getenv("OCI_DB_URL")
+dsn = os.getenv("POSTGRES_DB_URL")
 print(f"Connecting to database...")
 
 try:
