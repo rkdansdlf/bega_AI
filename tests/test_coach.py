@@ -86,6 +86,26 @@ class TestCoachValidator:
         assert len(response.analysis.risks) == 1
         assert response.analysis.risks[0].level == 0
 
+    def test_parse_stable_trend_is_normalized(self):
+        """key_metrics.trend='stable'을 neutral로 정규화"""
+        from app.core.coach_validator import parse_coach_response
+
+        raw = """{
+            "headline": "KT 위즈 2025시즌 점검",
+            "sentiment": "neutral",
+            "key_metrics": [
+                {"label": "불펜 ERA", "value": "4.21", "status": "warning", "trend": "stable", "is_critical": false}
+            ],
+            "analysis": {"strengths": [], "weaknesses": [], "risks": []},
+            "detailed_markdown": "",
+            "coach_note": "불펜 운용은 보합세입니다."
+        }"""
+
+        response, error = parse_coach_response(raw)
+        assert error is None
+        assert response is not None
+        assert response.key_metrics[0].trend == "neutral"
+
     def test_parse_invalid_json(self):
         """잘못된 JSON 파싱 시 None 반환 테스트"""
         from app.core.coach_validator import parse_coach_response

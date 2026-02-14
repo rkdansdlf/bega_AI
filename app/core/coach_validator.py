@@ -53,6 +53,21 @@ class KeyMetric(BaseModel):
             return "danger"
         return "warning"  # 알 수 없는 값은 warning으로 기본 처리
 
+    @field_validator("trend", mode="before")
+    @classmethod
+    def normalize_trend(cls, v: str) -> str:
+        """추세 값을 허용 스키마로 정규화합니다."""
+        if not isinstance(v, str):
+            return "neutral"
+        normalized = v.lower().strip()
+        if normalized in ["up", "상승", "increase", "rising"]:
+            return "up"
+        if normalized in ["down", "하락", "decrease", "falling"]:
+            return "down"
+        if normalized in ["neutral", "보합", "유지", "stable", "flat"]:
+            return "neutral"
+        return "neutral"
+
 
 class RiskItem(BaseModel):
     """위험 요소 모델"""
