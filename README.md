@@ -220,6 +220,7 @@ FastAPI Application (8001)
     
     ```sh
     ❯ pip install -r requirements.txt
+    ❯ pip install -r requirements-dev  # 로컬 개발: black/flake8/pytest
     ```
     
 
