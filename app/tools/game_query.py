@@ -355,7 +355,9 @@ class GameQueryTool:
 
             if team:
                 variants = self.get_team_variants(team)
-                where_conditions.append("(g.home_team = ANY(%s) OR g.away_team = ANY(%s))")
+                where_conditions.append(
+                    "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))"
+                )
                 query_params.extend([variants, variants])
 
             query = f"""
@@ -436,10 +438,10 @@ class GameQueryTool:
                 "((g.home_team = ANY(%s) AND g.away_team = ANY(%s)) OR "
                 "(g.home_team = ANY(%s) AND g.away_team = ANY(%s)))"
             ]
-            
+
             variants1 = self.get_team_variants(team1, year)
             variants2 = self.get_team_variants(team2, year)
-            
+
             query_params = [
                 variants1,
                 variants2,
@@ -475,7 +477,7 @@ class GameQueryTool:
                 ORDER BY g.game_date DESC
                 LIMIT %s;
             """
-            
+
             games_params = [variants1, variants2] + query_params + [limit]
             cursor.execute(games_query, games_params)
             games = cursor.fetchall()
@@ -545,7 +547,9 @@ class GameQueryTool:
 
             if team:
                 variants = self.get_team_variants(team)
-                where_conditions.append("(g.home_team = ANY(%s) OR g.away_team = ANY(%s))")
+                where_conditions.append(
+                    "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))"
+                )
                 query_params.extend([variants, variants])
 
             query = f"""
@@ -1055,7 +1059,9 @@ class GameQueryTool:
             if "cursor" in locals():
                 cursor.close()
 
-        self._record_team_query_result("get_team_last_game_date", team_name, year, result)
+        self._record_team_query_result(
+            "get_team_last_game_date", team_name, year, result
+        )
         return result
 
     def validate_game_exists(

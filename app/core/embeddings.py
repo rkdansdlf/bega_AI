@@ -542,9 +542,7 @@ async def _embed_openrouter(
                 embeddings.append(list(map(float, vec)))
 
         if not embeddings:
-            raise EmbeddingError(
-                f"OpenRouter가 임베딩을 반환하지 않았습니다: {data}"
-            )
+            raise EmbeddingError(f"OpenRouter가 임베딩을 반환하지 않았습니다: {data}")
         return embeddings
 
     async def post_with_limit(

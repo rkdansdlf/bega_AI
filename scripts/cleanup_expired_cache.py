@@ -43,7 +43,9 @@ def parse_years_csv(raw_years: Optional[str]) -> Optional[List[int]]:
     return deduped
 
 
-def parse_teams_csv(raw_teams: Optional[str], resolver: TeamCodeResolver) -> Optional[List[str]]:
+def parse_teams_csv(
+    raw_teams: Optional[str], resolver: TeamCodeResolver
+) -> Optional[List[str]]:
     if raw_teams is None:
         return None
 
@@ -56,7 +58,11 @@ def parse_teams_csv(raw_teams: Optional[str], resolver: TeamCodeResolver) -> Opt
         if canonical in CANONICAL_CODES and canonical not in teams:
             teams.append(canonical)
         else:
-            logger.warning("Ignoring unsupported team input for cleanup: %s -> %s", value, canonical)
+            logger.warning(
+                "Ignoring unsupported team input for cleanup: %s -> %s",
+                value,
+                canonical,
+            )
 
     if not teams:
         raise ValueError("no valid canonical teams were resolved from --teams")
@@ -178,7 +184,9 @@ def cleanup_expired_cache(
 def write_output(path: str, payload: Dict[str, Any]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def main() -> int:

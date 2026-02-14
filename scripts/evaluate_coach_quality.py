@@ -236,13 +236,14 @@ def evaluate_quality(
 
     cache_invalid_year_count = _as_int(metrics.get("cache_invalid_year_count"))
     legacy_residual_total = _as_int(metrics.get("legacy_residual_total"))
-    if (
-        cache_invalid_year_count > _as_int(thresholds["cache_invalid_year_max"])
-        or legacy_residual_total > _as_int(thresholds["legacy_residual_max"])
-    ):
+    if cache_invalid_year_count > _as_int(
+        thresholds["cache_invalid_year_max"]
+    ) or legacy_residual_total > _as_int(thresholds["legacy_residual_max"]):
         failure_codes.append("cache_integrity_fail")
 
-    if _as_float(metrics.get("warning_rate")) > _as_float(thresholds["warning_rate_max"]):
+    if _as_float(metrics.get("warning_rate")) > _as_float(
+        thresholds["warning_rate_max"]
+    ):
         failure_codes.append("warning_rate_fail")
 
     if _as_float(metrics.get("critical_over_limit_rate")) > _as_float(
@@ -304,7 +305,9 @@ def evaluate_reports(
         "thresholds": effective_thresholds,
         "requirements": {
             "required_generated_success": required_generated_success,
-            "required_years": sorted(required_years) if required_years is not None else None,
+            "required_years": (
+                sorted(required_years) if required_years is not None else None
+            ),
             "require_game_type": normalized_require_game_type,
         },
         "metrics": metrics,
@@ -327,7 +330,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional output JSON path.",
     )
-    parser.add_argument("--coverage-min", type=float, default=DEFAULT_THRESHOLDS["coverage_min"])
+    parser.add_argument(
+        "--coverage-min", type=float, default=DEFAULT_THRESHOLDS["coverage_min"]
+    )
     parser.add_argument(
         "--warning-rate-max", type=float, default=DEFAULT_THRESHOLDS["warning_rate_max"]
     )
@@ -336,7 +341,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_THRESHOLDS["critical_over_limit_rate_max"],
     )
-    parser.add_argument("--drift-rate-max", type=float, default=DEFAULT_THRESHOLDS["drift_rate_max"])
+    parser.add_argument(
+        "--drift-rate-max", type=float, default=DEFAULT_THRESHOLDS["drift_rate_max"]
+    )
     parser.add_argument(
         "--required-generated-success",
         type=int,
@@ -359,7 +366,9 @@ def build_parser() -> argparse.ArgumentParser:
 def _write_output(path: str, data: Dict[str, Any]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def main() -> int:

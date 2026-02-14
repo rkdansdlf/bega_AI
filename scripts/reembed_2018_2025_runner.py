@@ -6,7 +6,6 @@ from pathlib import Path
 
 from scripts.ingest_from_kbo import ingest
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VERIFY_SCRIPT = PROJECT_ROOT / "scripts" / "verify_embedding_coverage.py"
 VERIFY_OUTPUT_JSON = PROJECT_ROOT / "logs" / "embedding_coverage.json"

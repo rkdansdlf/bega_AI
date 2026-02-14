@@ -4,6 +4,7 @@ from app.tools.database_query import DatabaseQueryTool
 from app.tools.game_query import GameQueryTool
 from app.tools.team_code_resolver import TeamCodeResolver
 
+
 class TestTeamMappingRobustness:
     @pytest.fixture
     def mock_db_connection(self):
@@ -48,7 +49,7 @@ class TestTeamMappingRobustness:
         # Case: Korean Alias -> Should resolve to Canonical then return list
         variants = db_tool.get_team_variants("삼성")
         assert "SS" in variants
-        
+
         variants = db_tool.get_team_variants("롯데")
         assert "LT" in variants
         assert "LOT" in variants
@@ -62,23 +63,23 @@ class TestTeamMappingRobustness:
 
     def test_game_tool_game_query_params(self, game_tool):
         # Verify that providing a team name results in ANY(%s) param logic
-        # We can't easily check the SQL result without a real DB, 
+        # We can't easily check the SQL result without a real DB,
         # but we can check internal method behavior if we mocked the cursor execute.
-        
+
         mock_cursor = game_tool.connection.cursor.return_value
-        
+
         # Test get_games_by_date
         game_tool.get_games_by_date("2024-05-01", "SSG")
-        
+
         # Get the arguments passed to execute
         call_args = mock_cursor.execute.call_args
         query, params = call_args[0]
-        
+
         # Verify query structure
         assert "g.home_team = ANY(%s)" in query or "g.home_team = ANY(" in query
-        
+
         # Verify SSG variants are passed
-        assert "SSG" in params[1] # [date, variants, variants]
+        assert "SSG" in params[1]  # [date, variants, variants]
         assert "SK" in params[1]
 
     def test_db_tool_leaderboard_query_params(self, monkeypatch, mock_db_connection):
@@ -88,16 +89,16 @@ class TestTeamMappingRobustness:
         monkeypatch.setenv("TEAM_CODE_OUTSIDE_WINDOW_MODE", "dual")
         db_tool = DatabaseQueryTool(mock_db_connection)
         mock_cursor = db_tool.connection.cursor.return_value
-        
+
         # Test get_team_leaderboard
         db_tool.get_team_leaderboard("ops", 2024, "batting", team_filter="KIA")
-        
+
         call_args = mock_cursor.execute.call_args
         query, params = call_args[0]
-        
+
         # Verify IN/ANY clause is used (implementation detail: ANY(%s))
         assert "psb.team_code = ANY(%s)" in query
-        
+
         # Verify params contain variants
         # Params order: [year, year, [variants], min_pa, limit]
         found_variants = False
