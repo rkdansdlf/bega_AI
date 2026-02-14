@@ -69,7 +69,9 @@ def load_missing_targets(
         table = str(row["table"])
         profile = TABLE_PROFILES.get(table, {})
         source_table = str(profile.get("source_table", table))
-        targets.append(CoverageTarget(table=table, year=year, source_table=source_table))
+        targets.append(
+            CoverageTarget(table=table, year=year, source_table=source_table)
+        )
     targets.sort(key=lambda t: (t.year, t.table))
     return targets
 
@@ -83,14 +85,12 @@ def collect_missing_ids(
         _recreate_temp_tables(dest_cur)
         _, legacy_aliases = _load_expected_ids(source_conn, dest_cur, target)
         _load_actual_ids(dest_cur, target, legacy_aliases)
-        dest_cur.execute(
-            """
+        dest_cur.execute("""
             SELECT e.id
             FROM expected_ids e
             LEFT JOIN actual_ids a ON a.id = e.id
             WHERE a.id IS NULL
-            """
-        )
+            """)
         missing_ids = {row[0] for row in dest_cur.fetchall()}
     dest_conn.commit()
     return missing_ids
@@ -226,7 +226,9 @@ def reembed_target_missing_rows(
                 )
                 if season_year_value is None:
                     season_year_value = 0
-                season_id = coerce_int(first_value(row, ["season_id", "season_lookup_id"]))
+                season_id = coerce_int(
+                    first_value(row, ["season_id", "season_lookup_id"])
+                )
                 league_type_code = coerce_int(
                     first_value(row, ["league_type_code", "league_type", "league"])
                 )

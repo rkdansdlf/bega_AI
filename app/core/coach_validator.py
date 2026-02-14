@@ -329,8 +329,10 @@ def classify_parse_error(error_message: Optional[str]) -> str:
         return "json_decode_error"
     if "headline" in lowered and "field required" in lowered:
         return "schema_missing_headline"
-    if "key_metrics" in lowered and "value" in lowered and (
-        "at most 50" in lowered or "too_long" in lowered
+    if (
+        "key_metrics" in lowered
+        and "value" in lowered
+        and ("at most 50" in lowered or "too_long" in lowered)
     ):
         return "metric_value_too_long"
     if "validation error" in lowered:

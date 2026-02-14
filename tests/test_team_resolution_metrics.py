@@ -43,4 +43,3 @@ def test_team_resolution_miss_rate():
     assert snapshot["query_total"] == 2
     assert snapshot["query_miss_total"] == 1
     assert snapshot["team_resolution_miss_rate"] == 0.5
-

@@ -4,7 +4,11 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from app.routers.coach import AnalyzeRequest, _is_valid_analysis_year, _resolve_target_year
+from app.routers.coach import (
+    AnalyzeRequest,
+    _is_valid_analysis_year,
+    _resolve_target_year,
+)
 
 
 def _make_pool(fetchone_result):
