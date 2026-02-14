@@ -40,7 +40,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from pathlib import Path
 
 import psycopg
@@ -782,6 +782,37 @@ DEFAULT_TABLES = [
 TARGET_RPM = 10
 MIN_DELAY_SECONDS = 60 / TARGET_RPM
 
+STADIUM_ID_ALIAS_MAP: Dict[str, str] = {
+    "CHANGWON": "NCPARK",
+    "DAEGU": "LIONS2",
+    "DAEJEON": "EAGLES2",
+    "GWANGJU": "CHAMPIONS",
+    "INCHEON": "SSGLANDERS",
+    "SUWON": "KTWIZ",
+}
+
+# source_row_id를 안정적으로 고정하기 위한 canonical key 규칙.
+# 값이 누락되면 기존 fallback 빌더를 사용한다.
+CANONICAL_SOURCE_ROW_KEYS: Dict[str, Sequence[str]] = {
+    "kbo_seasons": ("season_id",),
+    "team_history": ("id",),
+    "awards": ("id",),
+    "player_season_batting": ("id",),
+    "player_season_pitching": ("id",),
+    "game": ("id",),
+    "game_metadata": ("game_id",),
+    "game_inning_scores": ("id",),
+    "game_lineups": ("id",),
+    "game_batting_stats": ("id",),
+    "game_pitching_stats": ("id",),
+    "game_summary": ("id",),
+    "teams": ("team_id",),
+    "team_franchises": ("id",),
+    "stadiums": ("stadium_id",),
+    "player_basic": ("player_id",),
+    "player_movements": ("id",),
+}
+
 
 UPSERT_SQL = """
 INSERT INTO rag_chunks (
@@ -845,12 +876,48 @@ def get_primary_key_columns(conn, table: str) -> List[str]:
         return [row[0] for row in cur.fetchall()]
 
 
+def _normalize_row_id_value(table: str, key: str, value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+
+    normalized: str
+    if isinstance(value, str):
+        normalized = value.strip()
+    else:
+        normalized = str(value)
+
+    if table == "stadiums" and key == "stadium_id":
+        normalized = STADIUM_ID_ALIAS_MAP.get(normalized, normalized)
+
+    return normalized or None
+
+
+def build_canonical_source_row_id(row: Dict[str, Any], table: str) -> Optional[str]:
+    keys = CANONICAL_SOURCE_ROW_KEYS.get(table)
+    if not keys:
+        return None
+
+    parts: List[str] = []
+    for key in keys:
+        if key not in row:
+            return None
+        normalized_value = _normalize_row_id_value(table, key, row.get(key))
+        if normalized_value is None:
+            return None
+        parts.append(f"{key}={normalized_value}")
+    return "|".join(parts)
+
+
 def build_source_row_id(
     row: Dict[str, Any],
     table: str,
     pk_columns: Sequence[str],
     pk_hint: Sequence[str],
 ) -> str:
+    canonical_row_id = build_canonical_source_row_id(row, table)
+    if canonical_row_id:
+        return canonical_row_id
+
     candidates: List[str] = []
     for column in pk_columns:
         if column in row and row[column] is not None:
@@ -1190,6 +1257,7 @@ def ingest_table(
     profile = TABLE_PROFILES.get(table_name, {})
     total_chunks = 0
     buffer: List[ChunkPayload] = []
+    seen_source_row_ids: Set[str] = set()
     settings = get_settings()
     processed_chunks = 0
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
@@ -1282,6 +1350,9 @@ def ingest_table(
                 source_row_id = build_source_row_id(
                     row, table_name, pk_columns, profile.get("pk_hint", [])
                 )
+                if source_row_id in seen_source_row_ids:
+                    continue
+                seen_source_row_ids.add(source_row_id)
                 title = build_title(row, table_name, source_row_id, profile)
                 renderer = profile.get("renderer")
                 if renderer and not use_legacy_renderer:
@@ -1425,11 +1496,11 @@ def ingest(
         raise ValueError("SUPABASE_DB_URL is not set in environment variables.")
     source_conn = psycopg.connect(settings.supabase_db_url)
 
-    # Connect to Destination (OCI) for writing vectors
-    print(f"Connecting to Destination DB (OCI)...")
+    # Connect to Destination (PostgreSQL) for writing vectors
+    print(f"Connecting to Destination DB (PostgreSQL)...")
     dest_conn = psycopg.connect(
         settings.database_url
-    )  # settings.database_url maps to oci_db_url
+    )  # settings.database_url maps to POSTGRES_DB_URL
 
     original_autocommit = dest_conn.autocommit
     dest_conn.autocommit = True

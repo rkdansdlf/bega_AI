@@ -20,14 +20,14 @@ create table if not exists rag_chunks (
 );
 
 -- Vector and text search indexes
-create index if not exists idx_rag_chunks_embedding on rag_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+create index if not exists idx_rag_chunks_embedding on rag_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 644);
 create index if not exists idx_rag_chunks_content_tsv on rag_chunks using gin (content_tsv);
 
 -- Metadata filtering indexes for performance
 create index if not exists idx_rag_chunks_season_year on rag_chunks (season_year);
 create index if not exists idx_rag_chunks_team_id on rag_chunks (team_id);
 create index if not exists idx_rag_chunks_source_table on rag_chunks (source_table);
-create index if not exists idx_rag_chunks_meta_league on rag_chunks using gin ((meta->>'league'));
+create index if not exists idx_rag_chunks_meta_league on rag_chunks ((meta->>'league'));
 
 -- Composite indexes for common filter combinations
 create index if not exists idx_rag_chunks_season_team on rag_chunks (season_year, team_id);
@@ -35,10 +35,10 @@ create index if not exists idx_rag_chunks_season_source on rag_chunks (season_ye
 create index if not exists idx_rag_chunks_team_source on rag_chunks (team_id, source_table);
 
 -- New indexes for awards, movements, and game queries
-create index if not exists idx_rag_chunks_award_type on rag_chunks using gin ((meta->>'award_type'));
-create index if not exists idx_rag_chunks_movement_type on rag_chunks using gin ((meta->>'movement_type'));
-create index if not exists idx_rag_chunks_game_date on rag_chunks using gin ((meta->>'game_date'));
-create index if not exists idx_rag_chunks_game_id on rag_chunks using gin ((meta->>'game_id'));
+create index if not exists idx_rag_chunks_award_type on rag_chunks ((meta->>'award_type'));
+create index if not exists idx_rag_chunks_movement_type on rag_chunks ((meta->>'movement_type'));
+create index if not exists idx_rag_chunks_game_date on rag_chunks ((meta->>'game_date'));
+create index if not exists idx_rag_chunks_game_id on rag_chunks ((meta->>'game_id'));
 
 -- Composite index for award queries by season
 create index if not exists idx_rag_chunks_season_award on rag_chunks (season_year)

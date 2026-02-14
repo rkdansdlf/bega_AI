@@ -35,11 +35,16 @@ from ..core.coach_validator import (
 )
 from ..core.ratelimit import rate_limit_dependency
 from ..tools.database_query import DatabaseQueryTool
+from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
 logger = logging.getLogger(__name__)
 
 # 빈 응답 시 재시도 횟수
 MAX_RETRY_ON_EMPTY = 2
+COACH_CACHE_SCHEMA_VERSION = "v2"
+COACH_CACHE_PROMPT_VERSION = "v4_dual"
+COACH_MODEL_NAME = "solar-pro-3"
+COACH_YEAR_MIN = 1982
 
 
 def _normalize_cached_response(cached_data: dict) -> dict:
@@ -69,6 +74,116 @@ def _normalize_cached_response(cached_data: dict) -> dict:
     except Exception as e:
         logger.warning(f"[Coach Cache] Failed to normalize legacy data: {e}")
         return cached_data
+
+
+def _parse_explicit_year(value: Any) -> Optional[int]:
+    """명시적 year 필드(예: season_year)를 정수로 파싱합니다."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        year = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if 1000 <= year <= 9999:
+        return year
+    return None
+
+
+def _parse_year_from_date_like(value: Any) -> Optional[int]:
+    """YYYY-MM-DD 또는 YYYY... 형태 문자열에서 연도를 추출합니다."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) < 4 or not text[:4].isdigit():
+        return None
+    return int(text[:4])
+
+
+def _is_valid_analysis_year(year: int) -> bool:
+    return COACH_YEAR_MIN <= year <= datetime.now().year + 1
+
+
+def _resolve_year_from_season_id(pool: ConnectionPool, season_id: Any) -> Optional[int]:
+    if season_id is None:
+        return None
+    try:
+        normalized_season_id = int(str(season_id).strip())
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        with pool.connection() as conn:
+            row = conn.execute(
+                "SELECT season_year FROM kbo_seasons WHERE season_id = %s LIMIT 1",
+                (normalized_season_id,),
+            ).fetchone()
+        if not row:
+            return None
+        season_year = int(row[0])
+        return season_year
+    except Exception as exc:
+        logger.warning("[Coach Router] Failed to resolve season_id=%s: %s", season_id, exc)
+        return None
+
+
+def _resolve_year_from_game_context(
+    pool: ConnectionPool, game_id: Optional[str], game_date: Any
+) -> Optional[int]:
+    explicit_game_year = _parse_year_from_date_like(game_date)
+    if explicit_game_year is not None:
+        return explicit_game_year
+
+    if game_id:
+        try:
+            with pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT game_date FROM game WHERE game_id = %s LIMIT 1",
+                    (game_id,),
+                ).fetchone()
+            if row and row[0]:
+                game_date_obj = row[0]
+                if hasattr(game_date_obj, "year"):
+                    return int(game_date_obj.year)
+                return _parse_year_from_date_like(game_date_obj)
+        except Exception as exc:
+            logger.warning("[Coach Router] Failed to resolve game_id=%s: %s", game_id, exc)
+
+        fallback_year = _parse_year_from_date_like(game_id)
+        if fallback_year is not None:
+            return fallback_year
+
+    return None
+
+
+def _resolve_target_year(payload: "AnalyzeRequest", pool: ConnectionPool) -> tuple[int, str]:
+    league_context = payload.league_context or {}
+
+    if "season_year" in league_context:
+        parsed_year = _parse_explicit_year(league_context.get("season_year"))
+        if parsed_year is None or not _is_valid_analysis_year(parsed_year):
+            raise HTTPException(
+                status_code=400,
+                detail="invalid_season_year_for_analysis",
+            )
+        return parsed_year, "league_context.season_year"
+
+    season_id = league_context.get("season")
+    season_year = _resolve_year_from_season_id(pool, season_id)
+    if season_year is not None and _is_valid_analysis_year(season_year):
+        return season_year, "league_context.season->kbo_seasons"
+
+    game_year = _resolve_year_from_game_context(
+        pool,
+        payload.game_id,
+        league_context.get("game_date"),
+    )
+    if game_year is not None and _is_valid_analysis_year(game_year):
+        return game_year, "game_date"
+
+    raise HTTPException(
+        status_code=400,
+        detail="unable_to_resolve_analysis_year",
+    )
 
 
 router = APIRouter(prefix="/coach", tags=["coach"])
@@ -462,8 +577,6 @@ async def analyze_team(
     특정 팀(들)에 대한 심층 분석을 요청합니다. 'The Coach' 페르소나가 적용됩니다.
     """
     from sse_starlette.sse import EventSourceResponse
-    import psycopg
-    import hashlib
 
     # 하위 호환성은 model_validator에서 처리됨
     if not payload.home_team_id:
@@ -471,7 +584,26 @@ async def analyze_team(
 
     try:
         request_id = uuid.uuid4().hex[:8]
-        
+        pool = get_connection_pool()
+        team_resolver = TeamCodeResolver()
+
+        home_team_canonical = team_resolver.resolve_canonical(payload.home_team_id)
+        away_team_canonical = (
+            team_resolver.resolve_canonical(payload.away_team_id)
+            if payload.away_team_id
+            else None
+        )
+        if home_team_canonical not in CANONICAL_CODES:
+            raise HTTPException(
+                status_code=400,
+                detail="unsupported_team_for_regular_analysis",
+            )
+        if away_team_canonical and away_team_canonical not in CANONICAL_CODES:
+            raise HTTPException(
+                status_code=400,
+                detail="unsupported_team_for_regular_analysis",
+            )
+
         home_name = agent._convert_team_id_to_name(payload.home_team_id)
         away_name = agent._convert_team_id_to_name(payload.away_team_id) if payload.away_team_id else None
         
@@ -485,44 +617,34 @@ async def analyze_team(
                 league_context=payload.league_context
             )
 
-        # 연도 결정 로직
-        now = datetime.now()
-        target_year = now.year
-        pre_season_notice = None
-
-        if payload.league_context and payload.league_context.get("season"):
-            raw_season = payload.league_context["season"]
-            # seasonId는 KBO 시즌 ID (예: 20255)일 수 있으므로 앞 4자리만 추출
-            try:
-                target_year = int(str(raw_season)[:4])
-            except (ValueError, TypeError):
-                target_year = now.year
-        elif now.month <= 3:
-            target_year = now.year - 1
-            pre_season_notice = f"NOTICE: 현재 {now.year}년 시즌 개막 전이므로, {target_year}년 시즌 데이터를 바탕으로 분석합니다."
-
-        year = target_year
+        year, resolve_source = _resolve_target_year(payload, pool)
+        if not _is_valid_analysis_year(year):
+            raise HTTPException(status_code=400, detail="analysis_year_out_of_range")
 
         # Cache Key 생성
-        cache_components = [
-            payload.home_team_id,
-            payload.away_team_id or "",
-            str(year),
-            json.dumps(payload.league_context or {}, sort_keys=True),
-            ",".join(sorted(payload.focus)),
-            payload.question_override or "",
-            payload.game_id or "",
-            "v4_dual",  # 버전 업데이트
-        ]
-        cache_key = hashlib.sha256("|".join(cache_components).encode()).hexdigest()
+        game_type = str((payload.league_context or {}).get("league_type") or "UNKNOWN").upper()
+        cache_key_payload = {
+            "schema": COACH_CACHE_SCHEMA_VERSION,
+            "prompt_version": COACH_CACHE_PROMPT_VERSION,
+            "team_code_canonical": home_team_canonical,
+            "away_team_code_canonical": away_team_canonical or "",
+            "year": year,
+            "game_type": game_type,
+        }
+        cache_key = hashlib.sha256(
+            json.dumps(cache_key_payload, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
 
         logger.info(
-            "[Coach Router] Analyzing %s vs %s (year=%d): %s... (CacheKey: %s)",
+            "[Coach Router] Analyzing %s vs %s (year=%d): %s... (CacheKey: %s) input_season=%s resolved_year=%d resolve_source=%s",
             home_name,
             away_name or "Single",
             year,
             query[:100],
             cache_key,
+            (payload.league_context or {}).get("season"),
+            year,
+            resolve_source,
         )
 
         async def event_generator():
@@ -534,9 +656,6 @@ async def analyze_team(
                     "event": "status",
                     "data": json.dumps({"message": "양 팀 전력 분석 중..."}, ensure_ascii=False),
                 }
-
-                pool = get_connection_pool()
-
                 # Phase 0: 캐시 확인
                 CACHE_TTL_HOURS = 168
                 cached_data = None
@@ -551,7 +670,13 @@ async def analyze_team(
                         RETURNING status, response_json, (xmax = 0) AS inserted,
                                   (updated_at > now() - interval '7 days') AS is_valid
                         """,
-                        (cache_key, payload.home_team_id, year, "v4_dual", "solar-pro-3"),
+                        (
+                            cache_key,
+                            home_team_canonical,
+                            year,
+                            COACH_CACHE_PROMPT_VERSION,
+                            COACH_MODEL_NAME,
+                        ),
                     ).fetchone()
                     conn.commit()
 
@@ -620,9 +745,6 @@ async def analyze_team(
                     game_context,
                     payload.league_context
                 )
-
-                if pre_season_notice:
-                    context = f"## 중요 알림\n{pre_season_notice}\n\n" + context
 
                 # 데이터 무결성 검사 (간소화)
                 # 홈팀 데이터가 충분한지 확인

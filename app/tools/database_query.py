@@ -12,6 +12,8 @@ import threading
 import psycopg
 from psycopg.rows import dict_row
 from psycopg import Connection as PgConnection
+from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
+from app.tools.team_resolution_metrics import get_team_resolution_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -120,82 +122,12 @@ class DatabaseQueryTool:
 
     def __init__(self, connection: PgConnection):
         self.connection = connection
-
-        # 1. NAME_TO_STATS_CODE: 통계 테이블(player_season_stats 등) 조회용
-        # 정규 코드(SS, LT, LG, DB, KIA, KH, HH, SSG, NC, KT) 기준
-        # NOTICE: OCI DB 테이블(player_season_*)이 아직 Legacy Code(HT, OB, WO, SK)를 사용하므로
-        #         쿼리용 코드는 Legacy로 매핑합니다.
-        self.NAME_TO_STATS_CODE = {
-            "KIA": "HT",
-            "기아": "HT",
-            "HT": "HT",
-            "LG": "LG",
-            "SSG": "SK",
-            "SK": "SK",
-            "NC": "NC",
-            "두산": "OB",
-            "DB": "OB",
-            "DO": "OB",
-            "OB": "OB",
-            "KT": "KT",
-            "롯데": "LT",
-            "LT": "LT",
-            "삼성": "SS",
-            "SS": "SS",
-            "한화": "HH",
-            "HH": "HH",
-            "키움": "WO",
-            "넥센": "WO",
-            "KH": "WO",
-            "KI": "WO",
-            "WO": "WO",
-            "NX": "WO",
-        }
-
-        # 2. NAME_TO_GAME_CODE: 경기/순위 테이블(game 등) 조회용
-        # 정규 코드(SS, LT, LG, DB, KIA, KH, HH, SSG, NC, KT) 기준
-        # NOTICE: game 테이블도 Legacy Code를 사용 중
-        self.NAME_TO_GAME_CODE = {
-            "KIA": "HT",
-            "HT": "HT",
-            "SSG": "SK",
-            "SK": "SK",
-            "키움": "WO",
-            "넥센": "WO",
-            "KH": "WO",
-            "KI": "WO",
-            "WO": "WO",
-            "NX": "WO",
-            "두산": "OB",
-            "DB": "OB",
-            "DO": "OB",
-            "OB": "OB",
-        }
-
-        self.TEAM_CODE_TO_NAME = {
-            "KIA": "KIA 타이거즈",
-            "HT": "KIA 타이거즈",
-            "LG": "LG 트윈스",
-            "SSG": "SSG 랜더스",
-            "SK": "SSG 랜더스",
-            "NC": "NC 다이노스",
-            "DB": "두산 베어스",
-            "DO": "두산 베어스",
-            "OB": "두산 베어스",
-            "두산": "두산 베어스",
-            "KT": "kt wiz",
-            "LT": "롯데 자이언츠",
-            "롯데": "롯데 자이언츠",
-            "SS": "삼성 라이온즈",
-            "삼성": "삼성 라이온즈",
-            "HH": "한화 이글스",
-            "한화": "한화 이글스",
-            "KH": "키움 히어로즈",
-            "KI": "키움 히어로즈",
-            "WO": "키움 히어로즈",
-            "키움": "키움 히어로즈",
-            "NX": "키움 히어로즈",
-        }
+        self.team_resolver = TeamCodeResolver()
+        self.team_resolution_metrics = get_team_resolution_metrics()
+        self.NAME_TO_STATS_CODE = self.team_resolver.name_to_canonical
+        self.NAME_TO_GAME_CODE = self.team_resolver.name_to_canonical
+        self.TEAM_VARIANTS = self.team_resolver.team_variants
+        self.TEAM_CODE_TO_NAME = self.team_resolver.code_to_name
 
         # DB에서 최신 매핑 로드하여 위 딕셔너리 정밀 업데이트
         self._load_team_mappings()
@@ -220,12 +152,24 @@ class DatabaseQueryTool:
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
 
-            # franchise_id가 있는 팀들 조회 (최신 창단순 정렬)
+            # franchise current_code를 우선 적용하고 정렬을 결정적으로 고정
             query = """
-                SELECT team_id, team_name, franchise_id, founded_year, is_active
-                FROM teams
-                WHERE franchise_id IS NOT NULL
-                ORDER BY franchise_id, is_active DESC, founded_year DESC;
+                SELECT
+                    t.team_id,
+                    t.team_name,
+                    t.franchise_id,
+                    t.founded_year,
+                    t.is_active,
+                    tf.current_code
+                FROM teams t
+                JOIN team_franchises tf ON tf.id = t.franchise_id
+                WHERE t.franchise_id IS NOT NULL
+                ORDER BY
+                    t.franchise_id,
+                    CASE WHEN t.team_id = tf.current_code THEN 0 ELSE 1 END,
+                    t.is_active DESC,
+                    t.founded_year DESC,
+                    t.team_id ASC;
             """
             cursor.execute(query)
             rows = cursor.fetchall()
@@ -234,60 +178,7 @@ class DatabaseQueryTool:
                 logger.info(
                     f"[DatabaseQuery] Loading mappings for {len(rows)} franchise entries from OCI"
                 )
-
-                # 프랜차이즈별로 그룹화
-                franchises = {}
-                for row in rows:
-                    f_id = row["franchise_id"]
-                    if f_id not in franchises:
-                        franchises[f_id] = []
-                    franchises[f_id].append(row)
-
-                for f_id, members in franchises.items():
-                    # 1. 현대적 브랜드명 선정 (DESC 정렬이므로 첫 번째가 최신)
-                    modern_team = members[0]
-                    modern_name = modern_team["team_name"]
-                    modern_id = modern_team["team_id"]
-
-                    # 2. 통계 테이블용 코드 결정
-                    # 기존 하드코딩된 매핑이 있으면 그것을 사용 (통계 테이블 코드가 일관되지 않음)
-                    # 예: LG 프랜차이즈 - MBC(1982), LG(1990) 중 통계는 LG 사용
-                    #     한화 프랜차이즈 - BE(1986), HH(1993) 중 통계는 HH 사용
-                    existing_stats_code = self.NAME_TO_STATS_CODE.get(modern_id)
-                    if existing_stats_code:
-                        stats_code = existing_stats_code
-                    else:
-                        # 하드코딩된 매핑이 없으면 modern_id 사용
-                        stats_code = modern_id
-
-                    game_code = stats_code
-
-                    # 3. 매핑 데이터 업데이트 (기존 매핑 덮어쓰지 않음)
-                    for member in members:
-                        m_id = member["team_id"]
-
-                        # (1) 통계 쿼리용 - 기존 매핑이 없을 때만 추가
-                        if m_id not in self.NAME_TO_STATS_CODE:
-                            self.NAME_TO_STATS_CODE[m_id] = stats_code
-
-                        # (2) 경기/순위 쿼리용 - 기존 매핑이 없을 때만 추가
-                        if m_id not in self.NAME_TO_GAME_CODE:
-                            self.NAME_TO_GAME_CODE[m_id] = game_code
-
-                        # (3) 표시용 (TEAM_CODE_TO_NAME) - 항상 현대 이름으로 업데이트
-                        self.TEAM_CODE_TO_NAME[m_id] = modern_name
-                        self.TEAM_CODE_TO_NAME[stats_code] = modern_name
-
-                    # 수동 추가: 이름 매칭 강화 (기존 매핑이 없을 때만)
-                    if modern_name not in self.NAME_TO_STATS_CODE:
-                        self.NAME_TO_STATS_CODE[modern_name] = stats_code
-                    short_name = modern_name.split()[0]
-                    if short_name not in self.NAME_TO_STATS_CODE:
-                        self.NAME_TO_STATS_CODE[short_name] = stats_code
-                    if modern_name not in self.NAME_TO_GAME_CODE:
-                        self.NAME_TO_GAME_CODE[modern_name] = game_code
-                    if short_name not in self.NAME_TO_GAME_CODE:
-                        self.NAME_TO_GAME_CODE[short_name] = game_code
+                self.team_resolver.sync_from_team_rows(rows)
 
                 logger.info(
                     "[DatabaseQuery] SQL Team mappings (Stats vs Game) synchronized using OCI."
@@ -299,8 +190,17 @@ class DatabaseQueryTool:
                 f"[DatabaseQuery] Failed to load mappings from OCI: {e}. Using defaults."
             )
 
+    def get_team_variants(
+        self, team_input: str, season_year: int | None = None
+    ) -> List[str]:
+        """
+        팀 코드의 모든 변형(Legacy + Canonical)을 반환합니다.
+        SQL 'IN' 절에 사용하기 위함입니다.
+        """
+        return self.team_resolver.query_variants(team_input, season_year)
+
     def get_team_name(self, team_code: str) -> str:
-        return self.TEAM_CODE_TO_NAME.get(team_code, team_code)
+        return self.team_resolver.display_name(team_code)
 
     def safe_float(self, value: Any, default: float = 0.0) -> float:
         """NULL 값을 안전하게 float로 변환합니다."""
@@ -320,19 +220,45 @@ class DatabaseQueryTool:
         except (ValueError, TypeError):
             return default
 
-    def get_team_code(self, team_input: str) -> str:
+    def get_team_code(self, team_input: str, season_year: int | None = None) -> str:
         """통계 테이블용 코드를 반환합니다 (기본값)"""
-        code = self.NAME_TO_STATS_CODE.get(team_input)
-        if not code:
-            code = self.NAME_TO_STATS_CODE.get(team_input.upper())
-        return code or team_input
+        return self.team_resolver.resolve_canonical(team_input, season_year)
 
-    def get_game_team_code(self, team_input: str) -> str:
+    def get_game_team_code(
+        self, team_input: str, season_year: int | None = None
+    ) -> str:
         """경기/순위 테이블용 코드를 반환합니다"""
-        code = self.NAME_TO_GAME_CODE.get(team_input)
-        if not code:
-            code = self.NAME_TO_GAME_CODE.get(team_input.upper())
-        return code or team_input
+        return self.team_resolver.resolve_canonical(team_input, season_year)
+
+    def _is_regular_analysis_team(self, team_input: str) -> bool:
+        canonical_team = self.team_resolver.resolve_canonical(team_input)
+        return canonical_team in CANONICAL_CODES
+
+    def _record_team_query_result(
+        self, query_name: str, team_name: str, year: int | None, result: Dict[str, Any]
+    ) -> None:
+        self.team_resolution_metrics.record_query_result(
+            source=f"DatabaseQueryTool.{query_name}",
+            season_year=year,
+            found=bool(result.get("found")),
+            error=result.get("error"),
+        )
+        self.team_resolution_metrics.maybe_log(logger, f"DatabaseQueryTool.{query_name}")
+
+    @staticmethod
+    def _canonical_team_expr(column_name: str) -> str:
+        return f"""
+            CASE
+                WHEN {column_name} IN ('HT') THEN 'KIA'
+                WHEN {column_name} IN ('DO', 'OB') THEN 'DB'
+                WHEN {column_name} IN ('KI', 'NX', 'WO', 'KW') THEN 'KH'
+                WHEN {column_name} IN ('SK', 'SL') THEN 'SSG'
+                WHEN {column_name} IN ('BE') THEN 'HH'
+                WHEN {column_name} IN ('MBC') THEN 'LG'
+                WHEN {column_name} IN ('LOT') THEN 'LT'
+                ELSE {column_name}
+            END
+        """
 
     def get_player_career_stats(
         self,
@@ -424,7 +350,12 @@ class DatabaseQueryTool:
                                    ELSE 0 END)::numeric, 3) as career_slg
                     FROM player_season_batting psb
                     JOIN player_basic pb ON psb.player_id = pb.player_id
-                    JOIN (SELECT DISTINCT ON (season_year) * FROM kbo_seasons WHERE league_type_code = '0' ORDER BY season_year, season_id) ks 
+                    JOIN (
+                        SELECT DISTINCT ON (season_year) *
+                        FROM kbo_seasons
+                        WHERE league_type_code = %s
+                        ORDER BY season_year, season_id
+                    ) ks
                         ON psb.season = ks.season_year
                     WHERE (LOWER(pb.name) = LOWER(%s) OR LOWER(pb.name) LIKE LOWER(%s))
                     AND psb.plate_appearances >= 10  -- 최소 기준
@@ -432,7 +363,7 @@ class DatabaseQueryTool:
                     ORDER BY total_home_runs DESC
                     LIMIT 1
                 """
-                cursor.execute(batting_query, (player_name, f"%{player_name}%"))
+                cursor.execute(batting_query, (0, player_name, f"%{player_name}%"))
                 batting_row = cursor.fetchone()
 
                 if batting_row:
@@ -475,7 +406,12 @@ class DatabaseQueryTool:
                                    ELSE 0 END)::numeric, 2) as career_whip
                     FROM player_season_pitching psp
                     JOIN player_basic pb ON psp.player_id = pb.player_id
-                    JOIN (SELECT DISTINCT ON (season_year) * FROM kbo_seasons WHERE league_type_code = '0' ORDER BY season_year, season_id) ks 
+                    JOIN (
+                        SELECT DISTINCT ON (season_year) *
+                        FROM kbo_seasons
+                        WHERE league_type_code = %s
+                        ORDER BY season_year, season_id
+                    ) ks
                         ON psp.season = ks.season_year
                     WHERE (LOWER(pb.name) = LOWER(%s) OR LOWER(pb.name) LIKE LOWER(%s))
                     AND psp.innings_pitched >= 1  -- 최소 기준
@@ -483,7 +419,7 @@ class DatabaseQueryTool:
                     ORDER BY total_wins DESC
                     LIMIT 1
                 """
-                cursor.execute(pitching_query, (player_name, f"%{player_name}%"))
+                cursor.execute(pitching_query, (0, player_name, f"%{player_name}%"))
                 pitching_row = cursor.fetchone()
 
                 if pitching_row:
@@ -720,10 +656,12 @@ class DatabaseQueryTool:
                 # 팀 필터 조건 구성
                 team_condition = ""
                 params = [year]
+                
                 if team_filter:
-                    team_code = self.get_team_code(team_filter)
-                    team_condition = "AND psb.team_code = %s"
-                    params.append(team_code)
+                    # Dual-State Support: Use IN clause with variants
+                    variants = self.get_team_variants(team_filter, year)
+                    team_condition = "AND psb.team_code = ANY(%s)"
+                    params.append(variants)
 
                 params.extend([min_pa, limit])
 
@@ -747,12 +685,13 @@ class DatabaseQueryTool:
                     ORDER BY pb.player_id, psb.team_code, psb.{db_column} {sort_order}
                     LIMIT %s
                 """
-                # params order needs to be adjusted because season is used twice now
-                # params previously: [year, min_pa, limit] (if no team filter)
-                # or [year, team_code, min_pa, limit]
+                # params order adjustment
+                # Original logic had confusing params append order.
+                # Correct order for placeholders: season (inner), season (outer), [team_variants], min_pa, limit
                 final_params = [year, year]
                 if team_filter:
-                    final_params.append(self.get_team_code(team_filter))
+                    variants = self.get_team_variants(team_filter, year)
+                    final_params.append(variants)
                 final_params.extend([min_pa, limit])
                 params = final_params
 
@@ -791,10 +730,12 @@ class DatabaseQueryTool:
                 # 팀 필터 조건 구성
                 team_condition = ""
                 params = [year]
+                
                 if team_filter:
-                    team_code = self.get_team_code(team_filter)
-                    team_condition = "AND psp.team_code = %s"
-                    params.append(team_code)
+                    # Dual-State Support: Use IN clause with variants
+                    variants = self.get_team_variants(team_filter, year)
+                    team_condition = "AND psp.team_code = ANY(%s)"
+                    params.append(variants)
 
                 params.extend([min_ip, limit])
 
@@ -820,7 +761,7 @@ class DatabaseQueryTool:
                 """
                 final_params = [year, year]
                 if team_filter:
-                    final_params.append(self.get_team_code(team_filter))
+                    final_params.append(self.get_team_variants(team_filter, year))
                 final_params.extend([min_ip, limit])
                 params = final_params
             else:
@@ -1136,7 +1077,6 @@ class DatabaseQueryTool:
         """
         logger.info(f"[DatabaseQuery] Calculating team rank for {team_name} ({year})")
 
-        team_code = self.get_team_code(team_name)
         result = {
             "team_name": team_name,
             "year": year,
@@ -1147,38 +1087,74 @@ class DatabaseQueryTool:
             "found": False,
             "error": None,
         }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            logger.warning(
+                "[DatabaseQuery] Unsupported regular analysis team: input=%s resolved=%s",
+                team_name,
+                self.team_resolver.resolve_canonical(team_name),
+            )
+            self._record_team_query_result(
+                "get_team_season_rank", team_name, year, result
+            )
+            return result
+
+        team_code = self.get_team_code(team_name, year)
+        team_variants = self.get_team_variants(team_name, year)
+        logger.info(
+            "[DatabaseQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+            team_name,
+            team_code,
+            team_variants,
+            self.team_resolver.query_mode,
+        )
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
+            canonical_home_expr = self._canonical_team_expr("g.home_team")
+            canonical_away_expr = self._canonical_team_expr("g.away_team")
+            canonical_win_expr = self._canonical_team_expr("g.winning_team")
 
             # 모든 팀의 승무패 집계 (정규시즌 기준)
             # season_id를 통해 정확한 시즌 필터링
-            rank_query = """
-                WITH team_stats AS (
+            rank_query = f"""
+                WITH all_games AS (
+                    SELECT
+                        {canonical_home_expr} as team,
+                        {canonical_win_expr} as winning_team,
+                        g.home_score,
+                        g.away_score
+                    FROM game g
+                    JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    JOIN teams t ON g.home_team = t.team_id
+                    WHERE ks.season_year = %s
+                      AND ks.league_type_code = %s
+                      AND g.game_status = 'COMPLETED'
+                      AND t.franchise_id IS NOT NULL
+
+                    UNION ALL
+
+                    SELECT
+                        {canonical_away_expr} as team,
+                        {canonical_win_expr} as winning_team,
+                        g.home_score,
+                        g.away_score
+                    FROM game g
+                    JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    JOIN teams t ON g.away_team = t.team_id
+                    WHERE ks.season_year = %s
+                      AND ks.league_type_code = %s
+                      AND g.game_status = 'COMPLETED'
+                      AND t.franchise_id IS NOT NULL
+                ),
+                team_stats AS (
                     SELECT 
                         team,
                         SUM(CASE WHEN winning_team = team THEN 1 ELSE 0 END) as wins,
                         SUM(CASE WHEN winning_team IS NOT NULL AND winning_team != team THEN 1 ELSE 0 END) as losses,
                         SUM(CASE WHEN winning_team IS NULL AND home_score = away_score THEN 1 ELSE 0 END) as draws
-                    FROM (
-                        SELECT home_team as team, winning_team, home_score, away_score 
-                        FROM game g
-                        JOIN kbo_seasons ks ON g.season_id = ks.season_id
-                        JOIN teams t ON g.home_team = t.team_id
-                        WHERE ks.season_year = %s AND ks.league_type_code = '0' -- 정규시즌
-                        AND g.game_status = 'COMPLETED'
-                        AND t.franchise_id IS NOT NULL
-                        
-                        UNION ALL
-                        
-                        SELECT away_team as team, winning_team, home_score, away_score 
-                        FROM game g
-                        JOIN kbo_seasons ks ON g.season_id = ks.season_id
-                        JOIN teams t ON g.away_team = t.team_id
-                        WHERE ks.season_year = %s AND ks.league_type_code = '0'
-                        AND g.game_status = 'COMPLETED'
-                        AND t.franchise_id IS NOT NULL
-                    ) all_games
+                    FROM all_games
                     GROUP BY team
                 )
                 SELECT 
@@ -1187,14 +1163,14 @@ class DatabaseQueryTool:
                 FROM team_stats
             """
 
-            cursor.execute(rank_query, (year, year))
+            cursor.execute(rank_query, (year, 0, year, 0))
             rankings = cursor.fetchall()
 
-            target_team_code = self.get_game_team_code(team_name)
+            target_team_code = self.get_game_team_code(team_name, year)
 
             # 1차 시도: 팀 코드로 매칭
             for row in rankings:
-                if row["team"] == target_team_code:
+                if row["team"] == target_team_code or row["team"] in team_variants:
                     result["rank"] = row["rank"]
                     result["wins"] = row["wins"]
                     result["losses"] = row["losses"]
@@ -1224,6 +1200,7 @@ class DatabaseQueryTool:
             if "cursor" in locals():
                 cursor.close()
 
+        self._record_team_query_result("get_team_season_rank", team_name, year, result)
         return result
 
     def get_team_basic_info(self, team_name: str) -> Dict[str, Any]:
@@ -1239,7 +1216,15 @@ class DatabaseQueryTool:
         logger.info(f"[DatabaseQuery] Querying team basic info: {team_name}")
 
         team_code = self.get_team_code(team_name) if team_name else None
+        team_variants = self.get_team_variants(team_code) if team_code else []
         full_team_name = self.get_team_name(team_code) if team_code else None
+        logger.info(
+            "[DatabaseQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+            team_name,
+            team_code,
+            team_variants,
+            self.team_resolver.query_mode,
+        )
 
         result = {
             "team_name": full_team_name,
@@ -1355,19 +1340,41 @@ class DatabaseQueryTool:
             logger.info(
                 f"[DatabaseQuery] Cache hit for team summary: {team_name}, {year}"
             )
+            self._record_team_query_result(
+                "get_team_summary", team_name, year, cached_result
+            )
             return cached_result
 
-        team_code = self.get_team_code(team_name) if team_name else None
-        full_team_name = self.get_team_name(team_code) if team_code else None
-
         result = {
-            "team_name": full_team_name,
+            "team_name": team_name,
             "year": year,
             "top_batters": [],
             "top_pitchers": [],
             "found": False,
             "error": None,
         }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            logger.warning(
+                "[DatabaseQuery] Unsupported regular analysis team: input=%s resolved=%s",
+                team_name,
+                self.team_resolver.resolve_canonical(team_name),
+            )
+            self._record_team_query_result("get_team_summary", team_name, year, result)
+            return result
+
+        team_code = self.get_team_code(team_name, year) if team_name else None
+        team_variants = self.get_team_variants(team_name, year) if team_name else []
+        full_team_name = self.get_team_name(team_code) if team_code else None
+        result["team_name"] = full_team_name
+        logger.info(
+            "[DatabaseQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+            team_name,
+            team_code,
+            team_variants,
+            self.team_resolver.query_mode,
+        )
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
@@ -1384,7 +1391,7 @@ class DatabaseQueryTool:
                 FROM player_season_batting psb
                 JOIN player_basic pb ON psb.player_id = pb.player_id
                 LEFT JOIN teams t ON psb.team_code = t.team_id
-                WHERE psb.team_code = %s
+                WHERE psb.team_code = ANY(%s)
                 AND psb.season = %s
                 AND psb.league = 'REGULAR'
                 AND psb.plate_appearances >= 50
@@ -1392,7 +1399,7 @@ class DatabaseQueryTool:
                 ORDER BY psb.ops DESC
                 LIMIT 8
             """
-            cursor.execute(batters_query, (team_code, year))
+            cursor.execute(batters_query, (team_variants, year))
             batters = cursor.fetchall()
 
             if batters:
@@ -1416,7 +1423,7 @@ class DatabaseQueryTool:
                        END as role
                 FROM player_season_pitching psp
                 JOIN player_basic pb ON psp.player_id = pb.player_id
-                WHERE psp.team_code = %s
+                WHERE psp.team_code = ANY(%s)
                 AND psp.season = %s
                 AND psp.league = 'REGULAR'
                 AND psp.innings_pitched >= 20
@@ -1424,7 +1431,7 @@ class DatabaseQueryTool:
                 ORDER BY psp.era ASC
                 LIMIT 8
             """
-            cursor.execute(pitchers_query, (team_code, year))
+            cursor.execute(pitchers_query, (team_variants, year))
             pitchers = cursor.fetchall()
 
             if pitchers:
@@ -1449,6 +1456,7 @@ class DatabaseQueryTool:
         if result.get("found") and not result.get("error"):
             _coach_cache.set(cache_key, result)
 
+        self._record_team_query_result("get_team_summary", team_name, year, result)
         return result
 
     def get_pitcher_starting_win_rate(
@@ -1712,33 +1720,61 @@ class DatabaseQueryTool:
             logger.info(
                 f"[DatabaseQuery] Cache hit for advanced metrics: {team_name}, {year}"
             )
+            self._record_team_query_result(
+                "get_team_advanced_metrics", team_name, year, cached_result
+            )
             return cached_result
 
-        team_code = self.get_team_code(team_name)
         result = {
-            "team_name": self.get_team_name(team_code),
+            "team_name": team_name,
             "year": year,
             "metrics": {},
             "league_averages": {},
             "rankings": {},
             "fatigue_index": {},
+            "found": False,
+            "error": None,
         }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            logger.warning(
+                "[DatabaseQuery] Unsupported regular analysis team: input=%s resolved=%s",
+                team_name,
+                self.team_resolver.resolve_canonical(team_name),
+            )
+            self._record_team_query_result(
+                "get_team_advanced_metrics", team_name, year, result
+            )
+            return result
+
+        team_code = self.get_team_code(team_name, year)
+        team_variants = self.get_team_variants(team_name, year)
+        result["team_name"] = self.get_team_name(team_code)
+        logger.info(
+            "[DatabaseQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+            team_name,
+            team_code,
+            team_variants,
+            self.team_resolver.query_mode,
+        )
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
+            canonical_team_code_expr = self._canonical_team_expr("team_code")
 
             # 1. 팀 타격 지표 및 순위
-            batting_query = """
+            batting_query = f"""
                 WITH team_batting AS (
                     SELECT
-                        team_code,
+                        {canonical_team_code_expr} as team_code,
                         ROUND(AVG(avg)::numeric, 3) as avg,
                         ROUND(AVG(ops)::numeric, 3) as ops,
                         SUM(home_runs) as total_hr,
                         SUM(rbi) as total_rbi
                     FROM player_season_batting
                     WHERE season = %s AND plate_appearances > 50
-                    GROUP BY team_code
+                    GROUP BY 1
                 ),
                 ranked_batting AS (
                     SELECT 
@@ -1747,9 +1783,9 @@ class DatabaseQueryTool:
                         RANK() OVER (ORDER BY avg DESC) as avg_rank
                     FROM team_batting
                 )
-                SELECT * FROM ranked_batting WHERE team_code = %s;
+                SELECT * FROM ranked_batting WHERE team_code = ANY(%s);
             """
-            cursor.execute(batting_query, (year, team_code))
+            cursor.execute(batting_query, (year, team_variants))
             bat_row = cursor.fetchone()
             if bat_row:
                 result["metrics"]["batting"] = {
@@ -1763,10 +1799,10 @@ class DatabaseQueryTool:
 
             # 2. 팀 투구 및 '과부하' 지표
             # gs > 0 (선발), gs = 0 (불펜) 구분하여 이닝 비중 계산
-            pitching_query = """
+            pitching_query = f"""
                 WITH team_pitching_raw AS (
                     SELECT 
-                        team_code,
+                        {canonical_team_code_expr} as team_code,
                         -- 선발 요건: GS > 0 이거나 QS > 0 이거나 경기당 3이닝 이상 투구
                         SUM(CASE WHEN (COALESCE(games_started, 0) > 0 OR COALESCE(quality_starts, 0) > 0 OR (innings_pitched / NULLIF(games, 0)) >= 3) THEN innings_pitched ELSE 0 END) as starter_ip,
                         SUM(CASE WHEN NOT (COALESCE(games_started, 0) > 0 OR COALESCE(quality_starts, 0) > 0 OR (innings_pitched / NULLIF(games, 0)) >= 3) THEN innings_pitched ELSE 0 END) as bullpen_ip,
@@ -1778,7 +1814,7 @@ class DatabaseQueryTool:
                         ROUND(AVG(era)::numeric, 2) as avg_era
                     FROM player_season_pitching
                     WHERE season = %s
-                    GROUP BY team_code
+                    GROUP BY 1
                 ),
                 fatigue_calc AS (
                     SELECT
@@ -1794,9 +1830,9 @@ class DatabaseQueryTool:
                         RANK() OVER (ORDER BY bullpen_share DESC) as load_rank
                     FROM fatigue_calc
                 )
-                SELECT * FROM ranked_pitching WHERE team_code = %s;
+                SELECT * FROM ranked_pitching WHERE team_code = ANY(%s);
             """
-            cursor.execute(pitching_query, (year, team_code))
+            cursor.execute(pitching_query, (year, team_variants))
             pitch_row = cursor.fetchone()
             if pitch_row:
                 result["metrics"]["pitching"] = {
@@ -1814,17 +1850,18 @@ class DatabaseQueryTool:
                 }
 
             # 3. 리그 평균 비교군 (불펜 비중 리그 평균)
-            league_avg_query = """
+            league_avg_query = f"""
                 SELECT
                     ROUND(AVG(bullpen_share)::numeric, 1) as avg_bullpen_share,
                     ROUND(AVG(avg_era)::numeric, 2) as avg_league_era
                 FROM (
                     SELECT 
+                        {canonical_team_code_expr} as canonical_team_code,
                         SUM(CASE WHEN NOT (COALESCE(games_started, 0) > 0 OR COALESCE(quality_starts, 0) > 0 OR (innings_pitched / NULLIF(games, 0)) >= 3) THEN innings_pitched ELSE 0 END) / NULLIF(SUM(innings_pitched), 0) * 100 as bullpen_share,
                         AVG(era) as avg_era
                     FROM player_season_pitching
                     WHERE season = %s
-                    GROUP BY team_code
+                    GROUP BY 1
                 ) as league_stats;
             """
             cursor.execute(league_avg_query, (year,))
@@ -1842,12 +1879,19 @@ class DatabaseQueryTool:
                 )
 
             # 성공적인 결과 캐시 (Coach 최적화)
+            result["found"] = bool(result["metrics"] or result["rankings"] or result["fatigue_index"])
             _coach_cache.set(cache_key, result)
+            self._record_team_query_result(
+                "get_team_advanced_metrics", team_name, year, result
+            )
             return result
 
         except Exception as e:
             logger.error(f"[DatabaseQuery] Error in advanced metrics: {e}")
             result["error"] = str(e)
+            self._record_team_query_result(
+                "get_team_advanced_metrics", team_name, year, result
+            )
             return result
         finally:
             if "cursor" in locals():
@@ -1952,11 +1996,13 @@ class DatabaseQueryTool:
         cache_key = f"recent_form:{team_name}:{year}:{limit}"
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
+            self._record_team_query_result(
+                "get_team_recent_form", team_name, year, cached_result
+            )
             return cached_result
 
-        team_code = self.get_team_code(team_name)
         result = {
-            "team_name": self.get_team_name(team_code),
+            "team_name": team_name,
             "year": year,
             "games": [],
             "summary": {
@@ -1969,6 +2015,27 @@ class DatabaseQueryTool:
             "found": False,
             "error": None,
         }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            logger.warning(
+                "[DatabaseQuery] Unsupported regular analysis team: input=%s resolved=%s",
+                team_name,
+                self.team_resolver.resolve_canonical(team_name),
+            )
+            self._record_team_query_result("get_team_recent_form", team_name, year, result)
+            return result
+
+        team_code = self.get_team_code(team_name, year)
+        team_variants = self.get_team_variants(team_name, year)
+        result["team_name"] = self.get_team_name(team_code)
+        logger.info(
+            "[DatabaseQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+            team_name,
+            team_code,
+            team_variants,
+            self.team_resolver.query_mode,
+        )
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
@@ -1978,11 +2045,11 @@ class DatabaseQueryTool:
                 SELECT 
                     g.game_date,
                     CASE 
-                        WHEN g.home_team = %s THEN 'home' 
+                        WHEN g.home_team = ANY(%s) THEN 'home' 
                         ELSE 'away' 
                     END as side,
                     CASE 
-                        WHEN g.home_team = %s THEN t_away.team_name 
+                        WHEN g.home_team = ANY(%s) THEN t_away.team_name 
                         ELSE t_home.team_name 
                     END as opponent,
                     g.home_score,
@@ -1990,19 +2057,26 @@ class DatabaseQueryTool:
                     g.winning_team,
                     g.stadium_id
                 FROM game g
+                JOIN kbo_seasons ks ON g.season_id = ks.season_id
                 JOIN teams t_home ON g.home_team = t_home.team_id
                 JOIN teams t_away ON g.away_team = t_away.team_id
-                WHERE (g.home_team = %s OR g.away_team = %s)
-                AND CAST(g.season_id AS TEXT) LIKE %s
+                WHERE (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
+                AND ks.season_year = %s
                 AND g.home_score IS NOT NULL -- 완료된 경기(점수 존재)
                 ORDER BY g.game_date DESC
                 LIMIT %s
             """
-            season_pattern = f"{year}%"
 
             cursor.execute(
                 query,
-                (team_code, team_code, team_code, team_code, season_pattern, limit),
+                (
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    year,
+                    limit,
+                ),
             )
             games = cursor.fetchall()
 
@@ -2035,7 +2109,7 @@ class DatabaseQueryTool:
                     total_runs += my_score
                     total_allowed += opp_score
 
-                    if g["winning_team"] == team_code:
+                    if g["winning_team"] in team_variants:
                         game_data["result"] = "Win"
                         wins += 1
                     elif g["winning_team"] is None and my_score == opp_score:
@@ -2065,6 +2139,7 @@ class DatabaseQueryTool:
             logger.error(f"[DatabaseQuery] Error querying recent form: {e}")
             result["error"] = str(e)
 
+        self._record_team_query_result("get_team_recent_form", team_name, year, result)
         return result
 
     def get_team_monthly_trend(self, team_name: str, year: int) -> Dict[str, Any]:
@@ -2083,16 +2158,41 @@ class DatabaseQueryTool:
         cache_key = f"monthly_trend:{team_name}:{year}"
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
+            self._record_team_query_result(
+                "get_team_monthly_trend", team_name, year, cached_result
+            )
             return cached_result
 
-        team_code = self.get_team_code(team_name)
         result = {
-            "team_name": self.get_team_name(team_code),
+            "team_name": team_name,
             "year": year,
             "monthly_stats": [],
             "found": False,
             "error": None,
         }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            logger.warning(
+                "[DatabaseQuery] Unsupported regular analysis team: input=%s resolved=%s",
+                team_name,
+                self.team_resolver.resolve_canonical(team_name),
+            )
+            self._record_team_query_result(
+                "get_team_monthly_trend", team_name, year, result
+            )
+            return result
+
+        team_code = self.get_team_code(team_name, year)
+        team_variants = self.get_team_variants(team_name, year)
+        result["team_name"] = self.get_team_name(team_code)
+        logger.info(
+            "[DatabaseQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+            team_name,
+            team_code,
+            team_variants,
+            self.team_resolver.query_mode,
+        )
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
@@ -2102,33 +2202,33 @@ class DatabaseQueryTool:
                 SELECT 
                     EXTRACT(MONTH FROM g.game_date) as month,
                     COUNT(*) as games,
-                    SUM(CASE WHEN g.winning_team = %s THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN g.winning_team != %s AND g.winning_team IS NOT NULL THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN g.winning_team = ANY(%s) THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN NOT (g.winning_team = ANY(%s)) AND g.winning_team IS NOT NULL THEN 1 ELSE 0 END) as losses,
                     SUM(CASE WHEN g.winning_team IS NULL THEN 1 ELSE 0 END) as draws,
                     AVG(
-                        CASE WHEN g.home_team = %s THEN g.home_score ELSE g.away_score END
+                        CASE WHEN g.home_team = ANY(%s) THEN g.home_score ELSE g.away_score END
                     ) as avg_runs_scored,
                     AVG(
-                        CASE WHEN g.home_team = %s THEN g.away_score ELSE g.home_score END
+                        CASE WHEN g.home_team = ANY(%s) THEN g.away_score ELSE g.home_score END
                     ) as avg_runs_allowed
                 FROM game g
-                WHERE (g.home_team = %s OR g.away_team = %s)
-                AND CAST(g.season_id AS TEXT) LIKE %s
+                JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                WHERE (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
+                AND ks.season_year = %s
                 AND g.home_score IS NOT NULL
                 GROUP BY month
                 ORDER BY month
             """
-            season_pattern = f"{year}%"
             cursor.execute(
                 query,
                 (
-                    team_code,
-                    team_code,
-                    team_code,
-                    team_code,
-                    team_code,
-                    team_code,
-                    season_pattern,
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    year,
                 ),
             )
             rows = cursor.fetchall()
@@ -2157,6 +2257,7 @@ class DatabaseQueryTool:
             logger.error(f"[DatabaseQuery] Error querying monthly trend: {e}")
             result["error"] = str(e)
 
+        self._record_team_query_result("get_team_monthly_trend", team_name, year, result)
         return result
 
     def get_team_matchup_stats(self, team_name: str, year: int) -> Dict[str, Any]:
@@ -2175,16 +2276,39 @@ class DatabaseQueryTool:
         cache_key = f"matchup_stats:{team_name}:{year}"
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
+            self._record_team_query_result(
+                "get_team_matchup_stats", team_name, year, cached_result
+            )
             return cached_result
 
-        team_code = self.get_team_code(team_name)
         result = {
-            "team_name": self.get_team_name(team_code),
+            "team_name": team_name,
             "year": year,
             "matchups": {},
             "found": False,
             "error": None,
         }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            logger.warning(
+                "[DatabaseQuery] Unsupported regular analysis team: input=%s resolved=%s",
+                team_name,
+                self.team_resolver.resolve_canonical(team_name),
+            )
+            self._record_team_query_result("get_team_matchup_stats", team_name, year, result)
+            return result
+
+        team_code = self.get_team_code(team_name, year)
+        team_variants = self.get_team_variants(team_name, year)
+        result["team_name"] = self.get_team_name(team_code)
+        logger.info(
+            "[DatabaseQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+            team_name,
+            team_code,
+            team_variants,
+            self.team_resolver.query_mode,
+        )
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
@@ -2192,26 +2316,33 @@ class DatabaseQueryTool:
             query = """
                 SELECT 
                     CASE 
-                        WHEN g.home_team = %s THEN t_away.team_name 
+                        WHEN g.home_team = ANY(%s) THEN t_away.team_name 
                         ELSE t_home.team_name 
                     END as opponent,
                     COUNT(*) as games,
-                    SUM(CASE WHEN g.winning_team = %s THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN g.winning_team != %s AND g.winning_team IS NOT NULL THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN g.winning_team = ANY(%s) THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN NOT (g.winning_team = ANY(%s)) AND g.winning_team IS NOT NULL THEN 1 ELSE 0 END) as losses,
                     SUM(CASE WHEN g.winning_team IS NULL THEN 1 ELSE 0 END) as draws
                 FROM game g
+                JOIN kbo_seasons ks ON g.season_id = ks.season_id
                 JOIN teams t_home ON g.home_team = t_home.team_id
                 JOIN teams t_away ON g.away_team = t_away.team_id
-                WHERE (g.home_team = %s OR g.away_team = %s)
-                AND CAST(g.season_id AS TEXT) LIKE %s
+                WHERE (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
+                AND ks.season_year = %s
                 AND g.home_score IS NOT NULL
                 GROUP BY opponent
                 ORDER BY wins DESC
             """
-            season_pattern = f"{year}%"
             cursor.execute(
                 query,
-                (team_code, team_code, team_code, team_code, team_code, season_pattern),
+                (
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    team_variants,
+                    year,
+                ),
             )
             rows = cursor.fetchall()
 
@@ -2232,4 +2363,5 @@ class DatabaseQueryTool:
             logger.error(f"[DatabaseQuery] Error querying matchup stats: {e}")
             result["error"] = str(e)
 
+        self._record_team_query_result("get_team_matchup_stats", team_name, year, result)
         return result

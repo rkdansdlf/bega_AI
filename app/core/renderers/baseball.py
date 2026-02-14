@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 NUMBER_SENTINELS = {"", None, "null", "None"}
 
 from app.core import kbo_metrics
+from app.core.entity_extractor import POS_ABBR_TO_NAME
 
 _LEAGUE_CONTEXT = kbo_metrics.LeagueContext()
 
@@ -478,26 +479,12 @@ def _parse_position(
 
     position_str = position_str.strip()
 
-    MAIN_POSITION = {
-        "一": "1루수",
-        "二": "2루수",
-        "三": "3루수",
-        "유": "유격수",
-        "좌": "좌익수",
-        "우": "우익수",
-        "중": "중견수",
-        "포": "포수",
-        "투": "투수",
-    }
-    SUB_POSITION = {
-        "타": "대타",
-        "지": "지명타자",
-        "주": "대주자",
-    }
+    MAIN_POSITION = {k: v for k, v in POS_ABBR_TO_NAME.items() if k not in ["타", "지", "주"]}
+    SUB_POSITION = {k: v for k, v in POS_ABBR_TO_NAME.items() if k in ["타", "지", "주"]}
 
     # 포지션 1글자 = 단일 포지션
     if len(position_str) == 1:
-        main = MAIN_POSITION.get(position_str, position_str)
+        main = POS_ABBR_TO_NAME.get(position_str, position_str)
         return (None, main, None)
     # 포지션 2글자
     if len(position_str) == 2:
