@@ -9,8 +9,7 @@ def test_build_canonical_source_row_id_game() -> None:
 def test_build_canonical_source_row_id_game_metadata() -> None:
     row = {"game_id": "20250301SSLG0", "stadium_code": "JAMSIL"}
     assert (
-        build_canonical_source_row_id(row, "game_metadata")
-        == "game_id=20250301SSLG0"
+        build_canonical_source_row_id(row, "game_metadata") == "game_id=20250301SSLG0"
     )
 
 

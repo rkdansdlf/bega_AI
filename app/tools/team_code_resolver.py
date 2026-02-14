@@ -6,7 +6,6 @@ import os
 from typing import Any, Dict, Iterable, List
 from app.tools.team_resolution_metrics import get_team_resolution_metrics
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -44,16 +43,18 @@ class TeamCodeResolver:
 
     def __init__(self) -> None:
         self.team_resolution_metrics = get_team_resolution_metrics()
-        self.read_mode = os.getenv("TEAM_CODE_READ_MODE", "canonical_only").strip().lower()
+        self.read_mode = (
+            os.getenv("TEAM_CODE_READ_MODE", "canonical_only").strip().lower()
+        )
         self.canonical_window_start = self._read_int_env(
             "TEAM_CODE_CANONICAL_WINDOW_START", 2021
         )
         self.canonical_window_end = self._read_int_env(
             "TEAM_CODE_CANONICAL_WINDOW_END", 2025
         )
-        self.outside_window_mode = os.getenv(
-            "TEAM_CODE_OUTSIDE_WINDOW_MODE", "dual"
-        ).strip().lower()
+        self.outside_window_mode = (
+            os.getenv("TEAM_CODE_OUTSIDE_WINDOW_MODE", "dual").strip().lower()
+        )
         if self.read_mode not in {"dual", "canonical_only"}:
             self.read_mode = "canonical_only"
         if self.outside_window_mode not in {"dual", "canonical_only"}:
@@ -97,7 +98,7 @@ class TeamCodeResolver:
             "NX": "KH",
             "우리": "KH",
             "빙그레": "HH",
-            "현대": "HU", # Historical dissolved
+            "현대": "HU",  # Historical dissolved
             "태평양": "TP",
             "청보": "CB",
             "삼미": "SM",
@@ -182,21 +183,25 @@ class TeamCodeResolver:
         if not team_input:
             return team_input
         cleaned = self._clean(team_input)
-        
+
         # 1. Start with name/initial code mapping to canonical
-        canonical = self.name_to_canonical.get(team_input) or self.name_to_canonical.get(cleaned)
+        canonical = self.name_to_canonical.get(
+            team_input
+        ) or self.name_to_canonical.get(cleaned)
         if not canonical:
             canonical = LEGACY_TO_CANONICAL.get(cleaned, cleaned)
-            
+
         # 2. If year is provided, find the EXACT brand code for that year
         if season_year and canonical in self.brand_history:
             for end_year, brand in self.brand_history[canonical]:
                 if end_year is None or season_year <= end_year:
                     return brand
-                    
+
         return canonical
 
-    def query_variants(self, team_input: str, season_year: int | None = None) -> List[str]:
+    def query_variants(
+        self, team_input: str, season_year: int | None = None
+    ) -> List[str]:
         canonical = self.resolve_canonical(team_input)
         if not canonical:
             return []
@@ -214,7 +219,9 @@ class TeamCodeResolver:
             outside_window=outside_window,
             fallback_used=fallback_used,
         )
-        self.team_resolution_metrics.maybe_log(logger, "TeamCodeResolver.query_variants")
+        self.team_resolution_metrics.maybe_log(
+            logger, "TeamCodeResolver.query_variants"
+        )
 
         if query_mode == "canonical_only":
             target = self.resolve_canonical(team_input, season_year)

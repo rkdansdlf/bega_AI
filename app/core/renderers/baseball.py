@@ -479,8 +479,12 @@ def _parse_position(
 
     position_str = position_str.strip()
 
-    MAIN_POSITION = {k: v for k, v in POS_ABBR_TO_NAME.items() if k not in ["타", "지", "주"]}
-    SUB_POSITION = {k: v for k, v in POS_ABBR_TO_NAME.items() if k in ["타", "지", "주"]}
+    MAIN_POSITION = {
+        k: v for k, v in POS_ABBR_TO_NAME.items() if k not in ["타", "지", "주"]
+    }
+    SUB_POSITION = {
+        k: v for k, v in POS_ABBR_TO_NAME.items() if k in ["타", "지", "주"]
+    }
 
     # 포지션 1글자 = 단일 포지션
     if len(position_str) == 1:

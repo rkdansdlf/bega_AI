@@ -68,6 +68,7 @@ LEGACY_SOURCE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "game_summary": ("game_id", "summary_type", "detail_text"),
 }
 
+
 @dataclass(frozen=True)
 class CoverageTarget:
     table: str
@@ -76,7 +77,9 @@ class CoverageTarget:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Verify rag_chunks embedding coverage.")
+    parser = argparse.ArgumentParser(
+        description="Verify rag_chunks embedding coverage."
+    )
     parser.add_argument("--start-year", type=int, default=2018)
     parser.add_argument("--end-year", type=int, default=2025)
     parser.add_argument(
@@ -135,15 +138,21 @@ def build_targets(mode: str, start_year: int, end_year: int) -> List[CoverageTar
         for table in STATIC_TABLES:
             profile = TABLE_PROFILES.get(table, {})
             source_table = str(profile.get("source_table", table))
-            targets.append(CoverageTarget(table=table, year=0, source_table=source_table))
+            targets.append(
+                CoverageTarget(table=table, year=0, source_table=source_table)
+            )
     return targets
 
 
 def _recreate_temp_tables(dest_cur) -> None:
     dest_cur.execute("DROP TABLE IF EXISTS expected_ids")
     dest_cur.execute("DROP TABLE IF EXISTS actual_ids")
-    dest_cur.execute("CREATE TEMP TABLE expected_ids (id text PRIMARY KEY) ON COMMIT DROP")
-    dest_cur.execute("CREATE TEMP TABLE actual_ids (id text PRIMARY KEY) ON COMMIT DROP")
+    dest_cur.execute(
+        "CREATE TEMP TABLE expected_ids (id text PRIMARY KEY) ON COMMIT DROP"
+    )
+    dest_cur.execute(
+        "CREATE TEMP TABLE actual_ids (id text PRIMARY KEY) ON COMMIT DROP"
+    )
 
 
 def _build_canonical_from_mapping(mapping: Dict[str, Any], table: str) -> Optional[str]:
@@ -167,7 +176,9 @@ def _build_legacy_from_mapping(mapping: Dict[str, Any], table: str) -> Optional[
             return None
         normalized = value.strip() if isinstance(value, str) else str(value)
         if table == "stadiums" and key == "stadium_id":
-            maybe_stadium = build_canonical_source_row_id({"stadium_id": normalized}, table)
+            maybe_stadium = build_canonical_source_row_id(
+                {"stadium_id": normalized}, table
+            )
             if maybe_stadium is None:
                 return None
             parts.append(maybe_stadium)
@@ -353,16 +364,16 @@ def verify_target(
 ) -> Dict[str, Any]:
     with dest_conn.cursor() as dest_cur:
         _recreate_temp_tables(dest_cur)
-        expected_count, legacy_aliases = _load_expected_ids(source_conn, dest_cur, target)
+        expected_count, legacy_aliases = _load_expected_ids(
+            source_conn, dest_cur, target
+        )
         _load_actual_ids(dest_cur, target, legacy_aliases)
 
-        dest_cur.execute(
-            """
+        dest_cur.execute("""
             SELECT count(*)
             FROM expected_ids e
             JOIN actual_ids a ON a.id = e.id
-            """
-        )
+            """)
         present_count = int(dest_cur.fetchone()[0])
         missing_count = expected_count - present_count
 

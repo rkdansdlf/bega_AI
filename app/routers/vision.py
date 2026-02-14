@@ -36,7 +36,7 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
     try:
         # Read image content
         contents = await file.read()
-        
+
         prompt = """
         Analyze this KBO(Korean Baseball Organization) ticket image and extract the following information in JSON format:
         - date (YYYY-MM-DD format)
@@ -58,7 +58,9 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
         if settings.llm_provider == "gemini":
             # Native Google Gemini Implementation
             if not settings.gemini_api_key:
-                raise HTTPException(status_code=500, detail="Gemini API Key not configured")
+                raise HTTPException(
+                    status_code=500, detail="Gemini API Key not configured"
+                )
 
             genai.configure(api_key=settings.gemini_api_key)
             model = genai.GenerativeModel(settings.vision_model or "gemini-2.0-flash")
@@ -70,7 +72,7 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
             image = await run_in_threadpool(_load_image, contents)
             response = await run_in_threadpool(model.generate_content, [prompt, image])
             response_text = response.text.strip()
-            
+
         else:
             # OpenRouter Implementation
             base64_image = base64.b64encode(contents).decode("utf-8")
