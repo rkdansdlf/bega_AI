@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, datetime
 from unittest.mock import MagicMock
 
@@ -8,6 +9,7 @@ from app.routers.coach import (
     AnalyzeRequest,
     _is_valid_analysis_year,
     _resolve_target_year,
+    analyze_team,
 )
 
 
@@ -111,3 +113,21 @@ def test_analysis_year_range_guard():
     assert _is_valid_analysis_year(1982)
     assert _is_valid_analysis_year(datetime.now().year + 1)
     assert not _is_valid_analysis_year(1981)
+
+
+def test_analyze_team_preserves_http_exception_status(monkeypatch):
+    payload = AnalyzeRequest(
+        home_team_id="SSG",
+        league_context={"season_year": 266},
+    )
+    agent = MagicMock()
+    agent._convert_team_id_to_name.return_value = "SSG"
+
+    dummy_pool = MagicMock()
+    monkeypatch.setattr("app.routers.coach.get_connection_pool", lambda: dummy_pool)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(analyze_team(payload, agent=agent, _=None))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "invalid_season_year_for_analysis"
