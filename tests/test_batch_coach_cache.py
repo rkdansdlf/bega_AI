@@ -95,7 +95,9 @@ def test_async_main_returns_failure_when_baseline_gate_fails(
 
     monkeypatch.setattr(batch_coach_cache, "get_connection_pool", lambda: object())
     monkeypatch.setattr(batch_coach_cache, "TeamCodeResolver", lambda: object())
-    monkeypatch.setattr(batch_coach_cache, "cleanup_cache_rows", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        batch_coach_cache, "cleanup_cache_rows", lambda *args, **kwargs: {}
+    )
     monkeypatch.setattr(
         batch_coach_cache,
         "generate_and_cache_team",
