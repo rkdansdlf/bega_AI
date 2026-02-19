@@ -252,7 +252,7 @@ FastAPI Application (8001)
     # OPENAI_EMBED_MODEL=text-embedding-3-small
     
     # --- 데이터베이스 ---
-    SUPABASE_DB_URL=postgresql://user:pass@host:5432/db
+    POSTGRES_DB_URL=postgresql://user:pass@host:5432/db
     
     # --- 공통 설정 ---
     DEFAULT_SEARCH_LIMIT=15
@@ -565,7 +565,7 @@ BEGA AI Service의 RAG(검색 증강 생성) 파이프라인은 다음 4단계�
 `app/db/schema.sql` 파일을 사용하여 `rag_chunks` 테이블을 생성합니다:
 
 ```bash
-psql $SUPABASE_DB_URL -f app/db/schema.sql
+psql $POSTGRES_DB_URL -f app/db/schema.sql
 ```
 
 ### 초기 데이터 수집
@@ -710,7 +710,7 @@ services:
       - LLM_PROVIDER=${LLM_PROVIDER}
       - EMBED_PROVIDER=${EMBED_PROVIDER}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - POSTGRES_DB_URL=${POSTGRES_DB_URL}
     volumes:
       - ./data:/app/data
       - ./docs:/app/docs
