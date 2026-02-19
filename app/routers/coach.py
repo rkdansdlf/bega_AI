@@ -11,10 +11,9 @@ import logging
 import json
 import asyncio
 import uuid
-import hashlib
 from time import perf_counter
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, model_validator
 
@@ -26,6 +25,7 @@ from ..deps import (
     get_connection_pool,
     get_coach_llm_generator,
 )
+from ..config import get_settings
 from ..agents.baseball_agent import BaseballStatisticsAgent
 from ..core.prompts import COACH_PROMPT_V2
 from ..core.coach_validator import (
@@ -33,6 +33,7 @@ from ..core.coach_validator import (
     CoachResponse,
     _create_fallback_response,
 )
+from ..core.coach_cache_key import build_coach_cache_key, normalize_focus
 from ..core.ratelimit import rate_limit_dependency
 from ..tools.database_query import DatabaseQueryTool
 from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
@@ -41,10 +42,117 @@ logger = logging.getLogger(__name__)
 
 # 빈 응답 시 재시도 횟수
 MAX_RETRY_ON_EMPTY = 2
-COACH_CACHE_SCHEMA_VERSION = "v2"
-COACH_CACHE_PROMPT_VERSION = "v4_dual"
-COACH_MODEL_NAME = "solar-pro-3"
+COACH_CACHE_SCHEMA_VERSION = "v3"
+COACH_CACHE_PROMPT_VERSION = "v5_focus"
 COACH_YEAR_MIN = 1982
+PENDING_STALE_SECONDS = 300
+PENDING_WAIT_TIMEOUT_SECONDS = 10
+PENDING_WAIT_POLL_MS = 300
+FAILED_RETRY_AFTER_SECONDS = 3600  # FAILED 항목 1시간 후 자동 재시도 허용
+FOCUS_SECTION_HEADERS: Dict[str, str] = {
+    "recent_form": "## 최근 전력",
+    "bullpen": "## 불펜 상태",
+    "starter": "## 선발 투수",
+    "matchup": "## 상대 전적",
+    "batting": "## 타격 생산성",
+}
+
+
+def _cache_status_response(
+    *,
+    headline: str,
+    coach_note: str,
+    detail: str,
+) -> Dict[str, Any]:
+    return {
+        "headline": headline,
+        "sentiment": "neutral",
+        "key_metrics": [],
+        "analysis": {
+            "strengths": [],
+            "weaknesses": [],
+            "risks": [],
+        },
+        "detailed_markdown": detail,
+        "coach_note": coach_note,
+    }
+
+
+def _calc_row_age_seconds(updated_at: Any) -> float:
+    if not isinstance(updated_at, datetime):
+        return float("inf")
+    now_ref = (
+        datetime.now(updated_at.tzinfo)
+        if updated_at.tzinfo is not None
+        else datetime.now()
+    )
+    return max(0.0, (now_ref - updated_at).total_seconds())
+
+
+def _determine_cache_gate(
+    *,
+    status: Optional[str],
+    has_cached_json: bool,
+    updated_at: Any,
+    pending_stale_seconds: int = PENDING_STALE_SECONDS,
+) -> str:
+    if status == "COMPLETED" and has_cached_json:
+        return "HIT"
+    if status == "PENDING":
+        age_seconds = _calc_row_age_seconds(updated_at)
+        if age_seconds > pending_stale_seconds:
+            return "PENDING_STALE_TAKEOVER"
+        return "PENDING_WAIT"
+    if status == "FAILED":
+        age_seconds = _calc_row_age_seconds(updated_at)
+        if age_seconds > FAILED_RETRY_AFTER_SECONDS:
+            return "MISS_GENERATE"  # 1시간 경과 시 재생성 허용
+        return "FAILED_LOCKED"
+    return "MISS_GENERATE"
+
+
+def _should_generate_from_gate(gate: str) -> bool:
+    return gate in {"MISS_GENERATE", "PENDING_STALE_TAKEOVER"}
+
+
+async def _wait_for_cache_terminal_state(
+    pool: ConnectionPool,
+    cache_key: str,
+    timeout_seconds: float = PENDING_WAIT_TIMEOUT_SECONDS,
+    poll_ms: int = PENDING_WAIT_POLL_MS,
+) -> Optional[Dict[str, Any]]:
+    deadline = perf_counter() + timeout_seconds
+    sleep_seconds = max(float(poll_ms), 1.0) / 1000.0
+
+    while perf_counter() < deadline:
+        await asyncio.sleep(sleep_seconds)
+        try:
+            with pool.connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT status, response_json, error_message
+                    FROM coach_analysis_cache
+                    WHERE cache_key = %s
+                    """,
+                    (cache_key,),
+                ).fetchone()
+            if not row:
+                continue
+            status, cached_json, error_message = row
+            if status == "COMPLETED" and cached_json:
+                return {
+                    "status": "COMPLETED",
+                    "response_json": cached_json,
+                }
+            if status == "FAILED":
+                return {
+                    "status": "FAILED",
+                    "error_message": error_message,
+                }
+        except Exception as exc:
+            logger.warning("[Coach] Cache wait poll failed for %s: %s", cache_key, exc)
+            return None
+    return None
 
 
 def _normalize_cached_response(cached_data: dict) -> dict:
@@ -190,6 +298,48 @@ def _resolve_target_year(
         status_code=400,
         detail="unable_to_resolve_analysis_year",
     )
+
+
+def _build_focus_section_requirements(resolved_focus: List[str]) -> str:
+    """
+    선택 focus에 해당하는 상세 섹션 제목 요구사항을 생성합니다.
+    """
+    if not resolved_focus:
+        return (
+            "- 선택 focus가 비어 있습니다. 종합 분석을 수행하세요.\n"
+            "- 다만 detailed_markdown은 최소 2개 이상의 소제목(##)으로 구성하세요."
+        )
+
+    header_lines = [
+        f"- 반드시 `{FOCUS_SECTION_HEADERS[focus]}` 제목을 포함하세요."
+        for focus in resolved_focus
+        if focus in FOCUS_SECTION_HEADERS
+    ]
+    non_selected = [
+        header for key, header in FOCUS_SECTION_HEADERS.items() if key not in resolved_focus
+    ]
+    omit_lines = [f"- 미선택 focus는 가능하면 생략하세요: `{header}`" for header in non_selected]
+    return "\n".join(header_lines + omit_lines)
+
+
+def _find_missing_focus_sections(
+    response_data: Dict[str, Any], resolved_focus: List[str]
+) -> List[str]:
+    """
+    detailed_markdown에서 선택 focus 섹션 누락 여부를 확인합니다.
+    """
+    if not resolved_focus:
+        return []
+
+    markdown = str(response_data.get("detailed_markdown") or "")
+    missing: List[str] = []
+    for focus in resolved_focus:
+        header = FOCUS_SECTION_HEADERS.get(focus)
+        if not header:
+            continue
+        if header not in markdown:
+            missing.append(focus)
+    return missing
 
 
 router = APIRouter(prefix="/coach", tags=["coach"])
@@ -575,6 +725,7 @@ class AnalyzeRequest(BaseModel):
     league_context: Optional[Dict[str, Any]] = None
     focus: List[str] = []
     game_id: Optional[str] = None
+    request_mode: Literal["auto_brief", "manual_detail"] = "manual_detail"
     question_override: Optional[str] = None
 
     @model_validator(mode="before")
@@ -632,39 +783,66 @@ async def analyze_team(
             if payload.away_team_id
             else None
         )
-
-        if payload.question_override:
-            query = payload.question_override
-        else:
+        request_mode = payload.request_mode
+        is_auto_brief = request_mode == "auto_brief"
+        input_focus = list(payload.focus or [])
+        resolved_focus = ["recent_form"] if is_auto_brief else normalize_focus(input_focus)
+        if is_auto_brief:
+            if payload.question_override:
+                logger.warning(
+                    "[Coach Router] auto_brief ignores question_override for %s: %s",
+                    home_name,
+                    payload.question_override,
+                )
+            effective_question_override = None
+            question_signature_override = "auto"
             query = _build_coach_query(
                 home_name,
-                payload.focus,
+                resolved_focus,
                 opponent_name=away_name,
                 league_context=payload.league_context,
             )
+        else:
+            effective_question_override = payload.question_override
+            question_signature_override = None
+            if payload.question_override:
+                query = payload.question_override
+            else:
+                query = _build_coach_query(
+                    home_name,
+                    resolved_focus,
+                    opponent_name=away_name,
+                    league_context=payload.league_context,
+                )
 
         year, resolve_source = _resolve_target_year(payload, pool)
         if not _is_valid_analysis_year(year):
             raise HTTPException(status_code=400, detail="analysis_year_out_of_range")
 
+        settings = get_settings()
+        coach_model_name = settings.coach_openrouter_model or settings.openrouter_model
+
         # Cache Key 생성
         game_type = str(
             (payload.league_context or {}).get("league_type") or "UNKNOWN"
         ).upper()
-        cache_key_payload = {
-            "schema": COACH_CACHE_SCHEMA_VERSION,
-            "prompt_version": COACH_CACHE_PROMPT_VERSION,
-            "team_code_canonical": home_team_canonical,
-            "away_team_code_canonical": away_team_canonical or "",
-            "year": year,
-            "game_type": game_type,
-        }
-        cache_key = hashlib.sha256(
-            json.dumps(cache_key_payload, sort_keys=True, ensure_ascii=False).encode()
-        ).hexdigest()
+        cache_key, cache_key_payload = build_coach_cache_key(
+            schema_version=COACH_CACHE_SCHEMA_VERSION,
+            prompt_version=COACH_CACHE_PROMPT_VERSION,
+            home_team_code=home_team_canonical,
+            away_team_code=away_team_canonical,
+            year=year,
+            game_type=game_type,
+            focus=resolved_focus,
+            question_override=effective_question_override,
+            question_signature_override=question_signature_override,
+        )
+        focus_signature = str(cache_key_payload["focus_signature"])
+        question_signature = str(cache_key_payload["question_signature"])
 
         logger.info(
-            "[Coach Router] Analyzing %s vs %s (year=%d): %s... (CacheKey: %s) input_season=%s resolved_year=%d resolve_source=%s",
+            "[Coach Router] request_mode=%s Analyzing %s vs %s (year=%d): %s... (CacheKey: %s) input_season=%s resolved_year=%d resolve_source=%s input_focus=%s resolved_focus=%s focus_signature=%s question_signature=%s cache_key_version=%s",
+            request_mode,
             home_name,
             away_name or "Single",
             year,
@@ -673,6 +851,11 @@ async def analyze_team(
             (payload.league_context or {}).get("season"),
             year,
             resolve_source,
+            input_focus,
+            resolved_focus,
+            focus_signature,
+            question_signature,
+            COACH_CACHE_SCHEMA_VERSION,
         )
 
         async def event_generator():
@@ -687,44 +870,92 @@ async def analyze_team(
                     ),
                 }
                 # Phase 0: 캐시 확인
-                CACHE_TTL_HOURS = 168
                 cached_data = None
+                cache_state = "MISS_GENERATE"
+                cache_error_message = None
 
                 with pool.connection() as conn:
-                    row = conn.execute(
-                        """
-                        INSERT INTO coach_analysis_cache (cache_key, team_id, year, prompt_version, model_name, status)
-                        VALUES (%s, %s, %s, %s, %s, 'PENDING')
-                        ON CONFLICT (cache_key) DO UPDATE
-                            SET cache_key = coach_analysis_cache.cache_key
-                        RETURNING status, response_json, (xmax = 0) AS inserted,
-                                  (updated_at > now() - interval '7 days') AS is_valid
-                        """,
-                        (
-                            cache_key,
-                            home_team_canonical,
-                            year,
-                            COACH_CACHE_PROMPT_VERSION,
-                            COACH_MODEL_NAME,
-                        ),
-                    ).fetchone()
-                    conn.commit()
+                    with conn.transaction():
+                        inserted = conn.execute(
+                            """
+                            INSERT INTO coach_analysis_cache (
+                                cache_key, team_id, year, prompt_version, model_name, status, error_message, updated_at
+                            ) VALUES (%s, %s, %s, %s, %s, 'PENDING', NULL, now())
+                            ON CONFLICT (cache_key) DO NOTHING
+                            RETURNING cache_key
+                            """,
+                            (
+                                cache_key,
+                                home_team_canonical,
+                                year,
+                                COACH_CACHE_PROMPT_VERSION,
+                                coach_model_name,
+                            ),
+                        ).fetchone()
+                        row = conn.execute(
+                            """
+                            SELECT status, response_json, error_message, updated_at
+                            FROM coach_analysis_cache
+                            WHERE cache_key = %s
+                            FOR UPDATE
+                            """,
+                            (cache_key,),
+                        ).fetchone()
 
-                    if row:
-                        status, cached_json, was_inserted, is_valid = row
-                        if status == "COMPLETED" and cached_json and is_valid:
-                            cached_data = cached_json
-                            logger.info("[Coach] Cache HIT for %s", cache_key)
-                        elif status == "COMPLETED" and cached_json and not is_valid:
-                            conn.execute(
-                                "UPDATE coach_analysis_cache SET status = 'PENDING', updated_at = now() WHERE cache_key = %s",
-                                (cache_key,),
+                        if inserted:
+                            cache_state = "MISS_GENERATE"
+                        elif row:
+                            status, cached_json, error_message, updated_at = row
+                            cache_state = _determine_cache_gate(
+                                status=status,
+                                has_cached_json=bool(cached_json),
+                                updated_at=updated_at,
                             )
-                            conn.commit()
-                            logger.info("[Coach] Cache EXPIRED, recomputing")
+
+                            if cache_state == "HIT":
+                                cached_data = cached_json
+                            elif cache_state in {"MISS_GENERATE", "PENDING_STALE_TAKEOVER"}:
+                                conn.execute(
+                                    """
+                                    UPDATE coach_analysis_cache
+                                    SET status = 'PENDING',
+                                        team_id = %s,
+                                        year = %s,
+                                        prompt_version = %s,
+                                        model_name = %s,
+                                        error_message = NULL,
+                                        updated_at = now()
+                                    WHERE cache_key = %s
+                                    """,
+                                    (
+                                        home_team_canonical,
+                                        year,
+                                        COACH_CACHE_PROMPT_VERSION,
+                                        coach_model_name,
+                                        cache_key,
+                                    ),
+                                )
+                            elif cache_state == "FAILED_LOCKED":
+                                cache_error_message = error_message
+                        else:
+                            # Defensive fallback: row should exist after INSERT/SELECT, but keep service available.
+                            cache_state = "MISS_GENERATE"
+
+                logger.info(
+                    "[Coach] Cache %s for %s focus_signature=%s question_signature=%s request_mode=%s cache_key_version=%s",
+                    cache_state,
+                    cache_key,
+                    focus_signature,
+                    question_signature,
+                    request_mode,
+                    COACH_CACHE_SCHEMA_VERSION,
+                )
 
                 if cached_data:
                     cached_data = _normalize_cached_response(cached_data)
+                    missing_focus_sections = _find_missing_focus_sections(
+                        cached_data, resolved_focus
+                    )
                     yield {
                         "event": "status",
                         "data": json.dumps(
@@ -745,12 +976,186 @@ async def analyze_team(
                                 "structured_response": cached_data,
                                 "fast_path": True,
                                 "cached": True,
+                                "request_mode": request_mode,
+                                "resolved_focus": resolved_focus,
+                                "focus_signature": focus_signature,
+                                "question_signature": question_signature,
+                                "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                                "cache_state": cache_state,
+                                "in_progress": False,
+                                "focus_section_missing": bool(
+                                    missing_focus_sections
+                                ),
+                                "missing_focus_sections": missing_focus_sections,
                             },
                             ensure_ascii=False,
                         ),
                     }
                     yield {"event": "done", "data": "[DONE]"}
                     return
+
+                if not _should_generate_from_gate(cache_state):
+                    if cache_state == "PENDING_WAIT":
+                        wait_result = await _wait_for_cache_terminal_state(
+                            pool=pool,
+                            cache_key=cache_key,
+                            timeout_seconds=PENDING_WAIT_TIMEOUT_SECONDS,
+                            poll_ms=PENDING_WAIT_POLL_MS,
+                        )
+                        if (
+                            wait_result
+                            and wait_result.get("status") == "COMPLETED"
+                            and wait_result.get("response_json")
+                        ):
+                            cached_wait_data = _normalize_cached_response(
+                                wait_result["response_json"]
+                            )
+                            missing_focus_sections = _find_missing_focus_sections(
+                                cached_wait_data, resolved_focus
+                            )
+                            yield {
+                                "event": "status",
+                                "data": json.dumps(
+                                    {"message": "진행 중이던 분석 결과를 불러옵니다..."},
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            json_str = json.dumps(
+                                cached_wait_data, ensure_ascii=False, indent=2
+                            )
+                            yield {
+                                "event": "message",
+                                "data": json.dumps(
+                                    {"delta": json_str}, ensure_ascii=False
+                                ),
+                            }
+                            yield {
+                                "event": "meta",
+                                "data": json.dumps(
+                                    {
+                                        "validation_status": "success",
+                                        "structured_response": cached_wait_data,
+                                        "fast_path": True,
+                                        "cached": True,
+                                        "request_mode": request_mode,
+                                        "resolved_focus": resolved_focus,
+                                        "focus_signature": focus_signature,
+                                        "question_signature": question_signature,
+                                        "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                                        "cache_state": "PENDING_WAIT",
+                                        "in_progress": False,
+                                        "focus_section_missing": bool(
+                                            missing_focus_sections
+                                        ),
+                                        "missing_focus_sections": missing_focus_sections,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            yield {"event": "done", "data": "[DONE]"}
+                            return
+
+                        if wait_result and wait_result.get("status") == "FAILED":
+                            cache_state = "FAILED_LOCKED"
+                            cache_error_message = (
+                                wait_result.get("error_message")
+                                or "analysis_generation_failed"
+                            )
+                        else:
+                            waiting_payload = _cache_status_response(
+                                headline=f"{home_name} 분석이 진행 중입니다",
+                                coach_note="잠시 후 다시 시도해주세요.",
+                                detail="## 캐시 준비 중\n\n동일 경기 분석 요청이 이미 진행 중입니다.",
+                            )
+                            yield {
+                                "event": "status",
+                                "data": json.dumps(
+                                    {
+                                        "message": "기존 분석 작업을 기다리는 중입니다..."
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            yield {
+                                "event": "message",
+                                "data": json.dumps(
+                                    {
+                                        "delta": json.dumps(
+                                            waiting_payload, ensure_ascii=False
+                                        )
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            yield {
+                                "event": "meta",
+                                "data": json.dumps(
+                                    {
+                                        "validation_status": "fallback",
+                                        "fast_path": True,
+                                        "cached": False,
+                                        "request_mode": request_mode,
+                                        "resolved_focus": resolved_focus,
+                                        "focus_signature": focus_signature,
+                                        "question_signature": question_signature,
+                                        "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                                        "cache_state": "PENDING_WAIT",
+                                        "in_progress": True,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            yield {"event": "done", "data": "[DONE]"}
+                            return
+
+                    if cache_state == "FAILED_LOCKED":
+                        failed_payload = _cache_status_response(
+                            headline=f"{home_name} 분석 캐시 갱신이 필요합니다",
+                            coach_note="수동 배치로 캐시를 갱신한 뒤 다시 시도해주세요.",
+                            detail=(
+                                "## 캐시 잠금 상태\n\n"
+                                "자동 재생성은 비활성화되어 있습니다.\n\n"
+                                f"사유: {cache_error_message or 'previous_failure'}"
+                            ),
+                        )
+                        yield {
+                            "event": "status",
+                            "data": json.dumps(
+                                {"message": "분석 캐시가 잠금 상태입니다."},
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {
+                            "event": "message",
+                            "data": json.dumps(
+                                {
+                                    "delta": json.dumps(
+                                        failed_payload, ensure_ascii=False
+                                    )
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {
+                            "event": "meta",
+                            "data": json.dumps(
+                                {
+                                        "validation_status": "fallback",
+                                        "fast_path": True,
+                                        "cached": False,
+                                        "request_mode": request_mode,
+                                        "resolved_focus": resolved_focus,
+                                        "focus_signature": focus_signature,
+                                        "question_signature": question_signature,
+                                    "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                                    "cache_state": "FAILED_LOCKED",
+                                    "in_progress": False,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {"event": "done", "data": "[DONE]"}
+                        return
 
                 # 도구 실행
                 yield {
@@ -764,7 +1169,7 @@ async def analyze_team(
                     pool,
                     payload.home_team_id,
                     year,
-                    payload.focus,
+                    resolved_focus,
                     payload.away_team_id,
                 )
 
@@ -787,7 +1192,7 @@ async def analyze_team(
                 # Game info fetching can be added here if needed, consistent with tool_results usage
 
                 context = _format_coach_context(
-                    tool_results, payload.focus, game_context, payload.league_context
+                    tool_results, resolved_focus, game_context, payload.league_context
                 )
 
                 # 데이터 무결성 검사 (간소화)
@@ -840,13 +1245,29 @@ async def analyze_team(
                     ),
                 }
 
-                coach_prompt = COACH_PROMPT_V2.format(question=query, context=context)
+                focus_section_requirements = _build_focus_section_requirements(
+                    resolved_focus
+                )
+                coach_prompt = COACH_PROMPT_V2.format(
+                    question=query,
+                    context=context,
+                    focus_section_requirements=focus_section_requirements,
+                )
                 messages = [{"role": "user", "content": coach_prompt}]
 
                 coach_llm = get_coach_llm_generator()
+                settings = get_settings()
+                effective_max_tokens = (
+                    settings.coach_brief_max_output_tokens
+                    if is_auto_brief
+                    else settings.coach_max_output_tokens
+                )
                 response_chunks = []
 
-                async for chunk in coach_llm(messages):
+                async for chunk in coach_llm(
+                    messages=messages,
+                    max_tokens=effective_max_tokens,
+                ):
                     response_chunks.append(chunk)
                     yield {
                         "event": "message",
@@ -857,6 +1278,18 @@ async def analyze_team(
 
                 # Phase 4: 검증 및 저장
                 parsed_response, parse_error = parse_coach_response(full_response)
+                missing_focus_sections = []
+                if parsed_response:
+                    missing_focus_sections = _find_missing_focus_sections(
+                        parsed_response.model_dump(), resolved_focus
+                    )
+                    if missing_focus_sections:
+                        logger.warning(
+                            "[Coach] Missing focus sections detected focus=%s missing=%s cache_key=%s",
+                            resolved_focus,
+                            missing_focus_sections,
+                            cache_key,
+                        )
 
                 with pool.connection() as conn:
                     if parsed_response:
@@ -880,6 +1313,15 @@ async def analyze_team(
                     "verified": True,
                     "fast_path": True,
                     "validation_status": "success" if parsed_response else "fallback",
+                    "request_mode": request_mode,
+                    "resolved_focus": resolved_focus,
+                    "focus_signature": focus_signature,
+                    "question_signature": question_signature,
+                    "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                    "cache_state": cache_state,
+                    "in_progress": False,
+                    "focus_section_missing": bool(missing_focus_sections),
+                    "missing_focus_sections": missing_focus_sections,
                 }
                 if parsed_response:
                     meta_payload["structured_response"] = parsed_response.model_dump()
@@ -890,7 +1332,6 @@ async def analyze_team(
                 }
 
                 yield {"event": "done", "data": "[DONE]"}
-
             except Exception as e:
                 logger.error(f"[Coach Streaming Error] {e}")
                 # Cache fail logic
@@ -902,13 +1343,14 @@ async def analyze_team(
                             (str(e), cache_key),
                         )
                         conn.commit()
-                except:
+                except:  # noqa: BLE001
                     pass
 
                 yield {
                     "event": "error",
                     "data": json.dumps({"error": str(e)}, ensure_ascii=False),
                 }
+                yield {"event": "done", "data": "[DONE]"}
 
         return EventSourceResponse(
             event_generator(),
@@ -950,11 +1392,12 @@ async def analyze_team_legacy(
             )
 
         team_name = agent._convert_team_id_to_name(primary_team_id)
+        resolved_focus = normalize_focus(payload.focus)
 
         if payload.question_override:
             query = payload.question_override
         else:
-            query = _build_coach_query(team_name, payload.focus)
+            query = _build_coach_query(team_name, resolved_focus)
 
         logger.info(f"[Coach Router Legacy] Analyzing for {team_name}")
 
@@ -1021,6 +1464,7 @@ async def analyze_team_legacy(
                     "event": "error",
                     "data": json.dumps({"error": str(e)}, ensure_ascii=False),
                 }
+                yield {"event": "done", "data": "[DONE]"}
 
         return EventSourceResponse(
             event_generator(),

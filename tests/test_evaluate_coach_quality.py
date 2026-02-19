@@ -189,3 +189,26 @@ def test_evaluate_reports_game_type_mismatch():
     ]
     result = evaluate_reports(reports, require_game_type="REGULAR")
     assert "game_type_mismatch" in result["failure_codes"]
+
+
+def test_evaluate_reports_collects_focus_signatures():
+    reports = [
+        _report(
+            {
+                "cases": 10,
+                "success": 10,
+                "generated_success_count": 10,
+                "failed": 0,
+                "validator_fail_count": 0,
+                "cache_invalid_year_count": 0,
+                "legacy_residual_total": 0,
+                "warning_rate": 0.0,
+                "critical_over_limit_rate": 0.0,
+                "target_years": [2025],
+                "game_type": "REGULAR",
+                "focus_signature": "recent_form+bullpen",
+            }
+        )
+    ]
+    result = evaluate_reports(reports)
+    assert result["metrics"]["observed_focus_signatures"] == ["recent_form+bullpen"]

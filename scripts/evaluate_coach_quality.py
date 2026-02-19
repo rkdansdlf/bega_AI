@@ -112,6 +112,20 @@ def _extract_game_type(summary: Dict[str, Any], options: Dict[str, Any]) -> str:
     return str(game_type).upper().strip()
 
 
+def _extract_focus_signature(summary: Dict[str, Any], options: Dict[str, Any]) -> str:
+    value = summary.get("focus_signature")
+    if value is None:
+        focus_values = summary.get("target_focus", options.get("focus"))
+        if isinstance(focus_values, list):
+            normalized = [
+                str(item).strip().lower() for item in focus_values if str(item).strip()
+            ]
+            value = "+".join(normalized) if normalized else "all"
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
 def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     total_cases = 0
     total_failed = 0
@@ -132,6 +146,7 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     observed_years: Set[int] = set()
     observed_game_types: Set[str] = set()
+    observed_focus_signatures: Set[str] = set()
 
     for entry in reports:
         summary = entry["summary"]
@@ -176,6 +191,9 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
         game_type = _extract_game_type(summary, options)
         if game_type:
             observed_game_types.add(game_type)
+        focus_signature = _extract_focus_signature(summary, options)
+        if focus_signature:
+            observed_focus_signatures.add(focus_signature)
 
     coverage_rate = (
         round((total_cases - total_failed) / total_cases, 4) if total_cases > 0 else 0.0
@@ -213,6 +231,7 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
         "drift_reports": drift_reports,
         "observed_target_years": sorted(observed_years),
         "observed_game_types": sorted(observed_game_types),
+        "observed_focus_signatures": sorted(observed_focus_signatures),
     }
 
 

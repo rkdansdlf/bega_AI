@@ -14,6 +14,8 @@ jobs:
       TEAM_CODE_CANONICAL_WINDOW_START: "2021"
       TEAM_CODE_CANONICAL_WINDOW_END: "2025"
       TEAM_CODE_OUTSIDE_WINDOW_MODE: dual
+      POSTGRES_DB_URL: ${{ secrets.POSTGRES_DB_URL }}
+      DB_URL: ${{ secrets.DB_URL }}
       CANONICAL_GUARD_DB_URL_RO: ${{ secrets.CANONICAL_GUARD_DB_URL_RO }}
 
     steps:
@@ -34,8 +36,16 @@ jobs:
       - name: Run outside-window regression report
         run: |
           if [ -z "${CANONICAL_GUARD_DB_URL_RO}" ]; then
-            echo "CANONICAL_GUARD_DB_URL_RO is required for guard report"
-            exit 1
+            if [ -n "${POSTGRES_DB_URL}" ]; then
+              export CANONICAL_GUARD_DB_URL_RO="${POSTGRES_DB_URL}"
+              echo "CANONICAL_GUARD_DB_URL_RO is not set. Falling back to POSTGRES_DB_URL."
+            elif [ -n "${DB_URL}" ]; then
+              export CANONICAL_GUARD_DB_URL_RO="${DB_URL}"
+              echo "CANONICAL_GUARD_DB_URL_RO is not set. Falling back to DB_URL."
+            else
+              echo "CANONICAL_GUARD_DB_URL_RO is required for guard report"
+              exit 1
+            fi
           fi
           python scripts/verify_canonical_transition.py \
             --mode outside_regression \
