@@ -7,7 +7,7 @@
 """
 
 import os
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
@@ -75,36 +75,87 @@ def similarity_search(
     # 벡터를 SQL 쿼리에 직접 삽입할 수 있는 문자열 형태로 변환합니다.
     vector_str = _vector_literal(embedding)
 
-    # 키워드 검색이 요청된 경우, 텍스트 검색 순위(ts_rank)를 계산하는 부분을 추가합니다.
-    ts_part = ""
-    keyword_param: List[str] = []
-    if keyword:
-        ts_part = (
-            ", ts_rank(content_tsv, plainto_tsquery('simple', %s)) as keyword_rank"
-        )
-        keyword_param.append(keyword)
-
     # 최종 SQL 쿼리를 구성합니다.
     # <=> 연산자: pgvector에서 코사인 거리(1 - 코사인 유사도)를 계산합니다.
-    # (1 - (embedding <=> ...))를 통해 코사인 유사도를 구합니다.
-    sql = f"""
-    SELECT 
-           id,
-           title,
-           content,
-           source_table,
-           source_row_id,
-           meta,
-           (1 - (embedding <=> %s::vector)) as similarity
-           {ts_part}
-    FROM rag_chunks
-    WHERE {where_clause}
-    ORDER BY embedding <=> %s::vector ASC
-    LIMIT %s
-    """
-    # SQL 쿼리에 사용될 파라미터를 최종적으로 조합합니다.
-    # 순서: [벡터 문자열, (키워드), 벡터 문자열(ORDER BY용), ...필터 값, LIMIT 값]
-    final_params = [vector_str] + keyword_param + [vector_str] + filter_params + [limit]
+    # Reciprocal Rank Fusion (RRF) 스타일의 가중합을 위해 rank를 계산합니다.
+    rrf_k = 60  # RRF standard constant
+
+    if keyword:
+        sql = f"""
+        WITH keyword_query AS (
+            SELECT plainto_tsquery('simple', %s) AS query
+        ),
+        vector_search AS (
+            SELECT
+                id,
+                ROW_NUMBER() OVER (ORDER BY embedding <=> %s::vector ASC) AS vector_rank
+            FROM rag_chunks
+            WHERE {where_clause}
+            LIMIT %s * 2
+        ),
+        keyword_search AS (
+            SELECT
+                r.id,
+                ts_rank(r.content_tsv, kq.query) AS ts_rank_val,
+                ROW_NUMBER() OVER (ORDER BY ts_rank(r.content_tsv, kq.query) DESC) AS keyword_rank
+            FROM rag_chunks r
+            CROSS JOIN keyword_query kq
+            WHERE {where_clause} AND r.content_tsv @@ kq.query
+            LIMIT %s * 2
+        ),
+        candidates AS (
+            SELECT id FROM vector_search
+            UNION
+            SELECT id FROM keyword_search
+        )
+        SELECT
+            c.id,
+            r.title,
+            r.content,
+            r.source_table,
+            r.source_row_id,
+            r.meta,
+            (1 - (r.embedding <=> %s::vector)) AS similarity,
+            COALESCE(k.ts_rank_val, 0) AS keyword_rank_val,
+            (
+                COALESCE(1.0 / ({rrf_k} + v.vector_rank), 0) +
+                COALESCE(1.0 / ({rrf_k} + k.keyword_rank), 0)
+            ) AS combined_score
+        FROM candidates c
+        JOIN rag_chunks r ON r.id = c.id
+        LEFT JOIN vector_search v ON v.id = c.id
+        LEFT JOIN keyword_search k ON k.id = c.id
+        ORDER BY combined_score DESC, similarity DESC
+        LIMIT %s
+        """
+
+        # Parameter order:
+        # keyword_query -> vector_search(vector+filters+limit) ->
+        # keyword_search(filters+limit) -> final similarity vector+limit.
+        final_params = (
+            [keyword, vector_str]
+            + filter_params
+            + [limit]
+            + filter_params
+            + [limit, vector_str, limit]
+        )
+    else:
+        # 키워드 없는 경우 순수 벡터 검색
+        sql = f"""
+        SELECT
+               id,
+               title,
+               content,
+               source_table,
+               source_row_id,
+               meta,
+               (1 - (embedding <=> %s::vector)) as similarity
+        FROM rag_chunks
+        WHERE {where_clause}
+        ORDER BY embedding <=> %s::vector ASC
+        LIMIT %s
+        """
+        final_params = [vector_str] + filter_params + [vector_str, limit]
 
     import time
 
@@ -120,9 +171,10 @@ def similarity_search(
 
     logger = logging.getLogger(__name__)
     logger.info(
-        "[Search] Vector similarity search took %.2fms (results=%d)",
+        "[Search] Hybrid RRF search took %.2fms (results=%d, hybrid=%s)",
         elapsed_ms,
         len(rows),
+        bool(keyword),
     )
 
     return [dict(row) for row in rows]
