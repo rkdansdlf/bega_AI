@@ -6,6 +6,7 @@ app/core/coach_cache_key.py 패턴을 동일하게 따름.
 - coach: team_id / year / focus / question_override → 경기 분석 특화
 - chat:  question / filters → 범용 RAG 응답 캐싱
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -21,21 +22,30 @@ CHAT_CACHE_SCHEMA_VERSION = "v1"
 # intent별 TTL (초 단위).
 # stats_lookup/comparison/recent_form은 짧게, 선수 프로필·규정 설명은 길게.
 INTENT_TTL_SECONDS: Dict[str, int] = {
-    "stats_lookup":           6 * 3600,    # 6h  - 경기 결과는 주기적 업데이트
-    "player_profile":        48 * 3600,    # 48h - 선수 기본 정보는 상대적으로 안정적
-    "recent_form":            3 * 3600,    # 3h  - 최근 폼은 빠르게 변함
-    "comparison":             3 * 3600,    # 3h  - 비교도 최신성 중요
-    "general_conversation":  48 * 3600,    # 48h - 인사/일반 대화는 거의 불변
-    "knowledge_explanation": 48 * 3600,    # 48h - KBO 규정·설명은 안정적
-    "freeform":              12 * 3600,    # 12h - 기타 (기본값)
+    "stats_lookup": 6 * 3600,  # 6h  - 경기 결과는 주기적 업데이트
+    "player_profile": 48 * 3600,  # 48h - 선수 기본 정보는 상대적으로 안정적
+    "recent_form": 3 * 3600,  # 3h  - 최근 폼은 빠르게 변함
+    "comparison": 3 * 3600,  # 3h  - 비교도 최신성 중요
+    "general_conversation": 48 * 3600,  # 48h - 인사/일반 대화는 거의 불변
+    "knowledge_explanation": 48 * 3600,  # 48h - KBO 규정·설명은 안정적
+    "freeform": 12 * 3600,  # 12h - 기타 (기본값)
 }
 DEFAULT_TTL_SECONDS = 12 * 3600
 
 # 실시간 키워드 감지 집합.
 # 아래 키워드가 포함된 질문은 캐싱을 건너뜀 (오늘 경기, 현재 순위 등).
-TEMPORAL_KEYWORDS = frozenset({
-    "오늘", "어제", "내일", "지금", "현재", "최근", "방금", "막",
-})
+TEMPORAL_KEYWORDS = frozenset(
+    {
+        "오늘",
+        "어제",
+        "내일",
+        "지금",
+        "현재",
+        "최근",
+        "방금",
+        "막",
+    }
+)
 
 
 def _normalize_question(text: str) -> str:

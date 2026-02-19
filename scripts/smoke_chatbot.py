@@ -98,15 +98,19 @@ def check_health(client: httpx.Client, base_url: str) -> Dict[str, Any]:
     try:
         response = client.get(f"{base_url}/health")
         payload = _safe_json(response)
-        ok = response.status_code == 200 and isinstance(payload, dict) and payload.get(
-            "status"
-        ) == "ok"
+        ok = (
+            response.status_code == 200
+            and isinstance(payload, dict)
+            and payload.get("status") == "ok"
+        )
         return {
             "endpoint": "/health",
             "status_code": response.status_code,
             "ok": ok,
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
-            "error": None if ok else f"unexpected_response:{_truncate(str(payload), 240)}",
+            "error": (
+                None if ok else f"unexpected_response:{_truncate(str(payload), 240)}"
+            ),
             "sample_response": payload,
         }
     except Exception as exc:  # noqa: BLE001
@@ -126,8 +130,10 @@ def check_completion(client: httpx.Client, base_url: str) -> Dict[str, Any]:
     try:
         response = client.post(f"{base_url}/ai/chat/completion", json=payload)
         body = _safe_json(response)
-        ok = response.status_code == 200 and isinstance(body, dict) and isinstance(
-            body.get("answer"), str
+        ok = (
+            response.status_code == 200
+            and isinstance(body, dict)
+            and isinstance(body.get("answer"), str)
         )
         return {
             "endpoint": "/ai/chat/completion",

@@ -72,8 +72,7 @@ class _DummyConnection:
             return _DummyExecuteResult((cache_key,))
 
         if (
-            "select status, response_json, error_message, updated_at"
-            in normalized
+            "select status, response_json, error_message, updated_at" in normalized
             and "from coach_analysis_cache" in normalized
         ):
             cache_key = str((params or ("",))[0])
@@ -106,7 +105,7 @@ class _DummyConnection:
             )
 
         if "update coach_analysis_cache set status = 'completed'" in normalized:
-            response_json, cache_key = (params or (None, ""))
+            response_json, cache_key = params or (None, "")
             row = self._cache_rows.setdefault(str(cache_key), {})
             parsed_json = response_json
             if isinstance(response_json, str):
@@ -126,7 +125,7 @@ class _DummyConnection:
             return _DummyExecuteResult(None, rowcount=1)
 
         if "update coach_analysis_cache set status = 'failed'" in normalized:
-            error_message, cache_key = (params or ("", ""))
+            error_message, cache_key = params or ("", "")
             row = self._cache_rows.setdefault(str(cache_key), {})
             row.update(
                 {
@@ -139,8 +138,11 @@ class _DummyConnection:
             self._counters["failed_update"] += 1
             return _DummyExecuteResult(None, rowcount=1)
 
-        if "update coach_analysis_cache" in normalized and "set status = 'pending'" in normalized:
-            _, _, _, _, cache_key = (params or ("", "", "", "", ""))
+        if (
+            "update coach_analysis_cache" in normalized
+            and "set status = 'pending'" in normalized
+        ):
+            _, _, _, _, cache_key = params or ("", "", "", "", "")
             row = self._cache_rows.setdefault(str(cache_key), {})
             row.update(
                 {
@@ -272,10 +274,15 @@ def _assert_meta_fields(
     assert '"focus_signature":' in payload
     assert '"question_signature":' in payload
     assert '"cache_state":' in payload
-    assert '"cache_key_version": "v3"' in payload or '"cache_key_version":"v3"' in payload
+    assert (
+        '"cache_key_version": "v3"' in payload or '"cache_key_version":"v3"' in payload
+    )
 
     if expected_cache_state is not None:
-        assert f'"cache_state": "{expected_cache_state}"' in payload or f'"cache_state":"{expected_cache_state}"' in payload
+        assert (
+            f'"cache_state": "{expected_cache_state}"' in payload
+            or f'"cache_state":"{expected_cache_state}"' in payload
+        )
 
 
 def test_health_endpoint(client: TestClient):
@@ -399,7 +406,9 @@ def test_coach_analyze_cache_split_by_focus(client: TestClient):
     assert llm_calls["count"] == 2
 
 
-def test_coach_analyze_completed_cache_hit_for_stale_entry_does_not_regenerate(client: TestClient):
+def test_coach_analyze_completed_cache_hit_for_stale_entry_does_not_regenerate(
+    client: TestClient,
+):
     payload = {
         "home_team_id": "LG",
         "away_team_id": "DB",
@@ -593,7 +602,9 @@ def test_coach_analyze_auto_vs_manual_use_different_max_tokens(
     )
     monkeypatch.setattr("app.routers.coach.get_settings", lambda: dummy_settings)
     monkeypatch.setattr("app.deps.get_settings", lambda: dummy_settings)
-    monkeypatch.setattr("app.routers.coach.get_coach_llm_generator", _fake_coach_llm_generator)
+    monkeypatch.setattr(
+        "app.routers.coach.get_coach_llm_generator", _fake_coach_llm_generator
+    )
 
     with client.stream(
         "POST",
@@ -662,7 +673,10 @@ def test_coach_analyze_pending_state_waits_and_skips_generation(
         text = "".join(chunk for chunk in response.iter_text())
 
     assert response.status_code == 200
-    assert '"cache_state":"PENDING_WAIT"' in text or '"cache_state": "PENDING_WAIT"' in text
+    assert (
+        '"cache_state":"PENDING_WAIT"' in text
+        or '"cache_state": "PENDING_WAIT"' in text
+    )
     assert '"in_progress": true' in text
     assert '"request_mode": "manual_detail"' in text
     assert '"focus_signature": "recent_form"' in text
@@ -706,7 +720,10 @@ def test_coach_analyze_stale_pending_triggers_regeneration(
         text = "".join(chunk for chunk in response.iter_text())
 
     assert response.status_code == 200
-    assert '"cache_state": "PENDING_STALE_TAKEOVER"' in text or '"cache_state":"PENDING_STALE_TAKEOVER"' in text
+    assert (
+        '"cache_state": "PENDING_STALE_TAKEOVER"' in text
+        or '"cache_state":"PENDING_STALE_TAKEOVER"' in text
+    )
     assert '"request_mode": "manual_detail"' in text
     assert '"focus_signature": "recent_form"' in text
     assert '"question_signature":' in text
@@ -744,7 +761,10 @@ def test_coach_analyze_failed_lock_blocks_regeneration(
         text = "".join(chunk for chunk in response.iter_text())
 
     assert response.status_code == 200
-    assert '"cache_state":"FAILED_LOCKED"' in text or '"cache_state": "FAILED_LOCKED"' in text
+    assert (
+        '"cache_state":"FAILED_LOCKED"' in text
+        or '"cache_state": "FAILED_LOCKED"' in text
+    )
     assert '"request_mode": "manual_detail"' in text
     assert '"focus_signature": "recent_form"' in text
     assert '"question_signature":' in text
@@ -753,7 +773,9 @@ def test_coach_analyze_failed_lock_blocks_regeneration(
 
 
 @pytest.mark.asyncio
-async def test_coach_llm_generator_prefers_coach_openrouter_settings(monkeypatch: pytest.MonkeyPatch):
+async def test_coach_llm_generator_prefers_coach_openrouter_settings(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from app.deps import get_coach_llm_generator
 
     captured: dict[str, Any] = {}
@@ -801,7 +823,9 @@ async def test_coach_llm_generator_prefers_coach_openrouter_settings(monkeypatch
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        def stream(self, method: str, url: str, json: dict[str, Any], headers: dict[str, str]):
+        def stream(
+            self, method: str, url: str, json: dict[str, Any], headers: dict[str, str]
+        ):
             return _FakeRequestContext(json)
 
     class _FakeTimeout:
@@ -817,7 +841,9 @@ async def test_coach_llm_generator_prefers_coach_openrouter_settings(monkeypatch
 
     coach_llm = get_coach_llm_generator()
     chunks: list[str] = []
-    async for chunk in coach_llm([{"role": "user", "content": "hello"}], max_tokens=512):
+    async for chunk in coach_llm(
+        [{"role": "user", "content": "hello"}], max_tokens=512
+    ):
         chunks.append(chunk)
 
     assert chunks == ["coach"]
@@ -825,7 +851,9 @@ async def test_coach_llm_generator_prefers_coach_openrouter_settings(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_coach_llm_generator_falls_back_to_coach_fallback_models(monkeypatch: pytest.MonkeyPatch):
+async def test_coach_llm_generator_falls_back_to_coach_fallback_models(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from app.deps import get_coach_llm_generator
 
     captured_payloads: list[dict[str, Any]] = []
@@ -897,7 +925,9 @@ async def test_coach_llm_generator_falls_back_to_coach_fallback_models(monkeypat
 
     coach_llm = get_coach_llm_generator()
     chunks: list[str] = []
-    async for chunk in coach_llm([{"role": "user", "content": "hello"}], max_tokens=256):
+    async for chunk in coach_llm(
+        [{"role": "user", "content": "hello"}], max_tokens=256
+    ):
         chunks.append(chunk)
 
     assert chunks == ["coach fallback"]

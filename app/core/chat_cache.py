@@ -12,6 +12,7 @@ DDL 자동 적용:
     deps.py lifespan()에서 CREATE_TABLE_SQL을 실행하도록 추가해야 합니다.
     (coach_analysis_cache 생성 방식과 동일)
 """
+
 from __future__ import annotations
 
 import json
@@ -53,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_cache_created_at ON chat_response_cache(crea
 #   cursor.rowcount  → int (DML 영향 행 수)
 # autocommit=True이므로 conn.commit() 생략.
 
+
 def _get_sync(conn, cache_key: str) -> Optional[Dict[str, Any]]:
     """
     유효한 캐시 항목을 조회합니다.
@@ -76,10 +78,10 @@ def _get_sync(conn, cache_key: str) -> Optional[Dict[str, Any]]:
     response_text, intent, model_name, hit_count, expires_at = row
     return {
         "response_text": response_text,
-        "intent":        intent,
-        "model_name":    model_name,
-        "hit_count":     hit_count,
-        "expires_at":    expires_at,
+        "intent": intent,
+        "model_name": model_name,
+        "hit_count": hit_count,
+        "expires_at": expires_at,
     }
 
 
@@ -152,9 +154,7 @@ def _cleanup_sync(conn) -> int:
     Returns:
         삭제된 행 수
     """
-    result = conn.execute(
-        "DELETE FROM chat_response_cache WHERE expires_at <= now()"
-    )
+    result = conn.execute("DELETE FROM chat_response_cache WHERE expires_at <= now()")
     # psycopg3 cursor.rowcount: 영향받은 행 수 (DML 실행 후 유효)
     deleted: int = getattr(result, "rowcount", 0) or 0
     if deleted:
@@ -169,8 +169,7 @@ def _get_stats_sync(conn) -> List[Dict[str, Any]]:
     Returns:
         [{"intent": str, "count": int, "avg_hits": float}, ...]
     """
-    rows = conn.execute(
-        """
+    rows = conn.execute("""
         SELECT intent,
                COUNT(*)                        AS cnt,
                ROUND(AVG(hit_count)::numeric, 2) AS avg_hits
@@ -178,13 +177,12 @@ def _get_stats_sync(conn) -> List[Dict[str, Any]]:
         WHERE  expires_at > now()
         GROUP  BY intent
         ORDER  BY cnt DESC
-        """
-    ).fetchall()
+        """).fetchall()
 
     return [
         {
-            "intent":   row[0],
-            "count":    row[1],
+            "intent": row[0],
+            "count": row[1],
             "avg_hits": float(row[2] or 0),
         }
         for row in rows
@@ -224,6 +222,7 @@ def _delete_by_key_sync(conn, cache_key: str) -> int:
 #   ...LLM 호출...
 #   with pool.connection() as conn:
 #       await save_to_cache(conn, cache_key=..., ...)
+
 
 async def get_cached_response(conn, cache_key: str) -> Optional[Dict[str, Any]]:
     """
@@ -266,9 +265,7 @@ async def save_to_cache(
         )
     except Exception as exc:
         # 키 앞 8자만 로깅 (전체 해시 노출 방지)
-        logger.warning(
-            "[ChatCache] save failed for key %.8s: %s", cache_key, exc
-        )
+        logger.warning("[ChatCache] save failed for key %.8s: %s", cache_key, exc)
 
 
 async def update_hit_count(conn, cache_key: str) -> None:
