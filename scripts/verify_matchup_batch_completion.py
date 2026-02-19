@@ -147,7 +147,9 @@ def _check_report(
     if any(str(reason).startswith("missing_done_event") for reason in failure_reasons):
         reasons.append("runtime:missing_done_event")
 
-    cache_keys = [str(item.get("cache_key")) for item in details if item.get("cache_key")]
+    cache_keys = [
+        str(item.get("cache_key")) for item in details if item.get("cache_key")
+    ]
     db_rows = _collect_db_rows(cache_keys)
     if len(db_rows) != len(set(cache_keys)):
         reasons.append("db:cache_key_not_found")
@@ -168,7 +170,11 @@ def _check_report(
 
         if strict_game_type_check:
             row_game_type = str(
-                (next((d for d in details if d.get("cache_key") == key), {}).get("game_type"))
+                (
+                    next((d for d in details if d.get("cache_key") == key), {}).get(
+                        "game_type"
+                    )
+                )
                 or ""
             ).upper()
             if required_game_type and row_game_type != required_game_type:
@@ -207,7 +213,9 @@ def _check_report(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify matchup batch completion report.")
+    parser = argparse.ArgumentParser(
+        description="Verify matchup batch completion report."
+    )
     parser.add_argument(
         "--report",
         required=True,

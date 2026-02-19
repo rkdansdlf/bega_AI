@@ -474,7 +474,12 @@ async def call_analyze(
 
 def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     status_counts = _normalize_status_counts(results)
-    total = status_counts["generated"] + status_counts["skipped"] + status_counts["failed"] + status_counts["in_progress"]
+    total = (
+        status_counts["generated"]
+        + status_counts["skipped"]
+        + status_counts["failed"]
+        + status_counts["in_progress"]
+    )
 
     return {
         "cases": total,
@@ -526,7 +531,12 @@ def summarize_matchup_results(
     focus: List[str],
 ) -> Dict[str, Any]:
     status_counts = _normalize_status_counts(results)
-    total = status_counts["generated"] + status_counts["skipped"] + status_counts["failed"] + status_counts["in_progress"]
+    total = (
+        status_counts["generated"]
+        + status_counts["skipped"]
+        + status_counts["failed"]
+        + status_counts["in_progress"]
+    )
     warnings_total = 0
     critical_over_limit_count = 0
     seen_cache_keys: set[str] = set()
@@ -579,9 +589,11 @@ def summarize_matchup_results(
         for aliases in getattr(resolver, "legacy_code_map", {}).keys():
             legacy_aliases.append(str(aliases).upper())
         legacy_aliases = sorted(set(legacy_aliases))
-        cache_invalid_year_count, legacy_residual_total = collect_matchup_integrity_metrics(
-            years,
-            legacy_aliases,
+        cache_invalid_year_count, legacy_residual_total = (
+            collect_matchup_integrity_metrics(
+                years,
+                legacy_aliases,
+            )
         )
     except Exception as exc:
         logger.warning("Failed to collect integrity metrics: %s", exc)
@@ -603,22 +615,22 @@ def summarize_matchup_results(
         "focus_signature": focus_signature,
         "cache_key_count": len(seen_cache_keys),
         "game_type": league_type.upper(),
-        "coverage_rate": round(
-            (status_counts["generated"] + status_counts["skipped"]) / total, 4
-        )
-        if total
-        else 0.0,
+        "coverage_rate": (
+            round((status_counts["generated"] + status_counts["skipped"]) / total, 4)
+            if total
+            else 0.0
+        ),
         "json_parse_success_rate": 0.0,
-        "warning_rate": round(
-            warnings_total / status_counts["generated"], 4
-        )
-        if status_counts["generated"]
-        else 0.0,
-        "critical_over_limit_rate": round(
-            critical_over_limit_count / status_counts["generated"], 4
-        )
-        if status_counts["generated"]
-        else 0.0,
+        "warning_rate": (
+            round(warnings_total / status_counts["generated"], 4)
+            if status_counts["generated"]
+            else 0.0
+        ),
+        "critical_over_limit_rate": (
+            round(critical_over_limit_count / status_counts["generated"], 4)
+            if status_counts["generated"]
+            else 0.0
+        ),
         "cache_invalid_year_count": cache_invalid_year_count,
         "legacy_residual_total": legacy_residual_total,
         "failure_reasons": sorted(set(failure_reasons)),
@@ -705,7 +717,9 @@ async def async_main(args: argparse.Namespace) -> int:
     if args.quality_report:
         report_path = Path(args.quality_report)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         print(f"Quality report written: {report_path}")
     return 0 if summary["failed"] == 0 and summary["in_progress"] == 0 else 1
 
