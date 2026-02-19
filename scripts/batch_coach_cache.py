@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import json
 import logging
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -67,6 +68,7 @@ class RunOptions:
     only_missing: bool
     force_rebuild: bool
     quality_report: str | None
+    baseline: bool
     game_type: str
     delay_seconds: float
 
@@ -630,6 +632,11 @@ def parse_args() -> RunOptions:
         help="Output JSON report path",
     )
     parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help="Run baseline quality evaluation after completing batch",
+    )
+    parser.add_argument(
         "--game-type",
         default="REGULAR",
         help="Cache key game_type value (default: REGULAR)",
@@ -647,6 +654,8 @@ def parse_args() -> RunOptions:
     for year in years:
         if not is_valid_year(year):
             raise ValueError(f"invalid year in --years: {year}")
+    if args.baseline and not args.quality_report:
+        parser.error("--baseline requires --quality-report")
 
     teams = parse_teams(args.teams, resolver)
     focus = parse_focus(args.focus)
@@ -657,12 +666,30 @@ def parse_args() -> RunOptions:
         only_missing=args.only_missing,
         force_rebuild=args.force_rebuild,
         quality_report=args.quality_report,
+        baseline=args.baseline,
         game_type=args.game_type,
         delay_seconds=args.delay_seconds,
     )
 
 
+def run_baseline_evaluation(report_path: Path, years: List[int], game_type: str) -> int:
+    cmd = [
+        sys.executable,
+        "scripts/evaluate_coach_quality.py",
+        str(report_path),
+        "--require-years",
+        ",".join(map(str, years)),
+        "--require-game-type",
+        str(game_type).upper(),
+    ]
+    proc = subprocess.run(cmd, check=False)
+    return proc.returncode
+
+
 async def async_main(options: RunOptions) -> int:
+    if options.baseline and not options.quality_report:
+        raise ValueError("--baseline requires --quality-report")
+
     run_start = datetime.now()
     pool = get_connection_pool()
     resolver = TeamCodeResolver()
@@ -722,6 +749,7 @@ async def async_main(options: RunOptions) -> int:
     print("=" * 72)
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
 
+    baseline_failed = False
     if options.quality_report:
         report_path = Path(options.quality_report)
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -731,7 +759,17 @@ async def async_main(options: RunOptions) -> int:
         )
         print(f"Quality report written: {report_path}")
 
-    return 0 if report["summary"]["failed"] == 0 else 1
+        if options.baseline:
+            print("\n" + "-" * 72)
+            print("기준 품질 평가(Baseline Evaluation) 실행 중...")
+            baseline_rc = run_baseline_evaluation(
+                report_path, options.years, options.game_type
+            )
+            if baseline_rc != 0:
+                baseline_failed = True
+                print(f"Baseline evaluation failed (exit code={baseline_rc})")
+
+    return 0 if report["summary"]["failed"] == 0 and not baseline_failed else 1
 
 
 def main() -> int:
