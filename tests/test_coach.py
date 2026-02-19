@@ -462,6 +462,27 @@ class TestCoachFastPath:
         assert "bullpen" in query or "불펜" in query
         assert "batting" in query or "타격" in query
 
+    def test_focus_section_requirements(self):
+        """선택 focus별 섹션 요구사항 생성 테스트"""
+        from app.routers.coach import _build_focus_section_requirements
+
+        requirements = _build_focus_section_requirements(["recent_form", "bullpen"])
+        assert "## 최근 전력" in requirements
+        assert "## 불펜 상태" in requirements
+        assert "미선택 focus" in requirements
+
+    def test_find_missing_focus_sections(self):
+        """detailed_markdown 섹션 누락 감지 테스트"""
+        from app.routers.coach import _find_missing_focus_sections
+
+        response_data = {
+            "detailed_markdown": "## 최근 전력\n- 승률 0.700\n## 선발 투수\n- 선발 ERA 3.20"
+        }
+        missing = _find_missing_focus_sections(
+            response_data, ["recent_form", "bullpen", "starter"]
+        )
+        assert missing == ["bullpen"]
+
     def test_format_coach_context(self):
         """Coach 컨텍스트 포맷팅 테스트"""
         from app.routers.coach import _format_coach_context

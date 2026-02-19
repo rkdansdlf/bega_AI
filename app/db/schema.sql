@@ -53,7 +53,7 @@ create table if not exists coach_analysis_cache (
   team_id varchar(10) not null,
   year int not null,
   prompt_version varchar(10) not null, -- e.g. "v2"
-  model_name varchar(50) not null,     -- e.g. "solar-pro-3"
+  model_name varchar(50) not null,     -- e.g. "upstage/solar-pro-3:free"
   status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
   response_json jsonb,                 -- Completed analysis result
   error_message text,                  -- Failure reason
