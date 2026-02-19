@@ -1,31 +1,55 @@
-# Use Python 3.11 as base image
-FROM python:3.11-slim
+# Stage 1: Build - Install dependencies and create wheels
+FROM python:3.14-slim AS builder
 
-# Set working directory
-WORKDIR /app
+WORKDIR /build
 
 # Install system dependencies for building Python packages
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libpq-dev \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file
 COPY requirements.txt .
 
-# Install dependencies with increased timeout and retries
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir \
-    --default-timeout=1000 \
-    --retries=5 \
-    -r requirements.txt
+# Build wheels for all dependencies
+RUN pip wheel --no-cache-dir -r requirements.txt -w /wheels
+
+# Stage 2: Runtime - Minimal production image
+FROM python:3.14-slim
+
+# Enable free-threading mode (Python 3.14+)
+
+
+WORKDIR /app
+
+# Install only runtime dependencies (libpq for psycopg3)
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
+
+# Copy wheels from builder and install
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
 
 # Copy source code
-COPY . .
+COPY --chown=appuser:appuser . .
+
+USER appuser
 
 # Expose port 8001
 EXPOSE 8001
 
-# Run the FastAPI application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Run the FastAPI application (no --reload in production)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]

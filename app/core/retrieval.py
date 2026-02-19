@@ -2,26 +2,29 @@
 
 이 모듈은 PostgreSQL 데이터베이스와 pgvector 확장을 사용하여
 벡터 임베딩 간의 코사인 유사도를 계산하고, 관련성 높은 문서를 검색하는 기능을 구현합니다.
+
+환경 변수 USE_FIRESTORE_SEARCH=true로 설정하면 Firestore Vector Search를 사용합니다.
 """
 
+import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from psycopg2.extensions import connection as PgConnection
-from psycopg2.extras import RealDictCursor
+import psycopg
+from psycopg.rows import dict_row
 
 from ..config import Settings
 
 
 def _vector_literal(vector: Sequence[float]) -> str:
     """Python 리스트 형태의 벡터를 pgvector가 인식하는 문자열 형태로 변환합니다.
-    
+
     예: [0.1, 0.2, 0.3] -> '[0.10000000,0.20000000,0.30000000]'
     """
     return "[" + ",".join(f"{v:.8f}" for v in vector) + "]"
 
 
 def similarity_search(
-    conn: PgConnection,
+    conn: psycopg.Connection,
     embedding: Sequence[float],
     *,
     limit: int,
@@ -30,8 +33,11 @@ def similarity_search(
 ) -> List[Dict[str, Any]]:
     """주어진 임베딩과 유사한 문서를 데이터베이스에서 검색합니다.
 
+    환경 변수 USE_FIRESTORE_SEARCH=true인 경우 Firestore Vector Search를 사용하고,
+    그렇지 않으면 Supabase pgvector를 사용합니다.
+
     Args:
-        conn: PostgreSQL 데이터베이스 연결 객체.
+        conn: PostgreSQL 데이터베이스 연결 객체 (Firestore 사용 시 무시됨).
         embedding: 검색의 기준이 될 벡터 임베딩.
         limit: 반환할 최대 문서 수.
         filters: 검색 결과를 필터링할 조건 (예: {'source_table': 'news'}).
@@ -40,6 +46,13 @@ def similarity_search(
     Returns:
         유사도 순으로 정렬된 문서 리스트. 각 문서는 사전(dict) 형태로 반환됩니다.
     """
+    # 환경 변수로 검색 엔진 선택
+    use_firestore = os.getenv("USE_FIRESTORE_SEARCH", "false").lower() == "true"
+
+    if use_firestore:
+        raise NotImplementedError("Firestore search has been removed.")
+
+    # 기본값: Supabase pgvector 사용 (기존 코드)
     filter_clauses: List[str] = ["embedding IS NOT NULL"]  # 임베딩이 없는 문서는 제외
     filter_params: List[Any] = []
 
@@ -58,15 +71,17 @@ def similarity_search(
                 filter_params.append(value)
 
     where_clause = " AND ".join(filter_clauses)
-    
+
     # 벡터를 SQL 쿼리에 직접 삽입할 수 있는 문자열 형태로 변환합니다.
     vector_str = _vector_literal(embedding)
-    
+
     # 키워드 검색이 요청된 경우, 텍스트 검색 순위(ts_rank)를 계산하는 부분을 추가합니다.
     ts_part = ""
     keyword_param: List[str] = []
     if keyword:
-        ts_part = ", ts_rank(content_tsv, plainto_tsquery('simple', %s)) as keyword_rank"
+        ts_part = (
+            ", ts_rank(content_tsv, plainto_tsquery('simple', %s)) as keyword_rank"
+        )
         keyword_param.append(keyword)
 
     # 최종 SQL 쿼리를 구성합니다.
@@ -84,15 +99,30 @@ def similarity_search(
            {ts_part}
     FROM rag_chunks
     WHERE {where_clause}
-    ORDER BY similarity DESC
+    ORDER BY embedding <=> %s::vector ASC
     LIMIT %s
     """
     # SQL 쿼리에 사용될 파라미터를 최종적으로 조합합니다.
-    # 순서: [벡터 문자열, (키워드), ...필터 값, LIMIT 값]
-    final_params = [vector_str] + keyword_param + filter_params + [limit]
+    # 순서: [벡터 문자열, (키워드), 벡터 문자열(ORDER BY용), ...필터 값, LIMIT 값]
+    final_params = [vector_str] + keyword_param + [vector_str] + filter_params + [limit]
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+    import time
+
+    start_time = time.perf_counter()
+    with conn.cursor(row_factory=dict_row) as cur:
+        # HNSW 검색 정확도 튜닝 (Recall 향상)
+        cur.execute("SET LOCAL hnsw.ef_search = 100;")
         cur.execute(sql, final_params)
         rows = cur.fetchall()
-        
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "[Search] Vector similarity search took %.2fms (results=%d)",
+        elapsed_ms,
+        len(rows),
+    )
+
     return [dict(row) for row in rows]

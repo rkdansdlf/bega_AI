@@ -16,7 +16,16 @@ from dotenv import load_dotenv
 
 import re
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile, File
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    File,
+)
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
@@ -26,7 +35,7 @@ from ..core.ratelimit import rate_limit_dependency
 
 logger = logging.getLogger(__name__)
 load_dotenv()
-router = APIRouter(prefix="/chat", tags=["chat"])
+router = APIRouter(prefix="/ai/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
 
@@ -105,24 +114,44 @@ async def _stream_response(
         """SSE 이벤트 스트림을 생성하는 비동기 제너레이터입니다."""
         # 1. 오류 발생 시 오류 이벤트 전송
         if error_payload:
-            yield {"event": "error", "data": json.dumps(error_payload, ensure_ascii=False)}
+            yield {
+                "event": "error",
+                "data": json.dumps(error_payload, ensure_ascii=False),
+            }
         # 2. 성공 시 메시지와 메타데이터 이벤트 전송
         elif result:
-            rendered = await _render_answer(result, style)
-            # 답변의 일부(delta)를 message 이벤트로 전송
-            yield {"event": "message", "data": json.dumps({"delta": rendered}, ensure_ascii=False)}
-            
+            answer = result.get("answer")
+
+            # answer가 비동기 제너레이터인 경우 (스트리밍)
+            if hasattr(answer, "__aiter__"):
+                async for delta in answer:
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({"delta": delta}, ensure_ascii=False),
+                    }
+
+                # 스트리밍 완료 후 전체 답변을 문자열로 결합하여 meta 데이터 준비 (옵션)
+                # 실제로는 meta 데이터만 보내면 됨
+
+            # answer가 일반 문자열인 경우 (비스트리밍/일상대화)
+            else:
+                rendered = await _render_answer(result, style)
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"delta": rendered}, ensure_ascii=False),
+                }
+
             def safe_serialize(obj):
                 """JSON 직렬화 가능한 형태로 객체를 변환"""
                 from datetime import datetime, date
-                
+
                 if obj is None:
                     return None
                 elif isinstance(obj, (str, int, float, bool)):
                     return obj
                 elif isinstance(obj, (datetime, date)):
                     return obj.isoformat()
-                elif hasattr(obj, 'to_dict'):
+                elif hasattr(obj, "to_dict"):
                     return safe_serialize(obj.to_dict())
                 elif isinstance(obj, dict):
                     return {key: safe_serialize(value) for key, value in obj.items()}
@@ -130,26 +159,35 @@ async def _stream_response(
                     return [safe_serialize(item) for item in obj]
                 else:
                     # ToolResult 등의 객체
-                    if hasattr(obj, '__dict__'):
-                        return {key: safe_serialize(value) for key, value in obj.__dict__.items()}
+                    if hasattr(obj, "__dict__"):
+                        return {
+                            key: safe_serialize(value)
+                            for key, value in obj.__dict__.items()
+                        }
                     else:
                         return str(obj)
-            
+
             # 도구 호출 등 추가 정보를 meta 이벤트로 전송
             tool_results_raw = result.get("tool_results", [])
             tool_results_serialized = safe_serialize(tool_results_raw)
-            
+
             meta_payload_raw = {
                 "tool_calls": [tc.to_dict() for tc in result.get("tool_calls", [])],
                 "tool_results": tool_results_serialized,
                 "data_sources": result.get("data_sources", []),
                 "verified": result.get("verified", False),
+                "visualizations": result.get(
+                    "visualizations", []
+                ),  # 시각화 데이터 전달
                 "style": style,
             }
             # 전체 payload를 안전하게 직렬화
             meta_payload = safe_serialize(meta_payload_raw)
-            yield {"event": "meta", "data": json.dumps(meta_payload, ensure_ascii=False)}
-            
+            yield {
+                "event": "meta",
+                "data": json.dumps(meta_payload, ensure_ascii=False),
+            }
+
         # 3. 스트림 종료를 알리는 done 이벤트 전송
         yield {"event": "done", "data": "[DONE]"}
 
@@ -165,6 +203,7 @@ async def _stream_response(
 
 class ChatPayload(Dict[str, Any]):
     """채팅 요청 시 POST body의 스키마 정의."""
+
     question: str
     filters: Optional[Dict[str, Any]] = None
     style: Optional[str] = None
@@ -188,21 +227,65 @@ async def chat_completion(
         question,
         context={"filters": filters, "history": history},
     )
+
+    # If the answer is an async generator, consume it for non-streaming response.
+    import inspect
+
+    answer_obj = result.get("answer")
+    if inspect.isasyncgen(answer_obj) or hasattr(answer_obj, "__aiter__"):
+        full_answer = ""
+        try:
+            async for chunk in answer_obj:
+                if chunk:
+                    full_answer += chunk
+            result["answer"] = full_answer
+        except Exception as e:
+            logger.error(f"Error consuming generator: {e}")
+            result["answer"] = str(answer_obj)
+
+    # ToolCall 등 커스텀 객체 직렬화 헬퍼
+    def safe_serialize(obj):
+        """JSON 직렬화 가능한 형태로 객체를 변환"""
+        from datetime import datetime, date
+
+        if obj is None:
+            return None
+        elif isinstance(obj, (str, int, float, bool)):
+            return obj
+        elif isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        elif hasattr(obj, "to_dict"):
+            return safe_serialize(obj.to_dict())
+        elif isinstance(obj, dict):
+            return {key: safe_serialize(value) for key, value in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [safe_serialize(item) for item in obj]
+        else:
+            if hasattr(obj, "__dict__"):
+                return {
+                    key: safe_serialize(value) for key, value in obj.__dict__.items()
+                }
+            return str(obj)
+
     if isinstance(result, dict):
-        return JSONResponse(result)
+        return JSONResponse(safe_serialize(result))
     else:
         # result가 객체라면 dict로 변환
-        return JSONResponse({
-            "answer": getattr(result, 'answer', str(result)),
-            "citations": getattr(result, 'citations', []),
-            "intent": intent
-        })
+        return JSONResponse(
+            safe_serialize(
+                {
+                    "answer": getattr(result, "answer", str(result)),
+                    "citations": getattr(result, "citations", []),
+                    "intent": getattr(result, "intent", "unknown"),
+                }
+            )
+        )
 
 
 @router.post("/stream")
 async def chat_stream_post(
     payload: Dict[str, Any] = Body(...),
-    style: str = Query("markdown", regex="^(markdown|json|compact)$"),
+    style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
     agent: BaseballStatisticsAgent = Depends(get_agent),
     _: None = Depends(rate_limit_dependency),
     request: Request = None,
@@ -211,7 +294,7 @@ async def chat_stream_post(
     question = payload.get("question", "")
     filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
-    
+
     # payload에 style이 지정된 경우, 쿼리 파라미터보다 우선 적용합니다.
     style_override = payload.get("style")
     if style_override in {"markdown", "json", "compact"}:
@@ -230,7 +313,7 @@ async def chat_stream_post(
 @router.get("/stream")
 async def chat_stream_get(
     q: str = Query("", description="질문 텍스트"),
-    style: str = Query("markdown", regex="^(markdown|json|compact)$"),
+    style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
     agent: BaseballStatisticsAgent = Depends(get_agent),
     _: None = Depends(rate_limit_dependency),
     request: Request = None,
@@ -251,7 +334,21 @@ async def chat_stream_get(
         agent=agent,
     )
 
-whisper_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY2"))
+
+_whisper_client: openai.AsyncOpenAI | None = None
+
+
+def _get_whisper_client() -> openai.AsyncOpenAI:
+    api_key = os.getenv("OPENAI_API_KEY2") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503, detail="OPENAI_API_KEY가 설정되지 않았습니다."
+        )
+    global _whisper_client
+    if _whisper_client is None:
+        _whisper_client = openai.AsyncOpenAI(api_key=api_key)
+    return _whisper_client
+
 
 @router.post("/voice")
 async def transcribe_audio(
@@ -260,30 +357,32 @@ async def transcribe_audio(
 ):
     logger.info(f"===== 음성 변환 시작 =====")
     logger.info(f"파일명: {file.filename}, 타입: {file.content_type}")
-    
+
     try:
         contents = await file.read()
         logger.info(f"파일 크기: {len(contents)} bytes")
-        
+
         import io
+
         audio_file = io.BytesIO(contents)
         audio_file.name = "audio.webm"
-        
+
         logger.info("OpenAI Whisper API 호출 중...")
-        
-        # 동기 호출인지 확인
-        response = whisper_client.audio.transcriptions.create(
+
+        whisper_client = _get_whisper_client()
+        # 비동기 호출로 변경
+        response = await whisper_client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
             language="ko",
-            prompt="야구, KBO, 직관, 경기, 선수, 팀에 대한 질문입니다."
+            prompt="야구, KBO, 직관, 경기, 선수, 팀에 대한 질문입니다.",
         )
-        
+
         logger.info(f" 변환 성공! 텍스트 길이: {len(response.text)}")
         logger.info(f"변환된 텍스트: {response.text}")
-        
+
         return {"text": response.text}
-        
+
     except Exception as e:
         logger.exception(f" 음성 변환 중 오류: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -2,11 +2,34 @@
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
 .env
 .env.*
+!.env.example
 venv/
 .venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Firebase
+firebase-service-account.json
+*-service-account.json
+
+# Migration
+scripts/migration_progress.json
+
+.migration.log
+migration.log
+server_log.txt
+*.txt
+
+# Local diagnostics and generated artifacts
+logs/
+batch_analysis_full.log
+standalone_test.py
+test_resolver_fix.py
+check_embedding.py
+test_diagnosis.py
+test_rag_search.py

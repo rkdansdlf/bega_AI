@@ -1,0 +1,37 @@
+name: Coach Cache Warmup
+
+on:
+  workflow_dispatch:       # 수동 실행 가능
+
+jobs:
+  warmup:
+    name: Pre-warm Coach Analysis Cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Coach Cache Warmup
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_PROVIDER: openrouter
+        run: python scripts/batch_coach_cache.py
+
+      - name: Warmup Summary
+        run: |
+          echo "### Coach Cache Warmup" >> $GITHUB_STEP_SUMMARY
+          echo "Pre-warming completed for all 10 KBO teams." >> $GITHUB_STEP_SUMMARY

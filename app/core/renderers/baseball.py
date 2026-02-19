@@ -8,6 +8,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 NUMBER_SENTINELS = {"", None, "null", "None"}
 
+from app.core import kbo_metrics
+from app.core.entity_extractor import POS_ABBR_TO_NAME
+
+_LEAGUE_CONTEXT = kbo_metrics.LeagueContext()
+
 
 def _has_final_consonant(word: str) -> bool:
     if not word:
@@ -70,18 +75,30 @@ def _format_count(value: Any, suffix: str = "") -> Optional[str]:
     return f"{number}{suffix}"
 
 
-def make_meta(row: Dict[str, Any], *, kind: str, aliases: Iterable[str]) -> str:
+def make_meta(
+    row: Dict[str, Any],
+    *,
+    kind: str,
+    aliases: Iterable[str],
+    extra_stats: Optional[Dict[str, Any]] = None,
+) -> str:
     meta = {
         "kind": kind,
         "season": row.get("season_year") or row.get("season"),
         "team": row.get("team_name") or row.get("team_code"),
         "player_id": row.get("player_id"),
+        "source_row_id": row.get("source_row_id", row.get("id")),
+        "player_name": row.get("player_name"),
         "aliases": [alias for alias in aliases if alias],
         "primary_stats": {},
     }
     for key in ("era", "avg", "ops", "whip", "ip"):
         if row.get(key) not in NUMBER_SENTINELS:
             meta["primary_stats"][key] = row[key]
+
+    if extra_stats:
+        meta.update(extra_stats)
+
     return json.dumps(meta, ensure_ascii=False)
 
 
@@ -102,7 +119,9 @@ def _build_aliases(row: Dict[str, Any]) -> List[str]:
     return [str(alias) for alias in aliases if alias not in NUMBER_SENTINELS]
 
 
-def _render_header(row: Dict[str, Any], *, season_field: str = "season_year") -> Tuple[str, str]:
+def _render_header(
+    row: Dict[str, Any], *, season_field: str = "season_year"
+) -> Tuple[str, str]:
     season = row.get(season_field) or row.get("season")
     team = row.get("team_name") or row.get("team_code")
     player = row.get("player_name")
@@ -177,9 +196,70 @@ def render_pitching_season(
     hits_allowed = _format_count(row.get("h") or row.get("hits"), "피안타")
     walk = _format_count(row.get("bb") or row.get("walks"), "볼넷")
     opponent_avg = _format_float(row.get("opponent_avg") or row.get("baopp"), 3)
+    # [Optimized] Pre-calculate metrics for RAG
+    extra_stats = {}
+    try:
+        ip_val = float(row.get("innings_pitched") or row.get("ip") or 0.0)
+        era_val = float(row.get("era") or 99.0)
+        whip_val = float(row.get("whip") or 99.0)
+        hr = int(float(row.get("home_runs_allowed") or 0))
+        bb = int(float(row.get("walks_allowed") or 0))
+        hbp = int(float(row.get("hit_batters") or 0))
+        k = int(float(row.get("strikeouts") or 0))
+        pa = int(float(row.get("tbf") or 0))
+
+        fip_val = kbo_metrics.fip(hr, bb, hbp, k, ip_val, _LEAGUE_CONTEXT) or 99.0
+        era_minus_val = kbo_metrics.era_minus(era_val, _LEAGUE_CONTEXT) or 999.0
+        fip_minus_val = kbo_metrics.fip_minus(fip_val, _LEAGUE_CONTEXT) or 999.0
+        kbb_pct = kbo_metrics.k_minus_bb_pct(k, bb, pa) or -99.0
+
+        score = kbo_metrics.pitcher_rank_score(
+            era_minus_val, fip_minus_val, kbb_pct, whip_val, ip_val
+        )
+
+        extra_stats = {
+            "role": (
+                "SP"
+                if ip_val >= 70 or int(float(row.get("games_started") or 0)) >= 10
+                else "RP"
+            ),
+            "ip": ip_val,
+            "era": era_val,
+            "fip": fip_val,
+            "k_per_nine": kbo_metrics.k_per_nine(k, ip_val) or 0.0,
+            "bb_per_nine": kbo_metrics.bb_per_nine(bb, ip_val) or 0.0,
+            "k_bb_ratio": kbo_metrics.k_bb_ratio(k, bb) or 0.0,
+            "kbb_pct": kbb_pct,
+            "era_minus": era_minus_val,
+            "fip_minus": fip_minus_val,
+            "score": score,
+            # Add raw stats needed for display
+            "innings_pitched": ip_val,
+            "strikeouts": k,
+            "walks_allowed": bb,
+            "hit_batters": hbp,
+            "home_runs_allowed": hr,
+            "tbf": pa,
+            "games_started": int(float(row.get("games_started") or 0)),
+        }
+    except Exception:
+        pass  # Fallback to runtime calc if data missing
+
     detailed = []
     if strikeouts:
         detailed.append(f"{strikeouts}을 기록했습니다.")
+
+    # New metrics
+    k9 = _format_float(extra_stats.get("k_per_nine"), 2)
+    bb9 = _format_float(extra_stats.get("bb_per_nine"), 2)
+    kbb = _format_float(extra_stats.get("k_bb_ratio"), 2)
+    if k9:
+        detailed.append(f"9이닝당 탈삼진(K/9)은 {k9}입니다.")
+    if bb9:
+        detailed.append(f"9이닝당 볼넷(BB/9)은 {bb9}입니다.")
+    if kbb:
+        detailed.append(f"삼진/볼넷 비율(K/BB)은 {kbb}입니다.")
+
     if hits_allowed:
         detailed.append(f"{hits_allowed}을 허용했습니다.")
     if walk:
@@ -198,13 +278,12 @@ def render_pitching_season(
         row,
         kind="pitching_season",
         aliases=_build_aliases(row),
+        extra_stats=extra_stats,
     )
 
     source = row.get("source_table", "player_season_pitching")
     row_id = row.get("source_row_id", "")
-    source_line = (
-        f"[출처] 2025 KBO 공식 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
-    )
+    source_line = f"[출처] 2025 KBO 공식 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
 
     return "\n".join(
         [
@@ -232,9 +311,9 @@ def render_batting_season(
     slg = _format_float(row.get("slg"), 3)
     games = _format_count(row.get("g") or row.get("games"), "경기")
     plate = _format_count(row.get("pa") or row.get("plate_appearances"), "타석")
-    home_runs = _format_count(row.get("hr") or row.get("home_runs"), "홈런")
-    rbi = _format_count(row.get("rbi"), "타점")
-    steals = _format_count(row.get("stolen_bases"), "도루")
+    home_runs = _format_count(row.get("hr") or row.get("home_runs"))
+    rbi = _format_count(row.get("rbi"))
+    steals = _format_count(row.get("stolen_bases"))
 
     headline = [header_text, subject]
     main = []
@@ -245,11 +324,11 @@ def render_batting_season(
     if ops:
         main.append(f"OPS {ops}")
     if home_runs:
-        main.append(home_runs)
+        main.append(f"홈런 {home_runs}")
     if rbi:
-        main.append(rbi)
+        main.append(f"타점 {rbi}")
     if steals:
-        main.append(steals)
+        main.append(f"도루 {steals}")
     tl_dr = _tl_dr(main if main else ["주요 기록이 제공되지 않았습니다."])
 
     first_sentence = [header_text, subject]
@@ -259,6 +338,90 @@ def render_batting_season(
         first_sentence.append("등록된 시즌 주요 기록이 없습니다.")
     core = "[핵심 문장] " + " ".join(first_sentence) + "입니다."
 
+    # [Optimized] Pre-calculate metrics for RAG
+    extra_stats = {}
+    try:
+        pa_val = int(float(row.get("plate_appearances") or row.get("pa") or 0))
+        hits = int(float(row.get("hits") or 0))
+        doubles = int(float(row.get("doubles") or 0))
+        triples = int(float(row.get("triples") or 0))
+        hr = int(float(row.get("home_runs") or row.get("hr") or 0))
+        bb = int(float(row.get("walks") or 0))
+        ibb = int(float(row.get("intentional_walks") or 0))
+        hbp = int(float(row.get("hbp") or 0))
+        sf = int(float(row.get("sacrifice_flies") or 0))
+        ab = int(float(row.get("at_bats") or 0))
+        rbi_val = int(float(row.get("rbi") or 0))
+        sb = int(float(row.get("stolen_bases") or 0))
+        k = int(float(row.get("strikeouts") or 0))
+
+        avg_val = float(row.get("avg") or row.get("batting_avg") or 0.0)
+        ops_val = float(row.get("ops") or 0.0)
+
+        # Recalculate if missing
+        if ops_val == 0.0:
+            ops_val = (
+                kbo_metrics.ops(hits, bb, hbp, ab, sf, doubles, triples, hr) or 0.0
+            )
+
+        league_ops = _LEAGUE_CONTEXT.lg_OBP + _LEAGUE_CONTEXT.lg_SLG
+        ops_plus = ((ops_val / league_ops) * 100) if league_ops else None
+
+        woba_val = kbo_metrics.woba(
+            bb, ibb, hbp, hits, doubles, triples, hr, ab, sf, _LEAGUE_CONTEXT
+        )
+        wrc_plus = None
+        if woba_val is not None and pa_val > 0:
+            wrc_plus = kbo_metrics.wrc_plus(woba_val, pa_val, _LEAGUE_CONTEXT)
+
+        war = None
+        if woba_val is not None:
+            war = kbo_metrics.war_batter(
+                woba_val, pa_val, 0.0, 0.0, 0.0, 0.0, _LEAGUE_CONTEXT
+            )
+
+        score = 0.0
+        if (
+            wrc_plus is not None
+        ):  # Use simplified score calculation here to avoid circular dep or re-implementation
+            wrc_plus_score = wrc_plus
+            war_score = (war * 20) if war is not None else 0
+            score = 0.7 * wrc_plus_score + 0.3 * war_score
+        else:
+            score = 90.0  # Default
+
+        extra_stats = {
+            "pa": pa_val,
+            "wrc_plus": wrc_plus,
+            "ops_plus": ops_plus,
+            "war": war,
+            "ops": ops_val,
+            "obp": float(row.get("obp") or 0.0),
+            "slg": float(row.get("slg") or 0.0),
+            "avg": avg_val,
+            "iso": kbo_metrics.iso(hits, doubles, triples, hr, ab) or 0.0,
+            "babip": kbo_metrics.babip(hits, ab, hr, k, sf) or 0.0,
+            "xr": kbo_metrics.xr(
+                hits, doubles, triples, hr, bb, ibb, hbp, ab, sf, sb, 0
+            )
+            or 0.0,
+            "home_runs": hr,
+            "rbi": rbi_val,
+            "steals": sb,
+            "score": score,
+            # Raw stats for display
+            "hits": hits,
+            "doubles": doubles,
+            "triples": triples,
+            "walks": bb,
+            "intentional_walks": ibb,
+            "hbp": hbp,
+            "sacrifice_flies": sf,
+            "at_bats": ab,
+        }
+    except Exception:
+        pass
+
     detailed = []
     if plate:
         detailed.append(f"{plate}에 나섰습니다.")
@@ -266,6 +429,18 @@ def render_batting_season(
         detailed.append(f"출루율은 {obp}입니다.")
     if slg:
         detailed.append(f"장타율은 {slg}입니다.")
+
+    # New metrics
+    iso = _format_float(extra_stats.get("iso"), 3)
+    babip = _format_float(extra_stats.get("babip"), 3)
+    xr = _format_float(extra_stats.get("xr"), 2)
+    if iso:
+        detailed.append(f"순수장타율(ISO)은 {iso}입니다.")
+    if babip:
+        detailed.append(f"인플레이 타구 타율(BABIP)은 {babip}입니다.")
+    if xr:
+        detailed.append(f"추정 득점(XR)은 {xr}입니다.")
+
     if league_avg and avg and league_avg.get("avg") not in NUMBER_SENTINELS:
         league_avg_avg = _format_float(league_avg.get("avg"), 3)
         if league_avg_avg:
@@ -278,16 +453,12 @@ def render_batting_season(
     detail_block = _detailed_lines(detailed + advanced)
 
     meta = make_meta(
-        row,
-        kind="batting_season",
-        aliases=_build_aliases(row),
+        row, kind="batting_season", aliases=_build_aliases(row), extra_stats=extra_stats
     )
 
     source = row.get("source_table", "player_season_batting")
     row_id = row.get("source_row_id", "")
-    source_line = (
-        f"[출처] 2025 KBO 공식 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
-    )
+    source_line = f"[출처] 2025 KBO 공식 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
 
     return "\n".join(
         [
@@ -299,52 +470,45 @@ def render_batting_season(
         ]
     )
 
-def _parse_position(position_str: Optional[str]) -> Tuple[Optional[str], str, Optional[str]]:
 
+def _parse_position(
+    position_str: Optional[str],
+) -> Tuple[Optional[str], str, Optional[str]]:
     if not position_str or position_str in NUMBER_SENTINELS:
         return (None, "정보 미상", None)
-    
+
     position_str = position_str.strip()
 
     MAIN_POSITION = {
-        "一": "1루수",
-        "二": "2루수", 
-        "三": "3루수",
-        "유": "유격수",
-        "좌": "좌익수",
-        "우": "우익수",
-        "중": "중견수",
-        "포": "포수",
-        "투": "투수",
+        k: v for k, v in POS_ABBR_TO_NAME.items() if k not in ["타", "지", "주"]
     }
     SUB_POSITION = {
-        "타": "대타",
-        "지": "지명타자",
-        "주": "대주자",
+        k: v for k, v in POS_ABBR_TO_NAME.items() if k in ["타", "지", "주"]
     }
 
-    #포지션 1글자 = 단일 포지션
+    # 포지션 1글자 = 단일 포지션
     if len(position_str) == 1:
-        main = MAIN_POSITION.get(position_str, position_str)
+        main = POS_ABBR_TO_NAME.get(position_str, position_str)
         return (None, main, None)
-    #포지션 2글자
+    # 포지션 2글자
     if len(position_str) == 2:
         first = position_str[0]
         second = position_str[1]
 
-        #case 1: sub+main
+        # case 1: sub+main
         if first in SUB_POSITION and second in MAIN_POSITION:
             sub = SUB_POSITION[first]
             main = MAIN_POSITION[second]
             return (sub, main, None)
-        
-        #case 2: main+main
+
+        # case 2: main+main
         if first in MAIN_POSITION and second in MAIN_POSITION:
             main1 = MAIN_POSITION[first]
             main2 = MAIN_POSITION[second]
             return (None, main1, main2)
-    #파싱 실패 시 원본 반환
+    # 파싱 실패 시 원본 반환
     return (None, position_str, None)
+
 
 def render_hitter_game(
     row: Dict[str, Any],
@@ -357,7 +521,7 @@ def render_hitter_game(
 
     game_id = row.get("game_id", "정보 미상")
     player = row.get("player_name", f"선수 {row.get('player_id', '정보 미상')}")
-    team = row.get("team_id", "팀 정보 미상")
+    team = row.get("team_name") or row.get("team_code", "팀 정보 미상")
     batting_order = row.get("batting_order")
 
     position_raw = row.get("position")
@@ -370,7 +534,7 @@ def render_hitter_game(
     rbis = _format_count(row.get("rbis"), "타점")
     runs = _format_count(row.get("runs"), "득점")
     avg = _format_float(row.get("batting_average"), 3)
-    
+
     def _position_text() -> str:
         if sub_position and switched_position:
             return f"{sub_position}({main_position}↔{switched_position})"
@@ -380,7 +544,7 @@ def render_hitter_game(
             return f"{main_position}↔{switched_position}"
         else:
             return main_position
-    
+
     position_display = _position_text()
 
     main_stats = []
@@ -394,28 +558,32 @@ def render_hitter_game(
         main_stats.append(rbis)
     if runs:
         main_stats.append(runs)
-    
+
     tl_dr = _tl_dr(main_stats if main_stats else ["경기 기록이 제공되지 않았습니다."])
 
     first_sentence_parts = [f"{team}", subject]
     if batting_order:
         first_sentence_parts.append(f"{batting_order}번 {position_display}로 출전해")
-    
+
     if main_stats[1:]:
         first_sentence_parts.append(" ".join(main_stats[1:]))
     else:
         first_sentence_parts.append("기록이 없습니다")
-    
+
     core = "[핵심 문장] " + " ".join(first_sentence_parts) + "."
 
     detailed = []
 
     if sub_position and switched_position:
-        detailed.append(f"{sub_position} 역할로 {main_position}와 {switched_position} 수비를 교대로 맡았습니다.")
+        detailed.append(
+            f"{sub_position} 역할로 {main_position}와 {switched_position} 수비를 교대로 맡았습니다."
+        )
     elif sub_position:
         detailed.append(f"{sub_position} 역할로 {main_position} 수비를 맡았습니다.")
     elif switched_position:
-        detailed.append(f"{main_position}와 {switched_position} 포지션을 교체하며 뛰었습니다.")
+        detailed.append(
+            f"{main_position}와 {switched_position} 포지션을 교체하며 뛰었습니다."
+        )
 
     if avg:
         detailed.append(f"경기 타율은 {avg}입니다.")
@@ -424,9 +592,9 @@ def render_hitter_game(
         ab_count = int(float(row.get("at_bats", 1)))
         if hit_count > 0:
             detailed.append(f"{ab_count}타수 {hit_count}안타를 기록했습니다.")
-    
+
     detail_block = _detailed_lines(detailed)
-    
+
     meta = {
         "kind": "batting_game",
         "game_id": game_id,
@@ -439,20 +607,21 @@ def render_hitter_game(
         "position_raw": position_raw,
         "aliases": [player, team, str(row.get("player_id"))],
     }
-    
+
     source = row.get("source_table", "hitter_record")
     row_id = row.get("source_row_id", row.get("id", ""))
-    source_line = (
-        f"[출처] KBO 경기 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+    source_line = f"[출처] KBO 경기 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+
+    return "\n".join(
+        [
+            tl_dr,
+            core,
+            detail_block,
+            f"[META] {json.dumps(meta, ensure_ascii=False)}",
+            source_line,
+        ]
     )
-    
-    return "\n".join([
-        tl_dr,
-        core,
-        detail_block,
-        f"[META] {json.dumps(meta, ensure_ascii=False)}",
-        source_line,
-    ])
+
 
 def render_pitcher_game(
     row: Dict[str, Any],
@@ -462,15 +631,15 @@ def render_pitcher_game(
 ) -> str:
     """경기별 투수 기록 렌더링"""
     today = _today_fallback(today_str)
-    
+
     game_id = row.get("game_id", "정보 미상")
     player = row.get("player_name", f"선수 {row.get('player_id', '정보 미상')}")
-    team = row.get("team_id", "팀 정보 미상")
+    team = row.get("team_name") or row.get("team_code", "팀 정보 미상")
     appearance = row.get("appearance", "등판")
     result = row.get("result", "")
-    
+
     subject = josa(player, ("은", "는"))
-    
+
     innings = _format_ip(row.get("innings"))
     wins = _format_count(row.get("wins"), "승")
     losses = _format_count(row.get("losses"), "패")
@@ -480,7 +649,7 @@ def render_pitcher_game(
     runs = _format_count(row.get("runs_allowed"), "실점")
     earned_runs = _format_count(row.get("earned_runs"), "자책점")
     era = _format_float(row.get("era"), 2)
-    
+
     main_stats = []
     if appearance:
         main_stats.append(appearance)
@@ -493,9 +662,9 @@ def render_pitcher_game(
         main_stats.append(wls)
     if strikeouts:
         main_stats.append(strikeouts)
-    
+
     tl_dr = _tl_dr(main_stats if main_stats else ["경기 기록이 제공되지 않았습니다."])
-    
+
     first_sentence_parts = [f"{team}", subject]
     if appearance:
         first_sentence_parts.append(f"{appearance}으로 출전해")
@@ -503,9 +672,9 @@ def render_pitcher_game(
         first_sentence_parts.append(" ".join(main_stats[1:]))
     else:
         first_sentence_parts.append("기록이 없습니다")
-    
+
     core = "[핵심 문장] " + " ".join(first_sentence_parts) + "."
-    
+
     detailed = []
     if hits_allowed:
         detailed.append(f"{hits_allowed}을 허용했습니다.")
@@ -515,16 +684,16 @@ def render_pitcher_game(
         detailed.append(f"{earned_runs}을 기록했습니다.")
     if era:
         detailed.append(f"경기 평균자책점은 {era}입니다.")
-    
+
     walks = _format_count(row.get("walks"), "볼넷")
     pitch_count = _format_count(row.get("pitch_count"), "구")
     if walks:
         detailed.append(f"{walks}을 내줬습니다.")
     if pitch_count:
         detailed.append(f"총 {pitch_count}를 던졌습니다.")
-    
+
     detail_block = _detailed_lines(detailed)
-    
+
     meta = {
         "kind": "pitching_game",
         "game_id": game_id,
@@ -534,20 +703,20 @@ def render_pitcher_game(
         "result": result,
         "aliases": [player, team, str(row.get("player_id"))],
     }
-    
+
     source = row.get("source_table", "pitcher_record")
     row_id = row.get("source_row_id", row.get("id", ""))
-    source_line = (
-        f"[출처] KBO 경기 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+    source_line = f"[출처] KBO 경기 기록 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+
+    return "\n".join(
+        [
+            tl_dr,
+            core,
+            detail_block,
+            f"[META] {json.dumps(meta, ensure_ascii=False)}",
+            source_line,
+        ]
     )
-    
-    return "\n".join([
-        tl_dr,
-        core,
-        detail_block,
-        f"[META] {json.dumps(meta, ensure_ascii=False)}",
-        source_line,
-    ])
 
 
 if __name__ == "__main__":  # pragma: no cover - simple manual sanity check
