@@ -410,6 +410,34 @@ PYTHONPATH=. .venv/bin/python scripts/batch_coach_matchup_cache.py \
 
 ----------
 
+### Chat 응답 캐시 운영/보안
+
+- `POST /ai/chat/stream`는 `history=null` 이고 실시간 키워드(`오늘`, `지금`, `어제`)가 없을 때만 캐시를 사용합니다.
+- 캐시 HIT 응답의 `event:meta`에는 `cached=true`, MISS 응답에는 `cached=false`가 포함됩니다.
+- 캐시 TTL은 intent 기반이며 대표값은 `stats_lookup=6h`, `player_profile=48h`, `recent_form=3h`입니다.
+- 만료 키로 재요청이 들어오면 `chat_response_cache`는 UPSERT로 갱신되고 `hit_count`는 `0`으로 리셋됩니다.
+
+관리 API(내부 전용):
+
+- `GET /ai/chat/cache/stats`
+- `DELETE /ai/chat/cache?intent=...`
+- `DELETE /ai/chat/cache/{cache_key}`
+
+보호 정책:
+
+- 기본값 `CHAT_CACHE_ADMIN_ENABLED=false`일 때 모든 관리 API는 `404`
+- `CHAT_CACHE_ADMIN_ENABLED=true`인데 `CHAT_CACHE_ADMIN_TOKEN` 미설정이면 `503`
+- 토큰 불일치 또는 미전달 시 `401`
+- 정상 토큰은 `X-Cache-Admin-Token` 헤더로 전달
+
+운영 체크 포인트:
+
+- 로그 키워드: `[ChatCache] HIT`, `[ChatCache] SAVED`
+- 관리 API 접근 로그의 `401/404` 비율 점검
+- `503` 발생 시 설정 누락(`enabled=true` + token 미설정) 여부를 즉시 확인
+
+----------
+
 ## API 문서
 
 ### 엔드포인트 목록

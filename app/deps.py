@@ -1,7 +1,9 @@
 """FastAPI 의존성 주입을 위한 공통 헬퍼를 정의하는 모듈."""
 
+import asyncio
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
+import logging
 from typing import Optional
 
 import psycopg
@@ -9,11 +11,15 @@ from psycopg_pool import ConnectionPool
 from fastapi import Depends
 from fastapi.params import Depends as DependsClass
 
+logger = logging.getLogger(__name__)
+
 from .config import get_settings
 from .core.rag import RAGPipeline
 from .ml.intent_router import predict_intent, load_clf
 from .agents.baseball_agent import BaseballStatisticsAgent
 from .core.prompts import SYSTEM_PROMPT
+from .core.chat_cache import CREATE_TABLE_SQL as CHAT_CACHE_DDL
+from .core.chat_cache import cleanup_expired as _cleanup_expired_cache
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성)
 _connection_pool: Optional[ConnectionPool] = None
@@ -50,6 +56,24 @@ def close_connection_pool():
         _connection_pool = None
 
 
+async def _chat_cache_cleanup_loop(interval_seconds: int = 3600) -> None:
+    """1시간마다 만료된 chat_response_cache 항목을 삭제하는 백그라운드 루프.
+
+    첫 실행은 interval_seconds 후 (앱 시작 직후 DB 부하 방지).
+    일시적 DB 오류 발생 시 경고 로그만 남기고 루프를 계속 유지합니다.
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            pool = get_connection_pool()
+            with pool.connection() as conn:
+                deleted = await _cleanup_expired_cache(conn)
+            if deleted:
+                logger.info("[ChatCache] Cleanup: %d expired entries deleted", deleted)
+        except Exception as exc:
+            logger.warning("[ChatCache] Cleanup loop error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app):
     """앱 시작/종료 시 실행되는 lifespan 이벤트"""
@@ -81,9 +105,26 @@ async def lifespan(app):
     except Exception as e:
         print(f"[Warning] Failed to ensure coach_analysis_cache table: {e}")
 
+    # [Chat Caching] chat_response_cache 테이블 자동 생성
+    try:
+        with pool.connection() as conn:
+            conn.execute(CHAT_CACHE_DDL)
+        logger.info("[Lifespan] chat_response_cache table ensured")
+    except Exception as exc:
+        logger.warning("[Lifespan] chat_response_cache DDL failed: %s", exc)
+
+    # [Chat Caching] 만료 항목 주기적 삭제 백그라운드 태스크 시작
+    cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
+    logger.info("[Lifespan] chat_response_cache cleanup task started (interval=1h)")
+
     yield
 
-    # 종료 시
+    # 종료 시: cleanup 태스크 취소 후 커넥션 풀 정리
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     close_connection_pool()  # 모든 커넥션 정리
 
 

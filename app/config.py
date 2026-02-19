@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     chatbot_model_name: Optional[str] = Field(
         None, validation_alias="CHATBOT_MODEL_NAME"
     )
+    chat_cache_admin_enabled: bool = Field(
+        False, validation_alias="CHAT_CACHE_ADMIN_ENABLED"
+    )
+    chat_cache_admin_token: Optional[str] = Field(
+        None, validation_alias="CHAT_CACHE_ADMIN_TOKEN"
+    )
 
     # --- 검색(Retrieval) 관련 설정 ---
     default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
