@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import logging
 import sys
@@ -30,6 +29,11 @@ from app.core.coach_validator import (
     validate_coach_response,
 )
 from app.core.prompts import COACH_PROMPT_V2
+from app.core.coach_cache_key import (
+    build_coach_cache_key,
+    build_focus_signature,
+    normalize_focus,
+)
 from app.deps import get_coach_llm_generator, get_connection_pool
 from app.routers.coach import _remove_duplicate_json_start
 from app.tools.database_query import DatabaseQueryTool
@@ -42,16 +46,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CANONICAL_TEAMS = ["SS", "LT", "LG", "DB", "KIA", "KH", "HH", "SSG", "NC", "KT"]
-PROMPT_VERSION = "v4_dual"
-MODEL_NAME = "solar-pro-3"
-CACHE_SCHEMA_VERSION = "v2"
+PROMPT_VERSION = "v5_focus"
+MODEL_NAME = "upstage/solar-pro-3:free"
+CACHE_SCHEMA_VERSION = "v3"
 COACH_YEAR_MIN = 1982
+FOCUS_SECTION_HEADERS: Dict[str, str] = {
+    "recent_form": "## 최근 전력",
+    "bullpen": "## 불펜 상태",
+    "starter": "## 선발 투수",
+    "matchup": "## 상대 전적",
+    "batting": "## 타격 생산성",
+}
 
 
 @dataclass
 class RunOptions:
     years: List[int]
     teams: List[str]
+    focus: List[str]
     only_missing: bool
     force_rebuild: bool
     quality_report: str | None
@@ -95,22 +107,33 @@ def parse_teams(teams_arg: str | None, resolver: TeamCodeResolver) -> List[str]:
     return parsed
 
 
+def parse_focus(focus_arg: str | None) -> List[str]:
+    if not focus_arg:
+        return []
+    return normalize_focus([token.strip() for token in focus_arg.split(",")])
+
+
 def is_valid_year(year: int) -> bool:
     return COACH_YEAR_MIN <= year <= datetime.now().year + 1
 
 
-def build_cache_key(team_id: str, year: int, game_type: str) -> str:
-    payload = {
-        "schema": CACHE_SCHEMA_VERSION,
-        "prompt_version": PROMPT_VERSION,
-        "team_code_canonical": team_id,
-        "away_team_code_canonical": "",
-        "year": year,
-        "game_type": game_type.upper(),
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()
+def build_focus_section_requirements(resolved_focus: List[str]) -> str:
+    if not resolved_focus:
+        return (
+            "- 선택 focus가 비어 있습니다. 종합 분석을 수행하세요.\n"
+            "- 다만 detailed_markdown은 최소 2개 이상의 소제목(##)으로 구성하세요."
+        )
+    selected = [
+        f"- 반드시 `{FOCUS_SECTION_HEADERS[item]}` 제목을 포함하세요."
+        for item in resolved_focus
+        if item in FOCUS_SECTION_HEADERS
+    ]
+    omitted = [
+        f"- 미선택 focus는 가능하면 생략하세요: `{header}`"
+        for key, header in FOCUS_SECTION_HEADERS.items()
+        if key not in resolved_focus
+    ]
+    return "\n".join(selected + omitted)
 
 
 def collect_regular_aliases(resolver: TeamCodeResolver) -> List[str]:
@@ -282,16 +305,30 @@ async def generate_and_cache_team(
     team_id: str,
     year: int,
     game_type: str,
+    focus: List[str],
     skip_completed: bool,
     only_missing: bool,
 ) -> Dict[str, Any]:
     start = datetime.now()
-    cache_key = build_cache_key(team_id, year, game_type)
+    cache_key, cache_key_payload = build_coach_cache_key(
+        schema_version=CACHE_SCHEMA_VERSION,
+        prompt_version=PROMPT_VERSION,
+        home_team_code=team_id,
+        away_team_code=None,
+        year=year,
+        game_type=game_type,
+        focus=focus,
+        question_override=None,
+    )
+    focus_signature = cache_key_payload["focus_signature"]
+    question_signature = cache_key_payload["question_signature"]
 
     result: Dict[str, Any] = {
         "team": team_id,
         "year": year,
         "cache_key": cache_key,
+        "focus_signature": focus_signature,
+        "question_signature": question_signature,
         "status": "failed",
         "reason": None,
         "failure_category": None,
@@ -371,8 +408,17 @@ async def generate_and_cache_team(
         return result
 
     context = format_batch_context(tool_results, year)
-    question = f"{team_id} {year}시즌 종합 분석"
-    coach_prompt = COACH_PROMPT_V2.format(question=question, context=context)
+    question = (
+        f"{team_id} {year}시즌 종합 분석"
+        if not focus
+        else f"{team_id} {year}시즌 {'/'.join(focus)} 집중 분석"
+    )
+    focus_section_requirements = build_focus_section_requirements(focus)
+    coach_prompt = COACH_PROMPT_V2.format(
+        question=question,
+        context=context,
+        focus_section_requirements=focus_section_requirements,
+    )
     messages = [{"role": "user", "content": coach_prompt}]
 
     coach_llm = get_coach_llm_generator()
@@ -513,6 +559,8 @@ def summarize_results(
         "failed": failed,
         "target_years": options.years,
         "target_teams": options.teams,
+        "target_focus": options.focus,
+        "focus_signature": build_focus_signature(options.focus),
         "game_type": options.game_type.upper(),
         "coverage_rate": round(cases_ok / total, 4) if total else 0.0,
         "json_parse_success_rate": (
@@ -536,6 +584,7 @@ def summarize_results(
         "options": {
             "years": options.years,
             "teams": options.teams,
+            "focus": options.focus,
             "only_missing": options.only_missing,
             "force_rebuild": options.force_rebuild,
             "game_type": options.game_type,
@@ -559,6 +608,11 @@ def parse_args() -> RunOptions:
         "--teams",
         default=None,
         help="Comma-separated team list (canonical or aliases). Default: canonical 10 teams",
+    )
+    parser.add_argument(
+        "--focus",
+        default=None,
+        help="Comma-separated focus profile (e.g. recent_form,bullpen). Default: empty(all)",
     )
     parser.add_argument(
         "--only-missing",
@@ -595,9 +649,11 @@ def parse_args() -> RunOptions:
             raise ValueError(f"invalid year in --years: {year}")
 
     teams = parse_teams(args.teams, resolver)
+    focus = parse_focus(args.focus)
     return RunOptions(
         years=years,
         teams=teams,
+        focus=focus,
         only_missing=args.only_missing,
         force_rebuild=args.force_rebuild,
         quality_report=args.quality_report,
@@ -615,6 +671,7 @@ async def async_main(options: RunOptions) -> int:
     print("Coach 배치 캐시 시작")
     print(f"Years: {options.years}")
     print(f"Teams: {options.teams}")
+    print(f"Focus: {options.focus or ['all']}")
     print(
         f"Prompt: {PROMPT_VERSION} | Schema: {CACHE_SCHEMA_VERSION} | GameType: {options.game_type}"
     )
@@ -639,6 +696,7 @@ async def async_main(options: RunOptions) -> int:
                 team_id=team,
                 year=year,
                 game_type=options.game_type,
+                focus=options.focus,
                 skip_completed=(not options.force_rebuild),
                 only_missing=(options.only_missing and not options.force_rebuild),
             )
