@@ -772,8 +772,7 @@ def test_coach_analyze_failed_lock_blocks_regeneration(
     assert app.state._test_llm_calls["count"] == 0
 
 
-@pytest.mark.asyncio
-async def test_coach_llm_generator_prefers_coach_openrouter_settings(
+def test_coach_llm_generator_prefers_coach_openrouter_settings(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from app.deps import get_coach_llm_generator
@@ -839,19 +838,22 @@ async def test_coach_llm_generator_prefers_coach_openrouter_settings(
     monkeypatch.setattr("app.deps.get_settings", lambda: dummy_settings)
     monkeypatch.setitem(sys.modules, "httpx", _FakeHttpxModule)
 
-    coach_llm = get_coach_llm_generator()
-    chunks: list[str] = []
-    async for chunk in coach_llm(
-        [{"role": "user", "content": "hello"}], max_tokens=512
-    ):
-        chunks.append(chunk)
+    async def run() -> list[str]:
+        coach_llm = get_coach_llm_generator()
+        chunks: list[str] = []
+        async for chunk in coach_llm(
+            [{"role": "user", "content": "hello"}], max_tokens=512
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(run())
 
     assert chunks == ["coach"]
     assert captured["payload"]["model"] == "coach-model-v1"
 
 
-@pytest.mark.asyncio
-async def test_coach_llm_generator_falls_back_to_coach_fallback_models(
+def test_coach_llm_generator_falls_back_to_coach_fallback_models(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from app.deps import get_coach_llm_generator
@@ -923,12 +925,16 @@ async def test_coach_llm_generator_falls_back_to_coach_fallback_models(
     monkeypatch.setattr("app.deps.get_settings", lambda: dummy_settings)
     monkeypatch.setitem(sys.modules, "httpx", _FakeHttpxModule)
 
-    coach_llm = get_coach_llm_generator()
-    chunks: list[str] = []
-    async for chunk in coach_llm(
-        [{"role": "user", "content": "hello"}], max_tokens=256
-    ):
-        chunks.append(chunk)
+    async def run() -> list[str]:
+        coach_llm = get_coach_llm_generator()
+        chunks: list[str] = []
+        async for chunk in coach_llm(
+            [{"role": "user", "content": "hello"}], max_tokens=256
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(run())
 
     assert chunks == ["coach fallback"]
     assert [payload["model"] for payload in captured_payloads] == [
