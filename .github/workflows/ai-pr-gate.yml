@@ -1,0 +1,38 @@
+name: ai-pr-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  ai-pr-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev
+
+      - name: Run AI PR gate tests
+        env:
+          PYTHONPATH: .
+          POSTGRES_DB_URL: postgresql://localhost:5432/postgres
+        run: |
+          python -m pytest \
+            tests/test_chat_api_smoke.py \
+            tests/test_coach.py \
+            tests/test_coach_dual.py \
+            tests/test_coach_router_year_resolution.py \
+            tests/test_rag_caching.py \
+            -q

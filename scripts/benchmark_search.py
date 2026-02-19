@@ -49,9 +49,9 @@ def benchmark_supabase(
     print("\n🔵 Supabase pgvector 벤치마크")
     print("=" * 60)
 
-    supabase_url = os.getenv("OCI_DB_URL")
+    supabase_url = os.getenv("POSTGRES_DB_URL")
     if not supabase_url:
-        print("❌ OCI_DB_URL 환경변수가 설정되지 않았습니다.")
+        print("❌ POSTGRES_DB_URL 환경변수가 설정되지 않았습니다.")
         return {}
 
     conn = psycopg.connect(supabase_url)

@@ -1,0 +1,90 @@
+name: Coach Quality Loop 2025 Weekly
+
+on:
+  schedule:
+    - cron: "0 18 * * 0" # 월요일 03:00 KST
+  workflow_dispatch:
+
+concurrency:
+  group: coach-quality-2025-weekly
+  cancel-in-progress: false
+
+jobs:
+  quality-loop-2025:
+    name: Coach Quality Loop (2025 Regular, 10 Teams)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      POSTGRES_DB_URL: ${{ secrets.COACH_QUALITY_DB_URL_STAGING_RW }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY_STAGING }}
+      LLM_PROVIDER: openrouter
+      COACH_LLM_PROVIDER: openrouter
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "${POSTGRES_DB_URL}" ]; then
+            echo "COACH_QUALITY_DB_URL_STAGING_RW is required"
+            exit 1
+          fi
+          if [ -z "${OPENROUTER_API_KEY}" ]; then
+            echo "OPENROUTER_API_KEY_STAGING is required"
+            exit 1
+          fi
+
+      - name: Cleanup cache dry-run (7d, year=2025)
+        run: |
+          python scripts/cleanup_expired_cache.py \
+            --days 7 \
+            --years 2025 \
+            --dry-run \
+            --output /tmp/coach_cleanup_2025_dryrun.json
+
+      - name: Cleanup cache execute (7d, year=2025)
+        run: |
+          python scripts/cleanup_expired_cache.py \
+            --days 7 \
+            --years 2025 \
+            --output /tmp/coach_cleanup_2025_execute.json
+
+      - name: Rebuild coach cache for 2025 regular season
+        run: |
+          python scripts/batch_coach_cache.py \
+            --years 2025 \
+            --force-rebuild \
+            --game-type REGULAR \
+            --quality-report /tmp/coach_quality_2025_weekly.json
+
+      - name: Evaluate coach quality gate
+        run: |
+          python scripts/evaluate_coach_quality.py \
+            /tmp/coach_quality_2025_weekly.json \
+            --required-generated-success 10 \
+            --require-years 2025 \
+            --require-game-type REGULAR \
+            --output /tmp/coach_quality_gate_2025_weekly.json
+
+      - name: Upload quality artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coach-quality-2025-weekly
+          path: |
+            /tmp/coach_cleanup_2025_dryrun.json
+            /tmp/coach_cleanup_2025_execute.json
+            /tmp/coach_quality_2025_weekly.json
+            /tmp/coach_quality_gate_2025_weekly.json

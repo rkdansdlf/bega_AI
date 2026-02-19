@@ -3,7 +3,7 @@ uvicorn[standard]>=0.31.0
 pydantic>=2.9.2
 pydantic-settings==2.4.0
 psycopg[binary,pool]>=3.2.4
-python-multipart==0.0.6
+python-multipart>=0.0.22
 sse-starlette==1.6.1
 joblib==1.4.2
 google-generativeai==0.8.5

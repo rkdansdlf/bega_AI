@@ -1,8 +1,6 @@
 name: Coach Cache Warmup
 
 on:
-  schedule:
-    - cron: '0 18 * * *'  # 매일 오전 3시 (KST = UTC+9)
   workflow_dispatch:       # 수동 실행 가능
 
 jobs:

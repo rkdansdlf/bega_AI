@@ -163,8 +163,8 @@ def main():
     )
     parser.add_argument(
         "--supabase-url",
-        default=os.getenv("OCI_DB_URL"),
-        help="Supabase PostgreSQL 연결 URL (기본값: 환경변수 OCI_DB_URL)",
+        default=os.getenv("POSTGRES_DB_URL"),
+        help="Supabase PostgreSQL 연결 URL (기본값: 환경변수 POSTGRES_DB_URL)",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Dry run 모드 (실제 데이터 변경 없음)"
@@ -179,7 +179,7 @@ def main():
 
     if not args.supabase_url:
         print(
-            "오류: Supabase DB URL이 필요합니다. --supabase-url 또는 환경변수 OCI_DB_URL을 설정하세요."
+            "오류: Supabase DB URL이 필요합니다. --supabase-url 또는 환경변수 POSTGRES_DB_URL을 설정하세요."
         )
         sys.exit(1)
 

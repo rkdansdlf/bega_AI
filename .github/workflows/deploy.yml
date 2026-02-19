@@ -6,12 +6,91 @@ on:
       - main
 
 jobs:
+  guard:
+    name: Canonical Guard
+    runs-on: ubuntu-latest
+    env:
+      TEAM_CODE_READ_MODE: canonical_only
+      TEAM_CODE_CANONICAL_WINDOW_START: "2021"
+      TEAM_CODE_CANONICAL_WINDOW_END: "2025"
+      TEAM_CODE_OUTSIDE_WINDOW_MODE: dual
+      POSTGRES_DB_URL: ${{ secrets.POSTGRES_DB_URL }}
+      DB_URL: ${{ secrets.DB_URL }}
+      CANONICAL_GUARD_DB_URL_RO: ${{ secrets.CANONICAL_GUARD_DB_URL_RO }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify canonical window guard
+        run: |
+          if [ -z "${CANONICAL_GUARD_DB_URL_RO}" ]; then
+            if [ -n "${POSTGRES_DB_URL}" ]; then
+              export CANONICAL_GUARD_DB_URL_RO="${POSTGRES_DB_URL}"
+              echo "CANONICAL_GUARD_DB_URL_RO is not set. Falling back to POSTGRES_DB_URL."
+            elif [ -n "${DB_URL}" ]; then
+              export CANONICAL_GUARD_DB_URL_RO="${DB_URL}"
+              echo "CANONICAL_GUARD_DB_URL_RO is not set. Falling back to DB_URL."
+            else
+              echo "CANONICAL_GUARD_DB_URL_RO is required for deploy guard"
+              exit 1
+            fi
+          fi
+          python scripts/verify_canonical_transition.py \
+            --mode canonical_window \
+            --strict-canonical-window \
+            --strict-legacy-residual \
+            --output canonical_guard.json
+
+      - name: Upload guard report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-canonical-guard-report
+          path: canonical_guard.json
+
   deploy:
+    if: >
+      vars.DEPLOY_TO_EC2 == 'true' &&
+      secrets.EC2_SSH_KEY != '' &&
+      secrets.EC2_HOST != '' &&
+      secrets.EC2_USER != ''
+    needs: guard
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+
+      - name: Validate EC2 deploy secrets
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          if [ -z "${EC2_SSH_KEY}" ]; then
+            echo "::error::Missing EC2_SSH_KEY secret."
+            exit 1
+          fi
+          if [ -z "${EC2_HOST}" ]; then
+            echo "::error::Missing EC2_HOST secret."
+            exit 1
+          fi
+          if [ -z "${EC2_USER}" ]; then
+            echo "::error::Missing EC2_USER secret."
+            exit 1
+          fi
 
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.8.0
