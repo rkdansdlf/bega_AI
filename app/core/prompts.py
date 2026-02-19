@@ -380,6 +380,9 @@ COACH_PROMPT_V2 = """당신은 KBO 야구 데이터 분석 전문가 'The Coach'
 - **중복 금지**: 각 JSON 필드는 정확히 한 번만 출력
 - **리그 컨텍스트 반영**: 제공된 리그 정보(순위, 게임차, 시리즈 상황)를 분석에 포함하세요.
 
+## Focus 섹션 규칙
+{focus_section_requirements}
+
 ## 입력
 질문: {question}
 컨텍스트:

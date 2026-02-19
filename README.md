@@ -220,6 +220,7 @@ FastAPI Application (8001)
     
     ```sh
     ❯ pip install -r requirements.txt
+    ❯ pip install -r requirements-dev  # 로컬 개발: black/flake8/pytest
     ```
     
 
@@ -285,6 +286,127 @@ FastAPI Application (8001)
 ```
 
 API는 `http://localhost:8001`에서 사용 가능합니다
+
+----------
+
+## 챗봇 검증 자동화
+
+PR 차단 게이트와 실서비스 스모크를 분리한 하이브리드 검증 전략을 사용합니다.
+
+### 1) PR 게이트 (오프라인/모킹)
+
+외부 LLM/OpenRouter 호출 없이 API 구조와 핵심 필드를 검증합니다.
+
+```bash
+python -m pytest \
+  tests/test_chat_api_smoke.py \
+  tests/test_coach.py \
+  tests/test_coach_dual.py \
+  tests/test_coach_router_year_resolution.py \
+  tests/test_coach_cache_key.py \
+  tests/test_coach_cache_policy.py \
+  tests/test_rag_caching.py \
+  -q
+```
+
+### 2) 실서비스 스모크 (수동 실행)
+
+배포 직전 또는 운영 점검 시 실호출 스모크를 실행합니다.
+
+```bash
+python scripts/smoke_chatbot.py \
+  --base-url http://127.0.0.1:8001 \
+  --season-year 2025 \
+  --timeout 30 \
+  --output logs/live_smoke_report.json
+```
+
+검증 대상:
+- `GET /health`
+- `POST /ai/chat/completion`
+- `POST /ai/chat/stream`
+- `POST /coach/analyze`
+
+### 트러블슈팅
+
+- `coach/analyze`는 `league_context.season_year`가 필요합니다.
+- 실서비스 스모크 실패 시 환경변수(`OPENROUTER_API_KEY`, `LLM_PROVIDER`)를 먼저 확인합니다.
+- 장애 진단 순서는 `health -> completion -> stream -> coach`를 권장합니다.
+
+### Coach 캐시 운영 정책
+
+- 런타임 `POST /coach/analyze`는 자동 재생성을 수행하지 않습니다.
+- 캐시 상태가 `PENDING`이면 기존 작업 완료를 짧게 대기하며, 신선한 `PENDING`에는 중복 생성이 금지됩니다.
+- 캐시 상태가 `FAILED`이면 런타임 재생성을 막고, 수동 배치로만 갱신합니다.
+- `auto_brief` 모드에서 `question_signature`는 질문 문구와 무관하게 `auto`로 고정되고, `manual_detail`은 질문 문구 변경 시 캐시 키가 분기되는지 확인합니다.
+
+운영 상수:
+
+- `PENDING_STALE_SECONDS = 300`
+- `PENDING_WAIT_TIMEOUT_SECONDS = 10`
+- `PENDING_WAIT_POLL_MS = 300`
+
+`/coach/analyze` 응답 메타에는 운영 해석용 필드가 포함됩니다.
+
+- `cache_state`: `HIT`, `PENDING_WAIT`, `PENDING_STALE_TAKEOVER`, `FAILED_LOCKED`, `MISS_GENERATE`
+- `in_progress`: 동일 요청 대기 중이면 `true`, 최종 응답이면 `false`
+- `cache_key_version`: 현재 캐시 스키마 버전
+- `resolved_focus`, `focus_signature`, `question_signature`: 디버깅/감시용
+
+또한 응답 메타에는 다음 필드도 포함될 수 있습니다.
+
+- `focus_section_missing`: 누락된 focus 섹션 존재 여부
+- `missing_focus_sections`: 누락된 focus 목록
+
+운영 로그 예시:
+
+- `[Coach] Cache HIT ...`
+- `[Coach] Cache PENDING_WAIT ...`
+- `[Coach] Cache PENDING_STALE_TAKEOVER ...`
+- `[Coach] Cache FAILED_LOCKED ...`
+
+예: 자동 분석이 이미 진행 중일 때는 `cache_state=PENDING_WAIT`, `in_progress=true`로 오며
+`cached`는 `false`입니다. 재요청이 금지된 `FAILED` 상태는 `cache_state=FAILED_LOCKED`로 반환됩니다.
+
+수동 매치업 캐시 생성/갱신:
+
+```bash
+# 2025 정규시즌 매치업 캐시 생성(이미 존재하면 cache hit로 skip)
+PYTHONPATH=. .venv/bin/python scripts/batch_coach_matchup_cache.py \
+  --years 2025 \
+  --league-type REGULAR
+
+# 실행 결과 확인 예시:
+# - 1회차: generated > 0 (신규 채움)
+# - 2회차: generated == 0, skipped == cases
+# - 실패 항목은 failed로 누적되고 reason 기준으로 재시도 대상 분류
+
+# 대상 키 삭제 후 강제 재생성
+PYTHONPATH=. .venv/bin/python scripts/batch_coach_matchup_cache.py \
+  --years 2025 \
+  --league-type REGULAR \
+  --force-rebuild
+
+# 수동/상세 모드(기존 스크립트 방식)으로 갱신
+PYTHONPATH=. .venv/bin/python scripts/batch_coach_matchup_cache.py \
+  --years 2025 \
+  --league-type REGULAR \
+  --mode manual_detail \
+  --focus recent_form,bullpen
+```
+
+재시작 후 검증 포인트:
+- 같은 매치업 재조회 시 서버 로그에 `cache_state=HIT` 또는 `cache_state=PENDING_WAIT`가 즉시 출력되는지 확인
+- 로그 키워드 검증: `Cache HIT`, `Cache PENDING_WAIT`, `Cache FAILED_LOCKED`
+- 동일 조건으로 `batch_coach_matchup_cache.py`를 연속 실행했을 때 2회차 `generated`가 0인지 확인
+- 강제 재생성이 필요한 경우에만 `--force-rebuild`를 사용
+
+권장 점검 예시:
+
+- `cache_state` 값이 `PENDING_WAIT`이면서 `in_progress=true`인 응답은 정상 대기 응답
+- `cache_state`가 `PENDING_WAIT`이면서 `in_progress=false`, `cached=true`라면 대기 종료 후 결과 반영 완료
+- `cache_state=FAILED_LOCKED`는 런타임 자동 복구를 금지하고 수동 배치 필요
+- 재기동 직후 대표 게임 1건 기준으로 `cached`가 즉시 `true`로 돌아오면 재생성 없는 상태로 판단
 
 ----------
 
@@ -608,6 +730,17 @@ docker-compose up -d
 -   [ ] 백업 전략 수립
 -   [ ] 모니터링 알림 설정
 -   [ ] SSE 타임아웃 튜닝
+-   [x] Coach `auto_brief` 캐시 키(`question_signature="auto"`) 충돌 여부 점검
+-   [x] Coach `auto` 모드 `COACH_BRIEF_MAX_OUTPUT_TOKENS` 적용 여부 점검
+-   [x] 예측 페이지 요청 경로 전환 확인: `/api/predictions/my-vote/*` 미사용, `/api/predictions/my-votes` 사용
+
+### 릴리즈 노트 (운영 반영)
+
+-   **예측 페이지 AI 최적화(코치 연동)**
+    -   핵심 경기/포스트시즌 경기만 `request_mode: auto_brief`로 자동 브리핑을 요청하고, 비핵심 경기에서는 AI 분석은 시작 시 자동 호출하지 않고 `AI 분석 요청` 버튼으로 진입형 요청으로 전환.
+    -   자동/수동 브리핑 모두 `cache_state`, `request_mode`, `focus_signature`, `question_signature`를 메타로 노출해 캐시 관측을 고정.
+    -   legacy 단건 투표 조회 API(`/api/predictions/my-vote/*`) 사용을 중단하고, 단건 경로 재출현을 운영 알람 대상으로 모니터링.
+    -   예측 페이지는 단건 조회(`/api/predictions/my-vote/*`)를 더 이상 호출하지 않고 `POST /api/predictions/my-votes`로 교체.
 
 ### 참고 사항
 

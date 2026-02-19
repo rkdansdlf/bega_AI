@@ -7,9 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 def ingest_lineup():
-    db_url = os.environ.get("OCI_DB_URL")
+    db_url = os.environ.get("POSTGRES_DB_URL")
     if not db_url:
-        print("Error: OCI_DB_URL environment variable not set.")
+        print("Error: POSTGRES_DB_URL environment variable not set.")
         return
 
     # Game ID: 20240501WOLT0 (Kiwoom @ Lotte)
