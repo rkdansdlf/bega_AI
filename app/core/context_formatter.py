@@ -356,17 +356,23 @@ class ContextFormatter:
                     context_parts.append(content)
                     context_parts.append("")
                     seen_content.add(content)
-        
+
         # 통계 데이터가 있으면 요약 제공
         if processed_data["pitchers"] or processed_data["batters"]:
             context_parts.append("\n**연관 통계 데이터 요약:**")
             if processed_data["pitchers"]:
-                context_parts.append(f"- 투수 데이터: {len(processed_data['pitchers'])}명의 기록 참조 가능")
+                context_parts.append(
+                    f"- 투수 데이터: {len(processed_data['pitchers'])}명의 기록 참조 가능"
+                )
             if processed_data["batters"]:
-                context_parts.append(f"- 타자 데이터: {len(processed_data['batters'])}명의 기록 참조 가능")
+                context_parts.append(
+                    f"- 타자 데이터: {len(processed_data['batters'])}명의 기록 참조 가능"
+                )
 
         if not context_parts or len(context_parts) <= 1:
-            context_parts.append("\n요청하신 리그 정보에 대한 구체적인 내용을 데이터베이스에서 찾을 수 없습니다.")
+            context_parts.append(
+                "\n요청하신 리그 정보에 대한 구체적인 내용을 데이터베이스에서 찾을 수 없습니다."
+            )
 
         return "\n".join(context_parts)
 

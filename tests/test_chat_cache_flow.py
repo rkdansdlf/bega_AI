@@ -47,7 +47,8 @@ class _DummyConnection:
             return _DummyExecuteResult(rowcount=0)
 
         if (
-            "select response_text, intent, model_name, hit_count, expires_at" in normalized
+            "select response_text, intent, model_name, hit_count, expires_at"
+            in normalized
             and "from chat_response_cache" in normalized
         ):
             cache_key = str((params or ("",))[0])
@@ -104,7 +105,9 @@ class _DummyConnection:
             for row in self._cache_rows.values():
                 if row["expires_at"] <= now_ref:
                     continue
-                grouped.setdefault(row.get("intent"), []).append(row.get("hit_count", 0))
+                grouped.setdefault(row.get("intent"), []).append(
+                    row.get("hit_count", 0)
+                )
 
             rows: list[tuple[Any, ...]] = []
             for intent, hits in sorted(
@@ -119,7 +122,9 @@ class _DummyConnection:
         if "delete from chat_response_cache where intent = %s" in normalized:
             intent = (params or ("",))[0]
             keys_to_delete = [
-                key for key, row in self._cache_rows.items() if row.get("intent") == intent
+                key
+                for key, row in self._cache_rows.items()
+                if row.get("intent") == intent
             ]
             for key in keys_to_delete:
                 del self._cache_rows[key]
@@ -197,7 +202,9 @@ def _client_with_dummy_pool(
     app.dependency_overrides[get_agent] = lambda: agent
     monkeypatch.setattr("app.deps.get_connection_pool", lambda: dummy_pool)
     monkeypatch.setattr("app.deps.close_connection_pool", lambda: None)
-    monkeypatch.setattr("app.routers.chat_stream.get_connection_pool", lambda: dummy_pool)
+    monkeypatch.setattr(
+        "app.routers.chat_stream.get_connection_pool", lambda: dummy_pool
+    )
     monkeypatch.setattr(
         "sse_starlette.sse.AppStatus.should_exit_event",
         _NeverExitEvent(),
@@ -275,9 +282,9 @@ def test_expired_cache_key_is_refreshed_by_upsert(monkeypatch: pytest.MonkeyPatc
             schema_version="v1",
         )
         assert cache_key in pool.cache_rows
-        pool.cache_rows[cache_key]["expires_at"] = datetime.now(timezone.utc) - timedelta(
-            seconds=1
-        )
+        pool.cache_rows[cache_key]["expires_at"] = datetime.now(
+            timezone.utc
+        ) - timedelta(seconds=1)
 
         second_response = client.post("/ai/chat/stream", json=payload)
         assert second_response.status_code == 200
@@ -328,7 +335,9 @@ def test_cache_admin_api_disabled_by_default_returns_404(
         stats_response = client.get("/ai/chat/cache/stats")
         assert stats_response.status_code == 404
 
-        flush_response = client.delete("/ai/chat/cache", params={"intent": "stats_lookup"})
+        flush_response = client.delete(
+            "/ai/chat/cache", params={"intent": "stats_lookup"}
+        )
         assert flush_response.status_code == 404
 
         invalidate_response = client.delete("/ai/chat/cache/sample-key")
@@ -412,7 +421,9 @@ def test_cache_admin_api_enabled_without_token_returns_503(
         stats_response = client.get("/ai/chat/cache/stats")
         assert stats_response.status_code == 503
 
-        flush_response = client.delete("/ai/chat/cache", params={"intent": "stats_lookup"})
+        flush_response = client.delete(
+            "/ai/chat/cache", params={"intent": "stats_lookup"}
+        )
         assert flush_response.status_code == 503
 
         invalidate_response = client.delete("/ai/chat/cache/sample-key")

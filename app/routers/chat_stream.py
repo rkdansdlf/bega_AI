@@ -112,7 +112,9 @@ async def _async_update_hit_count(cache_key: str) -> None:
         logger.warning("[ChatCache] hit_count background update failed: %s", exc)
 
 
-def _make_cached_sse_response(cached: dict, style: str, cache_key: str) -> EventSourceResponse:
+def _make_cached_sse_response(
+    cached: dict, style: str, cache_key: str
+) -> EventSourceResponse:
     """캐시된 응답을 SSE 형식으로 재스트리밍합니다.
 
     프론트엔드가 실제 스트리밍과 동일한 이벤트 시퀀스를 받을 수 있도록
@@ -286,6 +288,7 @@ async def _stream_response(
             # 캐시 저장: 에러 없이 완료되고 캐시 키가 있을 때만 저장
             if cache_key and full_response_text:
                 from ..config import get_settings as _get_settings
+
                 _settings = _get_settings()
                 model_name = (
                     getattr(_settings, "coach_openrouter_model", None)
