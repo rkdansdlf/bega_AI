@@ -28,7 +28,18 @@ class Settings(BaseSettings):
     # --- 기본 애플리케이션 설정 ---
     app_name: str = "KBO AI Service"
     debug: bool = False
-    cors_origins: List[str] = Field(default_factory=lambda: ["*"])
+    # CORS 설정(자격 증명 쿠키 사용 시 '* '는 허용되지 않음)
+    # 로컬 개발 기준 기본값은 Vite/개발 서버에서 사용되는 대표 도메인으로 제한
+    cors_origins: List[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:5176",
+            "http://127.0.0.1:5176",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    )
 
     # --- 데이터베이스 설정 (PostgreSQL 단일 경로) ---
     postgres_db_url: str = Field(..., validation_alias="POSTGRES_DB_URL")
@@ -63,7 +74,7 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_API_KEY"
     )
     openrouter_model: str = Field(
-        "openai/gpt-oss-120b", validation_alias="OPENROUTER_MODEL"
+        "upstage/solar-pro-3:free", validation_alias="OPENROUTER_MODEL"
     )
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
     # Default: openrouter/free - intelligent router that auto-selects available free models
@@ -102,6 +113,27 @@ class Settings(BaseSettings):
     coach_max_output_tokens: int = Field(
         2000, validation_alias="COACH_MAX_OUTPUT_TOKENS"
     )  # 2000 tokens recommended per COACH_PROMPT_V2
+    coach_openrouter_model: str = Field(
+        "upstage/solar-pro-3:free", validation_alias="COACH_OPENROUTER_MODEL"
+    )
+    coach_openrouter_fallback_models_raw: str = Field(
+        "openrouter/free",
+        validation_alias="COACH_OPENROUTER_FALLBACK_MODELS",
+    )
+    coach_brief_max_output_tokens: int = Field(
+        8000, validation_alias="COACH_BRIEF_MAX_OUTPUT_TOKENS"
+    )
+
+    @property
+    def coach_openrouter_fallback_models(self) -> List[str]:
+        if not self.coach_openrouter_fallback_models_raw:
+            return []
+        return [
+            m.strip()
+            for m in self.coach_openrouter_fallback_models_raw.split(",")
+            if m.strip()
+        ]
+
     coach_llm_read_timeout: float = Field(
         60.0, validation_alias="COACH_LLM_READ_TIMEOUT"
     )
@@ -157,6 +189,15 @@ class Settings(BaseSettings):
     @property
     def cors_allowed_origins(self) -> List[str]:
         """CORS 정책에 따라 허용된 출처 목록을 반환합니다."""
+        if "*" in self.cors_origins:
+            return [
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://localhost:5176",
+                "http://127.0.0.1:5176",
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+            ]
         return self.cors_origins
 
     @property

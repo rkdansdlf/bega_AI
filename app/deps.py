@@ -66,7 +66,7 @@ async def lifespan(app):
                 team_id varchar(10) not null,
                 year int not null,
                 prompt_version varchar(10) not null, -- e.g. "v2"
-                model_name varchar(50) not null,     -- e.g. "solar-pro-3"
+                model_name varchar(50) not null,     -- e.g. "upstage/solar-pro-3:free"
                 status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
                 response_json jsonb,                 -- Completed analysis result
                 error_message text,                  -- Failure reason
@@ -346,11 +346,11 @@ def get_coach_llm_generator():
             "X-Title": settings.openrouter_app_title or "",
         }
 
-        primary_model = settings.openrouter_model
+        primary_model = settings.coach_openrouter_model or settings.openrouter_model
         # [PATCH] openrouter/free 제거 - 무료 라우터는 빈 응답/큐잉 문제 발생
         fallback_models = [
             m
-            for m in settings.openrouter_fallback_models
+            for m in settings.coach_openrouter_fallback_models
             if m not in ("openrouter/free", "openrouter/auto")
         ]
         models_to_try = [primary_model] + fallback_models
@@ -453,8 +453,9 @@ def get_coach_llm_generator():
     async def coach_llm(messages, max_tokens=None):
         """Coach LLM entrypoint (OpenRouter only).
 
-        Note: Coach feature only supports OpenRouter. The openrouter_model and
-        openrouter_fallback_models settings control which models are used.
+        Note: Coach feature only supports OpenRouter.
+        COACH_OPENROUTER_MODEL/COACH_OPENROUTER_FALLBACK_MODELS settings
+        control which models are used.
         """
         effective_max_tokens = max_tokens or settings.coach_max_output_tokens
 
