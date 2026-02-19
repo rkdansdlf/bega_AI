@@ -33,7 +33,11 @@ def test_build_coach_cache_key_same_focus_different_order_same_key():
     )
 
     assert key1 == key2
-    assert payload1["focus_signature"] == payload2["focus_signature"] == "recent_form+bullpen"
+    assert (
+        payload1["focus_signature"]
+        == payload2["focus_signature"]
+        == "recent_form+bullpen"
+    )
 
 
 def test_build_coach_cache_key_diff_focus_different_key():

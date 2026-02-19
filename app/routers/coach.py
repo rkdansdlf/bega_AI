@@ -316,9 +316,13 @@ def _build_focus_section_requirements(resolved_focus: List[str]) -> str:
         if focus in FOCUS_SECTION_HEADERS
     ]
     non_selected = [
-        header for key, header in FOCUS_SECTION_HEADERS.items() if key not in resolved_focus
+        header
+        for key, header in FOCUS_SECTION_HEADERS.items()
+        if key not in resolved_focus
     ]
-    omit_lines = [f"- 미선택 focus는 가능하면 생략하세요: `{header}`" for header in non_selected]
+    omit_lines = [
+        f"- 미선택 focus는 가능하면 생략하세요: `{header}`" for header in non_selected
+    ]
     return "\n".join(header_lines + omit_lines)
 
 
@@ -786,7 +790,9 @@ async def analyze_team(
         request_mode = payload.request_mode
         is_auto_brief = request_mode == "auto_brief"
         input_focus = list(payload.focus or [])
-        resolved_focus = ["recent_form"] if is_auto_brief else normalize_focus(input_focus)
+        resolved_focus = (
+            ["recent_form"] if is_auto_brief else normalize_focus(input_focus)
+        )
         if is_auto_brief:
             if payload.question_override:
                 logger.warning(
@@ -914,7 +920,10 @@ async def analyze_team(
 
                             if cache_state == "HIT":
                                 cached_data = cached_json
-                            elif cache_state in {"MISS_GENERATE", "PENDING_STALE_TAKEOVER"}:
+                            elif cache_state in {
+                                "MISS_GENERATE",
+                                "PENDING_STALE_TAKEOVER",
+                            }:
                                 conn.execute(
                                     """
                                     UPDATE coach_analysis_cache
@@ -983,9 +992,7 @@ async def analyze_team(
                                 "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                 "cache_state": cache_state,
                                 "in_progress": False,
-                                "focus_section_missing": bool(
-                                    missing_focus_sections
-                                ),
+                                "focus_section_missing": bool(missing_focus_sections),
                                 "missing_focus_sections": missing_focus_sections,
                             },
                             ensure_ascii=False,
@@ -1016,7 +1023,9 @@ async def analyze_team(
                             yield {
                                 "event": "status",
                                 "data": json.dumps(
-                                    {"message": "진행 중이던 분석 결과를 불러옵니다..."},
+                                    {
+                                        "message": "진행 중이던 분석 결과를 불러옵니다..."
+                                    },
                                     ensure_ascii=False,
                                 ),
                             }
@@ -1140,13 +1149,13 @@ async def analyze_team(
                             "event": "meta",
                             "data": json.dumps(
                                 {
-                                        "validation_status": "fallback",
-                                        "fast_path": True,
-                                        "cached": False,
-                                        "request_mode": request_mode,
-                                        "resolved_focus": resolved_focus,
-                                        "focus_signature": focus_signature,
-                                        "question_signature": question_signature,
+                                    "validation_status": "fallback",
+                                    "fast_path": True,
+                                    "cached": False,
+                                    "request_mode": request_mode,
+                                    "resolved_focus": resolved_focus,
+                                    "focus_signature": focus_signature,
+                                    "question_signature": question_signature,
                                     "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                     "cache_state": "FAILED_LOCKED",
                                     "in_progress": False,
