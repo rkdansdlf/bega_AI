@@ -541,9 +541,12 @@ async def transcribe_audio(
 
         return {"text": response.text}
 
-    except Exception as e:
-        logger.exception(f" 음성 변환 중 오류: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("음성 변환 중 오류가 발생했습니다.")
+        raise HTTPException(
+            status_code=500,
+            detail="서버 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+        )
 
 
 # ─── 캐시 관리 API ────────────────────────────────────────────────────────────

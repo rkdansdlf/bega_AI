@@ -156,6 +156,28 @@ class Settings(BaseSettings):
         None, validation_alias="CHAT_CACHE_ADMIN_TOKEN"
     )
 
+    # --- Moderation 설정 ---
+    moderation_high_risk_keywords_raw: str = Field(
+        "죽어,죽인다,살인,테러,시발,씨발,병신,개새끼",
+        validation_alias="MODERATION_HIGH_RISK_KEYWORDS",
+    )
+    moderation_spam_keywords_raw: str = Field(
+        "광고,홍보,문의,오픈채팅,텔레그램,카카오톡,디엠,수익",
+        validation_alias="MODERATION_SPAM_KEYWORDS",
+    )
+    moderation_spam_url_threshold: int = Field(
+        3, validation_alias="MODERATION_SPAM_URL_THRESHOLD"
+    )
+    moderation_repeated_char_threshold: int = Field(
+        8, validation_alias="MODERATION_REPEATED_CHAR_THRESHOLD"
+    )
+    moderation_spam_medium_score: int = Field(
+        2, validation_alias="MODERATION_SPAM_MEDIUM_SCORE"
+    )
+    moderation_spam_block_score: int = Field(
+        3, validation_alias="MODERATION_SPAM_BLOCK_SCORE"
+    )
+
     # --- 검색(Retrieval) 관련 설정 ---
     default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
 
@@ -197,6 +219,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"지원되지 않는 COACH_LLM_PROVIDER '{value}'입니다. Coach는 OpenRouter만 지원합니다."
             )
+        return value
+
+    @field_validator(
+        "moderation_spam_url_threshold",
+        "moderation_repeated_char_threshold",
+        "moderation_spam_medium_score",
+        "moderation_spam_block_score",
+    )
+    def _validate_positive_threshold(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Moderation threshold 값은 1 이상이어야 합니다.")
         return value
 
     @property
@@ -265,6 +298,19 @@ class Settings(BaseSettings):
         if self.llm_provider == "openrouter":
             return self.openrouter_api_key
         return None
+
+    @property
+    def moderation_high_risk_keywords(self) -> List[str]:
+        return self._split_csv(self.moderation_high_risk_keywords_raw)
+
+    @property
+    def moderation_spam_keywords(self) -> List[str]:
+        return self._split_csv(self.moderation_spam_keywords_raw)
+
+    def _split_csv(self, raw_value: str) -> List[str]:
+        if not raw_value:
+            return []
+        return [item.strip().lower() for item in raw_value.split(",") if item.strip()]
 
 
 @lru_cache(maxsize=1)
