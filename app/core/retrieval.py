@@ -34,7 +34,7 @@ def similarity_search(
     """주어진 임베딩과 유사한 문서를 데이터베이스에서 검색합니다.
 
     환경 변수 USE_FIRESTORE_SEARCH=true인 경우 Firestore Vector Search를 사용하고,
-    그렇지 않으면 Supabase pgvector를 사용합니다.
+    그렇지 않으면 PostgreSQL pgvector를 사용합니다.
 
     Args:
         conn: PostgreSQL 데이터베이스 연결 객체 (Firestore 사용 시 무시됨).
@@ -52,7 +52,7 @@ def similarity_search(
     if use_firestore:
         raise NotImplementedError("Firestore search has been removed.")
 
-    # 기본값: Supabase pgvector 사용 (기존 코드)
+    # 기본값: PostgreSQL pgvector 사용
     filter_clauses: List[str] = ["embedding IS NOT NULL"]  # 임베딩이 없는 문서는 제외
     filter_params: List[Any] = []
 

@@ -4,11 +4,14 @@
 애플리케이션 설정을 로드하고 유효성을 검사하는 `Settings` 클래스를 정의합니다.
 """
 
+import logging
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -41,10 +44,14 @@ class Settings(BaseSettings):
         ]
     )
 
-    # --- 데이터베이스 설정 (PostgreSQL 단일 경로) ---
-    postgres_db_url: str = Field(..., validation_alias="POSTGRES_DB_URL")
-    # 별도 소스 DB를 읽는 배치 스크립트에서만 사용
-    supabase_db_url: Optional[str] = Field(None, validation_alias="SUPABASE_DB_URL")
+    # --- 데이터베이스 설정 ---
+    # 운영 기본 경로
+    postgres_db_url: Optional[str] = Field(None, validation_alias="POSTGRES_DB_URL")
+    # 하위 호환 경로 (deprecated)
+    legacy_source_db_url: Optional[str] = Field(
+        None, validation_alias="SUPABASE_DB_URL"
+    )
+    _legacy_source_db_warned: bool = PrivateAttr(default=False)
 
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
@@ -209,7 +216,28 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """AI 서비스가 사용할 PostgreSQL 연결 URL을 반환합니다."""
-        return self.postgres_db_url
+        return self.source_db_url
+
+    @property
+    def source_db_url(self) -> str:
+        """배치/마이그레이션 스크립트용 Source DB URL을 반환합니다.
+
+        우선순위:
+        1) POSTGRES_DB_URL
+        2) SUPABASE_DB_URL (deprecated fallback)
+        """
+        if self.postgres_db_url:
+            return self.postgres_db_url
+
+        if self.legacy_source_db_url:
+            if not self._legacy_source_db_warned:
+                logger.warning(
+                    "SUPABASE_DB_URL is deprecated and will be removed. Use POSTGRES_DB_URL instead."
+                )
+                self._legacy_source_db_warned = True
+            return self.legacy_source_db_url
+
+        raise RuntimeError("POSTGRES_DB_URL is not configured.")
 
     @property
     def function_calling_model(self) -> str:

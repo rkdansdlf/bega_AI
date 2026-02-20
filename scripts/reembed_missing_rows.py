@@ -49,6 +49,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--read-batch-size", type=int, default=500)
     parser.add_argument("--max-concurrency", type=int, default=1)
     parser.add_argument("--commit-interval", type=int, default=500)
+    parser.add_argument(
+        "--source-db-url",
+        default="",
+        help="Source PostgreSQL 연결 URL override (기본값: settings/source env).",
+    )
+    parser.add_argument(
+        "--supabase-url",
+        default="",
+        help="[Deprecated] --source-db-url 사용 권장",
+    )
     return parser
 
 
@@ -299,10 +309,14 @@ def main() -> int:
         return 0
 
     settings = get_settings()
-    if not settings.supabase_db_url:
-        raise RuntimeError("SUPABASE_DB_URL is not configured.")
+    source_db_url = args.source_db_url.strip()
+    if not source_db_url and args.supabase_url.strip():
+        print("[WARN] --supabase-url is deprecated. Use --source-db-url instead.")
+        source_db_url = args.supabase_url.strip()
+    if not source_db_url:
+        source_db_url = settings.source_db_url
 
-    with psycopg.connect(settings.supabase_db_url, autocommit=True) as source_conn:
+    with psycopg.connect(source_db_url, autocommit=True) as source_conn:
         with psycopg.connect(settings.database_url) as dest_conn:
             with dest_conn.cursor() as cur:
                 cur.execute("SET statement_timeout TO 0;")
