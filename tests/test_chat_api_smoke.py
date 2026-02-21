@@ -229,6 +229,9 @@ def client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.deps.close_connection_pool", lambda: None)
     monkeypatch.setattr("app.routers.coach.get_connection_pool", lambda: dummy_pool)
     monkeypatch.setattr(
+        "app.routers.chat_stream.get_connection_pool", lambda: dummy_pool
+    )
+    monkeypatch.setattr(
         "app.routers.coach._execute_coach_tools_parallel",
         _fake_execute_coach_tools_parallel,
     )
