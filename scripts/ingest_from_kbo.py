@@ -1478,6 +1478,7 @@ def ingest_table(
 def ingest(
     tables: Sequence[str],
     *,
+    source_db_url: str,
     limit: Optional[int],
     embed_batch_size: int,
     read_batch_size: int,
@@ -1492,7 +1493,7 @@ def ingest(
 
     # Connect to Source (PostgreSQL) for reading data
     print("Connecting to Source DB (PostgreSQL)...")
-    source_conn = psycopg.connect(settings.source_db_url)
+    source_conn = psycopg.connect(source_db_url)
 
     # Connect to Destination (PostgreSQL) for writing vectors
     print(f"Connecting to Destination DB (PostgreSQL)...")
@@ -1605,6 +1606,16 @@ def parse_args() -> argparse.Namespace:
         default=500,
         help="이 수만큼 청크를 쓰면 커밋을 수행합니다.",
     )
+    parser.add_argument(
+        "--source-db-url",
+        default="",
+        help="Source PostgreSQL 연결 URL override (기본값: settings.source_db_url)",
+    )
+    parser.add_argument(
+        "--supabase-url",
+        default="",
+        help="[Deprecated] --source-db-url 사용 권장",
+    )
     return parser.parse_args()
 
 
@@ -1612,7 +1623,16 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    settings = get_settings()
+    source_db_url = args.source_db_url.strip()
+    if not source_db_url and args.supabase_url.strip():
+        print("[WARN] --supabase-url is deprecated. Use --source-db-url instead.")
+        source_db_url = args.supabase_url.strip()
+    if not source_db_url:
+        source_db_url = settings.source_db_url
+
     ingest(
+        source_db_url=source_db_url,
         tables=[t for t in args.tables if t != "rag_chunks"],
         limit=args.limit,
         embed_batch_size=max(1, args.embed_batch_size),
