@@ -7,12 +7,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
+import sys
 
-import psycopg
-from psycopg.rows import dict_row
+os.environ.setdefault("PYTEST_CURRENT_TEST", "1")
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ModuleNotFoundError as exc:
+    psycopg = None
+    dict_row = None
+    _PSYCOPG_IMPORT_ERROR = exc
 
 from app.config import get_settings
 from app.core.chunking import smart_chunks
@@ -27,13 +40,15 @@ from scripts.ingest_from_kbo import (
     flush_chunks,
     get_primary_key_columns,
 )
-from scripts.verify_embedding_coverage import (
-    CoverageTarget,
-    _load_actual_ids,
-    _load_expected_ids,
-    _recreate_temp_tables,
-    build_expected_source_row_id,
-)
+
+
+def _require_psycopg() -> None:
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is required to run reembed_missing_rows.py. "
+            "Install dependencies (e.g. pip install psycopg[binary]) and retry. "
+            f"Detail: {_PSYCOPG_IMPORT_ERROR}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +82,8 @@ def load_missing_targets(
     start_year: int,
     end_year: int,
 ) -> List[CoverageTarget]:
+    from scripts.verify_embedding_coverage import CoverageTarget
+
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     targets: List[CoverageTarget] = []
     for row in payload.get("rows", []):
@@ -91,6 +108,12 @@ def collect_missing_ids(
     dest_conn: psycopg.Connection,
     target: CoverageTarget,
 ) -> Set[str]:
+    from scripts.verify_embedding_coverage import (
+        _load_actual_ids,
+        _load_expected_ids,
+        _recreate_temp_tables,
+    )
+
     with dest_conn.cursor() as dest_cur:
         _recreate_temp_tables(dest_cur)
         _, legacy_aliases = _load_expected_ids(source_conn, dest_cur, target)
@@ -168,6 +191,8 @@ def reembed_target_missing_rows(
     max_concurrency: int,
     commit_interval: int,
 ) -> Dict[str, int]:
+    from scripts.verify_embedding_coverage import build_expected_source_row_id
+
     table = target.table
     profile = TABLE_PROFILES.get(table, {})
     pk_columns = get_primary_key_columns(source_conn, table)
@@ -299,6 +324,7 @@ def reembed_target_missing_rows(
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    _require_psycopg()
     report_path = Path(args.report_path).expanduser().resolve()
     if not report_path.exists():
         raise FileNotFoundError(f"Coverage report not found: {report_path}")
