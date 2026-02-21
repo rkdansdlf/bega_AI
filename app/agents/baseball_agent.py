@@ -2120,6 +2120,7 @@ class BaseballStatisticsAgent:
                         "tool_results": [],
                         "verified": True,
                         "data_sources": ["predefined"],
+                        "intent": "general_conversation",
                     },
                 }
                 return
@@ -2220,6 +2221,7 @@ class BaseballStatisticsAgent:
             "visualizations": self._generate_visualizations(tool_results),
             "verified": answer_result["verified"],
             "data_sources": answer_result["data_sources"],
+            "intent": intent,
             "error": answer_result.get("error"),
         }
 

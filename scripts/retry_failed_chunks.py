@@ -15,13 +15,10 @@ import argparse
 from pathlib import Path
 from typing import List
 
-# migrate_to_firebase 모듈 임포트
-from migrate_to_firebase import FirebaseMigration
-
 
 def retry_failed_chunks(
     service_account_key_path: str,
-    supabase_db_url: str,
+    source_db_url: str,
     dry_run: bool = False,
     skip_storage: bool = False,
 ):
@@ -53,10 +50,17 @@ def retry_failed_chunks(
     if dry_run:
         print("⚠️  Dry Run 모드: 실제 데이터는 변경되지 않습니다.\n")
 
+    try:
+        from migrate_to_firebase import FirebaseMigration
+    except ImportError as exc:
+        raise RuntimeError(
+            "migrate_to_firebase 모듈을 찾을 수 없습니다. 스크립트 경로와 의존성을 확인하세요."
+        ) from exc
+
     # Firebase 마이그레이션 객체 생성
     migration = FirebaseMigration(
-        service_account_key_path=service_account_key_path,
-        supabase_db_url=supabase_db_url,
+        service_account_key_path,
+        source_db_url,
         batch_size=1,  # 한 번에 하나씩 처리
         dry_run=dry_run,
         skip_storage=skip_storage,
@@ -71,7 +75,7 @@ def retry_failed_chunks(
     for chunk_id in failed_ids:
         print(f"청크 ID {chunk_id} 재시도 중...", end=" ")
 
-        # Supabase에서 청크 데이터 가져오기
+        # Source DB에서 청크 데이터 가져오기
         try:
             with migration.pg_conn.cursor() as cur:
                 cur.execute(
@@ -162,9 +166,14 @@ def main():
         help="Firebase 서비스 계정 키 JSON 파일 경로",
     )
     parser.add_argument(
+        "--source-db-url",
+        default="",
+        help="Source PostgreSQL 연결 URL (기본값: 환경변수 POSTGRES_DB_URL)",
+    )
+    parser.add_argument(
         "--supabase-url",
-        default=os.getenv("POSTGRES_DB_URL"),
-        help="Supabase PostgreSQL 연결 URL (기본값: 환경변수 POSTGRES_DB_URL)",
+        default="",
+        help="[Deprecated] --source-db-url 사용 권장",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Dry run 모드 (실제 데이터 변경 없음)"
@@ -177,15 +186,29 @@ def main():
 
     args = parser.parse_args()
 
-    if not args.supabase_url:
+    source_db_url = args.source_db_url.strip()
+    if not source_db_url and args.supabase_url.strip():
+        print("[WARN] --supabase-url is deprecated. Use --source-db-url instead.")
+        source_db_url = args.supabase_url.strip()
+
+    if not source_db_url:
+        source_db_url = os.getenv("POSTGRES_DB_URL", "").strip()
+
+    if not source_db_url:
+        legacy_env = os.getenv("SUPABASE_DB_URL", "").strip()
+        if legacy_env:
+            print("[WARN] SUPABASE_DB_URL is deprecated. Use POSTGRES_DB_URL instead.")
+            source_db_url = legacy_env
+
+    if not source_db_url:
         print(
-            "오류: Supabase DB URL이 필요합니다. --supabase-url 또는 환경변수 POSTGRES_DB_URL을 설정하세요."
+            "오류: Source DB URL이 필요합니다. --source-db-url 또는 환경변수 POSTGRES_DB_URL을 설정하세요."
         )
         sys.exit(1)
 
     retry_failed_chunks(
         service_account_key_path=args.service_account_key,
-        supabase_db_url=args.supabase_url,
+        source_db_url=source_db_url,
         dry_run=args.dry_run,
         skip_storage=args.skip_storage,
     )
