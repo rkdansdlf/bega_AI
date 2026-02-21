@@ -1,5 +1,5 @@
 """
-Supabase(Postgres)에서 KBO 관련 테이블을 읽어 사람이 읽기 쉬운 텍스트로 변환→(선택) 임베딩 생성→rag_chunks 테이블에 UPSERT 하는 배치 인젝션 파이프라인입니다.
+Source PostgreSQL에서 KBO 관련 테이블을 읽어 사람이 읽기 쉬운 텍스트로 변환→(선택) 임베딩 생성→rag_chunks 테이블에 UPSERT 하는 배치 인젝션 파이프라인입니다.
  - 테이블별 선택/제목/하이라이트/렌더링 규칙을 프로필로 정의해 공통 로직으로 처리할 수 있습니다.
 
     source .venv/bin/activate
@@ -28,12 +28,13 @@ Supabase(Postgres)에서 KBO 관련 테이블을 읽어 사람이 읽기 쉬운 
      
 Docker/compose 환경에서는 `working_dir=/app` 상태에서 동일한 명령을 실행한다.
 
-위 명령을 실행하면 Supabase에서 데이터를 읽어와 벡터 임베딩과 함께 `rag_chunks`
+위 명령을 실행하면 Source DB에서 데이터를 읽어와 벡터 임베딩과 함께 `rag_chunks`
 테이블에 업서트한다.
 """
 
 from __future__ import annotations
 
+import os
 import argparse
 import gc
 import hashlib
@@ -42,10 +43,22 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from pathlib import Path
+import sys
+os.environ.setdefault("PYTEST_CURRENT_TEST", "1")
 
-import psycopg
-from psycopg import sql
-from psycopg.rows import dict_row
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    import psycopg
+    from psycopg import sql
+    from psycopg.rows import dict_row
+except ModuleNotFoundError as exc:
+    psycopg = None
+    sql = None
+    dict_row = None
+    _PSYCOPG_IMPORT_ERROR = exc
 
 # get_settings().database_url로 Postgres 연결을 열고 쿼리 타임아웃을 막기 위해 SET statement_timeout TO 0; 적용. 각 테이블을 순서대로 처리.
 from app.config import get_settings
@@ -59,6 +72,15 @@ from app.core.renderers.baseball import (
     render_hitter_game,
     render_pitcher_game,
 )
+
+
+def _require_psycopg() -> None:
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is required to run ingest_from_kbo.py. "
+            "Install dependencies (e.g. pip install psycopg[binary]) and retry. "
+            f"Detail: {_PSYCOPG_IMPORT_ERROR}"
+        )
 
 
 @dataclass
@@ -1478,6 +1500,7 @@ def ingest_table(
 def ingest(
     tables: Sequence[str],
     *,
+    source_db_url: str,
     limit: Optional[int],
     embed_batch_size: int,
     read_batch_size: int,
@@ -1488,13 +1511,12 @@ def ingest(
     max_concurrency: int,
     commit_interval: int,
 ) -> None:
+    _require_psycopg()
     settings = get_settings()
 
-    # Connect to Source (Supabase) for reading data
-    print(f"Connecting to Source DB (Supabase)...")
-    if not settings.supabase_db_url:
-        raise ValueError("SUPABASE_DB_URL is not set in environment variables.")
-    source_conn = psycopg.connect(settings.supabase_db_url)
+    # Connect to Source (PostgreSQL) for reading data
+    print("Connecting to Source DB (PostgreSQL)...")
+    source_conn = psycopg.connect(source_db_url)
 
     # Connect to Destination (PostgreSQL) for writing vectors
     print(f"Connecting to Destination DB (PostgreSQL)...")
@@ -1546,7 +1568,7 @@ def ingest(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Supabase KBO 데이터를 rag_chunks로 임베딩합니다."
+        description="PostgreSQL KBO 데이터를 rag_chunks로 임베딩합니다."
     )
     parser.add_argument(
         "--tables",
@@ -1607,6 +1629,16 @@ def parse_args() -> argparse.Namespace:
         default=500,
         help="이 수만큼 청크를 쓰면 커밋을 수행합니다.",
     )
+    parser.add_argument(
+        "--source-db-url",
+        default="",
+        help="Source PostgreSQL 연결 URL override (기본값: settings.source_db_url)",
+    )
+    parser.add_argument(
+        "--supabase-url",
+        default="",
+        help="[Deprecated] --source-db-url 사용 권장",
+    )
     return parser.parse_args()
 
 
@@ -1614,7 +1646,16 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    settings = get_settings()
+    source_db_url = args.source_db_url.strip()
+    if not source_db_url and args.supabase_url.strip():
+        print("[WARN] --supabase-url is deprecated. Use --source-db-url instead.")
+        source_db_url = args.supabase_url.strip()
+    if not source_db_url:
+        source_db_url = settings.source_db_url
+
     ingest(
+        source_db_url=source_db_url,
         tables=[t for t in args.tables if t != "rag_chunks"],
         limit=args.limit,
         embed_batch_size=max(1, args.embed_batch_size),

@@ -22,7 +22,7 @@ CHAT_CACHE_SCHEMA_VERSION = "v1"
 # intent별 TTL (초 단위).
 # stats_lookup/comparison/recent_form은 짧게, 선수 프로필·규정 설명은 길게.
 INTENT_TTL_SECONDS: Dict[str, int] = {
-    "stats_lookup": 6 * 3600,  # 6h  - 경기 결과는 주기적 업데이트
+    "stats_lookup": 3 * 3600,  # 3h - 경기 결과는 자주 변함 (기존 6h에서 단축)
     "player_profile": 48 * 3600,  # 48h - 선수 기본 정보는 상대적으로 안정적
     "recent_form": 3 * 3600,  # 3h  - 최근 폼은 빠르게 변함
     "comparison": 3 * 3600,  # 3h  - 비교도 최신성 중요
@@ -44,6 +44,24 @@ TEMPORAL_KEYWORDS = frozenset(
         "최근",
         "방금",
         "막",
+        "실시간",
+        "라이브",
+        "순위표",
+        "오늘의",
+    }
+)
+
+SERIES_TEMPORAL_HINTS = frozenset(
+    {
+        "오늘",
+        "현재",
+        "실시간",
+        "라이브",
+        "중계",
+        "현황",
+        "결과",
+        "일정",
+        "진행",
     }
 )
 
@@ -93,7 +111,11 @@ def has_temporal_keyword(question: str) -> bool:
     예: "오늘 경기 결과", "지금 1위 팀"
     """
     normalized = question.lower()
-    return any(kw in normalized for kw in TEMPORAL_KEYWORDS)
+    if any(kw in normalized for kw in TEMPORAL_KEYWORDS):
+        return True
+    if "시리즈" not in normalized:
+        return False
+    return any(hint in normalized for hint in SERIES_TEMPORAL_HINTS)
 
 
 def build_chat_cache_key(

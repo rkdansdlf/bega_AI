@@ -6,10 +6,19 @@ load_dotenv(
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
 )
 
-DB_URL = os.getenv("SUPABASE_DB_URL")
+POSTGRES_DB_URL = os.getenv("POSTGRES_DB_URL")
+LEGACY_SOURCE_DB_URL = os.getenv("SUPABASE_DB_URL")
+DB_URL = POSTGRES_DB_URL or LEGACY_SOURCE_DB_URL
 
 
 def setup_user_providers():
+    if not DB_URL:
+        raise RuntimeError(
+            "POSTGRES_DB_URL is not configured. (SUPABASE_DB_URL fallback is deprecated)"
+        )
+    if not POSTGRES_DB_URL and LEGACY_SOURCE_DB_URL:
+        print("[WARN] SUPABASE_DB_URL is deprecated. Use POSTGRES_DB_URL instead.")
+
     print("Connecting to DB...")
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
