@@ -27,24 +27,28 @@ class EntityFilter:
     award_type: Optional[str] = None  # 수상 유형 (예: "mvp", "golden_glove")
     movement_type: Optional[str] = None  # 이적 유형 (예: "fa", "trade")
     game_date: Optional[str] = None  # 경기 날짜 (예: "2025-05-10")
+    position_code: Optional[str] = None  # 표준 포지션 코드 (예: "1B", "SS", "PH")
 
 
 # KBO 팀명 매핑 테이블 (사용자 입력 → 실제 DB team_id)
 TEAM_MAPPING = {
-    # KIA (DB: HT)
-    "KIA": "HT",
-    "기아": "HT",
-    "타이거즈": "HT",
-    "기아타이거즈": "HT",
+    # KIA (DB: KIA)
+    "KIA": "KIA",
+    "기아": "KIA",
+    "타이거즈": "KIA",
+    "기아타이거즈": "KIA",
+    "HT": "KIA",
     # LG (DB: LG)
     "LG": "LG",
     "엘지": "LG",
     "트윈스": "LG",
     "LG트윈스": "LG",
-    # 두산 (DB: OB)
-    "두산": "OB",
-    "베어스": "OB",
-    "두산베어스": "OB",
+    # 두산 (DB: DB)
+    "두산": "DB",
+    "베어스": "DB",
+    "두산베어스": "DB",
+    "DO": "DB",
+    "OB": "DB",
     # 롯데 (DB: LT)
     "롯데": "LT",
     "자이언츠": "LT",
@@ -55,11 +59,16 @@ TEAM_MAPPING = {
     "라이온즈": "SS",
     "삼성라이온즈": "SS",
     "사자": "SS",
-    # 키움 (DB: WO)
-    "키움": "WO",
-    "히어로즈": "WO",
-    "키움히어로즈": "WO",
-    "영웅": "WO",
+    # 키움 (DB: KH)
+    "키움": "KH",
+    "히어로즈": "KH",
+    "키움 히어로즈": "KH",
+    "영웅": "KH",
+    "넥센": "KH",
+    "넥센히어로즈": "KH",
+    "KI": "KH",
+    "NX": "KH",
+    "WO": "KH",
     # 한화 (DB: HH)
     "한화": "HH",
     "이글스": "HH",
@@ -76,8 +85,9 @@ TEAM_MAPPING = {
     "NC다이노스": "NC",
     "공룡": "NC",
     "엔씨": "NC",
-    # SSG (DB: SSG)
+    # SSG 랜더스 (DB: SSG)
     "SSG": "SSG",
+    "SK": "SSG",
     "랜더스": "SSG",
     "SSG랜더스": "SSG",
     "에스에스지": "SSG",
@@ -139,7 +149,7 @@ STAT_MAPPING = {
     "득점권타율": "ops_risp",  # 임시로 ops_risp 또는 별도 필드 정의 필요
 }
 
-# 야구 포지션 및 역할 매핑 테이블
+# 야구 포지션 및 역할 매핑 테이블 (유형별 분류)
 POSITION_MAPPING = {
     "투수": "pitcher",
     "pitcher": "pitcher",
@@ -157,6 +167,52 @@ POSITION_MAPPING = {
     "내야수": "batter",
     "외야수": "batter",
     "포수": "batter",
+    "1B": "batter",
+    "2B": "batter",
+    "3B": "batter",
+    "SS": "batter",
+    "LF": "batter",
+    "CF": "batter",
+    "RF": "batter",
+    "DH": "batter",
+    "C": "batter",
+    "P": "pitcher",
+}
+
+# 한국어 포지션 명칭 → 표준 코드 매핑
+POSITION_NAME_TO_CODE = {
+    "1루수": "1B",
+    "일루수": "1B",
+    "2루수": "2B",
+    "이루수": "2B",
+    "3루수": "3B",
+    "삼루수": "3B",
+    "유격수": "SS",
+    "좌익수": "LF",
+    "중견수": "CF",
+    "우익수": "RF",
+    "지명타자": "DH",
+    "지타": "DH",
+    "포수": "C",
+    "투수": "P",
+    "대타": "PH",
+    "대주자": "PR",
+}
+
+# 한자/약어 → 한국어 명칭 매핑 (baseball.py와 동기화)
+POS_ABBR_TO_NAME = {
+    "一": "1루수",
+    "二": "2루수",
+    "三": "3루수",
+    "유": "유격수",
+    "좌": "좌익수",
+    "우": "우익수",
+    "중": "중견수",
+    "포": "포수",
+    "투": "투수",
+    "타": "대타",
+    "지": "지명타자",
+    "주": "대주자",
 }
 
 # 리그 타입 매핑 테이블 (사용자 입력 → 표준 리그명)
@@ -319,10 +375,79 @@ def extract_stat_type(query: str) -> Optional[str]:
 
 
 def extract_position_type(query: str) -> Optional[str]:
-    """질문에서 포지션/역할을 추출합니다."""
+    """질문에서 포지션/역할 유형(투수/타자)을 추출합니다."""
+    # 1. 포지션 매핑 테이블에서 직접 매칭
     for pos_variant, standard_pos in POSITION_MAPPING.items():
         if pos_variant in query:
             return standard_pos
+
+    # 2. 개별 포지션 코드를 통해 역추적 (batter/pitcher)
+    pos_code = extract_position_code(query)
+    if pos_code:
+        if pos_code == "P":
+            return "pitcher"
+        return "batter"
+
+    return None
+
+
+def extract_position_code(query: str) -> Optional[str]:
+    """질문에서 구체적인 포지션 코드(1B, SS 등)를 추출하여 표준화합니다."""
+    # 1. 풀네임 및 약어 검색
+    for name in POSITION_NAME_TO_CODE.keys():
+        if name in query:
+            return POSITION_NAME_TO_CODE[name]
+
+    for abbr in POS_ABBR_TO_NAME.keys():
+        if abbr in query:
+            name = POS_ABBR_TO_NAME[abbr]
+            return POSITION_NAME_TO_CODE.get(name)
+
+    # 2. 텍스트 직접 분석 및 표준화
+    # 정규표현식으로 타순+포지션 형태(예: "9번타자", "1루수") 등은 이미 위에서 처리됨
+    # "타일", "지타" 같은 복합어도 처리 필요 시 standardize_position 활용 가능
+
+    return None
+
+
+def standardize_position(position_str: str) -> Optional[str]:
+    """
+    다양한 포지션 표현(Hanja, Hangul, Full Name)을 표준 코드("1B", "SS", "P" 등)로 변환합니다.
+    예: "一" -> "1B", "타一" -> "PH", "유격수" -> "SS"
+    """
+    if not position_str:
+        return None
+
+    position_str = position_str.strip()
+
+    # 1. 이미 표준 코드인 경우
+    if position_str.upper() in POSITION_NAME_TO_CODE.values():
+        return position_str.upper()
+
+    # 2. 한국어 풀네임인 경우
+    if position_str in POSITION_NAME_TO_CODE:
+        return POSITION_NAME_TO_CODE[position_str]
+
+    # 3. 한자/약어 처리 (baseball.py 로직 차용)
+    if len(position_str) == 1:
+        name = POS_ABBR_TO_NAME.get(position_str)
+        if name:
+            return POSITION_NAME_TO_CODE.get(name)
+
+    if len(position_str) == 2:
+        first = position_str[0]
+        second = position_str[1]
+        # 서브 포지션(대타, 대주자 등)이 있으면 서브 포지션을 우선시 (PH, PR)
+        if first in ["타", "주", "지"] and second in POS_ABBR_TO_NAME:
+            name = POS_ABBR_TO_NAME.get(first)
+            if name:
+                return POSITION_NAME_TO_CODE.get(name)
+
+    # 4. 키워드 매칭
+    for name, code in POSITION_NAME_TO_CODE.items():
+        if name in position_str:
+            return code
+
     return None
 
 
@@ -922,6 +1047,7 @@ def extract_entities_from_query(query: str) -> EntityFilter:
     entity_filter.player_name = extract_player_name(query)
     entity_filter.stat_type = extract_stat_type(query)
     entity_filter.position_type = extract_position_type(query)
+    entity_filter.position_code = extract_position_code(query)
     entity_filter.league_type = extract_league_type(query)
     entity_filter.award_type = extract_award_type(query)
     entity_filter.movement_type = extract_movement_type(query)
@@ -938,7 +1064,8 @@ def extract_entities_from_query(query: str) -> EntityFilter:
         f"league={entity_filter.league_type}, "
         f"award={entity_filter.award_type}, "
         f"movement={entity_filter.movement_type}, "
-        f"game_date={entity_filter.game_date}"
+        f"game_date={entity_filter.game_date}, "
+        f"position_code={entity_filter.position_code}"
     )
 
     return entity_filter

@@ -10,6 +10,8 @@ from typing import Dict, List, Any, Optional
 import psycopg
 from psycopg.rows import dict_row
 from datetime import datetime
+from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
+from app.tools.team_resolution_metrics import get_team_resolution_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -26,64 +28,11 @@ class GameQueryTool:
 
     def __init__(self, connection: psycopg.Connection):
         self.connection = connection
-
-        # 기본 매핑 (폴백용)
-        self.TEAM_CODE_TO_NAME = {
-            "HT": "KIA 타이거즈",
-            "KIA": "KIA 타이거즈",
-            "LG": "LG 트윈스",
-            "OB": "두산 베어스",
-            "LT": "롯데 자이언츠",
-            "SS": "삼성 라이온즈",
-            "WO": "키움 히어로즈",
-            "HH": "한화 이글스",
-            "KT": "KT 위즈",
-            "NC": "NC 다이노스",
-            "SSG": "SSG 랜더스",
-            "SK": "SSG 랜더스",
-        }
-
-        self.NAME_TO_CODE = {
-            "KIA": "HT",
-            "기아": "HT",
-            "KIA 타이거즈": "HT",
-            "타이거즈": "HT",
-            "HT": "HT",
-            "LG": "LG",
-            "LG 트윈스": "LG",
-            "트윈스": "LG",
-            "두산": "OB",
-            "OB": "OB",
-            "두산 베어스": "OB",
-            "베어스": "OB",
-            "롯데": "LT",
-            "LT": "LT",
-            "롯데 자이언츠": "LT",
-            "자이언츠": "LT",
-            "삼성": "SS",
-            "SS": "SS",
-            "삼성 라이온즈": "SS",
-            "라이온즈": "SS",
-            "키움": "WO",
-            "WO": "WO",
-            "키움 히어로즈": "WO",
-            "히어로즈": "WO",
-            "우리": "WO",
-            "한화": "HH",
-            "HH": "HH",
-            "한화 이글스": "HH",
-            "이글스": "HH",
-            "KT": "KT",
-            "KT 위즈": "KT",
-            "위즈": "KT",
-            "NC": "NC",
-            "NC 다이노스": "NC",
-            "다이노스": "NC",
-            "SSG": "SSG",
-            "SK": "SSG",
-            "SSG 랜더스": "SSG",
-            "랜더스": "SSG",
-        }
+        self.team_resolver = TeamCodeResolver()
+        self.team_resolution_metrics = get_team_resolution_metrics()
+        self.TEAM_CODE_TO_NAME = self.team_resolver.code_to_name
+        self.NAME_TO_CODE = self.team_resolver.name_to_canonical
+        self.TEAM_VARIANTS = self.team_resolver.team_variants
 
         # DB에서 최신 매핑 로드
         self._load_team_mappings()
@@ -93,10 +42,22 @@ class GameQueryTool:
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
             query = """
-                SELECT team_id, team_name, franchise_id, founded_year, is_active
-                FROM teams
-                WHERE franchise_id IS NOT NULL
-                ORDER BY franchise_id, is_active DESC, founded_year DESC;
+                SELECT
+                    t.team_id,
+                    t.team_name,
+                    t.franchise_id,
+                    t.founded_year,
+                    t.is_active,
+                    tf.current_code
+                FROM teams t
+                JOIN team_franchises tf ON tf.id = t.franchise_id
+                WHERE t.franchise_id IS NOT NULL
+                ORDER BY
+                    t.franchise_id,
+                    CASE WHEN t.team_id = tf.current_code THEN 0 ELSE 1 END,
+                    t.is_active DESC,
+                    t.founded_year DESC,
+                    t.team_id ASC;
             """
             cursor.execute(query)
             rows = cursor.fetchall()
@@ -105,34 +66,7 @@ class GameQueryTool:
                 logger.info(
                     f"[GameQuery] Syncing {len(rows)} franchise entries from OCI"
                 )
-
-                # 프랜차이즈별로 그룹화
-                franchises = {}
-                for row in rows:
-                    f_id = row["franchise_id"]
-                    if f_id not in franchises:
-                        franchises[f_id] = []
-                    franchises[f_id].append(row)
-
-                for f_id, members in franchises.items():
-                    # 1. 현대적 브랜드명 선정 (DESC 정렬이므로 첫 번째가 최신)
-                    modern_team = members[0]
-                    modern_name = modern_team["team_name"]
-
-                    # 2. 경기(game) 테이블 매핑 원칙: 정규 코드 유지
-                    target_code = modern_team["team_id"]
-
-                    # 3. 매핑 데이터 업데이트
-                    for member in members:
-                        m_id = member["team_id"]
-                        m_name = member["team_name"]
-
-                        self.NAME_TO_CODE[m_id] = target_code
-                        self.NAME_TO_CODE[m_name] = target_code
-                        self.NAME_TO_CODE[m_name.split()[0]] = target_code
-
-                        self.TEAM_CODE_TO_NAME[m_id] = modern_name
-                        self.TEAM_CODE_TO_NAME[target_code] = modern_name
+                self.team_resolver.sync_from_team_rows(rows)
 
                 logger.info(
                     "[GameQuery] Game Team codes synchronized using OCI franchise IDs."
@@ -145,12 +79,20 @@ class GameQueryTool:
             )
 
     def get_team_name(self, team_code: str) -> str:
-        return self.TEAM_CODE_TO_NAME.get(team_code, team_code)
+        return self.team_resolver.display_name(team_code)
 
-    def get_team_code(self, team_input: str) -> str:
-        return self.NAME_TO_CODE.get(team_input, team_input)
+    def get_team_code(self, team_input: str, season_year: int | None = None) -> str:
+        return self.team_resolver.resolve_canonical(team_input, season_year)
 
-    def _normalize_team_name(self, team_name: str) -> str:
+    def get_team_variants(
+        self, team_input: str, season_year: int | None = None
+    ) -> List[str]:
+        """팀 코드의 모든 변형(Legacy + Canonical)을 반환합니다."""
+        return self.team_resolver.query_variants(team_input, season_year)
+
+    def _normalize_team_name(
+        self, team_name: str, season_year: int | None = None
+    ) -> str:
         """팀명을 정규화합니다."""
         team_name = team_name.strip()
 
@@ -159,7 +101,22 @@ class GameQueryTool:
         #         return standard_name
 
         # return team_name
-        return self.get_team_code(team_name)
+        return self.get_team_code(team_name, season_year)
+
+    def _is_regular_analysis_team(self, team_input: str) -> bool:
+        canonical_team = self.team_resolver.resolve_canonical(team_input)
+        return canonical_team in CANONICAL_CODES
+
+    def _record_team_query_result(
+        self, query_name: str, team_name: str, year: int | None, result: Dict[str, Any]
+    ) -> None:
+        self.team_resolution_metrics.record_query_result(
+            source=f"GameQueryTool.{query_name}",
+            season_year=year,
+            found=bool(result.get("found")),
+            error=result.get("error"),
+        )
+        self.team_resolution_metrics.maybe_log(logger, f"GameQueryTool.{query_name}")
 
     def _format_game_response(self, game_dict: Dict) -> Dict:
         """
@@ -241,14 +198,14 @@ class GameQueryTool:
                     query_params.append(date)
 
                 if home_team:
-                    normalized_home = self._normalize_team_name(home_team)
-                    where_conditions.append("g.home_team = %s")
-                    query_params.append(normalized_home)
+                    variants_home = self.get_team_variants(home_team)
+                    where_conditions.append("g.home_team = ANY(%s)")
+                    query_params.append(variants_home)
 
                 if away_team:
-                    normalized_away = self._normalize_team_name(away_team)
-                    where_conditions.append("g.away_team = %s")
-                    query_params.append(normalized_away)
+                    variants_away = self.get_team_variants(away_team)
+                    where_conditions.append("g.away_team = ANY(%s)")
+                    query_params.append(variants_away)
 
             if not where_conditions:
                 result["error"] = "검색 조건이 필요합니다 (game_id, date, 또는 팀명)"
@@ -397,9 +354,11 @@ class GameQueryTool:
             query_params = [date]
 
             if team:
-                normalized_team = self._normalize_team_name(team)
-                where_conditions.append("(g.home_team = %s OR g.away_team = %s)")
-                query_params.extend([normalized_team, normalized_team])
+                variants = self.get_team_variants(team)
+                where_conditions.append(
+                    "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))"
+                )
+                query_params.extend([variants, variants])
 
             query = f"""
                 SELECT 
@@ -456,8 +415,8 @@ class GameQueryTool:
         """
         logger.info(f"[GameQuery] Head to head: {team1} vs {team2}, Year: {year}")
 
-        team1_normalized = self._normalize_team_name(team1)
-        team2_normalized = self._normalize_team_name(team2)
+        team1_normalized = self._normalize_team_name(team1, year)
+        team2_normalized = self._normalize_team_name(team2, year)
         team1_name = self.get_team_name(team1_normalized)
         team2_name = self.get_team_name(team2_normalized)
 
@@ -476,14 +435,18 @@ class GameQueryTool:
 
             # 쿼리 조건 구성
             where_conditions = [
-                "((g.home_team = %s AND g.away_team = %s) OR "
-                "(g.home_team = %s AND g.away_team = %s))"
+                "((g.home_team = ANY(%s) AND g.away_team = ANY(%s)) OR "
+                "(g.home_team = ANY(%s) AND g.away_team = ANY(%s)))"
             ]
+
+            variants1 = self.get_team_variants(team1, year)
+            variants2 = self.get_team_variants(team2, year)
+
             query_params = [
-                team1_normalized,
-                team2_normalized,
-                team2_normalized,
-                team1_normalized,
+                variants1,
+                variants2,
+                variants2,
+                variants1,
             ]
 
             if year:
@@ -503,8 +466,8 @@ class GameQueryTool:
                     g.stadium,
                     g.winning_team,
                     CASE 
-                        WHEN g.winning_team = %s THEN 'team1_win'
-                        WHEN g.winning_team = %s THEN 'team2_win'
+                        WHEN g.winning_team = ANY(%s) THEN 'team1_win'
+                        WHEN g.winning_team = ANY(%s) THEN 'team2_win'
                         WHEN g.home_score = g.away_score THEN 'draw'
                         ELSE 'unknown'
                     END as game_result
@@ -515,8 +478,7 @@ class GameQueryTool:
                 LIMIT %s;
             """
 
-            # 파라미터 순서: [CASE_WHEN_team1, CASE_WHEN_team2] + [WHERE_params] + [LIMIT]
-            games_params = [team1_normalized, team2_normalized] + query_params + [limit]
+            games_params = [variants1, variants2] + query_params + [limit]
             cursor.execute(games_query, games_params)
             games = cursor.fetchall()
 
@@ -584,9 +546,11 @@ class GameQueryTool:
             query_params = [start_date, end_date]
 
             if team:
-                normalized_team = self._normalize_team_name(team)
-                where_conditions.append("(g.home_team = %s OR g.away_team = %s)")
-                query_params.extend([normalized_team, normalized_team])
+                variants = self.get_team_variants(team)
+                where_conditions.append(
+                    "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))"
+                )
+                query_params.extend([variants, variants])
 
             query = f"""
                 SELECT 
@@ -932,9 +896,16 @@ class GameQueryTool:
                 where_clause = "DATE(game_date) = %s"
                 params = [date]
                 if team_name:
-                    normalized_team = self._normalize_team_name(team_name)
-                    where_clause += " AND (home_team = %s OR away_team = %s)"
-                    params.extend([normalized_team, normalized_team])
+                    team_variants = self.get_team_variants(team_name)
+                    logger.info(
+                        "[GameQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+                        team_name,
+                        self.get_team_code(team_name),
+                        team_variants,
+                        self.team_resolver.query_mode,
+                    )
+                    where_clause += " AND (home_team = ANY(%s) OR away_team = ANY(%s))"
+                    params.extend([team_variants, team_variants])
 
                 cursor.execute(
                     f"SELECT game_id FROM game WHERE {where_clause} LIMIT 1", params
@@ -961,9 +932,16 @@ class GameQueryTool:
             params = [game_id]
 
             if team_name:
-                normalized_team = self._normalize_team_name(team_name)
-                lineup_query += " AND team_code = %s"
-                params.append(normalized_team)
+                team_variants = self.get_team_variants(team_name)
+                logger.info(
+                    "[GameQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+                    team_name,
+                    self.get_team_code(team_name),
+                    team_variants,
+                    self.team_resolver.query_mode,
+                )
+                lineup_query += " AND team_code = ANY(%s)"
+                params.append(team_variants)
 
             lineup_query += " ORDER BY team_code, batting_order"
 
@@ -1011,16 +989,30 @@ class GameQueryTool:
             f"[GameQuery] Getting last game date for {team_name} in {year} ({league_type})"
         )
 
-        normalized_team = self._normalize_team_name(team_name)
-
         result = {
             "team_name": team_name,
-            "team_id": normalized_team,
+            "team_id": None,
             "year": year,
             "last_game_date": None,
             "found": False,
             "error": None,
         }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            logger.warning(
+                "[GameQuery] Unsupported regular analysis team: input=%s resolved=%s",
+                team_name,
+                self.team_resolver.resolve_canonical(team_name),
+            )
+            self._record_team_query_result(
+                "get_team_last_game_date", team_name, year, result
+            )
+            return result
+
+        normalized_team = self._normalize_team_name(team_name, year)
+        team_variants = self.get_team_variants(team_name, year)
+        result["team_id"] = normalized_team
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
@@ -1035,11 +1027,18 @@ class GameQueryTool:
                 LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
                 WHERE ks.season_year = %s
                   AND ks.league_type_code = %s
-                  AND (g.home_team = %s OR g.away_team = %s)
+                  AND (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
                   AND g.game_status = 'COMPLETED';
             """
 
-            cursor.execute(query, (year, league_code, normalized_team, normalized_team))
+            logger.info(
+                "[GameQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
+                team_name,
+                normalized_team,
+                team_variants,
+                self.team_resolver.query_mode,
+            )
+            cursor.execute(query, (year, league_code, team_variants, team_variants))
             row = cursor.fetchone()
 
             if row and row["last_game_date"]:
@@ -1060,6 +1059,9 @@ class GameQueryTool:
             if "cursor" in locals():
                 cursor.close()
 
+        self._record_team_query_result(
+            "get_team_last_game_date", team_name, year, result
+        )
         return result
 
     def validate_game_exists(

@@ -1,68 +1,92 @@
-import httpx
-import base64
-import os
-from dotenv import load_dotenv
+import pytest
+from unittest.mock import MagicMock, patch, AsyncMock
+from fastapi.testclient import TestClient
+from app.main import app
+from app.config import get_settings
 
-load_dotenv()
-
-API_KEY = os.getenv("OPENROUTER_API_KEY")
-# Testing vision_model from env
-VISION_MODEL = os.getenv("VISION_MODEL", "openrouter/free")
+client = TestClient(app)
 
 
-async def _test_vision():
-    print(f"Testing Vision Model: {VISION_MODEL}")
-
-    # Simple 1x1 black pixel image in base64
-    base64_image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-
-    prompt = "What is in this image?"
-
-    payload = {
-        "model": VISION_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{base64_image}"},
-                    },
-                ],
-            }
-        ],
-    }
-
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            print(f"Status: {response.status_code}")
-            if response.status_code == 200:
-                print("Success!")
-                print(response.json()["choices"][0]["message"]["content"])
-            else:
-                print(f"Error Body: {response.text}")
-        except Exception as e:
-            print(f"Request failed: {e}")
+@pytest.fixture
+def mock_settings():
+    with patch("app.routers.vision.settings", autospec=True) as mock:
+        yield mock
 
 
-def test_vision():
-    import asyncio
+@pytest.fixture
+def mock_genai():
+    with patch("app.routers.vision.genai") as mock:
+        yield mock
 
-    asyncio.run(_test_vision())
+
+@pytest.fixture
+def mock_image_open():
+    with patch("app.routers.vision.Image.open") as mock:
+        yield mock
 
 
-if __name__ == "__main__":
-    import asyncio
+def test_analyze_ticket_gemini_success(mock_settings, mock_genai, mock_image_open):
+    # Configure settings for Gemini
+    mock_settings.llm_provider = "gemini"
+    mock_settings.gemini_api_key = "test_key"
+    mock_settings.vision_model = "gemini-2.0-flash"
 
-    asyncio.run(_test_vision())
+    # Mock Gemini response
+    mock_model = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = '{"date": "2024-05-05", "stadium": "Jamsil", "homeTeam": "LG", "awayTeam": "Doosan"}'
+    mock_model.generate_content.return_value = mock_response
+    mock_genai.GenerativeModel.return_value = mock_model
+
+    # Mock Image.open
+    mock_image = MagicMock()
+    mock_image_open.return_value = mock_image
+
+    # Create dummy image file
+    files = {"file": ("ticket.jpg", b"fake_image_content", "image/jpeg")}
+
+    response = client.post("/vision/ticket", files=files)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["date"] == "2024-05-05"
+    assert data["stadium"] == "Jamsil"
+    assert data["homeTeam"] == "LG"
+
+    # Verify Gemini was called
+    mock_genai.configure.assert_called_with(api_key="test_key")
+    mock_genai.GenerativeModel.assert_called_with("gemini-2.0-flash")
+    mock_model.generate_content.assert_called_once()
+
+
+def test_analyze_ticket_openrouter_success(mock_settings):
+    # Configure settings for OpenRouter
+    mock_settings.llm_provider = "openrouter"
+    mock_settings.openrouter_api_key = "test_router_key"
+    mock_settings.vision_model = "google/gemini-2.0-flash-001"
+
+    # Mock httpx.AsyncClient
+    with patch("app.routers.vision.httpx.AsyncClient") as mock_client:
+        mock_instance = AsyncMock()
+        mock_client.return_value.__aenter__.return_value = mock_instance
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"date": "2024-05-05", "stadium": "Incheon", "homeTeam": "SSG", "awayTeam": "KT"}'
+                    }
+                }
+            ]
+        }
+        mock_instance.post.return_value = mock_response
+
+        files = {"file": ("ticket.jpg", b"fake_image_content", "image/jpeg")}
+        response = client.post("/vision/ticket", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["stadium"] == "Incheon"
+        assert data["homeTeam"] == "SSG"

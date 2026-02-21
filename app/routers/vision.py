@@ -1,10 +1,14 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional
 from app.config import get_settings
 import httpx
 import base64
 import json
+import google.generativeai as genai
+from PIL import Image
+import io
 
 router = APIRouter(prefix="/vision", tags=["vision"])
 settings = get_settings()
@@ -27,15 +31,11 @@ class TicketInfo(BaseModel):
 @router.post("/ticket", response_model=TicketInfo)
 async def analyze_ticket_image(file: UploadFile = File(...)):
     """
-    Analyzes an uploaded ticket image using Gemini Vision via OpenRouter to extract details.
+    Analyzes an uploaded ticket image using Gemini Vision (Native or OpenRouter) to extract details.
     """
     try:
-        # Read image content and encode to base64
+        # Read image content
         contents = await file.read()
-        base64_image = base64.b64encode(contents).decode("utf-8")
-
-        # Determine MIME type
-        content_type = file.content_type or "image/jpeg"
 
         prompt = """
         Analyze this KBO(Korean Baseball Organization) ticket image and extract the following information in JSON format:
@@ -55,41 +55,61 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
         Return ONLY the JSON object, no markdown formatting.
         """
 
-        # OpenRouter API 호출
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.openrouter_api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://kbo-platform.com",
-                    "X-Title": "KBO Platform Ticket OCR",
-                },
-                json={
-                    "model": settings.vision_model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{content_type};base64,{base64_image}"
+        if settings.llm_provider == "gemini":
+            # Native Google Gemini Implementation
+            if not settings.gemini_api_key:
+                raise HTTPException(
+                    status_code=500, detail="Gemini API Key not configured"
+                )
+
+            genai.configure(api_key=settings.gemini_api_key)
+            model = genai.GenerativeModel(settings.vision_model or "gemini-2.0-flash")
+
+            def _load_image(image_bytes: bytes):
+                with Image.open(io.BytesIO(image_bytes)) as pil_image:
+                    return pil_image.copy()
+
+            image = await run_in_threadpool(_load_image, contents)
+            response = await run_in_threadpool(model.generate_content, [prompt, image])
+            response_text = response.text.strip()
+
+        else:
+            # OpenRouter Implementation
+            base64_image = base64.b64encode(contents).decode("utf-8")
+            content_type = file.content_type or "image/jpeg"
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.openrouter_api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://kbo-platform.com",
+                        "X-Title": "KBO Platform Ticket OCR",
+                    },
+                    json={
+                        "model": settings.vision_model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:{content_type};base64,{base64_image}"
+                                        },
                                     },
-                                },
-                            ],
-                        }
-                    ],
-                    "max_tokens": 1000,
-                },
-            )
+                                ],
+                            }
+                        ],
+                        "max_tokens": 1000,
+                    },
+                )
 
-            response.raise_for_status()
-            result = response.json()
-
-        # Extract response text
-        response_text = result["choices"][0]["message"]["content"].strip()
+                response.raise_for_status()
+                result = response.json()
+                response_text = result["choices"][0]["message"]["content"].strip()
 
         # Clean up response text (remove markdown code blocks if present)
         if response_text.startswith("```json"):
@@ -98,7 +118,6 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
             response_text = response_text[3:-3]
 
         data = json.loads(response_text)
-
         return TicketInfo(**data)
 
     except httpx.HTTPStatusError as e:

@@ -86,12 +86,121 @@ class TestCoachValidator:
         assert len(response.analysis.risks) == 1
         assert response.analysis.risks[0].level == 0
 
+    def test_parse_stable_trend_is_normalized(self):
+        """key_metrics.trend='stable'을 neutral로 정규화"""
+        from app.core.coach_validator import parse_coach_response
+
+        raw = """{
+            "headline": "KT 위즈 2025시즌 점검",
+            "sentiment": "neutral",
+            "key_metrics": [
+                {"label": "불펜 ERA", "value": "4.21", "status": "warning", "trend": "stable", "is_critical": false}
+            ],
+            "analysis": {"strengths": [], "weaknesses": [], "risks": []},
+            "detailed_markdown": "",
+            "coach_note": "불펜 운용은 보합세입니다."
+        }"""
+
+        response, error = parse_coach_response(raw)
+        assert error is None
+        assert response is not None
+        assert response.key_metrics[0].trend == "neutral"
+
     def test_parse_invalid_json(self):
         """잘못된 JSON 파싱 시 None 반환 테스트"""
         from app.core.coach_validator import parse_coach_response
 
         raw = "이것은 JSON이 아닙니다."
         raw = "이것은 JSON이 아닙니다."
+        response, error = parse_coach_response(raw)
+        assert response is None
+        assert error is not None
+
+    def test_parse_missing_headline_is_auto_recovered(self):
+        """headline 누락 시 자동 복구 후 파싱 성공"""
+        from app.core.coach_validator import parse_coach_response_with_meta
+
+        raw = """{
+            "sentiment": "neutral",
+            "key_metrics": [
+                {"label": "OPS", "value": "0.812", "status": "good", "is_critical": true}
+            ],
+            "analysis": {
+                "strengths": ["타선의 출루율이 꾸준히 유지됨"],
+                "weaknesses": [],
+                "risks": []
+            },
+            "coach_note": "중심 타선 유지가 필요합니다."
+        }"""
+
+        response, error, meta = parse_coach_response_with_meta(raw)
+        assert error is None
+        assert response is not None
+        assert response.headline != ""
+        assert meta["normalization_applied"] is True
+        assert "derive_headline" in meta["normalization_reasons"]
+
+    def test_parse_key_metric_value_is_truncated_before_validation(self):
+        """key_metrics.value가 50자 초과 시 사전 절단"""
+        from app.core.coach_validator import parse_coach_response_with_meta
+
+        long_value = "x" * 80
+        raw = f"""{{
+            "headline": "테스트 헤드라인",
+            "sentiment": "neutral",
+            "key_metrics": [
+                {{"label": "장문지표", "value": "{long_value}", "status": "warning", "is_critical": false}}
+            ],
+            "analysis": {{"strengths": [], "weaknesses": [], "risks": []}},
+            "coach_note": "테스트 노트입니다."
+        }}"""
+
+        response, error, meta = parse_coach_response_with_meta(raw)
+        assert error is None
+        assert response is not None
+        assert len(response.key_metrics[0].value) <= 50
+        assert response.key_metrics[0].value.endswith("...")
+        assert meta["normalization_applied"] is True
+        assert any(
+            reason.startswith("truncate_key_metrics_value_")
+            for reason in meta["normalization_reasons"]
+        )
+
+    def test_parse_is_critical_is_capped_to_two(self):
+        """is_critical=true가 3개 이상이면 2개로 보정"""
+        from app.core.coach_validator import parse_coach_response_with_meta
+
+        raw = """{
+            "headline": "테스트 헤드라인",
+            "sentiment": "neutral",
+            "key_metrics": [
+                {"label": "지표1", "value": "1", "status": "danger", "is_critical": true},
+                {"label": "지표2", "value": "2", "status": "danger", "is_critical": true},
+                {"label": "지표3", "value": "3", "status": "danger", "is_critical": true}
+            ],
+            "analysis": {"strengths": [], "weaknesses": [], "risks": []},
+            "coach_note": "테스트 노트입니다."
+        }"""
+
+        response, error, meta = parse_coach_response_with_meta(raw)
+        assert error is None
+        assert response is not None
+        critical_count = sum(1 for metric in response.key_metrics if metric.is_critical)
+        assert critical_count == 2
+        assert "reduce_is_critical_3_to_2" in meta["normalization_reasons"]
+
+    def test_parse_non_recoverable_shape_still_fails(self):
+        """정규화로 복구 불가능한 형태는 기존처럼 실패"""
+        from app.core.coach_validator import parse_coach_response
+
+        raw = """{
+            "headline": "테스트",
+            "sentiment": "neutral",
+            "key_metrics": [],
+            "analysis": "invalid_type",
+            "coach_note": "테스트 노트입니다."
+        }"""
+
         response, error = parse_coach_response(raw)
         assert response is None
         assert error is not None
@@ -353,52 +462,79 @@ class TestCoachFastPath:
         assert "bullpen" in query or "불펜" in query
         assert "batting" in query or "타격" in query
 
+    def test_focus_section_requirements(self):
+        """선택 focus별 섹션 요구사항 생성 테스트"""
+        from app.routers.coach import _build_focus_section_requirements
+
+        requirements = _build_focus_section_requirements(["recent_form", "bullpen"])
+        assert "## 최근 전력" in requirements
+        assert "## 불펜 상태" in requirements
+        assert "미선택 focus" in requirements
+
+    def test_find_missing_focus_sections(self):
+        """detailed_markdown 섹션 누락 감지 테스트"""
+        from app.routers.coach import _find_missing_focus_sections
+
+        response_data = {
+            "detailed_markdown": "## 최근 전력\n- 승률 0.700\n## 선발 투수\n- 선발 ERA 3.20"
+        }
+        missing = _find_missing_focus_sections(
+            response_data, ["recent_form", "bullpen", "starter"]
+        )
+        assert missing == ["bullpen"]
+
     def test_format_coach_context(self):
         """Coach 컨텍스트 포맷팅 테스트"""
         from app.routers.coach import _format_coach_context
 
         tool_results = {
-            "team_summary": {
-                "team_name": "KIA 타이거즈",
-                "year": 2024,
-                "top_batters": [
-                    {
-                        "player_name": "김도영",
-                        "avg": 0.312,
-                        "obp": 0.380,
-                        "slg": 0.520,
-                        "ops": 0.900,
-                        "home_runs": 25,
-                        "rbi": 80,
-                    }
-                ],
-                "top_pitchers": [
-                    {
-                        "player_name": "양현종",
-                        "era": 3.45,
-                        "whip": 1.12,
-                        "wins": 12,
-                        "losses": 5,
-                        "saves": 0,
-                        "innings_pitched": 150.0,
-                    }
-                ],
-                "found": True,
-            },
-            "advanced_metrics": {
-                "team_name": "KIA 타이거즈",
-                "year": 2024,
-                "metrics": {
-                    "batting": {"ops": 0.750, "avg": 0.280},
-                    "pitching": {"avg_era": 4.20, "qs_rate": "45%", "era_rank": "5위"},
+            "home": {
+                "summary": {
+                    "team_name": "KIA 타이거즈",
+                    "year": 2024,
+                    "top_batters": [
+                        {
+                            "player_name": "김도영",
+                            "avg": 0.312,
+                            "obp": 0.380,
+                            "slg": 0.520,
+                            "ops": 0.900,
+                            "home_runs": 25,
+                            "rbi": 80,
+                        }
+                    ],
+                    "top_pitchers": [
+                        {
+                            "player_name": "양현종",
+                            "era": 3.45,
+                            "whip": 1.12,
+                            "wins": 12,
+                            "losses": 5,
+                            "saves": 0,
+                            "innings_pitched": 150.0,
+                        }
+                    ],
+                    "found": True,
                 },
-                "fatigue_index": {
-                    "bullpen_share": "35%",
-                    "bullpen_load_rank": "3위 (높을수록 과부하)",
+                "advanced": {
+                    "team_name": "KIA 타이거즈",
+                    "year": 2024,
+                    "metrics": {
+                        "batting": {"ops": 0.750, "avg": 0.280},
+                        "pitching": {
+                            "avg_era": 4.20,
+                            "qs_rate": "45%",
+                            "era_rank": "5위",
+                        },
+                    },
+                    "fatigue_index": {
+                        "bullpen_share": "35%",
+                        "bullpen_load_rank": "3위 (높을수록 과부하)",
+                    },
+                    "league_averages": {"bullpen_share": "30%", "era": 4.00},
+                    "rankings": {"batting_ops": "4위", "batting_avg": "3위"},
                 },
-                "league_averages": {"bullpen_share": "30%", "era": 4.00},
-                "rankings": {"batting_ops": "4위", "batting_avg": "3위"},
-            },
+            }
         }
 
         context = _format_coach_context(tool_results, ["batting", "bullpen"])
@@ -406,9 +542,8 @@ class TestCoachFastPath:
         assert "KIA 타이거즈" in context
         assert "김도영" in context
         assert "양현종" in context
-        assert "불펜 부담 지표" in context
+        assert "불펜 비중" in context
         assert "35%" in context  # 팀 불펜 비중
-        assert "30%" in context  # 리그 평균
 
 
 # ============================================================
