@@ -116,9 +116,7 @@ def test_moderation_model_parse_error_high_risk_uses_fallback_block(
 
     response = client.post(
         "/moderation/safety-check",
-        json={
-            "content": "광고 링크 확인 https://a.com https://b.com https://c.com"
-        },
+        json={"content": "광고 링크 확인 https://a.com https://b.com https://c.com"},
     )
 
     assert response.status_code == 200

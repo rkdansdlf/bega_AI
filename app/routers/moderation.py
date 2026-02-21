@@ -37,7 +37,9 @@ async def safety_check(payload: Dict[str, Any] = Body(...)) -> ModerationResult:
     rule_result = _evaluate_rule(content, settings)
 
     if not settings.gemini_api_key:
-        logger.warning("GEMINI_API_KEY 미설정 상태입니다. RULE 기반 FALLBACK으로 처리합니다.")
+        logger.warning(
+            "GEMINI_API_KEY 미설정 상태입니다. RULE 기반 FALLBACK으로 처리합니다."
+        )
         fallback_result = _fallback_from_rule(rule_result)
         _log_result(fallback_result)
         return fallback_result
@@ -48,7 +50,9 @@ async def safety_check(payload: Dict[str, Any] = Body(...)) -> ModerationResult:
         _log_result(final_result)
         return final_result
     except Exception:
-        logger.exception("모델 기반 moderation 실패. RULE 기반 FALLBACK으로 전환합니다.")
+        logger.exception(
+            "모델 기반 moderation 실패. RULE 기반 FALLBACK으로 전환합니다."
+        )
         fallback_result = _fallback_from_rule(rule_result)
         _log_result(fallback_result)
         return fallback_result
