@@ -1,5 +1,5 @@
 import os
-import psycopg
+import argparse
 from dotenv import load_dotenv
 
 load_dotenv(
@@ -18,6 +18,14 @@ def setup_user_providers():
         )
     if not POSTGRES_DB_URL and LEGACY_SOURCE_DB_URL:
         print("[WARN] SUPABASE_DB_URL is deprecated. Use POSTGRES_DB_URL instead.")
+
+    try:
+        import psycopg
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "psycopg is required to run setup_user_providers. "
+            "Install dependencies (e.g. pip install -r requirements.txt) and retry."
+        ) from exc
 
     print("Connecting to DB...")
     with psycopg.connect(DB_URL) as conn:
@@ -56,5 +64,18 @@ def setup_user_providers():
             print("Setup successful!")
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Legacy provider columns migration helper for user providers."
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    parser.parse_args()
     setup_user_providers()
+
+
+if __name__ == "__main__":
+    main()
