@@ -34,6 +34,7 @@ Docker/compose 환경에서는 `working_dir=/app` 상태에서 동일한 명령�
 
 from __future__ import annotations
 
+import os
 import argparse
 import gc
 import hashlib
@@ -42,10 +43,22 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from pathlib import Path
+import sys
+os.environ.setdefault("PYTEST_CURRENT_TEST", "1")
 
-import psycopg
-from psycopg import sql
-from psycopg.rows import dict_row
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    import psycopg
+    from psycopg import sql
+    from psycopg.rows import dict_row
+except ModuleNotFoundError as exc:
+    psycopg = None
+    sql = None
+    dict_row = None
+    _PSYCOPG_IMPORT_ERROR = exc
 
 # get_settings().database_url로 Postgres 연결을 열고 쿼리 타임아웃을 막기 위해 SET statement_timeout TO 0; 적용. 각 테이블을 순서대로 처리.
 from app.config import get_settings
@@ -59,6 +72,15 @@ from app.core.renderers.baseball import (
     render_hitter_game,
     render_pitcher_game,
 )
+
+
+def _require_psycopg() -> None:
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is required to run ingest_from_kbo.py. "
+            "Install dependencies (e.g. pip install psycopg[binary]) and retry. "
+            f"Detail: {_PSYCOPG_IMPORT_ERROR}"
+        )
 
 
 @dataclass
@@ -1489,6 +1511,7 @@ def ingest(
     max_concurrency: int,
     commit_interval: int,
 ) -> None:
+    _require_psycopg()
     settings = get_settings()
 
     # Connect to Source (PostgreSQL) for reading data
