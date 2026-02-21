@@ -1,5 +1,5 @@
 -- 챗봇 응답 캐시 테이블
--- 실행: psql $SUPABASE_DB_URL -f scripts/create_chat_cache_table.sql
+-- 실행: psql $POSTGRES_DB_URL -f scripts/create_chat_cache_table.sql
 
 CREATE TABLE IF NOT EXISTS chat_response_cache (
     cache_key      VARCHAR(64)  PRIMARY KEY,

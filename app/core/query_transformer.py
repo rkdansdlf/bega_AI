@@ -7,7 +7,7 @@ Query Transformation과 Multi-query Retrieval을 위한 모듈입니다.
 
 import asyncio
 import logging
-from typing import List, Dict, Any, Sequence
+from typing import List, Dict, Any, Sequence, Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -251,6 +251,7 @@ async def multi_query_retrieval(
     query_variations: List[QueryVariation],
     retrieve_func,
     filters: Dict[str, Any],
+    entity_filter: Optional[Any] = None,
     limit_per_query: int = 5,
 ) -> List[Dict[str, Any]]:
     """
@@ -272,7 +273,12 @@ async def multi_query_retrieval(
     # 병렬로 모든 쿼리 변형에 대해 검색 수행
     tasks = []
     for variation in query_variations:
-        task = retrieve_func(variation.query, filters=filters, limit=limit_per_query)
+        task = retrieve_func(
+            variation.query,
+            filters=filters,
+            limit=limit_per_query,
+            entity_filter=entity_filter,
+        )
         tasks.append((variation, task))
 
     # 모든 검색 작업을 병렬 실행

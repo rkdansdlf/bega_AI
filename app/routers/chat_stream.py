@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import openai
 import os
+import secrets
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
@@ -20,6 +22,7 @@ from fastapi import (
     APIRouter,
     Body,
     Depends,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -29,15 +32,29 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from ..deps import get_agent
+from ..config import get_settings
+from ..deps import get_agent, get_connection_pool
 from ..agents.baseball_agent import BaseballStatisticsAgent
 from ..core.ratelimit import rate_limit_dependency
+from ..core.chat_cache_key import build_chat_cache_key, has_temporal_keyword
+from ..core.chat_cache import (
+    get_cached_response,
+    save_to_cache,
+    update_hit_count,
+    get_stats,
+    delete_by_intent,
+    delete_by_key,
+)
 
 logger = logging.getLogger(__name__)
 load_dotenv()
 router = APIRouter(prefix="/ai/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
+
+# 캐시 스키마 버전. 프롬프트 또는 정규화 방식 변경 시 올리면
+# 기존 캐시가 자동으로 미스 처리됩니다.
+CHAT_CACHE_SCHEMA_VERSION = "v1"
 
 
 def _decode_history_payload(payload: Any) -> Optional[List[Dict[str, str]]]:
@@ -85,6 +102,74 @@ async def _render_answer(result: Dict[str, Any], style: str) -> str:
     return result.get("answer", "")
 
 
+async def _async_update_hit_count(cache_key: str) -> None:
+    """백그라운드에서 hit_count를 업데이트합니다 (응답 지연 없음)."""
+    try:
+        pool = get_connection_pool()
+        with pool.connection() as conn:
+            await update_hit_count(conn, cache_key)
+    except Exception as exc:
+        logger.warning("[ChatCache] hit_count background update failed: %s", exc)
+
+
+def _make_cached_sse_response(
+    cached: dict, style: str, cache_key: str
+) -> EventSourceResponse:
+    """캐시된 응답을 SSE 형식으로 재스트리밍합니다.
+
+    프론트엔드가 실제 스트리밍과 동일한 이벤트 시퀀스를 받을 수 있도록
+    status → message(청크) → meta → done 순서로 이벤트를 생성합니다.
+    """
+
+    async def cached_generator():
+        response_text = cached["response_text"]
+
+        # status 이벤트: 캐시 히트 표시 (번개 이모지로 빠른 응답임을 암시)
+        yield {
+            "event": "status",
+            "data": json.dumps({"message": "⚡"}, ensure_ascii=False),
+        }
+
+        # message 이벤트: 200자 청크로 나눠 전송 (프론트엔드 타이핑 효과 유지)
+        chunk_size = 200
+        for i in range(0, len(response_text), chunk_size):
+            chunk = response_text[i : i + chunk_size]
+            yield {
+                "event": "message",
+                "data": json.dumps({"delta": chunk}, ensure_ascii=False),
+            }
+
+        # meta 이벤트 (cached: True 포함)
+        yield {
+            "event": "meta",
+            "data": json.dumps(
+                {
+                    "tool_calls": [],
+                    "tool_results": [],
+                    "data_sources": [],
+                    "verified": True,
+                    "visualizations": [],
+                    "style": style,
+                    "cached": True,
+                    "intent": cached.get("intent"),
+                    "cache_key_prefix": cache_key[:8],
+                },
+                ensure_ascii=False,
+            ),
+        }
+        yield {"event": "done", "data": "[DONE]"}
+
+    return EventSourceResponse(
+        cached_generator(),
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Cache": "HIT",
+        },
+        ping=15,
+    )
+
+
 async def _stream_response(
     request: Request,
     question: str,
@@ -93,8 +178,13 @@ async def _stream_response(
     style: str,
     history: Optional[List[Dict[str, str]]],
     agent: BaseballStatisticsAgent,
+    cache_key: Optional[str] = None,
 ):
-    """질문에 대한 답변을 생성하고 SSE 스트림으로 반환하는 핵심 로직입니다."""
+    """질문에 대한 답변을 생성하고 SSE 스트림으로 반환하는 핵심 로직입니다.
+
+    cache_key가 전달된 경우, 스트리밍 완료 후 응답 텍스트를 DB 캐시에 저장합니다.
+    캐싱 조건(history-free & 실시간 키워드 없음)은 호출자(chat_stream_post)에서 판단합니다.
+    """
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
@@ -123,19 +213,22 @@ async def _stream_response(
             answer = result.get("answer")
 
             # answer가 비동기 제너레이터인 경우 (스트리밍)
+            # 캐시 저장을 위해 전체 텍스트를 누적합니다.
+            full_response_text = ""
+
             if hasattr(answer, "__aiter__"):
                 async for delta in answer:
+                    if delta:
+                        full_response_text += delta
                     yield {
                         "event": "message",
                         "data": json.dumps({"delta": delta}, ensure_ascii=False),
                     }
 
-                # 스트리밍 완료 후 전체 답변을 문자열로 결합하여 meta 데이터 준비 (옵션)
-                # 실제로는 meta 데이터만 보내면 됨
-
             # answer가 일반 문자열인 경우 (비스트리밍/일상대화)
             else:
                 rendered = await _render_answer(result, style)
+                full_response_text = rendered
                 yield {
                     "event": "message",
                     "data": json.dumps({"delta": rendered}, ensure_ascii=False),
@@ -171,6 +264,8 @@ async def _stream_response(
             tool_results_raw = result.get("tool_results", [])
             tool_results_serialized = safe_serialize(tool_results_raw)
 
+            intent = result.get("intent")
+
             meta_payload_raw = {
                 "tool_calls": [tc.to_dict() for tc in result.get("tool_calls", [])],
                 "tool_results": tool_results_serialized,
@@ -180,6 +275,8 @@ async def _stream_response(
                     "visualizations", []
                 ),  # 시각화 데이터 전달
                 "style": style,
+                "cached": False,
+                "intent": intent,
             }
             # 전체 payload를 안전하게 직렬화
             meta_payload = safe_serialize(meta_payload_raw)
@@ -187,6 +284,37 @@ async def _stream_response(
                 "event": "meta",
                 "data": json.dumps(meta_payload, ensure_ascii=False),
             }
+
+            # 캐시 저장: 에러 없이 완료되고 캐시 키가 있을 때만 저장
+            if cache_key and full_response_text:
+                from ..config import get_settings as _get_settings
+
+                _settings = _get_settings()
+                model_name = (
+                    getattr(_settings, "coach_openrouter_model", None)
+                    or getattr(_settings, "openrouter_model", None)
+                    or getattr(_settings, "gemini_model", None)
+                    or "unknown"
+                )
+                try:
+                    pool = get_connection_pool()
+                    with pool.connection() as conn:
+                        await save_to_cache(
+                            conn,
+                            cache_key=cache_key,
+                            question_text=question,
+                            filters_json=filters,
+                            intent=intent,
+                            response_text=full_response_text,
+                            model_name=model_name,
+                        )
+                    logger.info(
+                        "[ChatCache] SAVED key=%s... intent=%s",
+                        cache_key[:8],
+                        intent,
+                    )
+                except Exception as exc:
+                    logger.warning("[ChatCache] save failed: %s", exc)
 
         # 3. 스트림 종료를 알리는 done 이벤트 전송
         yield {"event": "done", "data": "[DONE]"}
@@ -300,6 +428,32 @@ async def chat_stream_post(
     if style_override in {"markdown", "json", "compact"}:
         style = style_override
 
+    # 캐시 적용 조건: history-free 쿼리이고 실시간 키워드 없음
+    # history가 있으면 대화 맥락이 있으므로 캐싱 불가
+    # 실시간 키워드("오늘", "지금" 등)가 있으면 최신성이 중요하므로 캐싱 불가
+    cacheable = (history is None) and (not has_temporal_keyword(question))
+    cache_key: Optional[str] = None
+
+    if cacheable:
+        cache_key, _ = build_chat_cache_key(
+            question=question,
+            filters=filters,
+            schema_version=CHAT_CACHE_SCHEMA_VERSION,
+        )
+        pool = get_connection_pool()
+        with pool.connection() as conn:
+            cached = await get_cached_response(conn, cache_key)
+
+        if cached:
+            logger.info(
+                "[ChatCache] HIT key=%s... hit_count=%d",
+                cache_key[:8],
+                cached["hit_count"],
+            )
+            # hit_count는 background에서 업데이트 (응답 지연 없음)
+            asyncio.create_task(_async_update_hit_count(cache_key))
+            return _make_cached_sse_response(cached, style, cache_key)
+
     return await _stream_response(
         request,
         question,
@@ -307,6 +461,7 @@ async def chat_stream_post(
         style=style,
         history=history,
         agent=agent,
+        cache_key=cache_key,  # None이면 _stream_response 내에서 캐시 저장 건너뜀
     )
 
 
@@ -325,6 +480,8 @@ async def chat_stream_get(
 
     history = _decode_history_payload(history_param)
 
+    # GET 엔드포인트: filters 없음, cache_key 없음 (캐싱 미적용)
+    # GET은 브라우저 테스트/디버깅 용도이므로 캐싱 복잡도를 추가하지 않음
     return await _stream_response(
         request,
         q,
@@ -332,6 +489,7 @@ async def chat_stream_get(
         style=style,
         history=history,
         agent=agent,
+        cache_key=None,
     )
 
 
@@ -383,6 +541,65 @@ async def transcribe_audio(
 
         return {"text": response.text}
 
-    except Exception as e:
-        logger.exception(f" 음성 변환 중 오류: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("음성 변환 중 오류가 발생했습니다.")
+        raise HTTPException(
+            status_code=500,
+            detail="서버 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+        )
+
+
+# ─── 캐시 관리 API ────────────────────────────────────────────────────────────
+# 내부 관리용 엔드포인트입니다.
+# 기본값은 비활성화(404)이며, 활성화 시 X-Cache-Admin-Token 헤더 검증이 필요합니다.
+
+
+async def _require_chat_cache_admin(
+    x_cache_admin_token: str = Header(default="", alias="X-Cache-Admin-Token"),
+) -> None:
+    """캐시 관리 API 접근 제어 dependency."""
+    settings = get_settings()
+
+    if not settings.chat_cache_admin_enabled:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    expected_token = (settings.chat_cache_admin_token or "").strip()
+    if not expected_token:
+        logger.error("[ChatCache] Admin API is enabled but token is not configured")
+        raise HTTPException(status_code=503, detail="Chat cache admin misconfigured")
+
+    if not secrets.compare_digest(x_cache_admin_token, expected_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@router.get("/cache/stats")
+async def chat_cache_stats(_: None = Depends(_require_chat_cache_admin)):
+    """캐시 현황 통계를 반환합니다."""
+    pool = get_connection_pool()
+    with pool.connection() as conn:
+        stats = await get_stats(conn)
+    return {"stats": stats}
+
+
+@router.delete("/cache")
+async def flush_cache_by_intent(
+    intent: str = Query(..., description="삭제할 intent"),
+    _: None = Depends(_require_chat_cache_admin),
+):
+    """특정 intent의 캐시 항목을 모두 삭제합니다."""
+    pool = get_connection_pool()
+    with pool.connection() as conn:
+        deleted = await delete_by_intent(conn, intent)
+    return {"deleted": deleted, "intent": intent}
+
+
+@router.delete("/cache/{cache_key}")
+async def invalidate_cache_entry(
+    cache_key: str,
+    _: None = Depends(_require_chat_cache_admin),
+):
+    """특정 캐시 키를 무효화합니다."""
+    pool = get_connection_pool()
+    with pool.connection() as conn:
+        deleted = await delete_by_key(conn, cache_key)
+    return {"deleted": deleted, "cache_key": cache_key}

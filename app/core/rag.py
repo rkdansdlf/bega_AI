@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import random
 import time
 from functools import lru_cache
@@ -99,6 +100,33 @@ def batter_rank_score(wrc_plus, war):
 HISTORY_CONTEXT_LIMIT = 6
 _RAG_CACHE_MAX = 10000
 _LEAGUE_CONTEXT = kbo_metrics.LeagueContext()
+_RRF_QUERY_TOKEN_PATTERN = re.compile(r"[0-9A-Za-z가-힣+#]+")
+_RRF_STOPWORDS = frozenset(
+    {
+        "알려줘",
+        "알려",
+        "말해줘",
+        "말해",
+        "해줘",
+        "해주세요",
+        "좀",
+        "대한",
+        "대해",
+        "관련",
+        "무엇",
+        "뭐",
+        "어떤",
+        "누구",
+        "the",
+        "a",
+        "an",
+        "tell",
+        "me",
+        "about",
+    }
+)
+_RRF_MAX_QUERY_TOKENS = 4
+_RRF_LOG_PREVIEW_LEN = 140
 
 
 def _meta_cache_key(meta: Dict[str, Any]) -> str:
@@ -108,6 +136,72 @@ def _meta_cache_key(meta: Dict[str, Any]) -> str:
         )
     except (TypeError, ValueError):
         return str(meta)
+
+
+def _preview_text(value: str, max_len: int = _RRF_LOG_PREVIEW_LEN) -> str:
+    text = (value or "").strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
+def _append_unique_term(terms: List[str], seen: set[str], term: Any) -> None:
+    normalized = str(term).strip()
+    if not normalized:
+        return
+    key = normalized.lower()
+    if key in seen:
+        return
+    seen.add(key)
+    terms.append(normalized)
+
+
+def _build_rrf_keyword(query: str, entity_filter: Optional[Any]) -> str:
+    terms: List[str] = []
+    seen: set[str] = set()
+
+    if entity_filter is not None:
+        player_name = getattr(entity_filter, "player_name", None)
+        team_id = getattr(entity_filter, "team_id", None)
+        season_year = getattr(entity_filter, "season_year", None)
+
+        if player_name:
+            _append_unique_term(terms, seen, player_name)
+        if team_id:
+            _append_unique_term(terms, seen, TEAM_MAP.get(str(team_id), str(team_id)))
+        if season_year:
+            _append_unique_term(terms, seen, season_year)
+
+        for attr in (
+            "stat_type",
+            "award_type",
+            "movement_type",
+            "position_type",
+            "game_date",
+        ):
+            value = getattr(entity_filter, attr, None)
+            if value in (None, "", "any"):
+                continue
+            _append_unique_term(terms, seen, value)
+
+    query_tokens_added = 0
+    for token in _RRF_QUERY_TOKEN_PATTERN.findall(query):
+        normalized = token.strip()
+        lowered = normalized.lower()
+        if (
+            not normalized
+            or lowered in _RRF_STOPWORDS
+            or (len(normalized) == 1 and not normalized.isdigit())
+        ):
+            continue
+        _append_unique_term(terms, seen, normalized)
+        query_tokens_added += 1
+        if query_tokens_added >= _RRF_MAX_QUERY_TOKENS:
+            break
+
+    if not terms:
+        return query
+    return " ".join(terms)
 
 
 class MetaWrapper:
@@ -447,6 +541,7 @@ class RAGPipeline:
         *,
         limit: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
+        entity_filter: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
         hyde_prompt = HYDE_PROMPT.format(question=query)
         hyde_messages = [{"role": "user", "content": hyde_prompt}]
@@ -462,7 +557,12 @@ class RAGPipeline:
         if not embedding:
             return []
 
-        keyword = query
+        keyword = _build_rrf_keyword(query, entity_filter)
+        logger.debug(
+            "[RAG] RRF keyword built='%s' from query='%s'",
+            _preview_text(keyword),
+            _preview_text(query),
+        )
         from fastapi.concurrency import run_in_threadpool
 
         docs = await run_in_threadpool(
@@ -504,7 +604,11 @@ class RAGPipeline:
 
         # Multi-query retrieval 수행
         docs = await multi_query_retrieval(
-            query_variations, self.retrieve, filters or {}, limit_per_query=8
+            query_variations,
+            self.retrieve,
+            filters or {},
+            entity_filter=entity_filter,
+            limit_per_query=8,
         )
 
         logger.info(f"[RAG] Multi-query retrieval returned {len(docs)} documents")

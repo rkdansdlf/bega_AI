@@ -4,11 +4,14 @@
 애플리케이션 설정을 로드하고 유효성을 검사하는 `Settings` 클래스를 정의합니다.
 """
 
+import logging
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -41,10 +44,14 @@ class Settings(BaseSettings):
         ]
     )
 
-    # --- 데이터베이스 설정 (PostgreSQL 단일 경로) ---
-    postgres_db_url: str = Field(..., validation_alias="POSTGRES_DB_URL")
-    # 별도 소스 DB를 읽는 배치 스크립트에서만 사용
-    supabase_db_url: Optional[str] = Field(None, validation_alias="SUPABASE_DB_URL")
+    # --- 데이터베이스 설정 ---
+    # 운영 기본 경로
+    postgres_db_url: Optional[str] = Field(None, validation_alias="POSTGRES_DB_URL")
+    # 하위 호환 경로 (deprecated)
+    legacy_source_db_url: Optional[str] = Field(
+        None, validation_alias="SUPABASE_DB_URL"
+    )
+    _legacy_source_db_warned: bool = PrivateAttr(default=False)
 
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
@@ -142,6 +149,34 @@ class Settings(BaseSettings):
     chatbot_model_name: Optional[str] = Field(
         None, validation_alias="CHATBOT_MODEL_NAME"
     )
+    chat_cache_admin_enabled: bool = Field(
+        False, validation_alias="CHAT_CACHE_ADMIN_ENABLED"
+    )
+    chat_cache_admin_token: Optional[str] = Field(
+        None, validation_alias="CHAT_CACHE_ADMIN_TOKEN"
+    )
+
+    # --- Moderation 설정 ---
+    moderation_high_risk_keywords_raw: str = Field(
+        "죽어,죽인다,살인,테러,시발,씨발,병신,개새끼",
+        validation_alias="MODERATION_HIGH_RISK_KEYWORDS",
+    )
+    moderation_spam_keywords_raw: str = Field(
+        "광고,홍보,문의,오픈채팅,텔레그램,카카오톡,디엠,수익",
+        validation_alias="MODERATION_SPAM_KEYWORDS",
+    )
+    moderation_spam_url_threshold: int = Field(
+        3, validation_alias="MODERATION_SPAM_URL_THRESHOLD"
+    )
+    moderation_repeated_char_threshold: int = Field(
+        8, validation_alias="MODERATION_REPEATED_CHAR_THRESHOLD"
+    )
+    moderation_spam_medium_score: int = Field(
+        2, validation_alias="MODERATION_SPAM_MEDIUM_SCORE"
+    )
+    moderation_spam_block_score: int = Field(
+        3, validation_alias="MODERATION_SPAM_BLOCK_SCORE"
+    )
 
     # --- 검색(Retrieval) 관련 설정 ---
     default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
@@ -186,6 +221,17 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator(
+        "moderation_spam_url_threshold",
+        "moderation_repeated_char_threshold",
+        "moderation_spam_medium_score",
+        "moderation_spam_block_score",
+    )
+    def _validate_positive_threshold(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Moderation threshold 값은 1 이상이어야 합니다.")
+        return value
+
     @property
     def cors_allowed_origins(self) -> List[str]:
         """CORS 정책에 따라 허용된 출처 목록을 반환합니다."""
@@ -203,7 +249,28 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """AI 서비스가 사용할 PostgreSQL 연결 URL을 반환합니다."""
-        return self.postgres_db_url
+        return self.source_db_url
+
+    @property
+    def source_db_url(self) -> str:
+        """배치/마이그레이션 스크립트용 Source DB URL을 반환합니다.
+
+        우선순위:
+        1) POSTGRES_DB_URL
+        2) SUPABASE_DB_URL (deprecated fallback)
+        """
+        if self.postgres_db_url:
+            return self.postgres_db_url
+
+        if self.legacy_source_db_url:
+            if not self._legacy_source_db_warned:
+                logger.warning(
+                    "SUPABASE_DB_URL is deprecated and will be removed. Use POSTGRES_DB_URL instead."
+                )
+                self._legacy_source_db_warned = True
+            return self.legacy_source_db_url
+
+        raise RuntimeError("POSTGRES_DB_URL is not configured.")
 
     @property
     def function_calling_model(self) -> str:
@@ -231,6 +298,19 @@ class Settings(BaseSettings):
         if self.llm_provider == "openrouter":
             return self.openrouter_api_key
         return None
+
+    @property
+    def moderation_high_risk_keywords(self) -> List[str]:
+        return self._split_csv(self.moderation_high_risk_keywords_raw)
+
+    @property
+    def moderation_spam_keywords(self) -> List[str]:
+        return self._split_csv(self.moderation_spam_keywords_raw)
+
+    def _split_csv(self, raw_value: str) -> List[str]:
+        if not raw_value:
+            return []
+        return [item.strip().lower() for item in raw_value.split(",") if item.strip()]
 
 
 @lru_cache(maxsize=1)

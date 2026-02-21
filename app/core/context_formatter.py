@@ -339,24 +339,41 @@ class ContextFormatter:
     def _format_explanatory_content(
         self, processed_data: Dict[str, Any], query: str, entity_filter, year: int
     ) -> str:
-        """설명형 질문을 위한 자유로운 텍스트 포맷입니다."""
-        # 설명형 질문의 경우 원본 검색 컨텍스트를 그대로 사용
+        """설명형 질문을 위한 풍부한 텍스트 포맷입니다. 검색된 문서의 내용을 구체적으로 포함합니다."""
         context_parts = []
-        context_parts.append(f"### {year}년 KBO 리그 관련 정보")
+        context_parts.append(f"### {year}년 KBO 리그 관련 지식 및 정보")
 
-        # 간단한 요약 정보만 제공
-        if processed_data["pitchers"]:
+        # 검색된 원본 문서들에서 관련 내용 추출
+        raw_docs = processed_data.get("raw_docs", [])
+        if raw_docs:
+            context_parts.append("\n**관련 지식 베이스:**")
+            seen_content = set()
+            for doc in raw_docs[:5]:  # 상위 5개 문서의 핵심 내용 포함
+                content = doc.get("content", "").strip()
+                title = doc.get("title", "정보")
+                if content and content not in seen_content:
+                    context_parts.append(f"#### {title}")
+                    context_parts.append(content)
+                    context_parts.append("")
+                    seen_content.add(content)
+
+        # 통계 데이터가 있으면 요약 제공
+        if processed_data["pitchers"] or processed_data["batters"]:
+            context_parts.append("\n**연관 통계 데이터 요약:**")
+            if processed_data["pitchers"]:
+                context_parts.append(
+                    f"- 투수 데이터: {len(processed_data['pitchers'])}명의 기록 참조 가능"
+                )
+            if processed_data["batters"]:
+                context_parts.append(
+                    f"- 타자 데이터: {len(processed_data['batters'])}명의 기록 참조 가능"
+                )
+
+        if not context_parts or len(context_parts) <= 1:
             context_parts.append(
-                f"\n**투수 데이터**: {len(processed_data['pitchers'])}명의 투수 정보"
-            )
-        if processed_data["batters"]:
-            context_parts.append(
-                f"**타자 데이터**: {len(processed_data['batters'])}명의 타자 정보"
+                "\n요청하신 리그 정보에 대한 구체적인 내용을 데이터베이스에서 찾을 수 없습니다."
             )
 
-        context_parts.append(
-            "\n상세한 통계나 분석이 필요하시면 구체적인 질문을 해주세요."
-        )
         return "\n".join(context_parts)
 
     def _sort_by_requested_stat(

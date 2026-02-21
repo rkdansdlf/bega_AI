@@ -98,8 +98,8 @@ def _save_sync(
     """
     캐시 항목을 저장합니다.
 
-    ON CONFLICT (cache_key) DO NOTHING으로 동시 저장 요청(race condition)을
-    안전하게 처리합니다. 먼저 성공한 요청의 값이 보존됩니다.
+    ON CONFLICT (cache_key) DO UPDATE로 동일 키를 원자적으로 갱신합니다.
+    만료된 기존 row가 남아 있는 경우에도 즉시 재활성화할 수 있습니다.
 
     filters_json은 psycopg3 %s 플레이스홀더에 ::jsonb 캐스트를 적용합니다.
     (coach.py의 response_json 저장 방식과 동일)
@@ -121,7 +121,16 @@ def _save_sync(
              response_text, model_name, expires_at)
         VALUES
             (%s, %s, %s::jsonb, %s, %s, %s, %s)
-        ON CONFLICT (cache_key) DO NOTHING
+        ON CONFLICT (cache_key) DO UPDATE
+        SET
+            question_text = EXCLUDED.question_text,
+            filters_json = EXCLUDED.filters_json,
+            intent = EXCLUDED.intent,
+            response_text = EXCLUDED.response_text,
+            model_name = EXCLUDED.model_name,
+            expires_at = EXCLUDED.expires_at,
+            hit_count = 0,
+            created_at = now()
         """,
         (
             cache_key,
