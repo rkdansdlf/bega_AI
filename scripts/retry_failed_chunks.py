@@ -201,7 +201,9 @@ def main():
             source_db_url = legacy_env
 
     if not source_db_url:
-        print("오류: Source DB URL이 필요합니다. --source-db-url 또는 환경변수 POSTGRES_DB_URL을 설정하세요.")
+        print(
+            "오류: Source DB URL이 필요합니다. --source-db-url 또는 환경변수 POSTGRES_DB_URL을 설정하세요."
+        )
         sys.exit(1)
 
     retry_failed_chunks(
