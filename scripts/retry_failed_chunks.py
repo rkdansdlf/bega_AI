@@ -8,7 +8,10 @@
     python scripts/retry_failed_chunks.py --service-account-key path/to/key.json
 """
 
+import argparse
 import json
+import os
+import sys
 from pathlib import Path
 
 
