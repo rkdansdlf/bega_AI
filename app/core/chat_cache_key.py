@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 
 # 캐시 스키마 버전.
 # 프롬프트·정규화 방식이 변경될 때 올리면 기존 캐시가 자동 미스 처리됨.
-CHAT_CACHE_SCHEMA_VERSION = "v1"
+CHAT_CACHE_SCHEMA_VERSION = "v2"
 
 # intent별 TTL (초 단위).
 # stats_lookup/comparison/recent_form은 짧게, 선수 프로필·규정 설명은 길게.

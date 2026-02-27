@@ -7,8 +7,7 @@ Fast Path, 캐싱, 응답 검증기 등을 테스트합니다.
 import pytest
 import json
 import asyncio
-from unittest.mock import Mock, patch, AsyncMock, MagicMock
-from datetime import datetime
+from pydantic import ValidationError
 
 # ============================================================
 # Coach Validator Tests
@@ -266,6 +265,39 @@ class TestCoachValidator:
         assert "강력한 타선" in markdown
         assert "Coach's Note" in markdown
 
+    def test_analyze_request_strips_whitespace_question_override(self):
+        """manual 모드의 question_override 앞뒤 공백이 정리된다."""
+        from app.routers.coach import AnalyzeRequest
+
+        payload = AnalyzeRequest(
+            home_team_id="HH",
+            request_mode="manual_detail",
+            question_override="  오늘 경기 핵심을 정리해줘  ",
+        )
+
+        assert payload.question_override == "오늘 경기 핵심을 정리해줘"
+
+    def test_analyze_request_auto_mode_rejects_question_override(self):
+        """auto_brief 모드에서 question_override는 검증 예외가 발생한다."""
+        from app.routers.coach import AnalyzeRequest
+
+        with pytest.raises(ValidationError):
+            AnalyzeRequest(
+                home_team_id="HH",
+                request_mode="auto_brief",
+                question_override="강제로 설정하려고 한 질문",
+            )
+
+    def test_analyze_request_rejects_unknown_request_mode(self):
+        """정의되지 않은 request_mode는 검증 예외가 발생한다."""
+        from app.routers.coach import AnalyzeRequest
+
+        with pytest.raises(ValidationError):
+            AnalyzeRequest(
+                home_team_id="HH",
+                request_mode="experimental",
+            )
+
 
 # ============================================================
 # TTL Cache Tests
@@ -356,7 +388,7 @@ class TestToolCallerParallel:
         async def _async_test():
             import time
             import threading
-            from app.agents.tool_caller import ToolCaller, ToolCall, ToolResult
+            from app.agents.tool_caller import ToolCaller, ToolCall
 
             caller = ToolCaller()
             call_times = []

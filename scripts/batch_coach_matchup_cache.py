@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -672,8 +673,11 @@ async def async_main(args: argparse.Namespace) -> int:
 
     start_time = datetime.now()
     timeout = httpx.Timeout(args.timeout, connect=min(10.0, args.timeout))
+    default_headers: Dict[str, str] = {}
+    if args.internal_api_key:
+        default_headers["X-Internal-Api-Key"] = args.internal_api_key
     results: List[Dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, headers=default_headers) as client:
         for idx, target in enumerate(targets, start=1):
             item = await call_analyze(
                 client=client,
@@ -732,6 +736,11 @@ def parse_args() -> argparse.Namespace:
         "--base-url",
         default="http://127.0.0.1:8001",
         help="Coach API base URL.",
+    )
+    parser.add_argument(
+        "--internal-api-key",
+        default=os.getenv("AI_INTERNAL_TOKEN", ""),
+        help="Value for X-Internal-Api-Key when calling protected AI endpoints.",
     )
     parser.add_argument(
         "--years",

@@ -19,6 +19,14 @@ class _DummyCursor:
     def fetchall(self):
         return self.rows
 
+    def fetchone(self):
+        if not self.executed:
+            return None
+        query, _ = self.executed[-1]
+        if "information_schema.tables" in query and "rag_chunks" in query:
+            return (True,)
+        return None
+
     def __enter__(self):
         return self
 

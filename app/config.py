@@ -81,12 +81,12 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_API_KEY"
     )
     openrouter_model: str = Field(
-        "upstage/solar-pro-3:free", validation_alias="OPENROUTER_MODEL"
+        "openrouter/free", validation_alias="OPENROUTER_MODEL"
     )
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
-    # Default: openrouter/free - intelligent router that auto-selects available free models
+    # Default: no fallback by default; use OPENROUTER_FALLBACK_MODELS when explicitly set.
     openrouter_fallback_models_raw: str = Field(
-        "openrouter/free", validation_alias="OPENROUTER_FALLBACK_MODELS"
+        "", validation_alias="OPENROUTER_FALLBACK_MODELS"
     )
 
     @property
@@ -116,6 +116,16 @@ class Settings(BaseSettings):
     )
 
     # --- Coach LLM 설정 ---
+
+    # 내부 AI 호출 인증 토큰(헤더 또는 Bearer 토큰 지원)
+    # - 운영 기본 정책은 BFF(/api/ai/*) 경유이며, 외부 direct AI 공개는 금지합니다.
+    # - direct AI 호출을 허용하는 내부 환경에서는 AI_INTERNAL_TOKEN이 필수입니다.
+    # - AI_INTERNAL_TOKEN 미설정 상태의 direct AI 호출은 503(Service Unavailable)로 차단됩니다.
+    ai_internal_token: Optional[str] = Field(
+        None,
+        validation_alias="AI_INTERNAL_TOKEN",
+    )
+
     coach_llm_provider: str = Field("openrouter", validation_alias="COACH_LLM_PROVIDER")
     coach_max_output_tokens: int = Field(
         2000, validation_alias="COACH_MAX_OUTPUT_TOKENS"
@@ -184,6 +194,63 @@ class Settings(BaseSettings):
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
     max_output_tokens: int = Field(4096, validation_alias="MAX_OUTPUT_TOKENS")
+    chat_dynamic_token_enabled: bool = Field(
+        True, validation_alias="CHAT_DYNAMIC_TOKEN_ENABLED"
+    )
+    chat_analysis_max_tokens: int = Field(
+        350, validation_alias="CHAT_ANALYSIS_MAX_TOKENS"
+    )
+    chat_answer_max_tokens_short: int = Field(
+        1400, validation_alias="CHAT_ANSWER_MAX_TOKENS_SHORT"
+    )
+    chat_answer_max_tokens_long: int = Field(
+        2600, validation_alias="CHAT_ANSWER_MAX_TOKENS_LONG"
+    )
+    chat_answer_max_tokens_team: int = Field(
+        900, validation_alias="CHAT_ANSWER_MAX_TOKENS_TEAM"
+    )
+    chat_tool_result_max_chars: int = Field(
+        2200, validation_alias="CHAT_TOOL_RESULT_MAX_CHARS"
+    )
+    chat_tool_result_max_items: int = Field(
+        8, validation_alias="CHAT_TOOL_RESULT_MAX_ITEMS"
+    )
+    chat_first_token_watchdog_seconds: float = Field(
+        20.0, validation_alias="CHAT_FIRST_TOKEN_WATCHDOG_SECONDS"
+    )
+    chat_first_token_retry_max_attempts: int = Field(
+        1, validation_alias="CHAT_FIRST_TOKEN_RETRY_MAX_ATTEMPTS"
+    )
+    chat_tool_parallel_enabled: bool = Field(
+        True, validation_alias="CHAT_TOOL_PARALLEL_ENABLED"
+    )
+    chat_tool_parallel_max_concurrency: int = Field(
+        2, validation_alias="CHAT_TOOL_PARALLEL_MAX_CONCURRENCY"
+    )
+    chat_openrouter_empty_chunk_retries: int = Field(
+        2, validation_alias="CHAT_OPENROUTER_EMPTY_CHUNK_RETRIES"
+    )
+    chat_openrouter_empty_chunk_backoff_ms: int = Field(
+        400, validation_alias="CHAT_OPENROUTER_EMPTY_CHUNK_BACKOFF_MS"
+    )
+    chat_perf_metrics_enabled: bool = Field(
+        True, validation_alias="CHAT_PERF_METRICS_ENABLED"
+    )
+    chat_fast_path_enabled: bool = Field(
+        True, validation_alias="CHAT_FAST_PATH_ENABLED"
+    )
+    chat_fast_path_scope: str = Field(
+        "team", validation_alias="CHAT_FAST_PATH_SCOPE"
+    )
+    chat_fast_path_min_messages: int = Field(
+        1, validation_alias="CHAT_FAST_PATH_MIN_MESSAGES"
+    )
+    chat_fast_path_tool_cap: int = Field(
+        2, validation_alias="CHAT_FAST_PATH_TOOL_CAP"
+    )
+    chat_fast_path_fallback_on_empty: bool = Field(
+        True, validation_alias="CHAT_FAST_PATH_FALLBACK_ON_EMPTY"
+    )
 
     # --- Monitoring ---
     sentry_dsn: Optional[str] = Field(None, validation_alias="SENTRY_DSN")
@@ -196,6 +263,30 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"지원되지 않는 EMBED_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
             )
+        return value
+
+    @field_validator("chat_openrouter_empty_chunk_retries")
+    def _validate_chat_openrouter_empty_chunk_retries(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("CHAT_OPENROUTER_EMPTY_CHUNK_RETRIES must be >= 0")
+        return value
+
+    @field_validator("chat_openrouter_empty_chunk_backoff_ms")
+    def _validate_chat_openrouter_empty_chunk_backoff_ms(cls, value: int) -> int:
+        if value < 50:
+            raise ValueError("CHAT_OPENROUTER_EMPTY_CHUNK_BACKOFF_MS must be >= 50")
+        return value
+
+    @field_validator("chat_first_token_watchdog_seconds")
+    def _validate_chat_first_token_watchdog_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("CHAT_FIRST_TOKEN_WATCHDOG_SECONDS must be > 0")
+        return value
+
+    @field_validator("chat_first_token_retry_max_attempts")
+    def _validate_chat_first_token_retry_max_attempts(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("CHAT_FIRST_TOKEN_RETRY_MAX_ATTEMPTS must be >= 0")
         return value
 
     @field_validator("llm_provider")
@@ -230,6 +321,30 @@ class Settings(BaseSettings):
     def _validate_positive_threshold(cls, value: int) -> int:
         if value < 1:
             raise ValueError("Moderation threshold 값은 1 이상이어야 합니다.")
+        return value
+
+    @field_validator(
+        "chat_analysis_max_tokens",
+        "chat_answer_max_tokens_short",
+        "chat_answer_max_tokens_long",
+        "chat_tool_result_max_chars",
+        "chat_tool_result_max_items",
+        "chat_tool_parallel_max_concurrency",
+        "chat_fast_path_min_messages",
+        "chat_fast_path_tool_cap",
+    )
+    def _validate_chat_positive_threshold(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Chat optimization threshold 값은 1 이상이어야 합니다.")
+        return value
+
+    @field_validator("chat_fast_path_scope")
+    def _validate_chat_fast_path_scope(cls, value: str) -> str:
+        allowed = {"team"}
+        if value not in allowed:
+            raise ValueError(
+                f"지원되지 않는 CHAT_FAST_PATH_SCOPE '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
+            )
         return value
 
     @property

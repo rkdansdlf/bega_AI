@@ -1,15 +1,15 @@
 """FastAPI 의존성 주입을 위한 공통 헬퍼를 정의하는 모듈."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import Generator
 from contextlib import asynccontextmanager
 import logging
+import secrets
 from typing import Optional
 
 import psycopg
 from psycopg_pool import ConnectionPool
-from fastapi import Depends
-from fastapi.params import Depends as DependsClass
+from fastapi import Depends, Header, HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +17,9 @@ from .config import get_settings
 from .core.rag import RAGPipeline
 from .ml.intent_router import predict_intent, load_clf
 from .agents.baseball_agent import BaseballStatisticsAgent
-from .core.prompts import SYSTEM_PROMPT
 from .core.chat_cache import CREATE_TABLE_SQL as CHAT_CACHE_DDL
 from .core.chat_cache import cleanup_expired as _cleanup_expired_cache
+from .core.security_metrics import record_security_event
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성)
 _connection_pool: Optional[ConnectionPool] = None
@@ -174,6 +174,31 @@ def get_agent(
             and exception.response.status_code >= 500
         )
 
+    def _resolve_model_candidates(
+        primary_model: str, fallback_models: list[str]
+    ) -> list[str]:
+        blocked = {"openrouter/auto"}
+        candidates: list[str] = []
+        for model in [primary_model] + list(fallback_models):
+            if not model:
+                continue
+            if model in blocked:
+                logger.warning(f"[LLM] Skipping blocked model: {model}")
+                continue
+            if model not in candidates:
+                candidates.append(model)
+
+        if candidates:
+            return candidates
+
+        if primary_model:
+            logger.warning(
+                f"[LLM] All configured models are blocked; fallback to primary: {primary_model}"
+            )
+            return [primary_model]
+
+        return [m for m in fallback_models if m]
+
     @retry(
         stop=stop_after_attempt(2),  # 5 -> 2: 빠른 실패
         wait=wait_exponential(multiplier=1, min=1, max=5),
@@ -182,8 +207,8 @@ def get_agent(
     )
     async def fetch_completion_stream(payload, headers):
         """Helper function to fetch stream with retry logic."""
-        # 타임아웃: read=10s, total=20s (기존 60s에서 대폭 단축)
-        timeout_config = httpx.Timeout(10.0, connect=5.0, read=10.0, pool=5.0)
+        # Timeout: allow longer streaming windows before marking model as failed.
+        timeout_config = httpx.Timeout(30.0, connect=5.0, read=30.0, pool=5.0)
         async with httpx.AsyncClient(timeout=timeout_config) as client:
             async with client.stream(
                 "POST",
@@ -216,20 +241,23 @@ def get_agent(
             "X-Title": settings.openrouter_app_title or "",
         }
 
-        # Build list of models to try: primary + fallbacks
-        # [PATCH] openrouter/free 제거 - 무료 라우터는 큐잉/속도 저하 심각
+        # Build model list to try (블록된 모델은 건너뛰고, 없으면 primary로 복귀)
         primary_model = settings.openrouter_model
-        fallback_models = [
-            m
-            for m in settings.openrouter_fallback_models
-            if m not in ("openrouter/free", "openrouter/auto")
-        ]
-        models_to_try = [primary_model] + fallback_models
+        fallback_models = settings.openrouter_fallback_models
+        models_to_try = _resolve_model_candidates(
+            primary_model, fallback_models
+        )
         logger.info(
             f"[LLM] Models to try (filtered): {models_to_try}, max_tokens={effective_max_tokens}"
         )
 
         last_exception = None
+        empty_chunk_retries = max(
+            0, int(settings.chat_openrouter_empty_chunk_retries)
+        )
+        empty_chunk_backoff_ms = max(
+            50, int(settings.chat_openrouter_empty_chunk_backoff_ms)
+        )
 
         for i, model in enumerate(models_to_try):
             is_fallback = i > 0
@@ -242,61 +270,74 @@ def get_agent(
                     f"[LLM] Primary: {model}, Fallbacks available: {fallback_models}"
                 )
 
-            payload = {
-                "model": model,
-                "messages": messages,
-                "stream": True,
-                "temperature": 0.1,
-                "max_tokens": effective_max_tokens,
-            }
+            for retry_index in range(empty_chunk_retries + 1):
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "stream": True,
+                    "temperature": 0.1,
+                    "max_tokens": effective_max_tokens,
+                }
 
-            try:
-                chunk_count = 0
-                total_chars = 0
+                try:
+                    chunk_count = 0
 
-                async for line in fetch_completion_stream(payload, headers):
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            delta = (
-                                data.get("choices", [{}])[0]
-                                .get("delta", {})
-                                .get("content", "")
-                            )
-                            if delta:
-                                chunk_count += 1
-                                total_chars += len(delta)
-                                yield delta
-                        except json.JSONDecodeError:
+                    async for line in fetch_completion_stream(payload, headers):
+                        line = line.strip()
+                        if not line:
                             continue
-                    else:
-                        # Log non-data lines (might be errors or metadata)
-                        if line and not line.startswith(":"):
-                            logger.info(f"[OpenRouter Raw] {model}: {line}")
-                            if "error" in line.lower():
-                                logger.error(f"[OpenRouter Error Detail] {line}")
 
-                # Check if we got a valid response
-                if chunk_count == 0:
-                    error_msg = f"Empty response (0 chunks) from {model}. Check filters or token limits."
-                    logger.warning(f"[LLM] {error_msg}")
-                    last_exception = RuntimeError(error_msg)
-                    continue  # Try next model
-                else:
+                        if line.startswith("data: "):
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                delta = (
+                                    data.get("choices", [{}])[0]
+                                    .get("delta", {})
+                                    .get("content", "")
+                                )
+                                if delta:
+                                    chunk_count += 1
+                                    yield delta
+                            except json.JSONDecodeError:
+                                continue
+                        else:
+                            # Log non-data lines (might be errors or metadata)
+                            if line and not line.startswith(":"):
+                                logger.info(f"[OpenRouter Raw] {model}: {line}")
+                                if "error" in line.lower():
+                                    logger.error(f"[OpenRouter Error Detail] {line}")
+
+                    if chunk_count == 0:
+                        error_msg = (
+                            f"Empty response (0 chunks) from {model}. "
+                            "Check filters or token limits."
+                        )
+                        logger.warning(
+                            "[LLM EmptyChunk] model=%s retry_index=%d max_retries=%d max_tokens=%s reason=empty_chunk",
+                            model,
+                            retry_index,
+                            empty_chunk_retries,
+                            effective_max_tokens,
+                        )
+                        last_exception = RuntimeError(error_msg)
+                        if retry_index < empty_chunk_retries:
+                            backoff_seconds = (
+                                empty_chunk_backoff_ms / 1000.0
+                            ) * (2**retry_index)
+                            await asyncio.sleep(backoff_seconds)
+                            continue
+                        break
+
                     logger.info(f"[LLM] Success: {chunk_count} chunks from {model}")
                     return  # Success, exit the loop
 
-            except Exception as e:
-                logger.error(f"[LLM] Model {model} failed: {e}")
-                last_exception = e
-                continue  # Try next model
+                except Exception as e:
+                    logger.error(f"[LLM] Model {model} failed: {e}")
+                    last_exception = e
+                    break  # Try next model
 
         # All models failed
         logger.error(
@@ -358,7 +399,24 @@ def get_agent(
     else:
         llm_generator = openrouter_generator
 
-    return BaseballStatisticsAgent(connection=conn, llm_generator=llm_generator)
+    return BaseballStatisticsAgent(
+        connection=conn,
+        llm_generator=llm_generator,
+        fast_path_enabled=settings.chat_fast_path_enabled,
+        fast_path_scope=settings.chat_fast_path_scope,
+        fast_path_min_messages=settings.chat_fast_path_min_messages,
+        fast_path_tool_cap=settings.chat_fast_path_tool_cap,
+        fast_path_fallback_on_empty=settings.chat_fast_path_fallback_on_empty,
+        chat_dynamic_token_enabled=settings.chat_dynamic_token_enabled,
+        chat_analysis_max_tokens=settings.chat_analysis_max_tokens,
+        chat_answer_max_tokens_short=settings.chat_answer_max_tokens_short,
+        chat_answer_max_tokens_long=settings.chat_answer_max_tokens_long,
+        chat_answer_max_tokens_team=settings.chat_answer_max_tokens_team,
+        chat_tool_result_max_chars=settings.chat_tool_result_max_chars,
+        chat_tool_result_max_items=settings.chat_tool_result_max_items,
+        chat_first_token_watchdog_seconds=settings.chat_first_token_watchdog_seconds,
+        chat_first_token_retry_max_attempts=settings.chat_first_token_retry_max_attempts,
+    )
 
 
 def get_coach_llm_generator():
@@ -388,11 +446,11 @@ def get_coach_llm_generator():
         }
 
         primary_model = settings.coach_openrouter_model or settings.openrouter_model
-        # [PATCH] openrouter/free 제거 - 무료 라우터는 빈 응답/큐잉 문제 발생
+        # openrouter/free can be used when explicitly configured.
         fallback_models = [
             m
             for m in settings.coach_openrouter_fallback_models
-            if m not in ("openrouter/free", "openrouter/auto")
+            if m != "openrouter/auto"
         ]
         models_to_try = [primary_model] + fallback_models
 
@@ -514,3 +572,48 @@ def get_coach_llm_generator():
 
 def get_intent_router():
     return predict_intent
+
+
+def _extract_internal_token_from_authorization(authorization: str) -> str:
+    candidate = (authorization or "").strip()
+    if not candidate:
+        return ""
+    if candidate.lower().startswith("bearer "):
+        return candidate[7:].strip()
+    return candidate
+
+
+def require_ai_internal_token(
+    request: Request,
+    x_internal_api_key: str = Header(default="", alias="X-Internal-Api-Key"),
+    authorization: str = Header(default="", alias="Authorization"),
+) -> None:
+    settings = get_settings()
+    expected_token = (getattr(settings, "ai_internal_token", "") or "").strip()
+    endpoint = request.url.path if request is not None else "unknown"
+
+    if not expected_token:
+        logger.error("AI internal token is not configured.")
+        record_security_event(
+            "AI_INTERNAL_AUTH_MISCONFIGURED",
+            endpoint=endpoint,
+            detail="missing_ai_internal_token",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI internal authentication is not configured",
+        )
+
+    provided_token = ((x_internal_api_key or "").strip() or _extract_internal_token_from_authorization(
+        authorization
+    ))
+    if not provided_token or not secrets.compare_digest(provided_token, expected_token):
+        record_security_event(
+            "AI_INTERNAL_AUTH_REJECT",
+            endpoint=endpoint,
+            detail="missing_or_invalid_token",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid internal API token",
+        )

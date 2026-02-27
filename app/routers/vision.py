@@ -1,17 +1,59 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional
-from app.config import get_settings
+import logging
+
+from ..config import get_settings
+from ..core.ratelimit import rate_limit_vision_dependency
+from ..deps import require_ai_internal_token
 import httpx
 import base64
 import json
 import google.generativeai as genai
 from PIL import Image
 import io
+import tempfile
+
 
 router = APIRouter(prefix="/vision", tags=["vision"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
+MAX_TICKET_IMAGE_BYTES = 5 * 1024 * 1024
+ALLOWED_TICKET_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+def _normalize_content_type(content_type: Optional[str]) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+async def _read_ticket_image_with_limit(
+    file: UploadFile,
+    max_bytes: int,
+    allowed_content_types: Optional[set[str]] = None,
+) -> tuple[bytes, str]:
+    content_type = _normalize_content_type(file.content_type)
+    if allowed_content_types is not None and content_type not in allowed_content_types:
+        raise HTTPException(status_code=415, detail="지원되지 않는 이미지 파일 타입입니다.")
+
+    with tempfile.SpooledTemporaryFile(max_size=max_bytes, mode="w+b") as spool:
+        total = 0
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=413, detail="이미지 파일 크기가 너무 큽니다."
+                )
+            spool.write(chunk)
+
+        if total == 0:
+            raise HTTPException(status_code=400, detail="빈 파일입니다.")
+
+        spool.seek(0)
+        return spool.read(), content_type or "application/octet-stream"
 
 
 class TicketInfo(BaseModel):
@@ -29,13 +71,20 @@ class TicketInfo(BaseModel):
 
 
 @router.post("/ticket", response_model=TicketInfo)
-async def analyze_ticket_image(file: UploadFile = File(...)):
+async def analyze_ticket_image(
+    file: UploadFile = File(...),
+    _: None = Depends(rate_limit_vision_dependency),
+    __: None = Depends(require_ai_internal_token),
+):
     """
     Analyzes an uploaded ticket image using Gemini Vision (Native or OpenRouter) to extract details.
     """
     try:
-        # Read image content
-        contents = await file.read()
+        contents, content_type = await _read_ticket_image_with_limit(
+            file,
+            MAX_TICKET_IMAGE_BYTES,
+            allowed_content_types=ALLOWED_TICKET_IMAGE_TYPES,
+        )
 
         prompt = """
         Analyze this KBO(Korean Baseball Organization) ticket image and extract the following information in JSON format:
@@ -76,7 +125,6 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
         else:
             # OpenRouter Implementation
             base64_image = base64.b64encode(contents).decode("utf-8")
-            content_type = file.content_type or "image/jpeg"
 
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -120,13 +168,20 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
         data = json.loads(response_text)
         return TicketInfo(**data)
 
+    except HTTPException as exc:
+        logger.warning(
+            "Ticket image request rejected: status=%s detail=%s",
+            exc.status_code,
+            exc.detail,
+        )
+        raise
     except httpx.HTTPStatusError as e:
-        print(f"OpenRouter API error: {e.response.text}")
+        logger.error("OpenRouter API error: %s", e.response.text)
         raise HTTPException(
             status_code=500, detail=f"OpenRouter API error: {e.response.status_code}"
         )
-    except Exception as e:
-        print(f"Error processing ticket image: {e}")
+    except Exception:
+        logger.exception("Error processing ticket image")
         raise HTTPException(
-            status_code=500, detail=f"Failed to analyze ticket image: {str(e)}"
+            status_code=500, detail="Failed to analyze ticket image"
         )

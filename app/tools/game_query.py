@@ -6,10 +6,9 @@
 """
 
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 import psycopg
 from psycopg.rows import dict_row
-from datetime import datetime
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 from app.tools.team_resolution_metrics import get_team_resolution_metrics
 

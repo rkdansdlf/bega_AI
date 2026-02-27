@@ -12,11 +12,9 @@ import json
 import logging
 import re
 import random
-import time
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import psycopg
-import math
 
 import httpx
 
@@ -1436,12 +1434,12 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 )
 
         elif entity_filter.player_name:
-            logger.info(f"[RAG] Player-specific query: {entity_filter.player_name}")
+            logger.info(f"[RAG] Player-specific query: {entity_filter.player_name} (LLM expansion disabled for speed)")
             # For specific player queries, use multi-query with relaxed filters
             player_filters = dict(final_filters)
             player_filters.pop("source_table", None)  # Remove source_table filter
             docs = await self.retrieve_with_multi_query(
-                query, entity_filter, filters=player_filters, use_llm_expansion=True
+                query, entity_filter, filters=player_filters, use_llm_expansion=False
             )
 
         else:

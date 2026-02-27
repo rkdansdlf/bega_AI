@@ -6,9 +6,10 @@ KBO 규정 검색을 위한 전용 도구입니다.
 """
 
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.errors import UndefinedTable
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,24 @@ class RegulationQueryTool:
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
 
+            cursor.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'rag_chunks'
+                );
+                """
+            )
+            row = cursor.fetchone()
+            if not (row and row[0]):
+                logger.warning("[RegulationQuery] rag_chunks table is not available")
+                result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
+                return result
+
+            cursor = self.connection.cursor(row_factory=dict_row)
+
             # 검색 키워드 준비
             search_pattern = f"%{query}%"
 
@@ -152,8 +171,12 @@ class RegulationQueryTool:
                 logger.warning(f"[RegulationQuery] No regulations found for: {query}")
 
         except Exception as e:
-            logger.error(f"[RegulationQuery] Database error: {e}")
-            result["error"] = f"데이터베이스 오류: {e}"
+            if isinstance(e, UndefinedTable):
+                logger.error(f"[RegulationQuery] rag_chunks table not found: {e}")
+                result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
+            else:
+                logger.error(f"[RegulationQuery] Database error: {e}")
+                result["error"] = f"데이터베이스 오류: {e}"
         finally:
             if "cursor" in locals():
                 cursor.close()
@@ -184,6 +207,26 @@ class RegulationQueryTool:
         }
 
         try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+
+            cursor.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'rag_chunks'
+                );
+                """
+            )
+            row = cursor.fetchone()
+            if not (row and row[0]):
+                logger.warning(
+                    "[RegulationQuery] rag_chunks table is not available"
+                )
+                result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
+                return result
+
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 카테고리별 키워드 가져오기
@@ -230,8 +273,12 @@ class RegulationQueryTool:
                 )
 
         except Exception as e:
-            logger.error(f"[RegulationQuery] Category search error: {e}")
-            result["error"] = f"카테고리 검색 오류: {e}"
+            if isinstance(e, UndefinedTable):
+                logger.error(f"[RegulationQuery] rag_chunks table not found: {e}")
+                result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
+            else:
+                logger.error(f"[RegulationQuery] Category search error: {e}")
+                result["error"] = f"카테고리 검색 오류: {e}"
         finally:
             if "cursor" in locals():
                 cursor.close()

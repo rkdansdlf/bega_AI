@@ -449,46 +449,6 @@ def parse_coach_response(
     return response, error
 
 
-def _create_fallback_response(error_reason: str, original_text: str) -> CoachResponse:
-    """
-    파싱 실패 시 원본 텍스트를 보존하는 fallback 응답 생성.
-
-    에러가 발생해도 사용자에게 최소한의 정보를 제공합니다.
-    """
-    # 원본 텍스트에서 의미 있는 첫 줄 추출 시도
-    first_meaningful_line = ""
-    if original_text:
-        for line in original_text.strip().split("\n"):
-            cleaned = line.strip()
-            # [Fix] '{', '```', '#' 뿐만 아니라 '"headline"' 같은 JSON fragment도 무시
-            if cleaned and not cleaned.startswith(("{", "```", "#", '"')):
-                first_meaningful_line = cleaned[:100]  # 최대 100자
-                break
-
-    headline = first_meaningful_line or "AI 분석 결과"
-
-    # 원본 텍스트 정리 (마크다운 코드블록, JSON 잔해 제거)
-    cleaned_text = original_text.strip() if original_text else ""
-    for prefix in ["```json", "```", "{"]:
-        if cleaned_text.startswith(prefix):
-            cleaned_text = cleaned_text[len(prefix) :]
-    for suffix in ["```", "}"]:
-        if cleaned_text.endswith(suffix):
-            cleaned_text = cleaned_text[: -len(suffix)]
-    cleaned_text = cleaned_text.strip()
-
-    return CoachResponse(
-        headline=headline,
-        sentiment="neutral",
-        key_metrics=[],
-        analysis=AnalysisSection(strengths=[], weaknesses=[], risks=[]),
-        detailed_markdown="",
-        coach_note=(
-            cleaned_text[:2000] if cleaned_text else f"형식 변환 실패: {error_reason}"
-        ),
-    )
-
-
 def validate_coach_response(response: CoachResponse) -> List[str]:
     """
     CoachResponse의 데이터 품질을 검증합니다.

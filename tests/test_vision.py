@@ -1,10 +1,23 @@
+import os
+
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 from fastapi.testclient import TestClient
-from app.main import app
 from app.config import get_settings
 
-client = TestClient(app)
+AI_INTERNAL_TEST_TOKEN = "local-test-token"
+os.environ.setdefault("AI_INTERNAL_TOKEN", AI_INTERNAL_TEST_TOKEN)
+try:
+    get_settings.cache_clear()
+except AttributeError:
+    pass
+
+from app.main import app
+
+client = TestClient(
+    app,
+    headers={"X-Internal-Api-Key": AI_INTERNAL_TEST_TOKEN},
+)
 
 
 @pytest.fixture

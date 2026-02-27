@@ -1,9 +1,16 @@
 import asyncio
 import time
+import os
 from collections import defaultdict, deque
 from typing import Deque, DefaultDict
+from .security_metrics import record_security_event
 
 from fastapi import HTTPException, Request
+
+
+TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT = os.getenv(
+    "AI_TRUST_X_FORWARDED_FOR", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 class InMemoryRateLimiter:
@@ -40,14 +47,82 @@ class InMemoryRateLimiter:
             bucket.append(now)
 
 
-rate_limiter = InMemoryRateLimiter(max_requests=1000, window_seconds=60)
+CHAT_RATE_LIMITER = InMemoryRateLimiter(max_requests=60, window_seconds=60)
+CHAT_VOICE_RATE_LIMITER = InMemoryRateLimiter(max_requests=20, window_seconds=60)
+COACH_RATE_LIMITER = InMemoryRateLimiter(max_requests=25, window_seconds=60)
+VISION_RATE_LIMITER = InMemoryRateLimiter(max_requests=15, window_seconds=60)
+DEBUG_RATE_LIMITER = InMemoryRateLimiter(max_requests=30, window_seconds=60)
 
 
-async def rate_limit_dependency(request: Request) -> None:
+def _extract_client_key(request: Request, trust_x_forwarded_for: bool = False) -> str:
     """
-    FastAPI 의존성으로, 클라이언트 IP 주소별로 API 요청 속도 제한을 적용합니다.
-    각 요청 시 호출되어 현재 클라이언트의 요청이 허용된 속도 제한을 초과하는지 검사합니다.
-    """
+    클라이언트 식별자 추출.
 
-    client_host = request.client.host if request.client else "unknown"
-    await rate_limiter.check(client_host)
+    운영 환경에서 직접 접근이 아닌 로드밸런서를 거칠 경우에는
+    trust_x_forwarded_for=True로 설정하여 X-Forwarded-For 첫 번째 IP를 사용합니다.
+    """
+    if trust_x_forwarded_for:
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            forwarded = xff.split(",")[0].strip()
+            if forwarded:
+                return forwarded
+
+    if request.client and request.client.host:
+        return request.client.host
+
+    return "unknown"
+
+
+def _dependency_factory(
+    limiter: InMemoryRateLimiter, *, trust_x_forwarded_for: bool = False, name: str
+):
+    async def _dependency(request: Request) -> None:
+        client_key = _extract_client_key(request, trust_x_forwarded_for=trust_x_forwarded_for)
+        try:
+            await limiter.check(client_key)
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                record_security_event(
+                    "AI_RATE_LIMIT_EXCEEDED",
+                    endpoint=request.url.path,
+                    detail=name,
+                )
+            raise
+    return _dependency
+
+
+# 공용 엔드포인트(채팅/검색 상호작용): 공격 난이도 기준 기본값
+rate_limit_chat_dependency = _dependency_factory(
+    CHAT_RATE_LIMITER,
+    trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
+    name="chat"
+)
+rate_limit_chat_voice_dependency = _dependency_factory(
+    CHAT_VOICE_RATE_LIMITER,
+    trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
+    name="chat_voice"
+)
+
+# The Coach/비전 API는 처리 비용이 크므로 stricter 규칙 적용
+rate_limit_coach_dependency = _dependency_factory(
+    COACH_RATE_LIMITER,
+    trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
+    name="coach"
+)
+rate_limit_vision_dependency = _dependency_factory(
+    VISION_RATE_LIMITER,
+    trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
+    name="vision"
+)
+
+# 디버그/관리 성격 엔드포인트(검색/인제스트)는 별도 제한치
+rate_limit_debug_dependency = _dependency_factory(
+    DEBUG_RATE_LIMITER,
+    trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
+    name="debug"
+)
+
+
+# 기존 호환성: 기존 호출부가 남아 있을 때 동작 유지
+rate_limit_dependency = rate_limit_chat_dependency

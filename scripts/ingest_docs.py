@@ -55,7 +55,6 @@ def find_markdown_files(directories: list[str]) -> list[str]:
 
 
 import re
-from typing import Optional
 
 
 def infer_season_year(path: str) -> int:

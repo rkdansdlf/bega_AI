@@ -8,6 +8,9 @@
 import re
 import json
 import logging
+import asyncio
+import os
+import time
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 import psycopg
 from decimal import Decimal
@@ -31,7 +34,10 @@ from ..core.prompts import (
     COACH_PROMPT,
     DEFAULT_ANSWER_PROMPT,
 )  # SYSTEM_PROMPT 임포트
-from ..core.entity_extractor import extract_entities_from_query  # 엔티티 추출 임포트
+from ..core.entity_extractor import (
+    extract_entities_from_query,
+    extract_team,
+)  # 엔티티 추출 임포트
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -129,7 +135,25 @@ class BaseballStatisticsAgent:
     4. 검증된 데이터만 사용하여 답변 생성
     """
 
-    def __init__(self, connection: psycopg.Connection, llm_generator):
+    def __init__(
+        self,
+        connection: psycopg.Connection,
+        llm_generator,
+        fast_path_enabled: bool = True,
+        fast_path_scope: str = "team",
+        fast_path_min_messages: int = 1,
+        fast_path_tool_cap: int = 2,
+        fast_path_fallback_on_empty: bool = True,
+        chat_dynamic_token_enabled: bool = True,
+        chat_analysis_max_tokens: int = 350,
+        chat_answer_max_tokens_short: int = 1400,
+        chat_answer_max_tokens_long: int = 2600,
+        chat_answer_max_tokens_team: int = 900,
+        chat_tool_result_max_chars: int = 2200,
+        chat_tool_result_max_items: int = 8,
+        chat_first_token_watchdog_seconds: float = 20.0,
+        chat_first_token_retry_max_attempts: int = 1,
+    ):
         self.connection = connection
         self.llm_generator = llm_generator
         self.db_query_tool = DatabaseQueryTool(connection)
@@ -142,6 +166,62 @@ class BaseballStatisticsAgent:
 
         # 팀명 매핑 캐시 초기화
         self._team_name_cache = None
+
+        # Fast-path 설정
+        self.fast_path_enabled = fast_path_enabled
+        self.fast_path_scope = fast_path_scope
+        self.fast_path_min_messages = max(1, int(fast_path_min_messages))
+        self.fast_path_tool_cap = max(1, int(fast_path_tool_cap))
+        self.fast_path_fallback_on_empty = fast_path_fallback_on_empty
+        self.chat_dynamic_token_enabled = chat_dynamic_token_enabled
+        self.chat_analysis_max_tokens = max(64, int(chat_analysis_max_tokens))
+        self.chat_answer_max_tokens_short = max(256, int(chat_answer_max_tokens_short))
+        self.chat_answer_max_tokens_long = max(
+            self.chat_answer_max_tokens_short, int(chat_answer_max_tokens_long)
+        )
+        requested_team_tokens = int(chat_answer_max_tokens_team)
+        self.chat_answer_max_tokens_team = max(
+            256,
+            min(self.chat_answer_max_tokens_short, requested_team_tokens),
+        )
+        if self.chat_answer_max_tokens_team != requested_team_tokens:
+            logger.info(
+                "[AnswerConfig] team_tokens_requested=%d clamped_to=%d short_cap=%d",
+                requested_team_tokens,
+                self.chat_answer_max_tokens_team,
+                self.chat_answer_max_tokens_short,
+            )
+        self.chat_tool_result_max_chars = max(400, int(chat_tool_result_max_chars))
+        self.chat_tool_result_max_items = max(1, int(chat_tool_result_max_items))
+        self.chat_first_token_watchdog_seconds = max(
+            1.0, float(chat_first_token_watchdog_seconds)
+        )
+        self.chat_first_token_retry_max_attempts = max(
+            0, int(chat_first_token_retry_max_attempts)
+        )
+        logger.info(
+            "[PlannerConfig] fast_path_enabled=%s scope=%s min_messages=%d tool_cap=%d fallback_on_empty=%s",
+            self.fast_path_enabled,
+            self.fast_path_scope,
+            self.fast_path_min_messages,
+            self.fast_path_tool_cap,
+            self.fast_path_fallback_on_empty,
+        )
+        logger.info(
+            "[AnswerConfig] dynamic_token=%s analysis_max=%d answer_short=%d answer_team=%d answer_long=%d tool_chars=%d tool_items=%d",
+            self.chat_dynamic_token_enabled,
+            self.chat_analysis_max_tokens,
+            self.chat_answer_max_tokens_short,
+            self.chat_answer_max_tokens_team,
+            self.chat_answer_max_tokens_long,
+            self.chat_tool_result_max_chars,
+            self.chat_tool_result_max_items,
+        )
+        logger.info(
+            "[AnswerWatchdog] first_token_watchdog_seconds=%.1f retry_max_attempts=%d",
+            self.chat_first_token_watchdog_seconds,
+            self.chat_first_token_retry_max_attempts,
+        )
 
         # 등록 가능한 도구들
         self._register_tools()
@@ -2100,6 +2180,213 @@ class BaseballStatisticsAgent:
 """
         return None
 
+    def _is_team_analysis_query(self, query: str, entity_filter: Any) -> bool:
+        if not self.fast_path_enabled:
+            return False
+        if self.fast_path_scope != "team":
+            return False
+
+        team_detected = bool(getattr(entity_filter, "team_id", None)) or bool(
+            extract_team(query)
+        )
+        if not team_detected:
+            return False
+
+        query_lower = query.lower()
+        team_analysis_keywords = [
+            "분석",
+            "요약",
+            "장단점",
+            "리스크",
+            "흐름",
+            "추이",
+            "전력",
+            "강점",
+            "약점",
+            "진단",
+            "시즌",
+        ]
+        return any(keyword in query_lower for keyword in team_analysis_keywords)
+
+    def _resolve_reference_year(self, query: str, entity_filter: Any) -> int:
+        now = datetime.now()
+        current_year = now.year
+
+        extracted_year = getattr(entity_filter, "season_year", None)
+        if isinstance(extracted_year, int):
+            return extracted_year
+
+        query_lower = query.lower()
+        if "재작년" in query_lower:
+            return current_year - 2
+        if "작년" in query_lower:
+            return current_year - 1
+
+        if any(word in query_lower for word in ["올해", "이번 시즌", "최신"]):
+            if now.month <= 3:
+                return current_year - 1
+            return current_year
+
+        if now.month <= 3:
+            return current_year - 1
+        return current_year
+
+    def _coerce_tool_call(self, raw_call: Any) -> Optional[ToolCall]:
+        if isinstance(raw_call, ToolCall):
+            return raw_call
+        if not isinstance(raw_call, dict):
+            return None
+
+        tool_name = raw_call.get("tool_name")
+        parameters = raw_call.get("parameters", {})
+
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            return None
+        if not isinstance(parameters, dict):
+            return None
+
+        return ToolCall(tool_name=tool_name, parameters=parameters)
+
+    def _prioritize_and_cap_tool_calls(self, tool_calls: List[Any]) -> List[ToolCall]:
+        if not tool_calls:
+            return []
+
+        preferred_order = ["get_team_summary", "get_team_advanced_metrics"]
+        preferred_rank = {name: idx for idx, name in enumerate(preferred_order)}
+
+        deduped: List[ToolCall] = []
+        seen = set()
+        for raw_call in tool_calls:
+            call = self._coerce_tool_call(raw_call)
+            if call is None:
+                logger.warning("[Planner] skip invalid tool_call format: %s", raw_call)
+                continue
+            key = (
+                call.tool_name,
+                json.dumps(call.parameters, ensure_ascii=False, sort_keys=True),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(call)
+
+        deduped.sort(
+            key=lambda c: (
+                preferred_rank.get(c.tool_name, len(preferred_order)),
+                c.tool_name,
+            )
+        )
+        return deduped[: self.fast_path_tool_cap]
+
+    def _build_fast_path_plan(
+        self, query: str, entity_filter: Any, context: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        if not self._is_team_analysis_query(query, entity_filter):
+            return None
+
+        messages = context.get("messages") if isinstance(context, dict) else None
+        if not isinstance(messages, list) or len(messages) < self.fast_path_min_messages:
+            logger.info(
+                "[PlannerDecision] mode=llm reason=insufficient_messages_for_fast_path count=%s min_required=%d",
+                len(messages) if isinstance(messages, list) else 0,
+                self.fast_path_min_messages,
+            )
+            return None
+
+        team_name = getattr(entity_filter, "team_id", None) or extract_team(query)
+        if not team_name:
+            return None
+
+        year = self._resolve_reference_year(query, entity_filter)
+        tool_calls = [
+            ToolCall(
+                tool_name="get_team_summary",
+                parameters={"team_name": team_name, "year": year},
+            ),
+            ToolCall(
+                tool_name="get_team_advanced_metrics",
+                parameters={"team_name": team_name, "year": year},
+            ),
+        ]
+
+        return {
+            "analysis": f"팀 분석 Fast-Path: {team_name} {year} 시즌 핵심 지표 조회",
+            "tool_calls": self._prioritize_and_cap_tool_calls(tool_calls),
+            "expected_result": "팀 분석 핵심 지표",
+            "error": None,
+            "planner_mode": "fast_path",
+            "analysis_ms": 0.0,
+        }
+
+    def _soft_filter_llm_tool_calls(
+        self,
+        tool_calls: List[Any],
+        *,
+        query: str,
+        entity_filter: Any,
+    ) -> List[ToolCall]:
+        if not tool_calls:
+            return []
+
+        filtered: List[ToolCall] = []
+        seen = set()
+        team_query = self._is_team_analysis_query(query, entity_filter)
+        low_value_for_team = {"get_current_datetime", "get_baseball_season_info"}
+
+        for raw_call in tool_calls:
+            call = self._coerce_tool_call(raw_call)
+            if call is None:
+                logger.warning("[Planner] skip invalid llm tool_call format: %s", raw_call)
+                continue
+
+            if team_query and call.tool_name in low_value_for_team:
+                logger.info(
+                    "[Planner] drop low-value team tool_call: %s", call.tool_name
+                )
+                continue
+
+            key = (
+                call.tool_name,
+                json.dumps(call.parameters, ensure_ascii=False, sort_keys=True),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append(call)
+
+        return filtered
+
+    def _is_meaningful_tool_data(self, data: Any) -> bool:
+        if data is None:
+            return False
+        if isinstance(data, list):
+            return len(data) > 0
+        if isinstance(data, dict):
+            found = data.get("found")
+            if found is not False:
+                return True
+            core_list_keys = [
+                "top_batters",
+                "top_pitchers",
+                "leaderboard",
+                "games",
+                "results",
+                "items",
+            ]
+            return any(
+                isinstance(data.get(key), list) and len(data.get(key, [])) > 0
+                for key in core_list_keys
+            )
+        return bool(data)
+
+    def _has_meaningful_tool_results(self, tool_results: List[ToolResult]) -> bool:
+        for result in tool_results:
+            if not result.success:
+                continue
+            if self._is_meaningful_tool_data(result.data):
+                return True
+        return False
+
     async def process_query_stream(
         self, query: str, context: Dict[str, Any] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -2107,6 +2394,12 @@ class BaseballStatisticsAgent:
         통계 질문을 처리하고 진행 상황(이벤트)을 스트리밍합니다.
         """
         logger.info(f"[BaseballAgent] Processing query stream: {query}")
+        if context is None:
+            context = {}
+        elif not isinstance(context, dict):
+            context = {}
+        process_started_at = time.perf_counter()
+        analysis_started_at = process_started_at
 
         # --- 신규 추가: 일상 대화 처리기 ---
         if self._is_chitchat(query):
@@ -2148,16 +2441,63 @@ class BaseballStatisticsAgent:
         # 1단계: 도구 계획
         yield {"type": "status", "message": "질문 의도를 분석하고 있습니다..."}
         analysis_result = await self._analyze_query_and_plan_tools(query, context)
+        analysis_ms = round((time.perf_counter() - analysis_started_at) * 1000, 2)
+        planner_mode = analysis_result.get("planner_mode", "llm")
+        fallback_triggered = False
 
         if analysis_result["error"]:
+            error_text = str(analysis_result["error"]).replace("|", "\\|")
+            structured_error_answer = (
+                "핵심 결론: **질문 분석 단계에서 오류가 발생해 요청을 완전히 처리하지 못했습니다.**\n\n"
+                "## 상세 내역\n"
+                "| 구분 | 내용 |\n"
+                "| --- | --- |\n"
+                "| 상태 | 질문 분석 실패 |\n"
+                f"| 오류 | {error_text} |\n"
+                "| 조치 | 동일 질문 재시도 또는 질문 표현 단순화 권장 |\n\n"
+                "## 핵심 지표\n"
+                "- 도구 계획이 생성되지 않아 DB 조회가 실행되지 않았습니다.\n"
+                "- 안전한 형식의 오류 응답으로 변환했습니다.\n\n"
+                "## 인사이트\n"
+                "- 일시적 모델 응답 불안정 시 재시도에서 정상 복구되는 경우가 많습니다.\n"
+                "- 오류가 반복되면 모델/네트워크 상태 점검이 필요합니다.\n\n"
+                "- 데이터 출처: DB 조회 기반"
+            )
             yield {
                 "type": "answer_chunk",
-                "content": "질문 분석 중 오류가 발생했습니다.",
+                "content": structured_error_answer,
+            }
+            yield {
+                "type": "metadata",
+                "data": {
+                    "tool_calls": [],
+                    "tool_results": [],
+                    "visualizations": [],
+                    "verified": False,
+                    "data_sources": [
+                        {
+                            "tool": "analysis",
+                            "verified": False,
+                            "error": str(analysis_result["error"]),
+                        }
+                    ],
+                    "intent": intent,
+                    "error": str(analysis_result["error"]),
+                },
             }
             return
 
+        logger.info(
+            "[Planner] mode=%s fallback_triggered=%s tool_count=%d analysis_ms=%s",
+            planner_mode,
+            fallback_triggered,
+            len(analysis_result.get("tool_calls", [])),
+            analysis_result.get("analysis_ms"),
+        )
+
         # 2단계: 도구 실행
         tool_results = []
+        tool_started_at = time.perf_counter()
         hallucination_indicators = [
             "추출된",
             "결과",
@@ -2205,34 +2545,178 @@ class BaseballStatisticsAgent:
                 "message": result.message,
             }
 
+        # Fast-Path 품질 방어: 데이터가 빈약하면 LLM 분석 경로로 1회 폴백
+        if (
+            planner_mode == "fast_path"
+            and self.fast_path_fallback_on_empty
+            and not self._has_meaningful_tool_results(tool_results)
+        ):
+            fallback_triggered = True
+            logger.info(
+                "[Planner] mode=%s fallback_triggered=%s reason=insufficient_tool_data",
+                planner_mode,
+                fallback_triggered,
+            )
+            llm_fallback_plan = await self._analyze_query_with_llm(query, context)
+            if not llm_fallback_plan.get("error"):
+                fallback_tool_calls = self._prioritize_and_cap_tool_calls(
+                    llm_fallback_plan.get("tool_calls", [])
+                )
+
+                fallback_results: List[ToolResult] = []
+                for tool_call in fallback_tool_calls:
+                    yield {
+                        "type": "tool_start",
+                        "tool": tool_call.tool_name,
+                        "params": tool_call.parameters,
+                    }
+                    fallback_result = self.tool_caller.execute_tool(tool_call)
+                    fallback_results.append(fallback_result)
+                    yield {
+                        "type": "tool_result",
+                        "tool": tool_call.tool_name,
+                        "success": fallback_result.success,
+                        "message": fallback_result.message,
+                    }
+
+                if self._has_meaningful_tool_results(fallback_results):
+                    analysis_result = llm_fallback_plan
+                    analysis_result["planner_mode"] = "llm"
+                    tool_results = fallback_results
+                    planner_mode = "llm"
+        tool_ms = round((time.perf_counter() - tool_started_at) * 1000, 2)
+
         # 3단계: 답변 생성
         yield {
             "type": "status",
             "message": "분석된 데이터를 바탕으로 답변을 생성하고 있습니다...",
         }
+        answer_started_at = time.perf_counter()
 
-        answer_result = await self._generate_verified_answer(
-            query, tool_results, context
+        answer_error = None
+        answer_verified = False
+        answer_data_sources = []
+
+        def _build_safe_stream_error_answer(reason: str) -> str:
+            escaped_reason = (reason or "unknown_error").replace("|", "\\|")
+            return (
+                "핵심 결론: **답변 생성 중 일시적 오류가 발생해 안전 모드로 응답합니다.**\n\n"
+                "## 상세 내역\n"
+                "| 구분 | 내용 |\n"
+                "| --- | --- |\n"
+                "| 상태 | 답변 스트리밍 오류 |\n"
+                f"| 오류 | {escaped_reason} |\n"
+                "| 조치 | 동일 질문 재시도 권장 |\n\n"
+                "## 핵심 지표\n"
+                "- 도구 조회 결과는 확보되었으나 텍스트 생성이 중단되었습니다.\n"
+                "- 품질 규칙(표/섹션/출처)을 유지한 안전 응답을 반환합니다.\n\n"
+                "## 인사이트\n"
+                "- openrouter/free의 일시적 빈 응답은 재시도에서 회복되는 경우가 있습니다.\n\n"
+                "- 데이터 출처: DB 조회 기반"
+            )
+
+        answer_attempt = 0
+        prefetched_chunks: List[str] = []
+        answer_iterator: Optional[AsyncGenerator[str, None]] = None
+
+        while True:
+            answer_result = await self._generate_verified_answer(
+                query, tool_results, context
+            )
+            answer_error = answer_result.get("error")
+            answer_verified = answer_result["verified"]
+            answer_data_sources = answer_result.get("data_sources", [])
+            prefetched_chunks = []
+            answer_iterator = None
+
+            retry_triggered = False
+            answer_content = answer_result["answer"]
+            if hasattr(answer_content, "__aiter__"):
+                answer_iterator = answer_content.__aiter__()
+                try:
+                    async with asyncio.timeout(self.chat_first_token_watchdog_seconds):
+                        first_chunk = await answer_iterator.__anext__()
+                    if first_chunk:
+                        prefetched_chunks.append(first_chunk)
+                except TimeoutError:
+                    if answer_attempt < self.chat_first_token_retry_max_attempts:
+                        answer_attempt += 1
+                        retry_triggered = True
+                        logger.warning(
+                            "[AnswerWatchdog] first_token_timeout retry=%d/%d timeout=%.1fs",
+                            answer_attempt,
+                            self.chat_first_token_retry_max_attempts,
+                            self.chat_first_token_watchdog_seconds,
+                        )
+                    else:
+                        timeout_message = (
+                            "답변 첫 토큰 지연으로 재시도 한도를 초과했습니다."
+                        )
+                        answer_error = timeout_message
+                        answer_verified = False
+                        answer_iterator = None
+                        prefetched_chunks = [
+                            _build_safe_stream_error_answer(timeout_message)
+                        ]
+                except StopAsyncIteration:
+                    answer_iterator = None
+                except Exception as exc:
+                    logger.error("[BaseballAgent] Answer stream prefetch failed: %s", exc)
+                    answer_error = f"답변 스트리밍 오류: {exc}"
+                    answer_verified = False
+                    answer_iterator = None
+                    prefetched_chunks = [_build_safe_stream_error_answer(str(exc))]
+            else:
+                prefetched_chunks = [str(answer_content)]
+
+            if retry_triggered:
+                continue
+            break
+        first_token_ms = (
+            round((time.perf_counter() - answer_started_at) * 1000, 2)
+            if prefetched_chunks
+            else None
         )
+        answer_ms = round((time.perf_counter() - answer_started_at) * 1000, 2)
+        total_ms = round((time.perf_counter() - process_started_at) * 1000, 2)
 
         metadata = {
             "tool_calls": analysis_result["tool_calls"],
             "tool_results": tool_results,
             "visualizations": self._generate_visualizations(tool_results),
-            "verified": answer_result["verified"],
-            "data_sources": answer_result["data_sources"],
+            "verified": answer_verified,
+            "data_sources": answer_data_sources,
             "intent": intent,
-            "error": answer_result.get("error"),
+            "error": answer_error,
+            "planner_mode": planner_mode,
+            "fallback_triggered": fallback_triggered,
+            "perf": {
+                "total_ms": total_ms,
+                "analysis_ms": analysis_ms,
+                "tool_ms": tool_ms,
+                "answer_ms": answer_ms,
+                "first_token_ms": first_token_ms,
+                "tool_count": len(analysis_result.get("tool_calls", [])),
+                "answer_retry_count": answer_attempt,
+                "model": os.getenv("OPENROUTER_MODEL", "openrouter/free"),
+            },
         }
 
         yield {"type": "metadata", "data": metadata}
-
-        answer_content = answer_result["answer"]
-        if hasattr(answer_content, "__aiter__"):
-            async for chunk in answer_content:
+        for chunk in prefetched_chunks:
+            if chunk:
                 yield {"type": "answer_chunk", "content": chunk}
-        else:
-            yield {"type": "answer_chunk", "content": str(answer_content)}
+
+        if answer_iterator is not None:
+            try:
+                async for chunk in answer_iterator:
+                    yield {"type": "answer_chunk", "content": chunk}
+            except Exception as exc:
+                logger.error("[BaseballAgent] Answer stream iteration failed: %s", exc)
+                yield {
+                    "type": "answer_chunk",
+                    "content": _build_safe_stream_error_answer(str(exc)),
+                }
 
     async def process_query(
         self, query: str, context: Dict[str, Any] = None
@@ -2321,7 +2805,203 @@ class BaseballStatisticsAgent:
 
         return viz_list
 
+    def _compact_tool_payload_for_prompt(self, data: Any, depth: int = 0) -> Any:
+        """최종 답변 프롬프트에 넣을 도구 결과를 경량화합니다."""
+        if isinstance(data, dict):
+            if depth >= 3:
+                keys = list(data.keys())
+                return {
+                    "_truncated_fields": len(keys),
+                    "_sample_keys": keys[: min(3, len(keys))],
+                }
+
+            items = list(data.items())
+            compact: Dict[str, Any] = {}
+            for key, value in items[: self.chat_tool_result_max_items]:
+                compact[key] = self._compact_tool_payload_for_prompt(value, depth + 1)
+            if len(items) > self.chat_tool_result_max_items:
+                compact["_truncated_fields"] = (
+                    len(items) - self.chat_tool_result_max_items
+                )
+            return compact
+
+        if isinstance(data, list):
+            if depth >= 3:
+                return {"_truncated_items": len(data)}
+
+            clipped = [
+                self._compact_tool_payload_for_prompt(item, depth + 1)
+                for item in data[: self.chat_tool_result_max_items]
+            ]
+            if len(data) > self.chat_tool_result_max_items:
+                clipped.append(
+                    {"_truncated_items": len(data) - self.chat_tool_result_max_items}
+                )
+            return clipped
+
+        if isinstance(data, str) and len(data) > 300:
+            return f"{data[:300]}...(truncated)"
+
+        return data
+
+    def _serialize_tool_data_for_prompt(self, data: Any) -> str:
+        """도구 결과를 길이 제한 내 JSON 문자열로 직렬화합니다."""
+        sanitized_data = _replace_team_codes(data)
+        compact_data = self._compact_tool_payload_for_prompt(sanitized_data)
+        data_json = json.dumps(
+            compact_data,
+            ensure_ascii=False,
+            cls=DateTimeEncoder,
+        )
+        if len(data_json) > self.chat_tool_result_max_chars:
+            data_json = (
+                f"{data_json[: self.chat_tool_result_max_chars]}...(truncated)"
+            )
+        return data_json
+
+    def _summarize_team_tool_data_for_prompt(self, data: Any) -> Any:
+        """팀 분석 fast-path에서 프롬프트 입력용 핵심 필드만 유지합니다."""
+        if not isinstance(data, dict):
+            return data
+
+        team_name = data.get("team_name")
+        year = data.get("year")
+
+        if "top_batters" in data or "top_pitchers" in data:
+            top_batters = []
+            for row in data.get("top_batters", [])[:3]:
+                if not isinstance(row, dict):
+                    continue
+                top_batters.append(
+                    {
+                        "player_name": row.get("player_name"),
+                        "avg": row.get("avg"),
+                        "ops": row.get("ops"),
+                        "home_runs": row.get("home_runs"),
+                        "rbi": row.get("rbi"),
+                    }
+                )
+
+            top_pitchers = []
+            for row in data.get("top_pitchers", [])[:3]:
+                if not isinstance(row, dict):
+                    continue
+                top_pitchers.append(
+                    {
+                        "player_name": row.get("player_name"),
+                        "era": row.get("era"),
+                        "whip": row.get("whip"),
+                        "wins": row.get("wins"),
+                        "saves": row.get("saves"),
+                        "holds": row.get("holds"),
+                    }
+                )
+
+            return {
+                "team_name": team_name,
+                "year": year,
+                "top_batters": top_batters,
+                "top_pitchers": top_pitchers,
+                "found": data.get("found"),
+            }
+
+        if "metrics" in data and isinstance(data.get("metrics"), dict):
+            metrics = data.get("metrics", {})
+            batting = metrics.get("batting", {}) if isinstance(metrics, dict) else {}
+            pitching = metrics.get("pitching", {}) if isinstance(metrics, dict) else {}
+            return {
+                "team_name": team_name,
+                "year": year,
+                "batting": {
+                    "avg": batting.get("avg"),
+                    "ops": batting.get("ops"),
+                    "total_hr": batting.get("total_hr"),
+                    "total_rbi": batting.get("total_rbi"),
+                },
+                "pitching": {
+                    "era_rank": pitching.get("era_rank"),
+                    "qs_rate": pitching.get("qs_rate"),
+                    "avg_era": pitching.get("avg_era"),
+                },
+                "rankings": data.get("rankings", {}),
+                "found": data.get("found"),
+            }
+
+        return data
+
+    def _resolve_answer_max_tokens(
+        self, query: str, tool_results: List[ToolResult]
+    ) -> Optional[int]:
+        """최종 답변 max_tokens를 질문 유형별로 동적 계산합니다."""
+        if not self.chat_dynamic_token_enabled:
+            return None
+
+        entity_filter = extract_entities_from_query(query)
+        if self._is_team_analysis_query(query, entity_filter):
+            return self.chat_answer_max_tokens_team
+
+        has_heavy_rows = False
+        for result in tool_results:
+            if not result.success or not isinstance(result.data, dict):
+                continue
+            for key in ("results", "players", "games", "rows", "leaders"):
+                value = result.data.get(key)
+                if isinstance(value, list) and len(value) > 4:
+                    has_heavy_rows = True
+                    break
+            if has_heavy_rows:
+                break
+
+        long_keywords = ("상세", "자세히", "비교", "분석", "리포트", "전체", "추세")
+        if has_heavy_rows or len(query) > 45 or any(k in query for k in long_keywords):
+            return self.chat_answer_max_tokens_long
+        return self.chat_answer_max_tokens_short
+
     async def _analyze_query_and_plan_tools(
+        self, query: str, context: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
+        """
+        질문 분석 진입점.
+        - 팀 분석 패턴이면 Fast-Path(규칙 기반) 적용
+        - 그 외에는 기존 LLM 분석 경로 사용
+        """
+        if context is None:
+            context = {}
+        elif not isinstance(context, dict):
+            context = {}
+
+        entity_filter = extract_entities_from_query(query)
+        fast_path_plan = self._build_fast_path_plan(query, entity_filter, context)
+        if fast_path_plan:
+            logger.info(
+                "[PlannerDecision] mode=fast_path team_query=true tool_count=%d",
+                len(fast_path_plan.get("tool_calls", [])),
+            )
+            return fast_path_plan
+
+        llm_analysis_started = datetime.now()
+        llm_plan = await self._analyze_query_with_llm(query, context)
+        analysis_ms = round(
+            (datetime.now() - llm_analysis_started).total_seconds() * 1000, 2
+        )
+        if "planner_mode" not in llm_plan:
+            llm_plan["planner_mode"] = "llm"
+        llm_plan["analysis_ms"] = analysis_ms
+        original_count = len(llm_plan.get("tool_calls", []))
+        llm_plan["tool_calls"] = self._soft_filter_llm_tool_calls(
+            llm_plan.get("tool_calls", []),
+            query=query,
+            entity_filter=entity_filter,
+        )
+        logger.info(
+            "[PlannerDecision] mode=llm team_query=%s tool_count=%d->%d",
+            self._is_team_analysis_query(query, entity_filter),
+            original_count,
+            len(llm_plan.get("tool_calls", [])),
+        )
+        return llm_plan
+
+    async def _analyze_query_with_llm(
         self, query: str, context: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
@@ -2364,6 +3044,7 @@ class BaseballStatisticsAgent:
             )
 
         query_text = processed_query  # 전처리된 쿼리 사용
+        # TODO(phase2): 팀 분석/선수 분석별 경량 planner 프롬프트 분리
         analysis_prompt = SYSTEM_PROMPT.format(
             current_date=current_date,
             current_year=current_year,
@@ -2381,7 +3062,14 @@ class BaseballStatisticsAgent:
 
             # 스트리밍 API인 경우 전체 응답을 모아서 처리
             raw_response = ""
-            async for chunk in self.llm_generator(analysis_messages):
+            analysis_max_tokens = (
+                self.chat_analysis_max_tokens
+                if self.chat_dynamic_token_enabled
+                else None
+            )
+            async for chunk in self.llm_generator(
+                analysis_messages, max_tokens=analysis_max_tokens
+            ):
                 if chunk:
                     raw_response += chunk
 
@@ -2817,7 +3505,7 @@ class BaseballStatisticsAgent:
     async def _generate_verified_answer(
         self,
         query: str,
-        tool_results: List[Dict[str, Any]],
+        tool_results: List[ToolResult],
         context: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
@@ -2830,6 +3518,9 @@ class BaseballStatisticsAgent:
         # 시간 컨텍스트 생성
         now = datetime.now()
         current_year = now.year
+        is_team_query = self._is_team_analysis_query(
+            query, extract_entities_from_query(query)
+        )
 
         time_context = ""
         if "재작년" in query:
@@ -2850,14 +3541,12 @@ class BaseballStatisticsAgent:
             if result.success:
                 tool_data_summary.append(f"도구 {i + 1} 결과: {result.message}")
                 try:
-                    # 팀 코드를 전체 이름으로 변환하는 로직 추가
-                    sanitized_data = _replace_team_codes(result.data)
-                    data_json = json.dumps(
-                        sanitized_data,
-                        ensure_ascii=False,
-                        indent=2,
-                        cls=DateTimeEncoder,
+                    prompt_data = (
+                        self._summarize_team_tool_data_for_prompt(result.data)
+                        if is_team_query
+                        else result.data
                     )
+                    data_json = self._serialize_tool_data_for_prompt(prompt_data)
                     tool_data_summary.append(f"데이터: {data_json}")
                 except Exception as e:
                     logger.error(f"[BaseballAgent] JSON serialization error: {e}")
@@ -2899,6 +3588,23 @@ class BaseballStatisticsAgent:
             answer_prompt = COACH_PROMPT.format(
                 question=f"{query}{time_context}", context=tool_data_text
             )
+        elif is_team_query:
+            answer_prompt = (
+                "당신은 KBO 전문 분석가 BEGA입니다.\n"
+                "아래 DB 결과만 사용해 간결하고 정확하게 답변하세요.\n"
+                "반드시 아래 형식을 지키세요:\n"
+                "## 요약\n"
+                "- 핵심 결론 2~3문장\n\n"
+                "## 핵심 지표\n"
+                "- 반드시 표 1개 이상 포함\n\n"
+                "## 인사이트\n"
+                "- 2~4개 bullet\n\n"
+                "- 데이터 출처: DB 조회 기반\n\n"
+                "### 사용자 질문\n"
+                f"{query}{time_context}\n\n"
+                "### DB 검색 결과\n"
+                f"{tool_data_text}"
+            )
         else:
             # 기본 BEGA 페르소나 (기존 로직 유지)
             answer_prompt = DEFAULT_ANSWER_PROMPT.format(
@@ -2907,10 +3613,26 @@ class BaseballStatisticsAgent:
 
         try:
             # 검증된 데이터 기반 답변 생성
-            logger.info(f"[BaseballAgent] Final Answer Prompt:\n{answer_prompt}")
+            answer_prompt_preview = (
+                answer_prompt
+                if len(answer_prompt) <= 1200
+                else f"{answer_prompt[:1200]}...(truncated)"
+            )
+            logger.info(
+                "[BaseballAgent] Final Answer Prompt (preview): %s",
+                answer_prompt_preview,
+            )
             answer_messages = [{"role": "user", "content": answer_prompt}]
+            answer_max_tokens = self._resolve_answer_max_tokens(query, tool_results)
+            logger.info(
+                "[AnswerBudget] max_tokens=%s dynamic=%s query_len=%d tool_count=%d",
+                answer_max_tokens,
+                self.chat_dynamic_token_enabled,
+                len(query),
+                len(tool_results),
+            )
             # 스트리밍을 위해 await 제거하고 제너레이터 반환
-            answer = self.llm_generator(answer_messages)
+            answer = self.llm_generator(answer_messages, max_tokens=answer_max_tokens)
 
             # 성공한 도구가 하나라도 있는지 확인
             has_verified_data = any(result.success for result in tool_results)

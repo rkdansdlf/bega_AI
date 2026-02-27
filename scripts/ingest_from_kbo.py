@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import hashlib
 import json
@@ -1183,6 +1184,206 @@ def batched(
         yield list(iterable[idx : idx + size])
 
 
+RowPrepareTask = Tuple[str, Dict[str, Any], str, bool, str]
+
+
+def _build_chunk_payload_dicts_for_row(
+    table_name: str,
+    row: Dict[str, Any],
+    source_row_id: str,
+    *,
+    use_legacy_renderer: bool,
+    today_str: str,
+) -> List[Dict[str, Any]]:
+    profile = TABLE_PROFILES.get(table_name, {})
+    title = build_title(row, table_name, source_row_id, profile)
+    renderer = profile.get("renderer")
+
+    if renderer and not use_legacy_renderer:
+        enriched_row = dict(row)
+        enriched_row["source_table"] = table_name
+        enriched_row["source_row_id"] = source_row_id
+        content = renderer(
+            enriched_row,
+            league_avg=None,
+            percentiles=None,
+            today_str=today_str,
+        )
+    else:
+        content = build_content(row, table_name, source_row_id, profile)
+
+    season_year = coerce_int(first_value(row, ["season_year", "season", "year"]))
+    if season_year is None:
+        season_year = 0
+
+    season_id = coerce_int(first_value(row, ["season_id", "season_lookup_id"]))
+    league_type_code = coerce_int(
+        first_value(row, ["league_type_code", "league_type", "league"])
+    )
+    if league_type_code is None:
+        league_type_code = 0
+
+    team_id = first_value(
+        row,
+        ["team_id", "home_team_id", "away_team_id", "team", "team_code"],
+    )
+    player_id = first_value(row, ["player_id"])
+    chunks = smart_chunks(content)
+    if not chunks:
+        return []
+
+    payloads: List[Dict[str, Any]] = []
+    if len(chunks) == 1:
+        payloads.append(
+            {
+                "table": table_name,
+                "source_row_id": source_row_id,
+                "title": title,
+                "content": chunks[0],
+                "season_year": season_year,
+                "season_id": season_id,
+                "league_type_code": league_type_code,
+                "team_id": str(team_id) if team_id is not None else None,
+                "player_id": str(player_id) if player_id is not None else None,
+                "meta": row,
+            }
+        )
+    else:
+        for idx, chunk in enumerate(chunks, start=1):
+            payloads.append(
+                {
+                    "table": table_name,
+                    "source_row_id": f"{source_row_id}#part{idx}",
+                    "title": f"{title} (분할 {idx})",
+                    "content": chunk,
+                    "season_year": season_year,
+                    "season_id": season_id,
+                    "league_type_code": league_type_code,
+                    "team_id": str(team_id) if team_id is not None else None,
+                    "player_id": str(player_id) if player_id is not None else None,
+                    "meta": row,
+                }
+            )
+    return payloads
+
+
+def _prepare_single_row_task(task: RowPrepareTask) -> List[Dict[str, Any]]:
+    table_name, row, source_row_id, use_legacy_renderer, today_str = task
+    return _build_chunk_payload_dicts_for_row(
+        table_name=table_name,
+        row=row,
+        source_row_id=source_row_id,
+        use_legacy_renderer=use_legacy_renderer,
+        today_str=today_str,
+    )
+
+
+def _prepare_rows_with_thread_engine(
+    tasks: Sequence[RowPrepareTask], workers: int
+) -> List[List[Dict[str, Any]]]:
+    if not tasks:
+        return []
+    if workers <= 1:
+        return [_prepare_single_row_task(task) for task in tasks]
+
+    results: List[Optional[List[Dict[str, Any]]]] = [None] * len(tasks)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_index = {
+            executor.submit(_prepare_single_row_task, task): idx
+            for idx, task in enumerate(tasks)
+        }
+        for future in as_completed(future_to_index):
+            idx = future_to_index[future]
+            results[idx] = future.result()
+    return [item or [] for item in results]
+
+
+def _run_task_in_new_subinterpreter(task: RowPrepareTask) -> List[Dict[str, Any]]:
+    import concurrent.interpreters as interpreters
+
+    task_payload = {
+        "table_name": task[0],
+        "row": task[1],
+        "source_row_id": task[2],
+        "use_legacy_renderer": task[3],
+        "today_str": task[4],
+    }
+    task_json = json.dumps(task_payload, ensure_ascii=False, default=str)
+    result_queue = interpreters.create_queue()
+    interpreter = interpreters.create()
+    try:
+        interpreter.prepare_main(
+            task_json=task_json,
+            result_queue=result_queue,
+        )
+        interpreter.exec(
+            """
+import json
+from scripts.ingest_from_kbo import _build_chunk_payload_dicts_for_row
+
+try:
+    task = json.loads(task_json)
+    payloads = _build_chunk_payload_dicts_for_row(
+        table_name=task["table_name"],
+        row=task["row"],
+        source_row_id=task["source_row_id"],
+        use_legacy_renderer=task["use_legacy_renderer"],
+        today_str=task["today_str"],
+    )
+    result_queue.put({"ok": True, "payloads": payloads})
+except Exception as exc:  # noqa: BLE001
+    result_queue.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+"""
+        )
+        result = result_queue.get()
+        if isinstance(result, dict) and result.get("ok"):
+            payloads = result.get("payloads")
+            if isinstance(payloads, list):
+                return payloads
+        raise RuntimeError(
+            str(result.get("error")) if isinstance(result, dict) else "subinterp task failed"
+        )
+    finally:
+        interpreter.close()
+
+
+def _prepare_rows_with_subinterpreter_engine(
+    tasks: Sequence[RowPrepareTask], workers: int
+) -> List[List[Dict[str, Any]]]:
+    if not tasks:
+        return []
+    if workers <= 1:
+        return [_run_task_in_new_subinterpreter(task) for task in tasks]
+
+    results: List[Optional[List[Dict[str, Any]]]] = [None] * len(tasks)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_index = {
+            executor.submit(_run_task_in_new_subinterpreter, task): idx
+            for idx, task in enumerate(tasks)
+        }
+        for future in as_completed(future_to_index):
+            idx = future_to_index[future]
+            results[idx] = future.result()
+    return [item or [] for item in results]
+
+
+def _prepare_rows_for_engine(
+    tasks: Sequence[RowPrepareTask],
+    *,
+    parallel_engine: str,
+    workers: int,
+) -> Tuple[List[List[Dict[str, Any]]], str]:
+    if parallel_engine == "subinterp":
+        try:
+            return _prepare_rows_with_subinterpreter_engine(tasks, workers), "subinterp"
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[WARN] parallel_engine=subinterp failed ({exc}). Falling back to thread engine."
+            )
+            return _prepare_rows_with_thread_engine(tasks, workers), "thread"
+    return _prepare_rows_with_thread_engine(tasks, workers), "thread"
+
+
 def flush_chunks(
     cur,
     settings,
@@ -1270,6 +1471,8 @@ def ingest_table(
     skip_embedding: bool,
     max_concurrency: int,
     commit_interval: int,
+    parallel_engine: str,
+    workers: int,
     stats: Dict[str, Any],
 ) -> int:
     if table_name == "rag_chunks":
@@ -1283,6 +1486,7 @@ def ingest_table(
     settings = get_settings()
     processed_chunks = 0
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    effective_parallel_engine = parallel_engine
 
     # upsert 작업이 오래 걸려 타임아웃이 발생하지 않도록 statement_timeout을 방지
     with dest_conn.cursor() as cur:
@@ -1367,6 +1571,7 @@ def ingest_table(
                 f"      테이블 '{table_name}'에서 {fetched_rows}개 행을 가져왔습니다...",
                 flush=True,
             )
+            row_tasks: List[RowPrepareTask] = []
             for raw_row in rows:
                 row = dict(raw_row)
                 source_row_id = build_source_row_id(
@@ -1375,86 +1580,32 @@ def ingest_table(
                 if source_row_id in seen_source_row_ids:
                     continue
                 seen_source_row_ids.add(source_row_id)
-                title = build_title(row, table_name, source_row_id, profile)
-                renderer = profile.get("renderer")
-                if renderer and not use_legacy_renderer:
-                    enriched_row = dict(row)
-                    enriched_row["source_table"] = table_name
-                    enriched_row["source_row_id"] = source_row_id
-                    content = renderer(
-                        enriched_row,
-                        league_avg=None,
-                        percentiles=None,
-                        today_str=today_str,
+                row_tasks.append(
+                    (
+                        table_name,
+                        row,
+                        source_row_id,
+                        use_legacy_renderer,
+                        today_str,
                     )
-                else:
-                    content = build_content(row, table_name, source_row_id, profile)
-
-                season_year = coerce_int(
-                    first_value(row, ["season_year", "season", "year"])
                 )
-                if season_year is None:
-                    season_year = 0
 
-                season_id = coerce_int(
-                    first_value(row, ["season_id", "season_lookup_id"])
+            prepared_rows, used_engine = _prepare_rows_for_engine(
+                row_tasks,
+                parallel_engine=effective_parallel_engine,
+                workers=workers,
+            )
+            if used_engine != effective_parallel_engine:
+                stats["parallel_engine_fallbacks"] = (
+                    stats.get("parallel_engine_fallbacks", 0) + 1
                 )
-                league_type_code = coerce_int(
-                    first_value(row, ["league_type_code", "league_type", "league"])
-                )
-                if league_type_code is None:
-                    league_type_code = 0
+                effective_parallel_engine = used_engine
 
-                team_id = first_value(
-                    row,
-                    [
-                        "team_id",
-                        "home_team_id",
-                        "away_team_id",
-                        "team",
-                        "team_code",
-                    ],
-                )
-                player_id = first_value(row, ["player_id"])
+            stats["effective_parallel_engine"] = effective_parallel_engine
 
-                # 긴 본문은 smart_chunks로 분할. 분할되면 #part{n} 접미어와 “(분할 n)”를 제목에 추가.
-                chunks = smart_chunks(content)
-                if not chunks:
-                    continue
-
-                if len(chunks) == 1:
-                    buffer.append(
-                        ChunkPayload(
-                            table=table_name,
-                            source_row_id=source_row_id,
-                            title=title,
-                            content=chunks[0],
-                            season_year=season_year,
-                            season_id=season_id,
-                            league_type_code=league_type_code,
-                            team_id=str(team_id) if team_id is not None else None,
-                            player_id=str(player_id) if player_id is not None else None,
-                            meta=row,
-                        )
-                    )
-                else:
-                    for idx, chunk in enumerate(chunks, start=1):
-                        buffer.append(
-                            ChunkPayload(
-                                table=table_name,
-                                source_row_id=f"{source_row_id}#part{idx}",
-                                title=f"{title} (분할 {idx})",
-                                content=chunk,
-                                season_year=season_year,
-                                season_id=season_id,
-                                league_type_code=league_type_code,
-                                team_id=str(team_id) if team_id is not None else None,
-                                player_id=(
-                                    str(player_id) if player_id is not None else None
-                                ),
-                                meta=row,
-                            )
-                        )
+            for chunk_payloads in prepared_rows:
+                for payload in chunk_payloads:
+                    buffer.append(ChunkPayload(**payload))
 
                 if len(buffer) >= embed_batch_size:
                     flushed = flush_chunks(
@@ -1510,6 +1661,8 @@ def ingest(
     skip_embedding: bool,
     max_concurrency: int,
     commit_interval: int,
+    parallel_engine: str,
+    workers: int,
 ) -> None:
     _require_psycopg()
     settings = get_settings()
@@ -1539,6 +1692,8 @@ def ingest(
                 "sleep_seconds": 0.0,
                 "batches": 0,
                 "since_commit": 0,
+                "effective_parallel_engine": parallel_engine,
+                "parallel_engine_fallbacks": 0,
             }
             chunks = ingest_table(
                 source_conn,  # Read from Source
@@ -1553,12 +1708,16 @@ def ingest(
                 skip_embedding=skip_embedding,
                 max_concurrency=max_concurrency,
                 commit_interval=commit_interval,
+                parallel_engine=parallel_engine,
+                workers=workers,
                 stats=stats,
             )
             ingested_total += chunks
             print(
                 f"   -> 테이블 '{table}'에서 {chunks}개 청크를 작성했습니다 "
-                f"(배치={stats['batches']}, 임베딩 호출={stats['embedding_calls']}, 대기 시간={stats['sleep_seconds']:.2f}초)"
+                f"(배치={stats['batches']}, 임베딩 호출={stats['embedding_calls']}, "
+                f"대기 시간={stats['sleep_seconds']:.2f}초, 엔진={stats['effective_parallel_engine']}, "
+                f"fallback={stats['parallel_engine_fallbacks']})"
             )
     finally:
         source_conn.close()
@@ -1618,6 +1777,18 @@ def parse_args() -> argparse.Namespace:
         help="임베딩 API 호출 동시성 (기본 5).",
     )
     parser.add_argument(
+        "--parallel-engine",
+        choices=("thread", "subinterp"),
+        default="thread",
+        help="행 전처리 병렬 엔진 선택 (기본 thread). subinterp 실패 시 thread로 자동 fallback.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="행 전처리 병렬 워커 수 (기본 4).",
+    )
+    parser.add_argument(
         "--since",
         type=str,
         default=None,
@@ -1666,4 +1837,6 @@ if __name__ == "__main__":
         skip_embedding=args.no_embed,
         max_concurrency=max(1, args.max_concurrency),
         commit_interval=max(1, args.commit_interval),
+        parallel_engine=args.parallel_engine,
+        workers=max(1, args.workers),
     )

@@ -9,7 +9,6 @@ from typing import Dict, List, Any, Optional, Tuple
 import logging
 import time
 import threading
-import psycopg
 from psycopg.rows import dict_row
 from psycopg import Connection as PgConnection
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
