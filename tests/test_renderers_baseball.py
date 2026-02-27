@@ -1,5 +1,3 @@
-import textwrap
-
 from app.core.renderers.baseball import (
     render_batting_season,
     render_pitching_season,

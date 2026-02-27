@@ -6,6 +6,7 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 
 from .config import get_settings
 from .deps import lifespan
@@ -53,8 +54,58 @@ def create_app() -> FastAPI:
     app.include_router(search.router)
     app.include_router(ingest.router)
     app.include_router(vision.router)
+    app.include_router(vision.router, prefix="/ai")
     app.include_router(coach.router)
+    app.include_router(coach.router, prefix="/ai")
     app.include_router(moderation.router)
+
+    def _custom_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        security_schemes = openapi_schema.setdefault("components", {}).setdefault(
+            "securitySchemes", {}
+        )
+        security_schemes.setdefault(
+            "InternalApiKey",
+            {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Internal-Api-Key",
+                "description": (
+                    "AI 내부 호출용 키. Authorization Bearer 토큰을 사용할 수 있습니다."
+                ),
+            },
+        )
+
+        protected_prefixes = (
+            "/ai/chat",
+            "/coach",
+            "/ai/coach",
+            "/vision",
+            "/ai/vision",
+            "/ai/search",
+            "/ai/ingest",
+        )
+        for path, operations in openapi_schema.get("paths", {}).items():
+            if any(path.startswith(prefix) for prefix in protected_prefixes):
+                for operation in operations.values():
+                    if not isinstance(operation, dict):
+                        continue
+                    security = operation.setdefault("security", [])
+                    if {"InternalApiKey": []} not in security:
+                        security.append({"InternalApiKey": []})
+
+        app.openapi_schema = openapi_schema
+        return app.openapi_schema
+
+    app.openapi = _custom_openapi
 
     @app.get("/health", tags=["system"])
     async def health():

@@ -11,7 +11,7 @@ httpx>=0.25
 openai>=1.14.0
 # Use CPU-only Torch to avoid downloading CUDA/nvidia libraries during image build.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.5.1+cpu
+torch==2.10.0
 sentence-transformers==3.3.1
 tqdm>=4.66.0
 firebase-admin>=6.5.0

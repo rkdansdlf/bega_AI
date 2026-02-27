@@ -6,8 +6,12 @@
 """
 
 import logging
+import re
+from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 from dataclasses import dataclass
+import inspect
+
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,92 @@ class ToolCaller:
 
     def __init__(self):
         self.tools: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _coerce_year(value: Any) -> int | None:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            match = re.search(r"\d{4}", value)
+            if match:
+                return int(match.group(0))
+        return None
+
+    @classmethod
+    def _default_tool_value(cls, tool_name: str, param_name: str) -> Any | None:
+        year_defaults = {
+            "get_leaderboard",
+            "get_team_summary",
+            "get_team_advanced_metrics",
+            "get_team_rank",
+            "get_team_last_game",
+            "get_korean_series_winner",
+            "get_team_basic_info",
+            "get_player_stats",
+            "get_career_stats",
+            "validate_player",
+        }
+
+        if param_name == "year" and tool_name in year_defaults:
+            return datetime.now().year
+        if param_name == "position" and tool_name == "get_leaderboard":
+            return "batting"
+        if param_name == "comparison_type" and tool_name == "compare_players":
+            return "career"
+        if param_name == "stat_name" and tool_name == "get_leaderboard":
+            return "ops"
+        if param_name == "limit" and tool_name == "get_leaderboard":
+            return 10
+        return None
+
+    def _normalize_parameters(
+        self, tool_name: str, tool_function: Callable, parameters: Dict[str, Any]
+    ) -> tuple[Dict[str, Any], set[str], set[str]]:
+        sig = inspect.signature(tool_function)
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        )
+
+        # 불필요한 인자 제거 (LLM이 임의 키를 넣는 케이스 방지)
+        if accepts_kwargs:
+            normalized = dict(parameters)
+        else:
+            normalized = {
+                key: value
+                for key, value in parameters.items()
+                if key in sig.parameters
+            }
+        dropped = set(parameters.keys()) - set(normalized.keys())
+
+        # 누락 필수/필수 유사 파라미터 채우기
+        missing_required: set[str] = set()
+        for name, param in sig.parameters.items():
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                continue
+            if name not in normalized:
+                fallback = self._default_tool_value(tool_name, name)
+                if fallback is not None:
+                    normalized[name] = fallback
+                elif param.default == inspect.Parameter.empty:
+                    missing_required.add(name)
+
+        # year 문자열 보정("2025년", 공백 등)
+        if "year" in normalized:
+            coerced_year = self._coerce_year(normalized["year"])
+            if coerced_year is not None:
+                normalized["year"] = coerced_year
+            elif normalized.get("year") is None:
+                normalized["year"] = datetime.now().year
+
+        # limit 정수 정규화
+        if "limit" in normalized and isinstance(normalized["limit"], str):
+            stripped = normalized["limit"].strip()
+            if stripped.isdigit():
+                normalized["limit"] = int(stripped)
+
+        return normalized, missing_required, dropped
 
     def register_tool(
         self,
@@ -118,30 +208,28 @@ class ToolCaller:
         tool_function = tool_info["function"]
 
         try:
-            # 매개변수 유효성 검사
-            # 매개변수 유효성 검사
-            import inspect
+            normalized_parameters, missing_required, dropped_params = self._normalize_parameters(
+                tool_call.tool_name, tool_function, tool_call.parameters
+            )
 
-            sig = inspect.signature(tool_function)
-
-            # 실제 필수 파라미터(default 값이 없는)만 확인
-            required_func_params = {
-                name
-                for name, param in sig.parameters.items()
-                if param.default == inspect.Parameter.empty
-                and param.kind != inspect.Parameter.VAR_KEYWORD
-            }
-
-            provided_params = set(tool_call.parameters.keys())
-            missing_required = required_func_params - provided_params
+            if dropped_params:
+                logger.warning(
+                    "[ToolCaller] Dropped unsupported parameters: "
+                    f"{tool_call.tool_name}: {sorted(dropped_params)}"
+                )
 
             if missing_required:
                 logger.warning(
                     f"[ToolCaller] Missing REQUIRED parameters: {missing_required}"
                 )
+                return ToolResult(
+                    success=False,
+                    data={},
+                    message=f"매개변수 누락: {', '.join(sorted(missing_required))}",
+                )
 
             # 도구 함수 실행
-            result = tool_function(**tool_call.parameters)
+            result = tool_function(**normalized_parameters)
 
             # 결과 타입 확인
             if isinstance(result, ToolResult):
@@ -198,7 +286,7 @@ class ToolCaller:
         return results
 
     async def execute_multiple_tools_parallel(
-        self, tool_calls: List[ToolCall]
+        self, tool_calls: List[ToolCall], max_concurrency: int | None = None
     ) -> List[ToolResult]:
         """
         여러 도구를 병렬로 실행합니다.
@@ -214,12 +302,26 @@ class ToolCaller:
         """
         import asyncio
 
-        logger.info(f"[ToolCaller] Executing {len(tool_calls)} tools in parallel")
+        logger.info(
+            "[ToolCaller] Executing %d tools in parallel (max_concurrency=%s)",
+            len(tool_calls),
+            max_concurrency,
+        )
+
+        semaphore = (
+            asyncio.Semaphore(max_concurrency)
+            if isinstance(max_concurrency, int) and max_concurrency > 0
+            else None
+        )
 
         async def execute_single_async(tool_call: ToolCall) -> ToolResult:
             """단일 도구를 비동기적으로 실행합니다."""
             loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self.execute_tool, tool_call)
+            if semaphore is None:
+                return await loop.run_in_executor(None, self.execute_tool, tool_call)
+
+            async with semaphore:
+                return await loop.run_in_executor(None, self.execute_tool, tool_call)
 
         # 병렬 실행
         tasks = [execute_single_async(tc) for tc in tool_calls]
