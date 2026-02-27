@@ -14,16 +14,16 @@ import uuid
 from time import perf_counter
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Literal
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, model_validator
 
 from psycopg_pool import ConnectionPool
 
 from ..deps import (
     get_agent,
-    get_db_connection,
     get_connection_pool,
     get_coach_llm_generator,
+    require_ai_internal_token,
 )
 from ..config import get_settings
 from ..agents.baseball_agent import BaseballStatisticsAgent
@@ -31,24 +31,26 @@ from ..core.prompts import COACH_PROMPT_V2
 from ..core.coach_validator import (
     parse_coach_response,
     CoachResponse,
-    _create_fallback_response,
 )
 from ..core.coach_cache_key import build_coach_cache_key, normalize_focus
-from ..core.ratelimit import rate_limit_dependency
+from ..core.ratelimit import rate_limit_coach_dependency
 from ..tools.database_query import DatabaseQueryTool
 from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
 logger = logging.getLogger(__name__)
 
 # 빈 응답 시 재시도 횟수
-MAX_RETRY_ON_EMPTY = 2
 COACH_CACHE_SCHEMA_VERSION = "v3"
 COACH_CACHE_PROMPT_VERSION = "v5_focus"
 COACH_YEAR_MIN = 1982
+MAX_COACH_FOCUS_ITEMS = 6
+MAX_COACH_QUESTION_OVERRIDE_LENGTH = 2000
 PENDING_STALE_SECONDS = 300
 PENDING_WAIT_TIMEOUT_SECONDS = 10
 PENDING_WAIT_POLL_MS = 300
 FAILED_RETRY_AFTER_SECONDS = 3600  # FAILED 항목 1시간 후 자동 재시도 허용
+COACH_REQUEST_MODE_AUTO = "auto_brief"
+COACH_REQUEST_MODE_MANUAL = "manual_detail"
 FOCUS_SECTION_HEADERS: Dict[str, str] = {
     "recent_form": "## 최근 전력",
     "bullpen": "## 불펜 상태",
@@ -508,16 +510,6 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _safe_int(value: Any, default: int = 0) -> int:
-    """None-safe int conversion for formatting."""
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
-
-
 def _remove_duplicate_json_start(text: str) -> str:
     """
     LLM 스트리밍 중 발생하는 JSON 시작 부분 중복을 제거합니다.
@@ -729,7 +721,7 @@ class AnalyzeRequest(BaseModel):
     league_context: Optional[Dict[str, Any]] = None
     focus: List[str] = []
     game_id: Optional[str] = None
-    request_mode: Literal["auto_brief", "manual_detail"] = "manual_detail"
+    request_mode: Literal[COACH_REQUEST_MODE_AUTO, COACH_REQUEST_MODE_MANUAL] = COACH_REQUEST_MODE_MANUAL
     question_override: Optional[str] = None
 
     @model_validator(mode="before")
@@ -737,6 +729,29 @@ class AnalyzeRequest(BaseModel):
     def backfill_home_team_id(cls, values: Any) -> Any:
         """team_id만 보내는 기존 호출을 home_team_id로 매핑"""
         if isinstance(values, dict):
+            focus = values.get("focus")
+            if focus is not None and isinstance(focus, list) and len(focus) > MAX_COACH_FOCUS_ITEMS:
+                raise ValueError(f"focus 항목은 최대 {MAX_COACH_FOCUS_ITEMS}개까지 허용됩니다.")
+
+            question_override = values.get("question_override")
+            if isinstance(question_override, str):
+                question_override_trimmed = question_override.strip()
+                if not question_override_trimmed:
+                    values["question_override"] = None
+                elif len(question_override_trimmed) > MAX_COACH_QUESTION_OVERRIDE_LENGTH:
+                    raise ValueError(
+                        "question_override가 너무 깁니다. "
+                        f"최대 {MAX_COACH_QUESTION_OVERRIDE_LENGTH}자까지 허용됩니다."
+                    )
+                else:
+                    values["question_override"] = question_override_trimmed
+
+            request_mode = values.get("request_mode")
+            if request_mode == COACH_REQUEST_MODE_AUTO and values.get("question_override") is not None:
+                raise ValueError(
+                    "auto_brief 모드에서는 question_override를 사용할 수 없습니다."
+                )
+
             if not values.get("home_team_id") and values.get("team_id"):
                 values["home_team_id"] = values["team_id"]
         return values
@@ -746,7 +761,8 @@ class AnalyzeRequest(BaseModel):
 async def analyze_team(
     payload: AnalyzeRequest,
     agent: BaseballStatisticsAgent = Depends(get_agent),
-    _: None = Depends(rate_limit_dependency),
+    __: None = Depends(rate_limit_coach_dependency),
+    _: None = Depends(require_ai_internal_token),
 ):
     """
     특정 팀(들)에 대한 심층 분석을 요청합니다. 'The Coach' 페르소나가 적용됩니다.
@@ -788,17 +804,16 @@ async def analyze_team(
             else None
         )
         request_mode = payload.request_mode
-        is_auto_brief = request_mode == "auto_brief"
+        is_auto_brief = request_mode == COACH_REQUEST_MODE_AUTO
         input_focus = list(payload.focus or [])
         resolved_focus = (
             ["recent_form"] if is_auto_brief else normalize_focus(input_focus)
         )
         if is_auto_brief:
             if payload.question_override:
-                logger.warning(
-                    "[Coach Router] auto_brief ignores question_override for %s: %s",
-                    home_name,
-                    payload.question_override,
+                raise HTTPException(
+                    status_code=400,
+                    detail="auto_brief 요청에서는 question_override를 사용할 수 없습니다.",
                 )
             effective_question_override = None
             question_signature_override = "auto"
@@ -1196,7 +1211,9 @@ async def analyze_team(
 
                 # Phase 2: 컨텍스트 포맷팅
                 game_context = (
-                    payload.question_override if payload.question_override else None
+                    effective_question_override
+                    if effective_question_override
+                    else None
                 )
                 # Game info fetching can be added here if needed, consistent with tool_results usage
 
@@ -1240,6 +1257,26 @@ async def analyze_team(
                         "event": "message",
                         "data": json.dumps(
                             {"delta": fallback_response}, ensure_ascii=False
+                        ),
+                    }
+                    yield {
+                        "event": "meta",
+                        "data": json.dumps(
+                            {
+                                "validation_status": "fallback",
+                                "fast_path": True,
+                                "cached": False,
+                                "request_mode": request_mode,
+                                "resolved_focus": resolved_focus,
+                                "focus_signature": focus_signature,
+                                "question_signature": question_signature,
+                                "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                                "cache_state": cache_state,
+                                "in_progress": False,
+                                "focus_section_missing": False,
+                                "missing_focus_sections": [],
+                            },
+                            ensure_ascii=False,
                         ),
                     }
                     yield {"event": "done", "data": "[DONE]"}
@@ -1356,6 +1393,26 @@ async def analyze_team(
                     pass
 
                 yield {
+                    "event": "meta",
+                    "data": json.dumps(
+                        {
+                            "validation_status": "fallback",
+                            "fast_path": True,
+                            "cached": False,
+                            "request_mode": request_mode,
+                            "resolved_focus": resolved_focus,
+                            "focus_signature": focus_signature,
+                            "question_signature": question_signature,
+                            "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                            "cache_state": cache_state,
+                            "in_progress": False,
+                            "focus_section_missing": False,
+                            "missing_focus_sections": [],
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+                yield {
                     "event": "error",
                     "data": json.dumps({"error": str(e)}, ensure_ascii=False),
                 }
@@ -1385,7 +1442,8 @@ async def analyze_team(
 async def analyze_team_legacy(
     payload: AnalyzeRequest,
     agent: BaseballStatisticsAgent = Depends(get_agent),
-    _: None = Depends(rate_limit_dependency),
+    __: None = Depends(rate_limit_coach_dependency),
+    _: None = Depends(require_ai_internal_token),
 ):
     """
     기존 방식의 Coach 분석 (전체 에이전트 파이프라인 사용).
@@ -1398,6 +1456,11 @@ async def analyze_team_legacy(
         if not primary_team_id:
             raise HTTPException(
                 status_code=400, detail="home_team_id 또는 team_id가 필요합니다."
+            )
+        if payload.request_mode == COACH_REQUEST_MODE_AUTO and payload.question_override:
+            raise HTTPException(
+                status_code=400,
+                detail="auto_brief 요청에서는 question_override를 사용할 수 없습니다.",
             )
 
         team_name = agent._convert_team_id_to_name(primary_team_id)

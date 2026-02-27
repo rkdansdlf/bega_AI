@@ -53,16 +53,6 @@ def _format_ip(value: Any) -> Optional[str]:
     return f"{whole}.{fraction}이닝"
 
 
-def _format_percentage(value: Any, digits: int = 1) -> Optional[str]:
-    if value in NUMBER_SENTINELS:
-        return None
-    try:
-        pct = float(value) * 100
-    except (TypeError, ValueError):
-        return None
-    return f"{pct:.{digits}f}%"
-
-
 def _format_count(value: Any, suffix: str = "") -> Optional[str]:
     if value is None or value == "null" or value == "None":
         return None

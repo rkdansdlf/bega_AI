@@ -6,13 +6,17 @@
 환경 변수 USE_FIRESTORE_SEARCH 설정은 과거 호환 전용이며 현재는 PostgreSQL pgvector 검색만 지원합니다.
 """
 
+import logging
 import os
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.errors import UndefinedTable
 
-from ..config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 def _vector_literal(vector: Sequence[float]) -> str:
@@ -21,6 +25,26 @@ def _vector_literal(vector: Sequence[float]) -> str:
     예: [0.1, 0.2, 0.3] -> '[0.10000000,0.20000000,0.30000000]'
     """
     return "[" + ",".join(f"{v:.8f}" for v in vector) + "]"
+
+
+def _rag_chunks_exists(conn: psycopg.Connection) -> bool:
+    """`rag_chunks` 테이블이 존재하는지 확인합니다."""
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'rag_chunks'
+                );
+                """
+            )
+            row = cursor.fetchone()
+            return bool(row[0]) if row else False
+    except Exception:
+        return False
 
 
 def similarity_search(
@@ -49,6 +73,10 @@ def similarity_search(
         raise NotImplementedError(
             "Firestore search has been removed. PostgreSQL pgvector search is supported only."
         )
+
+    if not _rag_chunks_exists(conn):
+        logger.warning("[Search] rag_chunks table is not available.")
+        return []
 
     # 기본값: PostgreSQL pgvector 사용
     filter_clauses: List[str] = ["embedding IS NOT NULL"]  # 임베딩이 없는 문서는 제외
@@ -155,19 +183,18 @@ def similarity_search(
         """
         final_params = [vector_str] + filter_params + [vector_str, limit]
 
-    import time
-
     start_time = time.perf_counter()
-    with conn.cursor(row_factory=dict_row) as cur:
-        # HNSW 검색 정확도 튜닝 (Recall 향상)
-        cur.execute("SET LOCAL hnsw.ef_search = 100;")
-        cur.execute(sql, final_params)
-        rows = cur.fetchall()
+
+    try:
+        with conn.cursor(row_factory=dict_row) as cur:
+            # HNSW 검색 정확도 튜닝 (Recall 향상)
+            cur.execute("SET LOCAL hnsw.ef_search = 100;")
+            cur.execute(sql, final_params)
+            rows = cur.fetchall()
+    except UndefinedTable:
+        return []
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
-    import logging
-
-    logger = logging.getLogger(__name__)
     logger.info(
         "[Search] Hybrid RRF search took %.2fms (results=%d, hybrid=%s)",
         elapsed_ms,
