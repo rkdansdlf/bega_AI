@@ -68,3 +68,25 @@ def test_gate_to_generation_matrix():
     }
     for gate, expected in matrix.items():
         assert _should_generate_from_gate(gate) is expected
+
+
+def test_completed_cache_expires_when_ttl_is_exceeded():
+    old_time = datetime.now(timezone.utc) - timedelta(days=2)
+    gate = _determine_cache_gate(
+        status="COMPLETED",
+        has_cached_json=True,
+        updated_at=old_time,
+        completed_ttl_seconds=3600,
+    )
+    assert gate == "MISS_GENERATE"
+
+
+def test_completed_cache_hit_within_ttl():
+    fresh_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+    gate = _determine_cache_gate(
+        status="COMPLETED",
+        has_cached_json=True,
+        updated_at=fresh_time,
+        completed_ttl_seconds=3600,
+    )
+    assert gate == "HIT"

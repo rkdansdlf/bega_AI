@@ -12,11 +12,9 @@ import json
 import logging
 import re
 import random
-import time
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import psycopg
-import math
 
 import httpx
 
@@ -492,8 +490,8 @@ class RAGPipeline:
                         processed_batters.append(processed)
             elif doc.get("source_table") in [
                 "game",
+                "game_flow_summary",
                 "game_metadata",
-                "game_inning_scores",
                 "game_batting_stats",
                 "game_pitching_stats",
             ]:
@@ -1056,6 +1054,12 @@ class RAGPipeline:
             "스코어",
             "결과",
             "이닝별",
+            "이닝별 득점",
+            "몇 점",
+            "7회",
+            "8회",
+            "9회",
+            "연장",
             "오늘",
             "어제",
             "내일",
@@ -1122,6 +1126,21 @@ class RAGPipeline:
         has_team_vs_pattern = bool(re.search(team_vs_pattern, query, re.IGNORECASE))
 
         return has_game_keywords or has_date_pattern or has_team_vs_pattern
+
+    def _is_game_flow_narrative_query(self, query: str) -> bool:
+        query_lower = query.lower()
+        narrative_keywords = [
+            "경기 흐름",
+            "흐름 요약",
+            "승부처",
+            "언제 갈렸어",
+            "언제 갈렸",
+            "역전",
+            "동점 흐름",
+            "초중후반 득점",
+            "득점 양상",
+        ]
+        return any(keyword in query_lower for keyword in narrative_keywords)
 
     def _is_general_conversation(self, query: str) -> bool:
         """
@@ -1352,6 +1371,8 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         search_strategy = enhance_search_strategy(query)
         entity_filter = search_strategy["entity_filter"]
         extracted_filters = search_strategy["db_filters"]
+        is_game_query = self._is_game_query(query)
+        is_game_flow_narrative = self._is_game_flow_narrative_query(query)
 
         # 2. 통계 질문인지 먼저 확인 (최우선)
         is_statistical = self._is_statistical_query(query, entity_filter)
@@ -1383,21 +1404,32 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 )
 
         # 5. 경기 데이터 질문인지 확인
-        elif self._is_game_query(query):
-            logger.info(f"[RAG] Game query detected, trying agent first")
-            agent_result = await self._try_agent_first(
-                query, intent=intent, filters=filters, history=history
-            )
-            if agent_result is not None:
-                return agent_result
+        elif is_game_query:
+            if is_game_flow_narrative:
+                logger.info(
+                    "[RAG] Narrative game-flow query detected, skipping agent-first"
+                )
             else:
-                logger.info(f"[RAG] Game agent failed, falling back to traditional RAG")
+                logger.info(f"[RAG] Game query detected, trying agent first")
+                agent_result = await self._try_agent_first(
+                    query, intent=intent, filters=filters, history=history
+                )
+                if agent_result is not None:
+                    return agent_result
+                else:
+                    logger.info(
+                        f"[RAG] Game agent failed, falling back to traditional RAG"
+                    )
 
         # 6. 기존 RAG 방식으로 폴백 또는 일반 질문 처리
 
         # Merge user-provided filters with extracted filters
         # User-provided filters take precedence
         final_filters = {**extracted_filters, **(filters or {})}
+        if is_game_query or entity_filter.game_date:
+            final_filters.pop("team_id", None)
+        if is_game_flow_narrative:
+            final_filters["source_table"] = "game_flow_summary"
 
         # Determine year for analysis
         year = final_filters.get("season_year") or entity_filter.season_year or 2025
@@ -1436,12 +1468,14 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 )
 
         elif entity_filter.player_name:
-            logger.info(f"[RAG] Player-specific query: {entity_filter.player_name}")
+            logger.info(
+                f"[RAG] Player-specific query: {entity_filter.player_name} (LLM expansion disabled for speed)"
+            )
             # For specific player queries, use multi-query with relaxed filters
             player_filters = dict(final_filters)
             player_filters.pop("source_table", None)  # Remove source_table filter
             docs = await self.retrieve_with_multi_query(
-                query, entity_filter, filters=player_filters, use_llm_expansion=True
+                query, entity_filter, filters=player_filters, use_llm_expansion=False
             )
 
         else:

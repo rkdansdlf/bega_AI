@@ -10,7 +10,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set
 import sys
 
 os.environ.setdefault("PYTEST_CURRENT_TEST", "1")
@@ -40,6 +40,9 @@ from scripts.ingest_from_kbo import (
     flush_chunks,
     get_primary_key_columns,
 )
+
+if TYPE_CHECKING:
+    from scripts.verify_embedding_coverage import CoverageTarget
 
 
 def _require_psycopg() -> None:

@@ -17,12 +17,13 @@ from typing import Any, Dict, Optional, Tuple
 
 # 캐시 스키마 버전.
 # 프롬프트·정규화 방식이 변경될 때 올리면 기존 캐시가 자동 미스 처리됨.
-CHAT_CACHE_SCHEMA_VERSION = "v1"
+CHAT_CACHE_SCHEMA_VERSION = "v2"
 
 # intent별 TTL (초 단위).
 # stats_lookup/comparison/recent_form은 짧게, 선수 프로필·규정 설명은 길게.
 INTENT_TTL_SECONDS: Dict[str, int] = {
     "stats_lookup": 3 * 3600,  # 3h - 경기 결과는 자주 변함 (기존 6h에서 단축)
+    "game_lookup": 3 * 3600,  # 3h - 박스스코어/이닝 결과는 최신성이 중요
     "player_profile": 48 * 3600,  # 48h - 선수 기본 정보는 상대적으로 안정적
     "recent_form": 3 * 3600,  # 3h  - 최근 폼은 빠르게 변함
     "comparison": 3 * 3600,  # 3h  - 비교도 최신성 중요

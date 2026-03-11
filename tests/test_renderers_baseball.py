@@ -1,7 +1,6 @@
-import textwrap
-
 from app.core.renderers.baseball import (
     render_batting_season,
+    render_game_flow_summary,
     render_pitching_season,
 )
 
@@ -154,3 +153,120 @@ def test_render_pitching_metrics_precalc():
         assert meta_data["era_minus"] < 100
     if meta_data["score"]:
         assert meta_data["score"] > 90  # High score expected
+
+
+def _parse_meta(rendered: str) -> dict:
+    import json
+
+    meta_line = [line for line in rendered.splitlines() if line.startswith("[META]")][0]
+    return json.loads(meta_line.replace("[META] ", ""))
+
+
+def test_render_game_flow_summary_late_comeback_metrics() -> None:
+    row = {
+        "game_id": "20250501LGHH0",
+        "game_date": "2025-05-01",
+        "home_team": "LG",
+        "away_team": "HH",
+        "home_team_name": "LG 트윈스",
+        "away_team_name": "한화 이글스",
+        "home_score": 3,
+        "away_score": 2,
+        "winning_team": "LG",
+        "inning_lines_json": [
+            {"inning": 1, "home_runs": 0, "away_runs": 2, "is_extra": False},
+            {"inning": 5, "home_runs": 3, "away_runs": 0, "is_extra": False},
+        ],
+        "source_table": "game_flow_summary",
+        "source_row_id": "game_id=20250501LGHH0",
+    }
+
+    rendered = render_game_flow_summary(row, today_str="2025-05-01")
+    meta = _parse_meta(rendered)
+
+    assert rendered.startswith("[TL;DR]")
+    assert "5회말" in rendered
+    assert meta["lead_changes"] == 1
+    assert meta["tie_events"] == 0
+    assert meta["decisive_half"] == "5회말"
+    assert len(rendered) <= 800
+
+
+def test_render_game_flow_summary_wire_to_wire_game() -> None:
+    row = {
+        "game_id": "20250502LGHH0",
+        "game_date": "2025-05-02",
+        "home_team": "LG",
+        "away_team": "HH",
+        "home_team_name": "LG 트윈스",
+        "away_team_name": "한화 이글스",
+        "home_score": 1,
+        "away_score": 4,
+        "winning_team": "HH",
+        "inning_lines_json": [
+            {"inning": 1, "home_runs": 0, "away_runs": 2, "is_extra": False},
+            {"inning": 4, "home_runs": 0, "away_runs": 1, "is_extra": False},
+            {"inning": 7, "home_runs": 0, "away_runs": 1, "is_extra": False},
+            {"inning": 8, "home_runs": 1, "away_runs": 0, "is_extra": False},
+        ],
+    }
+
+    rendered = render_game_flow_summary(row, today_str="2025-05-02")
+    meta = _parse_meta(rendered)
+
+    assert meta["lead_changes"] == 0
+    assert meta["tie_events"] == 0
+    assert meta["decisive_half"] == "1회초"
+
+
+def test_render_game_flow_summary_extra_innings_bucket_totals() -> None:
+    row = {
+        "game_id": "20250503LGHH0",
+        "game_date": "2025-05-03",
+        "home_team": "LG",
+        "away_team": "HH",
+        "home_team_name": "LG 트윈스",
+        "away_team_name": "한화 이글스",
+        "home_score": 4,
+        "away_score": 5,
+        "winning_team": "HH",
+        "inning_lines_json": [
+            {"inning": 2, "home_runs": 1, "away_runs": 0, "is_extra": False},
+            {"inning": 6, "home_runs": 2, "away_runs": 3, "is_extra": False},
+            {"inning": 9, "home_runs": 1, "away_runs": 1, "is_extra": False},
+            {"inning": 10, "home_runs": 0, "away_runs": 1, "is_extra": True},
+        ],
+    }
+
+    rendered = render_game_flow_summary(row, today_str="2025-05-03")
+    meta = _parse_meta(rendered)
+
+    assert meta["bucket_totals"]["away"]["extra"] == 1
+    assert meta["bucket_totals"]["home"]["extra"] == 0
+    assert "연장" in rendered
+
+
+def test_render_game_flow_summary_draw_has_no_decisive_half() -> None:
+    row = {
+        "game_id": "20250504LGHH0",
+        "game_date": "2025-05-04",
+        "home_team": "LG",
+        "away_team": "HH",
+        "home_team_name": "LG 트윈스",
+        "away_team_name": "한화 이글스",
+        "home_score": 3,
+        "away_score": 3,
+        "winning_team": None,
+        "inning_lines_json": [
+            {"inning": 1, "home_runs": 0, "away_runs": 1, "is_extra": False},
+            {"inning": 1, "home_runs": 1, "away_runs": 1, "is_extra": False},
+            {"inning": 8, "home_runs": 0, "away_runs": 2, "is_extra": False},
+            {"inning": 8, "home_runs": 2, "away_runs": 2, "is_extra": False},
+        ],
+    }
+
+    rendered = render_game_flow_summary(row, today_str="2025-05-04")
+    meta = _parse_meta(rendered)
+
+    assert "무승부" in rendered
+    assert meta["decisive_half"] is None

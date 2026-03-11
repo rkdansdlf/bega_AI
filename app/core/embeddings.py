@@ -39,6 +39,13 @@ class EmbeddingError(RuntimeError):
     """임베딩 생성 과정에서 오류가 발생했을 때 사용하는 예외 클래스."""
 
 
+def _is_non_retryable_openai_error(exc: Exception) -> bool:
+    if not isinstance(exc, EmbeddingError):
+        return False
+    message = str(exc).lower()
+    return "insufficient_quota" in message or "exceeded your current quota" in message
+
+
 def _normalize_query(text: str) -> str:
     if not text:
         return ""
@@ -416,6 +423,13 @@ async def _embed_openai(
                     break
                 except (EmbeddingError, httpx.HTTPError) as exc:
                     attempt += 1
+                    if _is_non_retryable_openai_error(exc):
+                        logger.error(
+                            "OpenAI batch %d failed without retry: %s",
+                            idx,
+                            exc,
+                        )
+                        raise
                     if attempt >= max_retries:
                         logger.error(
                             "OpenAI batch %d failed after %d retries: %s",

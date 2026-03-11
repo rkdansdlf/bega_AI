@@ -17,6 +17,37 @@ logger = logging.getLogger(__name__)
 MAX_KEY_METRIC_VALUE_LENGTH = 50
 MAX_CRITICAL_METRICS = 2
 FALLBACK_HEADLINE = "AI 코치 분석 요약"
+MAX_ANALYSIS_TEXT_LENGTH = 180
+MAX_ANALYSIS_LIST_ITEMS = 4
+MAX_ANALYSIS_LIST_ITEM_LENGTH = 140
+
+
+def _normalize_short_text(value: Any, *, max_length: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = " ".join(value.split()).strip()
+    if len(normalized) > max_length:
+        return normalized[: max_length - 3] + "..."
+    return normalized
+
+
+def _normalize_text_list(
+    value: Any,
+    *,
+    max_items: int = MAX_ANALYSIS_LIST_ITEMS,
+    max_item_length: int = MAX_ANALYSIS_LIST_ITEM_LENGTH,
+) -> List[str]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: List[str] = []
+    for item in value:
+        text = _normalize_short_text(item, max_length=max_item_length)
+        if text:
+            normalized.append(text)
+        if len(normalized) >= max_items:
+            break
+    return normalized
 
 
 # ============================================================
@@ -104,9 +135,44 @@ class RiskItem(BaseModel):
 class AnalysisSection(BaseModel):
     """분석 섹션 모델"""
 
+    summary: str = Field(default="", max_length=MAX_ANALYSIS_TEXT_LENGTH)
+    verdict: str = Field(default="", max_length=MAX_ANALYSIS_TEXT_LENGTH)
     strengths: List[str] = Field(default_factory=list, description="강점 목록")
     weaknesses: List[str] = Field(default_factory=list, description="약점 목록")
     risks: List[RiskItem] = Field(default_factory=list, description="위험 요소 목록")
+    why_it_matters: List[str] = Field(
+        default_factory=list, description="판단 근거 목록"
+    )
+    swing_factors: List[str] = Field(default_factory=list, description="승부 변수 목록")
+    watch_points: List[str] = Field(
+        default_factory=list, description="체크 포인트 목록"
+    )
+    uncertainty: List[str] = Field(default_factory=list, description="불확실성 목록")
+
+    @field_validator("summary", "verdict", mode="before")
+    @classmethod
+    def truncate_analysis_text(cls, v: Any) -> str:
+        return _normalize_short_text(v, max_length=MAX_ANALYSIS_TEXT_LENGTH)
+
+    @field_validator(
+        "strengths",
+        "weaknesses",
+        "why_it_matters",
+        "swing_factors",
+        "watch_points",
+        "uncertainty",
+        mode="before",
+    )
+    @classmethod
+    def normalize_analysis_lists(cls, v: Any) -> List[str]:
+        return _normalize_text_list(v)
+
+    @field_validator("risks", mode="before")
+    @classmethod
+    def limit_risks(cls, v: Any) -> List[Any]:
+        if not isinstance(v, list):
+            return []
+        return v[:3]
 
 
 class CoachResponse(BaseModel):
@@ -449,46 +515,6 @@ def parse_coach_response(
     return response, error
 
 
-def _create_fallback_response(error_reason: str, original_text: str) -> CoachResponse:
-    """
-    파싱 실패 시 원본 텍스트를 보존하는 fallback 응답 생성.
-
-    에러가 발생해도 사용자에게 최소한의 정보를 제공합니다.
-    """
-    # 원본 텍스트에서 의미 있는 첫 줄 추출 시도
-    first_meaningful_line = ""
-    if original_text:
-        for line in original_text.strip().split("\n"):
-            cleaned = line.strip()
-            # [Fix] '{', '```', '#' 뿐만 아니라 '"headline"' 같은 JSON fragment도 무시
-            if cleaned and not cleaned.startswith(("{", "```", "#", '"')):
-                first_meaningful_line = cleaned[:100]  # 최대 100자
-                break
-
-    headline = first_meaningful_line or "AI 분석 결과"
-
-    # 원본 텍스트 정리 (마크다운 코드블록, JSON 잔해 제거)
-    cleaned_text = original_text.strip() if original_text else ""
-    for prefix in ["```json", "```", "{"]:
-        if cleaned_text.startswith(prefix):
-            cleaned_text = cleaned_text[len(prefix) :]
-    for suffix in ["```", "}"]:
-        if cleaned_text.endswith(suffix):
-            cleaned_text = cleaned_text[: -len(suffix)]
-    cleaned_text = cleaned_text.strip()
-
-    return CoachResponse(
-        headline=headline,
-        sentiment="neutral",
-        key_metrics=[],
-        analysis=AnalysisSection(strengths=[], weaknesses=[], risks=[]),
-        detailed_markdown="",
-        coach_note=(
-            cleaned_text[:2000] if cleaned_text else f"형식 변환 실패: {error_reason}"
-        ),
-    )
-
-
 def validate_coach_response(response: CoachResponse) -> List[str]:
     """
     CoachResponse의 데이터 품질을 검증합니다.
@@ -506,15 +532,37 @@ def validate_coach_response(response: CoachResponse) -> List[str]:
         )
 
     # 분석 내용 확인
-    if not response.analysis.strengths and not response.analysis.weaknesses:
+    if (
+        not response.analysis.summary
+        and not response.analysis.verdict
+        and not response.analysis.strengths
+        and not response.analysis.weaknesses
+    ):
         warnings.append("강점과 약점이 모두 비어있습니다.")
+
+    if not response.analysis.verdict:
+        warnings.append("analysis.verdict가 비어있습니다. 판단 문장을 권장합니다.")
+
+    if not response.analysis.why_it_matters:
+        warnings.append(
+            "analysis.why_it_matters가 비어있습니다. 판단 근거 보강이 필요합니다."
+        )
 
     # coach_note 길이 확인
     if len(response.coach_note) < 20:
         warnings.append("coach_note가 너무 짧습니다. 구체적인 전략 제언을 권장합니다.")
 
     # 선수명 포함 여부 확인 (품질 지표)
-    all_text = " ".join(response.analysis.strengths + response.analysis.weaknesses)
+    all_text = " ".join(
+        [
+            response.analysis.summary,
+            response.analysis.verdict,
+            *response.analysis.strengths,
+            *response.analysis.weaknesses,
+            *response.analysis.why_it_matters,
+            *response.analysis.swing_factors,
+        ]
+    )
     if all_text:
         # 한글 이름 패턴 (2-4글자 한글 이름)
         korean_name_pattern = r"[가-힣]{2,4}"
@@ -559,6 +607,16 @@ def format_coach_response_as_markdown(response: CoachResponse) -> str:
         parts.append("")
 
     # 분석 섹션
+    if response.analysis.summary:
+        parts.append("### 한 줄 판단")
+        parts.append(response.analysis.summary)
+        parts.append("")
+
+    if response.analysis.verdict:
+        parts.append("### 코치 판정")
+        parts.append(f"- {response.analysis.verdict}")
+        parts.append("")
+
     if response.analysis.strengths:
         parts.append("### 💪 강점")
         for s in response.analysis.strengths:
@@ -577,6 +635,30 @@ def format_coach_response_as_markdown(response: CoachResponse) -> str:
         for r in response.analysis.risks:
             emoji = risk_emoji.get(r.level, "⚪")
             parts.append(f"- {emoji} **{r.area}**: {r.description}")
+        parts.append("")
+
+    if response.analysis.why_it_matters:
+        parts.append("### 왜 중요한가")
+        for item in response.analysis.why_it_matters:
+            parts.append(f"- {item}")
+        parts.append("")
+
+    if response.analysis.swing_factors:
+        parts.append("### 승부 변수")
+        for item in response.analysis.swing_factors:
+            parts.append(f"- {item}")
+        parts.append("")
+
+    if response.analysis.watch_points:
+        parts.append("### 체크 포인트")
+        for item in response.analysis.watch_points:
+            parts.append(f"- {item}")
+        parts.append("")
+
+    if response.analysis.uncertainty:
+        parts.append("### 불확실성")
+        for item in response.analysis.uncertainty:
+            parts.append(f"- {item}")
         parts.append("")
 
     # 상세 분석 (이미 마크다운)
