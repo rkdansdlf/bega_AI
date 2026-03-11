@@ -127,6 +127,7 @@ class DatabaseQueryTool:
         self.NAME_TO_GAME_CODE = self.team_resolver.name_to_canonical
         self.TEAM_VARIANTS = self.team_resolver.team_variants
         self.TEAM_CODE_TO_NAME = self.team_resolver.code_to_name
+        self._table_columns_cache: Dict[str, set[str]] = {}
 
         # DB에서 최신 매핑 로드하여 위 딕셔너리 정밀 업데이트
         self._load_team_mappings()
@@ -188,6 +189,80 @@ class DatabaseQueryTool:
             logger.warning(
                 f"[DatabaseQuery] Failed to load mappings from OCI: {e}. Using defaults."
             )
+
+    def _get_table_columns(self, table_name: str) -> set[str]:
+        cached = self._table_columns_cache.get(table_name)
+        if cached is not None:
+            return cached
+
+        columns: set[str] = set()
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = %s
+                """,
+                (table_name,),
+            )
+            rows = cursor.fetchall()
+            columns = {str(row["column_name"]) for row in rows}
+            cursor.close()
+        except Exception as e:
+            logger.warning(
+                "[DatabaseQuery] Failed to inspect columns for table '%s': %s",
+                table_name,
+                e,
+            )
+
+        self._table_columns_cache[table_name] = columns
+        return columns
+
+    @staticmethod
+    def _normalize_award_type_value(award_type: str | None) -> str:
+        raw = (award_type or "").strip()
+        if not raw:
+            return ""
+
+        compact = raw.lower().replace("-", " ").replace("_", " ")
+        compact = " ".join(compact.split())
+
+        if compact in {"mvp", "최우수선수", "최우수 선수"}:
+            return "mvp"
+        if compact in {
+            "rookie",
+            "rookie of the year",
+            "신인왕",
+            "신인상",
+            "루키",
+        }:
+            return "rookie"
+        if compact in {
+            "golden glove",
+            "goldenglove",
+            "골든글러브",
+            "골글",
+            "황금장갑",
+        }:
+            return "golden_glove"
+        if compact in {
+            "korean series mvp",
+            "한국시리즈 mvp",
+            "코리안시리즈 mvp",
+            "ks mvp",
+        }:
+            return "korean_series_mvp"
+        if compact in {
+            "all star mvp",
+            "all-star mvp",
+            "올스타 mvp",
+            "올스타전 mvp",
+        }:
+            return "all_star_mvp"
+
+        return compact.replace(" ", "_")
 
     def get_team_variants(
         self, team_input: str, season_year: int | None = None
@@ -667,29 +742,49 @@ class DatabaseQueryTool:
                 params.extend([min_pa, limit])
 
                 query = f"""
-                    SELECT DISTINCT ON (pb.player_id, psb.team_code)
-                        pb.name as player_name, 
-                        psb.team_code, 
-                        psb.{db_column} as stat_value,
-                        psb.plate_appearances, psb.avg, psb.obp, psb.slg, psb.ops, psb.home_runs, psb.rbi
-                    FROM (
-                        SELECT DISTINCT ON (player_id, team_code) *
+                    WITH latest_batting AS (
+                        SELECT DISTINCT ON (player_id, team_code)
+                            player_id,
+                            team_code,
+                            plate_appearances,
+                            avg,
+                            obp,
+                            slg,
+                            ops,
+                            home_runs,
+                            rbi,
+                            {db_column} as stat_value
                         FROM player_season_batting
                         WHERE season = %s
                         ORDER BY player_id, team_code, plate_appearances DESC
-                    ) psb
-                    JOIN player_basic pb ON psb.player_id = pb.player_id
-                    WHERE psb.season = %s 
-                    {team_condition}
-                    AND psb.plate_appearances >= %s 
-                    AND psb.{db_column} IS NOT NULL
-                    ORDER BY pb.player_id, psb.team_code, psb.{db_column} {sort_order}
+                    ),
+                    qualified_batting AS (
+                        SELECT
+                            pb.name as player_name,
+                            lb.team_code,
+                            lb.stat_value,
+                            lb.plate_appearances,
+                            lb.avg,
+                            lb.obp,
+                            lb.slg,
+                            lb.ops,
+                            lb.home_runs,
+                            lb.rbi
+                        FROM latest_batting lb
+                        JOIN player_basic pb ON lb.player_id = pb.player_id
+                        WHERE 1 = 1
+                        {team_condition.replace('psb.', 'lb.')}
+                        AND lb.plate_appearances >= %s
+                        AND lb.stat_value IS NOT NULL
+                    )
+                    SELECT
+                        *,
+                        COUNT(*) OVER() as total_qualified_players
+                    FROM qualified_batting
+                    ORDER BY stat_value {sort_order}, plate_appearances DESC, player_name ASC
                     LIMIT %s
                 """
-                # params order adjustment
-                # Original logic had confusing params append order.
-                # Correct order for placeholders: season (inner), season (outer), [team_variants], min_pa, limit
-                final_params = [year, year]
+                final_params = [year]
                 if team_filter:
                     variants = self.get_team_variants(team_filter, year)
                     final_params.append(variants)
@@ -741,26 +836,51 @@ class DatabaseQueryTool:
                 params.extend([min_ip, limit])
 
                 query = f"""
-                    SELECT DISTINCT ON (pb.player_id, psp.team_code)
-                        pb.name as player_name, 
-                        psp.team_code, 
-                        psp.{db_column} as stat_value,
-                        psp.innings_pitched, psp.era, psp.whip, psp.wins, psp.losses, psp.saves, psp.strikeouts, psp.quality_starts
-                    FROM (
-                        SELECT DISTINCT ON (player_id, team_code) *
+                    WITH latest_pitching AS (
+                        SELECT DISTINCT ON (player_id, team_code)
+                            player_id,
+                            team_code,
+                            innings_pitched,
+                            era,
+                            whip,
+                            wins,
+                            losses,
+                            saves,
+                            strikeouts,
+                            quality_starts,
+                            {db_column} as stat_value
                         FROM player_season_pitching
                         WHERE season = %s
                         ORDER BY player_id, team_code, innings_pitched DESC
-                    ) psp
-                    JOIN player_basic pb ON psp.player_id = pb.player_id
-                    WHERE psp.season = %s 
-                    {team_condition}
-                    AND psp.innings_pitched >= %s 
-                    AND psp.{db_column} IS NOT NULL
-                    ORDER BY pb.player_id, psp.team_code, psp.{db_column} {sort_order}
+                    ),
+                    qualified_pitching AS (
+                        SELECT
+                            pb.name as player_name,
+                            lp.team_code,
+                            lp.stat_value,
+                            lp.innings_pitched,
+                            lp.era,
+                            lp.whip,
+                            lp.wins,
+                            lp.losses,
+                            lp.saves,
+                            lp.strikeouts,
+                            lp.quality_starts
+                        FROM latest_pitching lp
+                        JOIN player_basic pb ON lp.player_id = pb.player_id
+                        WHERE 1 = 1
+                        {team_condition.replace('psp.', 'lp.')}
+                        AND lp.innings_pitched >= %s
+                        AND lp.stat_value IS NOT NULL
+                    )
+                    SELECT
+                        *,
+                        COUNT(*) OVER() as total_qualified_players
+                    FROM qualified_pitching
+                    ORDER BY stat_value {sort_order}, innings_pitched DESC, player_name ASC
                     LIMIT %s
                 """
-                final_params = [year, year]
+                final_params = [year]
                 if team_filter:
                     final_params.append(self.get_team_variants(team_filter, year))
                 final_params.extend([min_ip, limit])
@@ -774,16 +894,20 @@ class DatabaseQueryTool:
             rows = cursor.fetchall()
 
             if rows:
+                total_qualified_players = rows[0].get("total_qualified_players")
                 for row in rows:
                     team_code = row.get("team_code")
                     display_team_name = self.get_team_name(team_code) or team_code
 
                     player_data = dict(row)
+                    player_data.pop("total_qualified_players", None)
                     player_data["team_name"] = display_team_name
                     result["leaderboard"].append(player_data)
 
                 result["found"] = True
-                result["total_qualified_players"] = len(rows)
+                result["total_qualified_players"] = self.safe_int(
+                    total_qualified_players, len(rows)
+                )
                 logger.info(f"[DatabaseQuery] Found {len(rows)} players in leaderboard")
             else:
                 logger.warning(
@@ -862,6 +986,114 @@ class DatabaseQueryTool:
 
         except Exception as e:
             logger.error(f"[DatabaseQuery] Error validating player: {e}")
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return result
+
+    def get_award_winners(
+        self, year: int, award_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        특정 시즌의 수상자 정보를 조회합니다.
+
+        awards 스키마는 환경마다 차이가 있었기 때문에 award_year/position 컬럼을
+        동적으로 확인한 뒤, 정규화된 award_type으로 필터링합니다.
+        """
+        logger.info(
+            "[DatabaseQuery] Querying award winners: year=%s award_type=%s",
+            year,
+            award_type,
+        )
+
+        requested_type = self._normalize_award_type_value(award_type)
+        if requested_type == "any":
+            requested_type = ""
+
+        result = {
+            "year": year,
+            "award_type": requested_type or None,
+            "awards": [],
+            "found": False,
+            "error": None,
+        }
+
+        award_columns = self._get_table_columns("awards")
+        season_column = "award_year"
+        if "award_year" not in award_columns and "year" in award_columns:
+            season_column = "year"
+
+        position_column = "position" if "position" in award_columns else None
+        team_name_column = "team_name" if "team_name" in award_columns else None
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            position_select = (
+                f"a.{position_column} AS position"
+                if position_column
+                else "NULL::text AS position"
+            )
+            team_name_select = (
+                f"a.{team_name_column} AS team_name"
+                if team_name_column
+                else "NULL::text AS team_name"
+            )
+            query = f"""
+                SELECT DISTINCT
+                    a.player_name,
+                    a.award_type,
+                    a.{season_column} AS award_year,
+                    {position_select},
+                    {team_name_select}
+                FROM awards a
+                WHERE a.{season_column} = %s
+                ORDER BY a.award_type, a.player_name
+            """
+
+            cursor.execute(query, (year,))
+            rows = cursor.fetchall()
+
+            deduped_keys = set()
+            for row in rows:
+                normalized_type = self._normalize_award_type_value(row.get("award_type"))
+                if requested_type and normalized_type != requested_type:
+                    continue
+
+                award_year = self.safe_int(row.get("award_year"), year)
+                dedupe_key = (
+                    award_year,
+                    normalized_type,
+                    row.get("player_name"),
+                    row.get("position"),
+                )
+                if dedupe_key in deduped_keys:
+                    continue
+                deduped_keys.add(dedupe_key)
+
+                raw_team_name = row.get("team_name")
+                display_team_name = raw_team_name
+                if isinstance(raw_team_name, str) and raw_team_name:
+                    try:
+                        display_team_name = self.get_team_name(raw_team_name) or raw_team_name
+                    except Exception:
+                        display_team_name = raw_team_name
+
+                result["awards"].append(
+                    {
+                        "year": award_year,
+                        "award_type": normalized_type or row.get("award_type"),
+                        "award_type_label": row.get("award_type"),
+                        "player_name": row.get("player_name"),
+                        "position": row.get("position"),
+                        "team_name": display_team_name,
+                    }
+                )
+
+            result["found"] = len(result["awards"]) > 0
+        except Exception as e:
+            logger.error("[DatabaseQuery] Error querying awards: %s", e)
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
@@ -1202,6 +1434,107 @@ class DatabaseQueryTool:
                 cursor.close()
 
         self._record_team_query_result("get_team_season_rank", team_name, year, result)
+        return result
+
+    def get_team_by_season_rank(self, year: int, rank: int) -> Dict[str, Any]:
+        """
+        특정 연도의 정규시즌 순위로 팀을 역조회합니다.
+        """
+        logger.info(
+            "[DatabaseQuery] Calculating team by rank for year=%s rank=%s", year, rank
+        )
+
+        result = {
+            "year": year,
+            "rank": rank,
+            "team_name": None,
+            "team_code": None,
+            "wins": 0,
+            "losses": 0,
+            "draws": 0,
+            "found": False,
+            "error": None,
+        }
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            canonical_home_expr = self._canonical_team_expr("g.home_team")
+            canonical_away_expr = self._canonical_team_expr("g.away_team")
+            canonical_win_expr = self._canonical_team_expr("g.winning_team")
+
+            rank_query = f"""
+                WITH all_games AS (
+                    SELECT
+                        {canonical_home_expr} as team,
+                        {canonical_win_expr} as winning_team,
+                        g.home_score,
+                        g.away_score
+                    FROM game g
+                    JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    JOIN teams t ON g.home_team = t.team_id
+                    WHERE ks.season_year = %s
+                      AND ks.league_type_code = %s
+                      AND g.game_status = 'COMPLETED'
+                      AND t.franchise_id IS NOT NULL
+
+                    UNION ALL
+
+                    SELECT
+                        {canonical_away_expr} as team,
+                        {canonical_win_expr} as winning_team,
+                        g.home_score,
+                        g.away_score
+                    FROM game g
+                    JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    JOIN teams t ON g.away_team = t.team_id
+                    WHERE ks.season_year = %s
+                      AND ks.league_type_code = %s
+                      AND g.game_status = 'COMPLETED'
+                      AND t.franchise_id IS NOT NULL
+                ),
+                team_stats AS (
+                    SELECT
+                        team,
+                        SUM(CASE WHEN winning_team = team THEN 1 ELSE 0 END) as wins,
+                        SUM(CASE WHEN winning_team IS NOT NULL AND winning_team != team THEN 1 ELSE 0 END) as losses,
+                        SUM(CASE WHEN winning_team IS NULL AND home_score = away_score THEN 1 ELSE 0 END) as draws
+                    FROM all_games
+                    GROUP BY team
+                ),
+                ranked_teams AS (
+                    SELECT
+                        team,
+                        wins,
+                        losses,
+                        draws,
+                        RANK() OVER (ORDER BY (wins::float / NULLIF(wins + losses, 0)) DESC) as rank
+                    FROM team_stats
+                )
+                SELECT team, wins, losses, draws, rank
+                FROM ranked_teams
+                WHERE rank = %s
+                ORDER BY team
+                LIMIT 1
+            """
+
+            cursor.execute(rank_query, (year, 0, year, 0, rank))
+            row = cursor.fetchone()
+            if row:
+                result["team_code"] = row["team"]
+                result["team_name"] = self.get_team_name(row["team"]) or row["team"]
+                result["wins"] = row["wins"]
+                result["losses"] = row["losses"]
+                result["draws"] = row["draws"]
+                result["found"] = True
+
+        except Exception as e:
+            logger.error("[DatabaseQuery] Error calculating team by rank: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        self._record_team_query_result("get_team_by_season_rank", str(rank), year, result)
         return result
 
     def get_team_basic_info(self, team_name: str) -> Dict[str, Any]:
@@ -1980,7 +2313,12 @@ class DatabaseQueryTool:
             return result
 
     def get_team_recent_form(
-        self, team_name: str, year: int, limit: int = 10
+        self,
+        team_name: str,
+        year: int,
+        limit: int = 10,
+        as_of_game_date: Optional[str] = None,
+        exclude_game_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         팀의 최근 경기 결과(승패, 득실점)를 조회합니다.
@@ -1993,10 +2331,19 @@ class DatabaseQueryTool:
         Returns:
             최근 경기 결과 요약
         """
-        logger.info(f"[DatabaseQuery] Querying recent form for {team_name} in {year}")
+        logger.info(
+            "[DatabaseQuery] Querying recent form for %s in %s as_of=%s exclude=%s",
+            team_name,
+            year,
+            as_of_game_date,
+            exclude_game_id,
+        )
 
         # TTL 캐시 확인
-        cache_key = f"recent_form:{team_name}:{year}:{limit}"
+        cache_key = (
+            f"recent_form:{team_name}:{year}:{limit}:"
+            f"{as_of_game_date or 'latest'}:{exclude_game_id or 'none'}"
+        )
         cached_result = _coach_cache.get(cache_key)
         if cached_result is not None:
             self._record_team_query_result(
@@ -2049,6 +2396,7 @@ class DatabaseQueryTool:
             query = """
                 SELECT 
                     g.game_date,
+                    g.game_id,
                     CASE 
                         WHEN g.home_team = ANY(%s) THEN 'home' 
                         ELSE 'away' 
@@ -2068,21 +2416,27 @@ class DatabaseQueryTool:
                 WHERE (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
                 AND ks.season_year = %s
                 AND g.home_score IS NOT NULL -- 완료된 경기(점수 존재)
-                ORDER BY g.game_date DESC
+            """
+            query_params = [
+                team_variants,
+                team_variants,
+                team_variants,
+                team_variants,
+                year,
+            ]
+            if as_of_game_date:
+                query += " AND g.game_date < %s"
+                query_params.append(as_of_game_date)
+            if exclude_game_id:
+                query += " AND g.game_id <> %s"
+                query_params.append(exclude_game_id)
+
+            query += """
+                ORDER BY g.game_date DESC, g.game_id DESC
                 LIMIT %s
             """
-
-            cursor.execute(
-                query,
-                (
-                    team_variants,
-                    team_variants,
-                    team_variants,
-                    team_variants,
-                    year,
-                    limit,
-                ),
-            )
+            query_params.append(limit)
+            cursor.execute(query, tuple(query_params))
             games = cursor.fetchall()
 
             if games:

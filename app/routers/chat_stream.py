@@ -12,8 +12,10 @@ import json
 import logging
 import openai
 import os
+import re
 import secrets
 import tempfile
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
@@ -57,7 +59,7 @@ MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
 
 # 캐시 스키마 버전. 프롬프트 또는 정규화 방식 변경 시 올리면
 # 기존 캐시가 자동으로 미스 처리됩니다.
-CHAT_CACHE_SCHEMA_VERSION = "v2"
+CHAT_CACHE_SCHEMA_VERSION = "v9"
 MAX_CHAT_QUESTION_LENGTH = 1200
 MAX_CHAT_HISTORY_ENTRY_LENGTH = 2000
 MAX_CHAT_REQUEST_BYTES = 12 * 1024
@@ -158,81 +160,166 @@ async def _render_answer(result: Dict[str, Any], style: str) -> str:
 
 def _build_completion_fallback_answer(reason: str) -> str:
     """completion 경로에서 비동기 제너레이터 소비 실패 시 사용할 안전한 문자열 답변."""
-    reason_text = (reason or "알 수 없는 오류").strip()
-    reason_text = reason_text.replace("|", "\\|")
-    if len(reason_text) > 240:
-        reason_text = reason_text[:240] + "..."
-
     return (
-        "핵심 결론: **답변 생성 과정에서 일시적 오류가 발생해 일부 응답이 누락되었습니다.**\n\n"
-        "## 상세 내역\n"
-        "| 구분 | 내용 |\n"
-        "| --- | --- |\n"
-        "| 상태 | 답변 생성 중 예외 발생 |\n"
-        f"| 사유 | {reason_text} |\n"
-        "| 조치 | 동일 질문 재시도 권장 |\n\n"
-        "## 핵심 지표\n"
-        "- 현재 요청에서는 완전한 최종 답변 텍스트를 확보하지 못했습니다.\n"
-        "- 다만 API는 문자열 응답 형식을 유지하도록 처리했습니다.\n\n"
-        "## 인사이트\n"
-        "- 모델 응답이 비어 있거나 스트림이 중단될 때 재시도 시 정상화되는 경우가 많습니다.\n"
-        "- 동일 현상이 반복되면 모델 상태/네트워크 상태를 함께 점검해야 합니다.\n\n"
-        "- 데이터 출처: DB 조회 기반"
+        "방금 답변이 중간에 끊겼습니다. 같은 질문을 한 번 더 보내주시면 "
+        "바로 다시 이어서 답하겠습니다."
     )
 
 
-def _has_quality_section(answer: str) -> bool:
-    text = answer or ""
-    markers = (
-        "## 상세 내역",
-        "## 핵심 지표",
-        "## 인사이트",
-        "## 요약",
-        "상세 내역",
-        "핵심 지표",
-        "인사이트",
+def _format_chatbot_table_row(cells: List[str]) -> Optional[str]:
+    normalized = [str(cell).strip() for cell in cells if str(cell).strip()]
+    if not normalized:
+        return None
+    label = normalized[0]
+    particle = _select_topic_particle(label)
+    if len(normalized) >= 3:
+        return (
+            f"{label}{particle} {normalized[1]}이고, "
+            f"{normalized[2]} 정도로 보면 됩니다."
+        )
+    if len(normalized) == 2:
+        return f"{label}{particle} {normalized[1]}입니다."
+    return normalized[0]
+
+
+def _extract_particle_target(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("**") and cleaned.endswith("**") and len(cleaned) > 4:
+        cleaned = cleaned[2:-2].strip()
+    cleaned = re.sub(r"[`*_~]+", "", cleaned)
+    return cleaned.strip()
+
+
+def _get_last_char(text: str) -> str:
+    cleaned = _extract_particle_target(text)
+    return cleaned[-1] if cleaned else ""
+
+
+def _has_batchim(text: str) -> bool:
+    last_char = _get_last_char(text)
+    if not last_char:
+        return False
+    if "가" <= last_char <= "힣":
+        return (ord(last_char) - ord("가")) % 28 != 0
+    return False
+
+
+def _select_topic_particle(text: str) -> str:
+    return "은" if _has_batchim(text) else "는"
+
+
+def _select_subject_particle(text: str) -> str:
+    return "이" if _has_batchim(text) else "가"
+
+
+def _select_direction_particle(text: str) -> str:
+    last_char = _get_last_char(text)
+    if not last_char:
+        return "로"
+    if "가" <= last_char <= "힣":
+        final_consonant = (ord(last_char) - ord("가")) % 28
+        if final_consonant == 0 or final_consonant == 8:
+            return "로"
+        return "으로"
+    return "로"
+
+
+def _postprocess_chatbot_answer_text(text: str) -> str:
+    normalized = text.strip()
+    if not normalized:
+        return normalized
+
+    normalized = re.sub(
+        r"^(.*?는) 타선은 ([^,]+), 마운드는 ([^.]+) 기준으로 현재 전력의 방향성은 확인 가능합니다\.$",
+        r"\1 \2의 타선과 \3의 마운드를 보면 지금 전력 흐름은 읽힙니다.",
+        normalized,
+        count=1,
+        flags=re.MULTILINE,
     )
-    return any(marker in text for marker in markers)
+
+    def replace_bold_particle(match: re.Match[str]) -> str:
+        token = match.group(1)
+        particle = match.group(2)
+        if particle in {"은", "는"}:
+            fixed = _select_topic_particle(token)
+        elif particle in {"이", "가"}:
+            fixed = _select_subject_particle(token)
+        else:
+            fixed = _select_direction_particle(token)
+        return f"{token}{fixed}"
+
+    normalized = re.sub(
+        r"(\*\*[^*]+\*\*)(은|는|이|가|로)(?=[\s,.)!?]|$)",
+        replace_bold_particle,
+        normalized,
+    )
+    return normalized
 
 
-def _has_quality_table(answer: str) -> bool:
+def _normalize_chatbot_answer_text(answer: str) -> str:
     text = answer or ""
-    return "|" in text and ("| ---" in text or "|:---" in text or "|------" in text)
+    paragraphs: List[str] = []
+    table_rows: List[List[str]] = []
+    table_headers: List[str] = []
+
+    def flush_table() -> None:
+        nonlocal table_rows, table_headers
+        if not table_rows:
+            return
+        table_sentences: List[str] = []
+        for row in table_rows[:4]:
+            sentence = _format_chatbot_table_row(row)
+            if sentence:
+                table_sentences.append(sentence)
+        if table_sentences:
+            paragraphs.append(" ".join(table_sentences))
+        table_rows = []
+        table_headers = []
+
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            flush_table()
+            continue
+
+        lowered = stripped.lower()
+        if stripped.startswith("## ") or stripped.startswith("### "):
+            flush_table()
+            continue
+        if lowered.startswith("출처:") or lowered.startswith("- 출처:"):
+            flush_table()
+            continue
+        if lowered.startswith("source:") or lowered.startswith("- source:"):
+            flush_table()
+            continue
+
+        if stripped.startswith("|"):
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            is_divider = all(
+                cell and set(cell) <= {"-", ":", " "} for cell in cells
+            )
+            if is_divider:
+                continue
+            if not table_headers:
+                table_headers = cells
+            else:
+                table_rows.append(cells)
+            continue
+
+        flush_table()
+
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            stripped = stripped[2:].strip()
+        if stripped:
+            paragraphs.append(stripped)
+
+    flush_table()
+    normalized = "\n\n".join(part for part in paragraphs if part).strip()
+    return _postprocess_chatbot_answer_text(normalized or text.strip())
 
 
-def _quality_supplement(answer: str) -> str:
-    text = answer or ""
-    supplements: List[str] = []
-
-    if not _has_quality_section(text):
-        supplements.append(
-            "## 상세 내역\n"
-            "| 항목 | 내용 |\n"
-            "| --- | --- |\n"
-            "| 응답 상태 | 원문 응답 수신 |\n"
-            "| 형식 보정 | 섹션 구조 자동 추가 |\n\n"
-            "## 핵심 지표\n"
-            "- 품질 규칙(표/섹션/출처) 충족을 위해 응답 구조를 보정했습니다.\n\n"
-            "## 인사이트\n"
-            "- 동일 질문 재요청 시 더 풍부한 원문 구조가 생성될 수 있습니다."
-        )
-    elif not _has_quality_table(text):
-        supplements.append(
-            "### 요약 표\n"
-            "| 항목 | 내용 |\n"
-            "| --- | --- |\n"
-            "| 응답 상태 | 원문 응답 수신 |\n"
-            "| 형식 보정 | 표 구조 자동 추가 |"
-        )
-
-    if "출처" not in text:
-        supplements.append("- 데이터 출처: DB 조회 기반")
-
-    if not supplements:
-        return ""
-
-    prefix = "\n\n" if text else ""
-    return prefix + "\n\n".join(supplements)
+def _ensure_quality_answer_text(answer: str) -> str:
+    return _normalize_chatbot_answer_text(answer or "")
 
 
 def _is_non_cacheable_response(response_text: str) -> bool:
@@ -245,6 +332,25 @@ def _is_non_cacheable_response(response_text: str) -> bool:
     return any(marker in normalized for marker in _NON_CACHEABLE_RESPONSE_MARKERS) or any(
         marker in normalized for marker in compact_markers
     )
+
+
+def _safe_serialize(obj: Any) -> Any:
+    """JSON 직렬화 가능한 형태로 객체를 변환합니다."""
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if hasattr(obj, "to_dict"):
+        return _safe_serialize(obj.to_dict())
+    if isinstance(obj, dict):
+        return {key: _safe_serialize(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_serialize(item) for item in obj]
+    if hasattr(obj, "__dict__"):
+        return {key: _safe_serialize(value) for key, value in obj.__dict__.items()}
+    return str(obj)
 
 
 async def _async_update_hit_count(cache_key: str) -> None:
@@ -279,7 +385,7 @@ def _make_cached_sse_response(
     """
 
     async def cached_generator():
-        response_text = cached["response_text"]
+        response_text = _ensure_quality_answer_text(cached["response_text"])
 
         # status 이벤트: 캐시 히트 표시 (번개 이모지로 빠른 응답임을 암시)
         yield {
@@ -309,6 +415,11 @@ def _make_cached_sse_response(
                     "style": style,
                     "cached": True,
                     "intent": cached.get("intent"),
+                    "grounding_mode": "cache",
+                    "source_tier": "cache",
+                    "answer_sources": [],
+                    "as_of_date": None,
+                    "fallback_reason": None,
                     "cache_key_prefix": cache_key[:8],
                     "perf": {
                         "total_ms": 0.0,
@@ -354,17 +465,30 @@ async def _stream_response(
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
+    context_messages = (
+        history if history else [{"role": "user", "content": question}]
+    )
+
     result: Optional[Dict[str, Any]] = None
     error_payload: Optional[Dict[str, Any]] = None
     try:
         # 에이전트를 실행하여 결과를 생성합니다.
         result = await agent.process_query(
             question,
-            context={"filters": filters, "history": history},
+            context={
+                "filters": filters,
+                "history": history,
+                "messages": context_messages,
+                "request_mode": "stream",
+                "persona": "chat",
+            },
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("chat_stream에서 오류가 발생했습니다.")
-        error_payload = {"message": "internal_error", "detail": str(exc)}
+        error_payload = {
+            "message": "temporary_issue",
+            "detail": "지금은 응답 템포가 잠깐 흔들리고 있어요. 같은 질문을 다시 보내주세요.",
+        }
 
     async def event_generator():
         """SSE 이벤트 스트림을 생성하는 비동기 제너레이터입니다."""
@@ -388,44 +512,26 @@ async def _stream_response(
 
             # answer가 비동기 제너레이터인 경우 (스트리밍)
             # 캐시 저장을 위해 전체 텍스트를 누적합니다.
-            full_response_text = ""
+            full_response_chunks: List[str] = []
             answer_stream_error = None
 
             if hasattr(answer, "__aiter__"):
                 try:
                     async for delta in answer:
                         if delta:
-                            full_response_text += delta
-                        yield {
-                            "event": "message",
-                            "data": json.dumps({"delta": delta}, ensure_ascii=False),
-                        }
-                    supplement = _quality_supplement(full_response_text)
-                    if supplement:
-                        full_response_text += supplement
-                        yield {
-                            "event": "message",
-                            "data": json.dumps({"delta": supplement}, ensure_ascii=False),
-                        }
+                            full_response_chunks.append(delta)
+                            yield {
+                                "event": "message",
+                                "data": json.dumps({"delta": delta}, ensure_ascii=False),
+                            }
                 except Exception as exc:
                     answer_stream_error = str(exc)
                     logger.exception("chat_stream answer iteration failed.")
                     fallback_text = (
-                        "핵심 결론: **답변 생성 중 오류가 발생해 안전 모드 응답으로 전환되었습니다.**\n\n"
-                        "## 상세 내역\n"
-                        "| 구분 | 내용 |\n"
-                        "| --- | --- |\n"
-                        "| 상태 | 스트리밍 중단 |\n"
-                        f"| 오류 | {(answer_stream_error or 'unknown_error').replace('|', '\\|')} |\n"
-                        "| 조치 | 동일 질문 재시도 권장 |\n\n"
-                        "## 핵심 지표\n"
-                        "- 스트림 예외를 감지해 비정상 종료를 방지했습니다.\n"
-                        "- 품질 규칙(표/섹션/출처)을 유지한 안전 응답을 반환했습니다.\n\n"
-                        "## 인사이트\n"
-                        "- 일시적 모델 응답 불안정 구간에서 주로 발생합니다.\n\n"
-                        "- 데이터 출처: DB 조회 기반"
+                        "지금 답변이 중간에 잠깐 끊겼습니다. "
+                        "같은 질문을 한 번 더 보내주시면 바로 다시 이어서 볼게요."
                     )
-                    full_response_text += fallback_text
+                    full_response_chunks.append(fallback_text)
                     yield {
                         "event": "message",
                         "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
@@ -434,8 +540,8 @@ async def _stream_response(
                         "event": "error",
                         "data": json.dumps(
                             {
-                                "message": "answer_stream_error",
-                                "detail": answer_stream_error,
+                                "message": "temporary_generation_issue",
+                                "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
                             },
                             ensure_ascii=False,
                         ),
@@ -444,47 +550,38 @@ async def _stream_response(
             # answer가 일반 문자열인 경우 (비스트리밍/일상대화)
             else:
                 rendered = await _render_answer(result, style)
-                full_response_text = rendered + _quality_supplement(rendered)
+                full_response_chunks.append(_ensure_quality_answer_text(rendered))
+                full_response_text = "".join(full_response_chunks)
                 yield {
                     "event": "message",
                     "data": json.dumps({"delta": full_response_text}, ensure_ascii=False),
                 }
 
-            def safe_serialize(obj):
-                """JSON 직렬화 가능한 형태로 객체를 변환"""
-                from datetime import datetime, date
-
-                if obj is None:
-                    return None
-                elif isinstance(obj, (str, int, float, bool)):
-                    return obj
-                elif isinstance(obj, (datetime, date)):
-                    return obj.isoformat()
-                elif hasattr(obj, "to_dict"):
-                    return safe_serialize(obj.to_dict())
-                elif isinstance(obj, dict):
-                    return {key: safe_serialize(value) for key, value in obj.items()}
-                elif isinstance(obj, (list, tuple)):
-                    return [safe_serialize(item) for item in obj]
-                else:
-                    # ToolResult 등의 객체
-                    if hasattr(obj, "__dict__"):
-                        return {
-                            key: safe_serialize(value)
-                            for key, value in obj.__dict__.items()
-                        }
-                    else:
-                        return str(obj)
+            full_response_text = "".join(full_response_chunks)
 
             # 도구 호출 등 추가 정보를 meta 이벤트로 전송
             tool_results_raw = result.get("tool_results", [])
-            tool_results_serialized = safe_serialize(tool_results_raw)
+            tool_results_serialized = _safe_serialize(tool_results_raw)
             tool_calls_raw = result.get("tool_calls", [])
             tool_calls_serialized = [
                 tc.to_dict() if hasattr(tc, "to_dict") else tc for tc in tool_calls_raw
             ]
 
             intent = result.get("intent")
+            public_error = None
+            internal_result_error = result.get("error")
+            if internal_result_error:
+                logger.warning(
+                    "chat_stream user_error_hidden result_error=%s",
+                    internal_result_error,
+                )
+                public_error = "temporary_generation_issue"
+            if answer_stream_error:
+                logger.warning(
+                    "chat_stream user_error_hidden stream_error=%s",
+                    answer_stream_error,
+                )
+                public_error = "temporary_generation_issue"
 
             meta_payload_raw = {
                 "tool_calls": tool_calls_serialized,
@@ -498,11 +595,21 @@ async def _stream_response(
                 "style": style,
                 "cached": False,
                 "intent": intent,
+                "planner_mode": result.get("planner_mode"),
+                "grounding_mode": result.get("grounding_mode"),
+                "source_tier": result.get("source_tier"),
+                "answer_sources": result.get("answer_sources", []),
+                "as_of_date": result.get("as_of_date"),
+                "fallback_reason": result.get("fallback_reason"),
+                "fallback_answer_used": bool(
+                    result.get("fallback_answer_used", False)
+                )
+                or bool(answer_stream_error),
                 "perf": result.get("perf"),
-                "error": result.get("error") or answer_stream_error,
+                "error": public_error,
             }
             # 전체 payload를 안전하게 직렬화
-            meta_payload = safe_serialize(meta_payload_raw)
+            meta_payload = _safe_serialize(meta_payload_raw)
             yield {
                 "event": "meta",
                 "data": json.dumps(meta_payload, ensure_ascii=False),
@@ -514,6 +621,8 @@ async def _stream_response(
                 cache_key
                 and full_response_text
                 and not result_error
+                and not public_error
+                and not bool(answer_stream_error)
                 and not _is_non_cacheable_response(full_response_text)
             ):
                 from ..config import get_settings as _get_settings
@@ -545,7 +654,12 @@ async def _stream_response(
                 except Exception as exc:
                     logger.warning("[ChatCache] save failed: %s", exc)
             elif cache_key and full_response_text:
-                reason = "result_error" if result_error else "non_cacheable_response"
+                if result_error:
+                    reason = "result_error"
+                elif public_error or answer_stream_error:
+                    reason = "public_or_stream_error"
+                else:
+                    reason = "non_cacheable_response"
                 logger.info(
                     "[ChatCache] SKIP save key=%s... reason=%s",
                     cache_key[:8],
@@ -669,7 +783,7 @@ async def chat_completion(
                 asyncio.create_task(_async_update_hit_count(cache_key))
                 return JSONResponse(
                     {
-                        "answer": cached_text,
+                        "answer": _ensure_quality_answer_text(cached_text),
                         "tool_calls": [],
                         "tool_results": [],
                         "data_sources": [],
@@ -677,6 +791,11 @@ async def chat_completion(
                         "visualizations": [],
                         "intent": cached.get("intent"),
                         "cached": True,
+                        "grounding_mode": "cache",
+                        "source_tier": "cache",
+                        "answer_sources": [],
+                        "as_of_date": None,
+                        "fallback_reason": None,
                         "cache_key_prefix": cache_key[:8],
                         "perf": {
                             "total_ms": 0.0,
@@ -697,18 +816,33 @@ async def chat_completion(
         completion_timeout_seconds = 0.0
 
     try:
+        context_messages = (
+            history if history else [{"role": "user", "content": question}]
+        )
         if completion_timeout_seconds > 0:
             result = await asyncio.wait_for(
                 agent.process_query(
                     question,
-                    context={"filters": filters, "history": history},
+                    context={
+                        "filters": filters,
+                        "history": history,
+                        "messages": context_messages,
+                        "request_mode": "completion",
+                        "persona": "chat",
+                    },
                 ),
                 timeout=completion_timeout_seconds,
             )
         else:
             result = await agent.process_query(
                 question,
-                context={"filters": filters, "history": history},
+                context={
+                    "filters": filters,
+                    "history": history,
+                    "messages": context_messages,
+                    "request_mode": "completion",
+                    "persona": "chat",
+                },
             )
     except asyncio.TimeoutError as exc:
         logger.warning(
@@ -726,18 +860,19 @@ async def chat_completion(
 
     answer_obj = result.get("answer")
     if inspect.isasyncgen(answer_obj) or hasattr(answer_obj, "__aiter__"):
-        full_answer = ""
+        full_answer_chunks: List[str] = []
+        public_error: Optional[str] = None
         try:
             if completion_timeout_seconds > 0:
                 async with asyncio.timeout(completion_timeout_seconds):
                     async for chunk in answer_obj:
                         if chunk:
-                            full_answer += chunk
+                            full_answer_chunks.append(chunk)
             else:
                 async for chunk in answer_obj:
                     if chunk:
-                        full_answer += chunk
-            result["answer"] = full_answer
+                        full_answer_chunks.append(chunk)
+            result["answer"] = "".join(full_answer_chunks)
         except TimeoutError as exc:
             logger.warning(
                 "chat_completion timeout while consuming stream: question=%s timeout=%.1fs",
@@ -749,14 +884,17 @@ async def chat_completion(
                 detail="답변 생성 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.",
             ) from exc
         except Exception as e:
-            logger.error(f"Error consuming generator: {e}")
-            if full_answer.strip():
-                result["answer"] = full_answer
+            logger.error("Error consuming generator: %s", e)
+            public_error = "temporary_generation_issue"
+            if full_answer_chunks:
+                result["answer"] = "".join(full_answer_chunks)
             else:
                 result["answer"] = _build_completion_fallback_answer(str(e))
+        if public_error:
+            result["error"] = public_error
 
     if isinstance(result.get("answer"), str):
-        result["answer"] = result["answer"] + _quality_supplement(result["answer"])
+        result["answer"] = _ensure_quality_answer_text(result["answer"])
 
     # 정상 응답은 completion 경로에서도 캐시에 저장합니다.
     if isinstance(result, dict):
@@ -796,41 +934,30 @@ async def chat_completion(
             except Exception as exc:
                 logger.warning("[ChatCache] completion save failed: %s", exc)
 
-    # ToolCall 등 커스텀 객체 직렬화 헬퍼
-    def safe_serialize(obj):
-        """JSON 직렬화 가능한 형태로 객체를 변환"""
-        from datetime import datetime, date
-
-        if obj is None:
-            return None
-        elif isinstance(obj, (str, int, float, bool)):
-            return obj
-        elif isinstance(obj, (datetime, date)):
-            return obj.isoformat()
-        elif hasattr(obj, "to_dict"):
-            return safe_serialize(obj.to_dict())
-        elif isinstance(obj, dict):
-            return {key: safe_serialize(value) for key, value in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [safe_serialize(item) for item in obj]
-        else:
-            if hasattr(obj, "__dict__"):
-                return {
-                    key: safe_serialize(value) for key, value in obj.__dict__.items()
-                }
-            return str(obj)
-
     if isinstance(result, dict):
-        payload_serialized = safe_serialize(result)
+        payload_serialized = _safe_serialize(result)
         if isinstance(payload_serialized, dict):
+            answer_text = payload_serialized.get("answer")
+            if isinstance(answer_text, str):
+                payload_serialized["answer"] = _ensure_quality_answer_text(answer_text)
             payload_serialized.setdefault("cached", False)
+            if payload_serialized.get("error"):
+                logger.warning(
+                    "chat_completion user_error_hidden error=%s",
+                    payload_serialized.get("error"),
+                )
+                payload_serialized["error"] = "temporary_generation_issue"
         return JSONResponse(payload_serialized)
     else:
         # result가 객체라면 dict로 변환
+        answer_text = getattr(result, "answer", str(result))
+        if not isinstance(answer_text, str):
+            answer_text = str(answer_text)
+        answer_text = _ensure_quality_answer_text(answer_text)
         return JSONResponse(
-            safe_serialize(
+            _safe_serialize(
                 {
-                    "answer": getattr(result, "answer", str(result)),
+                    "answer": answer_text,
                     "citations": getattr(result, "citations", []),
                     "intent": getattr(result, "intent", "unknown"),
                     "cached": False,

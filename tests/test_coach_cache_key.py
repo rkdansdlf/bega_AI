@@ -1,6 +1,8 @@
 from app.core.coach_cache_key import (
     build_coach_cache_key,
     build_focus_signature,
+    build_lineup_signature,
+    build_starter_signature,
     normalize_focus,
 )
 
@@ -177,3 +179,43 @@ def test_build_coach_cache_key_manual_question_change_always_changes_key():
 
 def test_unknown_focus_ignored_signature_all():
     assert build_focus_signature(["unknown", "legacy_only"]) == "all"
+
+
+def test_build_starter_signature_changes_with_pitchers():
+    sig1 = build_starter_signature("류현진", "임찬규")
+    sig2 = build_starter_signature("문동주", "임찬규")
+
+    assert sig1 != sig2
+
+
+def test_build_lineup_signature_ignores_order_noise_and_whitespace():
+    sig1 = build_lineup_signature(["  문현빈", "노시환", "채은성 "])
+    sig2 = build_lineup_signature(["채은성", "문현빈", "노시환"])
+
+    assert sig1 == sig2
+
+
+def test_build_coach_cache_key_changes_when_game_id_differs_for_auto_brief():
+    common_kwargs = {
+        "schema_version": "v4",
+        "prompt_version": "v6_game",
+        "home_team_code": "HH",
+        "away_team_code": "LG",
+        "year": 2025,
+        "game_type": "POST",
+        "focus": ["recent_form"],
+        "question_override": None,
+        "league_type_code": 4,
+        "stage_label": "PO",
+        "starter_signature": build_starter_signature("폰세", "임찬규"),
+        "lineup_signature": build_lineup_signature(["문현빈", "노시환", "오스틴"]),
+        "request_mode": "auto_brief",
+        "question_signature_override": "auto",
+    }
+
+    key1, payload1 = build_coach_cache_key(game_id="202510200001", **common_kwargs)
+    key2, payload2 = build_coach_cache_key(game_id="202510220001", **common_kwargs)
+
+    assert key1 != key2
+    assert payload1["game_id"] == "202510200001"
+    assert payload2["game_id"] == "202510220001"

@@ -6,9 +6,10 @@ import re
 from typing import Any, Dict, Literal, TypedDict
 
 import google.generativeai as genai
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from ..config import Settings, get_settings
+from ..deps import require_ai_internal_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/moderation", tags=["moderation"])
@@ -25,7 +26,10 @@ class ModerationResult(TypedDict):
 
 
 @router.post("/safety-check")
-async def safety_check(payload: Dict[str, Any] = Body(...)) -> ModerationResult:
+async def safety_check(
+    payload: Dict[str, Any] = Body(...),
+    _: None = Depends(require_ai_internal_token),
+) -> ModerationResult:
     """
     게시글/댓글 텍스트를 점진 Hybrid 정책(RULE + MODEL)으로 검사합니다.
     """

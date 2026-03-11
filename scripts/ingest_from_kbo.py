@@ -69,6 +69,7 @@ from app.core.chunking import smart_chunks
 from app.core.embeddings import embed_texts
 from app.core.renderers.baseball import (
     render_batting_season,
+    render_game_flow_summary,
     render_pitching_season,
     render_hitter_game,
     render_pitcher_game,
@@ -110,6 +111,72 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": [
             "title"
         ],  # A simple PK hint, though not strictly needed for a single file
+    },
+    "markdown_docs_rules_terms": {
+        "description": "야구 규정과 용어 해설 문서",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_knowledge"
+        / "rules_terms.md",
+        "source_table": "markdown_docs",
+        "title": "야구 규정과 용어 해설",
+        "pk_hint": ["title"],
+        "league_scope": "kbo+baseball",
+        "knowledge_type": "rules_terms",
+        "freshness": "evergreen",
+    },
+    "markdown_docs_strategy_metrics": {
+        "description": "야구 전술과 지표 해설 문서",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_knowledge"
+        / "strategy_metrics.md",
+        "source_table": "markdown_docs",
+        "title": "야구 전술과 지표 해설",
+        "pk_hint": ["title"],
+        "league_scope": "kbo+baseball",
+        "knowledge_type": "strategy_metrics",
+        "freshness": "evergreen",
+    },
+    "markdown_docs_culture_history": {
+        "description": "구단/구장/팬문화/역사 해설 문서",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_knowledge"
+        / "culture_history.md",
+        "source_table": "markdown_docs",
+        "title": "구단과 구장, 팬문화, 역사 해설",
+        "pk_hint": ["title"],
+        "league_scope": "kbo",
+        "knowledge_type": "culture_history",
+        "freshness": "evergreen",
+    },
+    "markdown_docs_2025_storylines": {
+        "description": "2025 시즌 스토리라인 해설 문서",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "kbo_knowledge"
+        / "season_2025_storylines.md",
+        "source_table": "markdown_docs",
+        "title": "2025 KBO 시즌 스토리라인",
+        "pk_hint": ["title"],
+        "season_year": 2025,
+        "league_scope": "kbo",
+        "knowledge_type": "season_storylines",
+        "freshness": "seasonal",
+    },
+    "markdown_docs_chatbot_kb_v2": {
+        "description": "KBO 챗봇 심화 지식 베이스 V2",
+        "source_file": Path(__file__).parent.parent
+        / "docs"
+        / "KBO_CHATBOT_KB_V2.md",
+        "source_table": "markdown_docs",
+        "title": "KBO 챗봇 심화 지식 베이스 V2",
+        "pk_hint": ["title"],
+        "season_year": 2025,
+        "league_scope": "kbo",
+        "knowledge_type": "season_storylines",
+        "freshness": "seasonal",
     },
     "kbo_regulations_basic": {
         "description": "KBO 기본 규정 (리그 구성, 경기 시간, 타이브레이크 등)",
@@ -241,6 +308,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["player_id", "season_id", "season", "league", "level"],
         "renderer": render_batting_season,
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "bs.updated_at",
     },
     "player_season_pitching": {
         "description": "KBO 투수 시즌 기록 요약",
@@ -287,6 +355,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["player_id", "season_id", "season", "league", "level"],
         "renderer": render_pitching_season,
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "ps.updated_at",
     },
     "game": {
         "description": "KBO 경기 기본 정보",
@@ -328,6 +397,105 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["id", "game_id"],
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "g.updated_at",
+    },
+    "game_flow_summary": {
+        "description": "KBO 경기 흐름 요약",
+        "source_table": "game_flow_summary",
+        "title_fields": [
+            ["game_date"],
+            ["away_team_name", "away_team"],
+            ["home_team_name", "home_team"],
+        ],
+        "select_sql": """
+            SELECT *
+            FROM (
+                WITH complete_games AS (
+                    SELECT
+                        gis.game_id
+                    FROM game_inning_scores gis
+                    GROUP BY gis.game_id
+                    HAVING COUNT(*) > 0
+                       AND COUNT(*) = COUNT(DISTINCT gis.inning::text || ':' || gis.team_side)
+                       AND COUNT(*) = 2 * COUNT(DISTINCT gis.inning)
+                ),
+                inning_pairs AS (
+                    SELECT
+                        gis.game_id,
+                        gis.inning,
+                        MAX(CASE WHEN gis.team_side = 'home' THEN gis.runs END) AS home_runs,
+                        MAX(CASE WHEN gis.team_side = 'away' THEN gis.runs END) AS away_runs,
+                        BOOL_OR(gis.is_extra IS TRUE) AS is_extra,
+                        MAX(gis.updated_at) AS updated_at
+                    FROM game_inning_scores gis
+                    JOIN complete_games cg ON cg.game_id = gis.game_id
+                    GROUP BY gis.game_id, gis.inning
+                )
+                SELECT
+                    g.game_id,
+                    g.game_date,
+                    ks.season_year,
+                    g.season_id,
+                    ks.league_type_code,
+                    g.home_team,
+                    g.away_team,
+                    ht.team_name AS home_team_name,
+                    at.team_name AS away_team_name,
+                    g.home_score,
+                    g.away_score,
+                    g.winning_team,
+                    json_agg(
+                        json_build_object(
+                            'inning', ip.inning,
+                            'home_runs', COALESCE(ip.home_runs, 0),
+                            'away_runs', COALESCE(ip.away_runs, 0),
+                            'is_extra', COALESCE(ip.is_extra, false)
+                        )
+                        ORDER BY ip.inning
+                    ) AS inning_lines_json,
+                    COALESCE(
+                        MAX(ip.updated_at),
+                        TIMESTAMP '1970-01-01'
+                    ) AS latest_updated_at
+                FROM game g
+                JOIN complete_games cg ON cg.game_id = g.game_id
+                JOIN inning_pairs ip ON ip.game_id = g.game_id
+                LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+                LEFT JOIN teams ht ON ht.team_id = g.home_team
+                LEFT JOIN teams at ON at.team_id = g.away_team
+                WHERE g.home_score IS NOT NULL
+                  AND g.away_score IS NOT NULL
+                GROUP BY
+                    g.game_id,
+                    g.game_date,
+                    ks.season_year,
+                    g.season_id,
+                    ks.league_type_code,
+                    g.home_team,
+                    g.away_team,
+                    ht.team_name,
+                    at.team_name,
+                    g.home_score,
+                    g.away_score,
+                    g.winning_team
+            ) game_flow_rows
+            ORDER BY game_date DESC, game_id
+        """,
+        "highlights": [
+            ("경기일", ["game_date"]),
+            ("경기", ["game_id"]),
+            ("원정팀", ["away_team_name", "away_team"]),
+            ("홈팀", ["home_team_name", "home_team"]),
+            ("원정팀 점수", ["away_score"]),
+            ("홈팀 점수", ["home_score"]),
+            ("승리팀", ["winning_team"]),
+        ],
+        "pk_columns_override": ["game_id"],
+        "pk_hint": ["game_id"],
+        "single_chunk": True,
+        "renderer": render_game_flow_summary,
+        "season_filter_column": "season_year",
+        "since_filter_column": "latest_updated_at",
     },
     "game_batting_stats": {
         "description": "경기별 타자 기록",
@@ -370,6 +538,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["game_id", "player_id", "team_code"],
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "gbs.updated_at",
         "renderer": render_hitter_game,
     },
     "game_pitching_stats": {
@@ -410,6 +579,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["game_id", "player_id", "team_code"],
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "gps.updated_at",
         "renderer": render_pitcher_game,
     },
     "game_inning_scores": {
@@ -449,6 +619,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["game_id", "inning"],
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "gis.updated_at",
     },
     "game_lineups": {
         "description": "경기 라인업 정보",
@@ -481,6 +652,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["game_id", "team_code", "batting_order"],
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "gl.updated_at",
     },
     "game_metadata": {
         "description": "경기 메타데이터 (심판, 날씨, 관중)",
@@ -518,6 +690,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["game_id"],
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "gm.updated_at",
     },
     "kbo_seasons": {
         "description": "연도별 KBO 시즌 정보",
@@ -594,32 +767,33 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["team_code", "season"],
         "season_filter_column": "th.season",
+        "since_filter_column": "th.updated_at",
     },
     "awards": {
         "description": "KBO 수상 기록 (MVP, 신인왕, 골든글러브)",
         "title_fields": [
-            ["year"],
+            ["award_year"],
             ["award_type"],
             ["player_name"],
         ],
         "select_sql": """
             SELECT
                 a.*,
-                a.year AS season_year,
-                t.team_name
+                a.award_year AS season_year,
+                a.team_name
             FROM awards a
-            LEFT JOIN teams t ON t.team_name = a.team_name
-            ORDER BY a.year DESC, a.award_type, a.player_name
+            ORDER BY a.award_year DESC, a.award_type, a.player_name
         """,
         "highlights": [
-            ("시즌", ["year", "season_year"]),
+            ("시즌", ["award_year", "season_year"]),
             ("수상 종류", ["award_type"]),
             ("선수", ["player_name"]),
             ("팀", ["team_name", "team"]),
             ("포지션", ["position"]),
         ],
-        "pk_hint": ["id", "year", "award_type", "player_name"],
-        "season_filter_column": "a.year",
+        "pk_hint": ["id", "award_year", "award_type", "player_name"],
+        "season_filter_column": "a.award_year",
+        "since_filter_column": "a.updated_at",
     },
     "player_movements": {
         "description": "선수 이동 기록 (FA, 트레이드, 드래프트)",
@@ -646,6 +820,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["id", "date", "player_name"],
         "season_filter_column": None,
+        "since_filter_column": "pm.updated_at",
     },
     "team_franchises": {
         "description": "KBO 프랜차이즈 그룹 정보",
@@ -670,6 +845,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["id"],
         "season_filter_column": None,
+        "since_filter_column": "tf.updated_at",
     },
     "player_basic": {
         "description": "선수 기본 정보",
@@ -696,6 +872,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["player_id"],
         "season_filter_column": None,
+        "since_filter_column": "pb.updated_at",
     },
     "team_name_mapping": {
         "description": "풀네임-코드 매핑",
@@ -733,6 +910,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["team_id", "id"],
         "season_filter_column": None,
+        "since_filter_column": "tp.updated_at",
     },
     "game_summary": {
         "description": "경기 요약 정보 (승리 타점, 홈런 등 주요 기록 설명)",
@@ -762,6 +940,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["id"],
         "season_filter_column": "ks.season_year",
+        "since_filter_column": "gs.updated_at",
     },
 }
 
@@ -784,7 +963,7 @@ DEFAULT_TABLES = [
     # 경기 정보
     "game",
     "game_metadata",
-    "game_inning_scores",
+    "game_flow_summary",
     "game_lineups",
     # 경기별 기록 (가장 많은 데이터)
     "game_batting_stats",
@@ -792,6 +971,11 @@ DEFAULT_TABLES = [
     "game_summary",
     # 정적 문서
     "kbo_metrics_explained",
+    "markdown_docs_rules_terms",
+    "markdown_docs_strategy_metrics",
+    "markdown_docs_culture_history",
+    "markdown_docs_2025_storylines",
+    "markdown_docs_chatbot_kb_v2",
     "kbo_regulations_basic",
     "kbo_regulations_player",
     "kbo_regulations_game",
@@ -823,6 +1007,7 @@ CANONICAL_SOURCE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "player_season_batting": ("id",),
     "player_season_pitching": ("id",),
     "game": ("id",),
+    "game_flow_summary": ("game_id",),
     "game_metadata": ("game_id",),
     "game_inning_scores": ("id",),
     "game_lineups": ("id",),
@@ -897,6 +1082,17 @@ def get_primary_key_columns(conn, table: str) -> List[str]:
     with conn.cursor() as cur:
         cur.execute(query, (table, "public"))
         return [row[0] for row in cur.fetchall()]
+
+
+def resolve_primary_key_columns(
+    conn,
+    table: str,
+    profile: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    override = list((profile or {}).get("pk_columns_override") or [])
+    if override:
+        return override
+    return get_primary_key_columns(conn, table)
 
 
 def _normalize_row_id_value(table: str, key: str, value: Any) -> Optional[str]:
@@ -1112,6 +1308,70 @@ def build_content(
     return "\n".join(str(line) for line in lines)
 
 
+def _find_top_level_keyword_positions(sql_text: str, keyword: str) -> List[int]:
+    positions: List[int] = []
+    upper = sql_text.upper()
+    keyword_upper = keyword.upper()
+    keyword_len = len(keyword_upper)
+    depth = 0
+    in_single_quote = False
+    in_double_quote = False
+    idx = 0
+
+    while idx < len(sql_text):
+        char = sql_text[idx]
+
+        if in_single_quote:
+            if char == "'" and idx + 1 < len(sql_text) and sql_text[idx + 1] == "'":
+                idx += 2
+                continue
+            if char == "'":
+                in_single_quote = False
+            idx += 1
+            continue
+
+        if in_double_quote:
+            if char == '"':
+                in_double_quote = False
+            idx += 1
+            continue
+
+        if char == "'":
+            in_single_quote = True
+            idx += 1
+            continue
+
+        if char == '"':
+            in_double_quote = True
+            idx += 1
+            continue
+
+        if char == "(":
+            depth += 1
+            idx += 1
+            continue
+
+        if char == ")":
+            depth = max(0, depth - 1)
+            idx += 1
+            continue
+
+        if depth == 0 and upper.startswith(keyword_upper, idx):
+            prev_char = upper[idx - 1] if idx > 0 else " "
+            next_pos = idx + keyword_len
+            next_char = upper[next_pos] if next_pos < len(upper) else " "
+            if not (prev_char.isalnum() or prev_char == "_") and not (
+                next_char.isalnum() or next_char == "_"
+            ):
+                positions.append(idx)
+                idx += keyword_len
+                continue
+
+        idx += 1
+
+    return positions
+
+
 # build_select_query가 프로필의 select_sql이 있으면 그 SQL에 season_year 등 필터를 주입하고 ORDER BY/ LIMIT를 붙임. 커스텀 SQL이 없으면 SELECT * FROM <table> + PK 순 정렬.
 def build_select_query(
     table: str,
@@ -1123,14 +1383,15 @@ def build_select_query(
 ):
     custom_sql = profile.get("select_sql")
     season_filter_column = profile.get("season_filter_column", "season_year")
+    since_filter_column = profile.get("since_filter_column", "updated_at")
     params: List[Any] = []
     if custom_sql:
         stripped = custom_sql.strip()
-        upper = stripped.upper()
         order_clause = ""
-        order_idx = upper.find(" ORDER BY ")
-        if order_idx != -1:
-            base_sql = stripped[:order_idx]
+        order_matches = _find_top_level_keyword_positions(stripped, "ORDER BY")
+        if order_matches:
+            order_idx = order_matches[-1]
+            base_sql = stripped[:order_idx].rstrip()
             order_clause = stripped[order_idx:]
         else:
             base_sql = stripped
@@ -1139,9 +1400,12 @@ def build_select_query(
         if season_year is not None and season_filter_column:
             where_clauses.append(f"{season_filter_column} = %s")
             params.append(season_year)
+        if since is not None and since_filter_column:
+            where_clauses.append(f"{since_filter_column} >= %s")
+            params.append(since)
+            
         if where_clauses:
-            upper_base = base_sql.upper()
-            has_where = " WHERE " in upper_base or upper_base.endswith("WHERE")
+            has_where = bool(_find_top_level_keyword_positions(base_sql, "WHERE"))
             if has_where:
                 base_sql = f"{base_sql}\n   AND {' AND '.join(where_clauses)}"
             else:
@@ -1196,12 +1460,13 @@ def _build_chunk_payload_dicts_for_row(
     today_str: str,
 ) -> List[Dict[str, Any]]:
     profile = TABLE_PROFILES.get(table_name, {})
+    target_source_table = str(profile.get("source_table", table_name))
     title = build_title(row, table_name, source_row_id, profile)
     renderer = profile.get("renderer")
 
     if renderer and not use_legacy_renderer:
         enriched_row = dict(row)
-        enriched_row["source_table"] = table_name
+        enriched_row["source_table"] = target_source_table
         enriched_row["source_row_id"] = source_row_id
         content = renderer(
             enriched_row,
@@ -1228,7 +1493,10 @@ def _build_chunk_payload_dicts_for_row(
         ["team_id", "home_team_id", "away_team_id", "team", "team_code"],
     )
     player_id = first_value(row, ["player_id"])
-    chunks = smart_chunks(content)
+    if profile.get("single_chunk"):
+        chunks = [content.strip()] if content and content.strip() else []
+    else:
+        chunks = smart_chunks(content)
     if not chunks:
         return []
 
@@ -1236,7 +1504,7 @@ def _build_chunk_payload_dicts_for_row(
     if len(chunks) == 1:
         payloads.append(
             {
-                "table": table_name,
+                "table": target_source_table,
                 "source_row_id": source_row_id,
                 "title": title,
                 "content": chunks[0],
@@ -1252,7 +1520,7 @@ def _build_chunk_payload_dicts_for_row(
         for idx, chunk in enumerate(chunks, start=1):
             payloads.append(
                 {
-                    "table": table_name,
+                    "table": target_source_table,
                     "source_row_id": f"{source_row_id}#part{idx}",
                     "title": f"{title} (분할 {idx})",
                     "content": chunk,
@@ -1522,7 +1790,7 @@ def ingest_table(
                         source_row_id=f"{profile['source_table']}_part_{idx}",
                         title=profile["title"],
                         content=chunk,
-                        season_year=0,
+                        season_year=int(profile.get("season_year", 0) or 0),
                         season_id=None,
                         league_type_code=0,
                         team_id=None,
@@ -1530,6 +1798,23 @@ def ingest_table(
                         meta={
                             "source_file": str(profile["source_file"]),
                             "chunk_index": idx,
+                            "league_scope": profile.get(
+                                "league_scope",
+                                "kbo+baseball"
+                                if profile.get("source_table") == "markdown_docs"
+                                else "kbo",
+                            ),
+                            "knowledge_type": profile.get(
+                                "knowledge_type",
+                                "rules_terms"
+                                if profile.get("source_table") == "kbo_regulations"
+                                else (
+                                    "strategy_metrics"
+                                    if profile.get("source_table") == "kbo_definitions"
+                                    else "document"
+                                ),
+                            ),
+                            "freshness": profile.get("freshness", "evergreen"),
                         },
                     )
                 )
@@ -1549,7 +1834,7 @@ def ingest_table(
             return total_chunks
         # --- END NEW LOGIC ---
 
-        pk_columns = get_primary_key_columns(source_conn, table_name)
+        pk_columns = resolve_primary_key_columns(source_conn, table_name, profile)
         query, params = build_select_query(
             table_name,
             profile,
@@ -1733,7 +2018,7 @@ def parse_args() -> argparse.Namespace:
         "--tables",
         nargs="+",
         default=DEFAULT_TABLES,
-        help="인덱싱할 테이블 리스트 (기본: 주요 14개 테이블).",
+        help="인덱싱할 테이블 리스트 (기본: 주요 운영 테이블과 정적 문서).",
     )
     parser.add_argument(
         "--limit",
@@ -1745,8 +2030,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embed-batch-size",
         type=int,
-        default=500,
-        help="임베딩 API 호출당 청크 수 (기본 500).",
+        default=32,
+        help="임베딩 API 호출당 청크 수 (기본 32).",
     )
     parser.add_argument(
         "--read-batch-size",

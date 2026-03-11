@@ -43,7 +43,7 @@ def test_summarize_results_includes_latency_and_error_metrics() -> None:
         },
     ]
 
-    summary = smoke._summarize_results(results)
+    summary = smoke._summarize_results(results, stream_fallback_ratio_max=0.40)
 
     assert "completion_metrics" in summary
     assert "stream_metrics" in summary

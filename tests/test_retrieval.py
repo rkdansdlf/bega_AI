@@ -80,14 +80,17 @@ def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() -> Non
     assert "keyword_query AS" in sql
     assert "candidates AS" in sql
     assert "UNION" in sql
+    assert "source_table <> %s" in sql
     assert "ORDER BY combined_score DESC, similarity DESC" in sql
     assert params == [
         keyword,
         expected_vector,
+        "game_inning_scores",
         2025,
         "league",
         "정규시즌",
         5,
+        "game_inning_scores",
         2025,
         "league",
         "정규시즌",
@@ -128,5 +131,80 @@ def test_similarity_search_without_keyword_keeps_vector_path() -> None:
     expected_vector = "[0.40000000,0.50000000,0.60000000]"
     assert "keyword_query AS" not in sql
     assert "candidates AS" not in sql
+    assert "source_table <> %s" in sql
     assert "ORDER BY embedding <=> %s::vector ASC" in sql
-    assert params == [expected_vector, 2025, expected_vector, 3]
+    assert params == [expected_vector, "game_inning_scores", 2025, expected_vector, 3]
+
+
+def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> None:
+    rows = [
+        {
+            "id": 9,
+            "title": "inning-box",
+            "content": "inning box content",
+            "source_table": "game_inning_scores",
+            "source_row_id": "id=9",
+            "meta": {},
+            "similarity": 0.7,
+        }
+    ]
+    conn = _DummyConnection(rows)
+    embedding = [0.7, 0.8, 0.9]
+
+    result = similarity_search(
+        conn,
+        embedding,
+        limit=2,
+        filters={"season_year": 2025, "_include_game_inning_scores": True},
+        keyword=None,
+    )
+
+    assert result == rows
+    assert conn.last_cursor is not None
+
+    sql, params = conn.last_cursor.executed[1]
+    expected_vector = "[0.70000000,0.80000000,0.90000000]"
+    assert "source_table <> %s" not in sql
+    assert params == [expected_vector, 2025, expected_vector, 2]
+
+
+def test_similarity_search_internal_exclude_source_tables_appends_filters() -> None:
+    rows = [
+        {
+            "id": 11,
+            "title": "flow-only",
+            "content": "flow content",
+            "source_table": "game",
+            "source_row_id": "game_id=20250501LGHH0",
+            "meta": {},
+            "similarity": 0.6,
+        }
+    ]
+    conn = _DummyConnection(rows)
+    embedding = [0.9, 0.1, 0.2]
+
+    result = similarity_search(
+        conn,
+        embedding,
+        limit=2,
+        filters={
+            "season_year": 2025,
+            "_exclude_source_tables": ["game_flow_summary"],
+        },
+        keyword=None,
+    )
+
+    assert result == rows
+    assert conn.last_cursor is not None
+
+    sql, params = conn.last_cursor.executed[1]
+    expected_vector = "[0.90000000,0.10000000,0.20000000]"
+    assert sql.count("source_table <> %s") == 2
+    assert params == [
+        expected_vector,
+        "game_inning_scores",
+        "game_flow_summary",
+        2025,
+        expected_vector,
+        2,
+    ]

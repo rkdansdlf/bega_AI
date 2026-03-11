@@ -10,11 +10,28 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
+REPORTS_DIR = Path(__file__).resolve().parents[2] / "reports"
+PRESET_BASELINES = {
+    "regmix_100": REPORTS_DIR / "smoke_latency_baseline_regmix_100.json",
+    "regulations_20": REPORTS_DIR / "smoke_latency_baseline_regulations_20.json",
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare candidate smoke summary to baseline metrics."
     )
-    parser.add_argument("--baseline", required=True, help="Baseline JSON path.")
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help="Baseline JSON path.",
+    )
+    parser.add_argument(
+        "--baseline-preset",
+        choices=sorted(PRESET_BASELINES),
+        default=None,
+        help="Use canonical baseline JSON for a named preset.",
+    )
     parser.add_argument("--candidate", required=True, help="Candidate summary JSON path.")
     parser.add_argument("--output", default=None, help="Optional output JSON path.")
     parser.add_argument(
@@ -54,6 +71,14 @@ def parse_args() -> argparse.Namespace:
 
 def _load_json(path_str: str) -> Dict[str, Any]:
     return json.loads(Path(path_str).read_text(encoding="utf-8"))
+
+
+def _resolve_baseline_path(args: argparse.Namespace) -> str:
+    if args.baseline:
+        return args.baseline
+    if args.baseline_preset:
+        return str(PRESET_BASELINES[args.baseline_preset])
+    raise ValueError("Either --baseline or --baseline-preset must be provided.")
 
 
 def _safe_ratio_delta(candidate: Optional[float], baseline: Optional[float]) -> Optional[float]:
@@ -184,7 +209,7 @@ def evaluate_candidate(
 
 def main() -> int:
     args = parse_args()
-    baseline = _load_json(args.baseline)
+    baseline = _load_json(_resolve_baseline_path(args))
     candidate = _load_json(args.candidate)
     report = evaluate_candidate(
         baseline,

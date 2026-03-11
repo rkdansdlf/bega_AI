@@ -34,10 +34,16 @@ async def ingest_document(
     settings = get_settings()
     chunks = smart_chunks(payload.content)
     embeddings = await async_embed_texts(chunks, settings)
+    chunk_count = len(chunks)
 
     with conn.cursor() as cur:
-        for chunk, embedding in zip(chunks, embeddings):
+        for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings), start=1):
             vector_literal = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
+            source_row_id = payload.source_row_id
+            title = payload.title
+            if chunk_count > 1:
+                source_row_id = f"{payload.source_row_id}#part{idx}"
+                title = f"{payload.title} (분할 {idx})"
             cur.execute(
                 """
                 INSERT INTO rag_chunks (season_year, team_id, player_id, source_table, source_row_id, title, content, embedding)
@@ -50,8 +56,8 @@ async def ingest_document(
                     payload.team_id,
                     payload.player_id,
                     payload.source_table,
-                    payload.source_row_id,
-                    payload.title,
+                    source_row_id,
+                    title,
                     chunk,
                     vector_literal,
                 ),

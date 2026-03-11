@@ -52,7 +52,7 @@ create table if not exists coach_analysis_cache (
   cache_key varchar(64) primary key,  -- SHA256 Hash of (team_id, year, focus, question)
   team_id varchar(10) not null,
   year int not null,
-  prompt_version varchar(10) not null, -- e.g. "v2"
+  prompt_version varchar(32) not null, -- e.g. "v2"
   model_name varchar(50) not null,     -- e.g. "upstage/solar-pro-3:free"
   status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
   response_json jsonb,                 -- Completed analysis result
@@ -60,6 +60,9 @@ create table if not exists coach_analysis_cache (
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+
+alter table coach_analysis_cache
+  alter column prompt_version type varchar(32);
 
 -- Index for expiration and lookup
 create index if not exists idx_coach_cache_created_at on coach_analysis_cache (created_at);

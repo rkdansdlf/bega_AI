@@ -5,10 +5,10 @@ from collections.abc import Generator
 from contextlib import asynccontextmanager
 import logging
 import secrets
-from typing import Optional
+from typing import Any, Optional
 
 import psycopg
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 from fastapi import Depends, Header, HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,122 @@ from .core.security_metrics import record_security_event
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성)
 _connection_pool: Optional[ConnectionPool] = None
+COACH_OPENROUTER_BLOCKED_MODELS = {
+    "openrouter/auto",
+    "upstage/solar-pro-3:free",
+}
+COACH_OPENROUTER_RETRY_LIMIT = 1
+COACH_OPENROUTER_RETRY_BACKOFF_SECONDS = 0.75
+COACH_OPENROUTER_MAX_TOKENS = 4000
+
+
+def _extract_text_from_openrouter_content(content: Any) -> str:
+    """OpenRouter delta/message content를 안전하게 문자열로 변환합니다."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                if item:
+                    parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str) and text_value:
+                    parts.append(text_value)
+                    continue
+                nested_content = item.get("content")
+                if isinstance(nested_content, str) and nested_content:
+                    parts.append(nested_content)
+        return "".join(parts)
+    if isinstance(content, dict):
+        text_value = content.get("text")
+        if isinstance(text_value, str):
+            return text_value
+    return ""
+
+
+def _parse_openrouter_stream_delta(payload: Any) -> tuple[str, str]:
+    """SSE payload에서 텍스트 delta를 추출하고 파싱 상태 코드를 반환합니다."""
+    if not isinstance(payload, dict):
+        return "", "non_object_payload"
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return "", "missing_choices"
+    if not choices:
+        return "", "empty_choices"
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return "", "malformed_choice"
+
+    delta_obj = first_choice.get("delta")
+    if isinstance(delta_obj, dict):
+        delta_text = _extract_text_from_openrouter_content(delta_obj.get("content"))
+        if delta_text:
+            return delta_text, "ok"
+
+    message_obj = first_choice.get("message")
+    if isinstance(message_obj, dict):
+        message_text = _extract_text_from_openrouter_content(message_obj.get("content"))
+        if message_text:
+            return message_text, "ok"
+
+    text_value = first_choice.get("text")
+    if isinstance(text_value, str) and text_value:
+        return text_value, "ok"
+
+    if first_choice.get("finish_reason"):
+        return "", "finished"
+    return "", "empty_content"
+
+
+def resolve_coach_openrouter_models(
+    primary_model: str, fallback_models: list[str]
+) -> list[str]:
+    candidates: list[str] = []
+    for model in [primary_model] + list(fallback_models):
+        normalized = str(model or "").strip()
+        if not normalized:
+            continue
+        if normalized in COACH_OPENROUTER_BLOCKED_MODELS:
+            logger.warning("[Coach LLM] Skipping blocked model: %s", normalized)
+            continue
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    if candidates:
+        return candidates
+
+    fallback = str(primary_model or "").strip()
+    if fallback:
+        return [fallback]
+    return ["openrouter/free"]
+
+
+def is_retryable_coach_openrouter_error(exc: Exception) -> bool:
+    import httpx
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+
+    return isinstance(
+        exc,
+        (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+            httpx.TransportError,
+            httpx.ReadError,
+        ),
+    )
+
+
+def clamp_coach_openrouter_max_tokens(requested_tokens: int) -> int:
+    normalized = max(256, int(requested_tokens))
+    return min(normalized, COACH_OPENROUTER_MAX_TOKENS)
 
 
 def get_connection_pool() -> ConnectionPool:
@@ -42,6 +158,7 @@ def get_connection_pool() -> ConnectionPool:
                 "keepalives_interval": 10,
                 "keepalives_count": 5,
                 "autocommit": True,
+                "target_session_attrs": "read-write",  # standby/recovery 서버 연결 거부
             },
         )
 
@@ -89,7 +206,7 @@ async def lifespan(app):
                 cache_key varchar(64) primary key,  -- SHA256 Hash of (team_id, year, focus, question)
                 team_id varchar(10) not null,
                 year int not null,
-                prompt_version varchar(10) not null, -- e.g. "v2"
+                prompt_version varchar(32) not null, -- e.g. "v2"
                 model_name varchar(50) not null,     -- e.g. "upstage/solar-pro-3:free"
                 status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
                 response_json jsonb,                 -- Completed analysis result
@@ -97,6 +214,8 @@ async def lifespan(app):
                 created_at timestamptz default now(),
                 updated_at timestamptz default now()
             );
+            ALTER TABLE coach_analysis_cache
+            ALTER COLUMN prompt_version TYPE varchar(32);
             CREATE INDEX IF NOT EXISTS idx_coach_cache_created_at ON coach_analysis_cache (created_at);
             CREATE INDEX IF NOT EXISTS idx_coach_cache_team_year ON coach_analysis_cache (team_id, year);
             """)
@@ -133,10 +252,23 @@ def get_db_connection() -> Generator[psycopg.Connection, None, None]:
     pool_instance = get_connection_pool()
 
     # psycopg_pool은 context manager를 지원하여 안전하게 반환함
-    with pool_instance.connection() as conn:
-        # 연결 상태 확인은 psycopg3에서 더 지능적으로 처리되지만
-        # 명시적인 확인이 필요한 경우 execute("SELECT 1") 등을 사용 가능
-        yield conn
+    try:
+        with pool_instance.connection() as conn:
+            # 연결 상태 확인은 psycopg3에서 더 지능적으로 처리되지만
+            # 명시적인 확인이 필요한 경우 execute("SELECT 1") 등을 사용 가능
+            yield conn
+    except PoolTimeout as exc:
+        logger.error("[DB] Pool timeout while acquiring connection: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 연결이 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.",
+        ) from exc
+    except psycopg.OperationalError as exc:
+        logger.error("[DB] Operational error while acquiring connection: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 연결이 복구 중입니다. 잠시 후 다시 시도해주세요.",
+        ) from exc
 
 
 def get_rag_pipeline(
@@ -281,6 +413,8 @@ def get_agent(
 
                 try:
                     chunk_count = 0
+                    empty_choice_count = 0
+                    malformed_chunk_count = 0
 
                     async for line in fetch_completion_stream(payload, headers):
                         line = line.strip()
@@ -293,15 +427,21 @@ def get_agent(
                                 break
                             try:
                                 data = json.loads(data_str)
-                                delta = (
-                                    data.get("choices", [{}])[0]
-                                    .get("delta", {})
-                                    .get("content", "")
+                                delta, parse_reason = _parse_openrouter_stream_delta(
+                                    data
                                 )
+                                if parse_reason in {"missing_choices", "empty_choices"}:
+                                    empty_choice_count += 1
+                                elif parse_reason in {
+                                    "non_object_payload",
+                                    "malformed_choice",
+                                }:
+                                    malformed_chunk_count += 1
                                 if delta:
                                     chunk_count += 1
                                     yield delta
                             except json.JSONDecodeError:
+                                malformed_chunk_count += 1
                                 continue
                         else:
                             # Log non-data lines (might be errors or metadata)
@@ -311,16 +451,25 @@ def get_agent(
                                     logger.error(f"[OpenRouter Error Detail] {line}")
 
                     if chunk_count == 0:
+                        if malformed_chunk_count > 0:
+                            empty_chunk_reason = "malformed_stream_payload"
+                        elif empty_choice_count > 0:
+                            empty_chunk_reason = "empty_choices"
+                        else:
+                            empty_chunk_reason = "empty_chunk"
                         error_msg = (
                             f"Empty response (0 chunks) from {model}. "
                             "Check filters or token limits."
                         )
                         logger.warning(
-                            "[LLM EmptyChunk] model=%s retry_index=%d max_retries=%d max_tokens=%s reason=empty_chunk",
+                            "[LLM EmptyChunk] model=%s retry_index=%d max_retries=%d max_tokens=%s reason=%s empty_choices=%d malformed_chunks=%d",
                             model,
                             retry_index,
                             empty_chunk_retries,
                             effective_max_tokens,
+                            empty_chunk_reason,
+                            empty_choice_count,
+                            malformed_chunk_count,
                         )
                         last_exception = RuntimeError(error_msg)
                         if retry_index < empty_chunk_retries:
@@ -331,6 +480,14 @@ def get_agent(
                             continue
                         break
 
+                    if empty_choice_count > 0 or malformed_chunk_count > 0:
+                        logger.info(
+                            "[LLM StreamParse] model=%s chunk_count=%d empty_choices=%d malformed_chunks=%d",
+                            model,
+                            chunk_count,
+                            empty_choice_count,
+                            malformed_chunk_count,
+                        )
                     logger.info(f"[LLM] Success: {chunk_count} chunks from {model}")
                     return  # Success, exit the loop
 
@@ -416,6 +573,8 @@ def get_agent(
         chat_tool_result_max_items=settings.chat_tool_result_max_items,
         chat_first_token_watchdog_seconds=settings.chat_first_token_watchdog_seconds,
         chat_first_token_retry_max_attempts=settings.chat_first_token_retry_max_attempts,
+        chat_stream_first_token_watchdog_seconds=settings.chat_stream_first_token_watchdog_seconds,
+        chat_stream_first_token_retry_max_attempts=settings.chat_stream_first_token_retry_max_attempts,
     )
 
 
@@ -438,6 +597,14 @@ def get_coach_llm_generator():
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required for Coach.")
 
+        effective_max_tokens = clamp_coach_openrouter_max_tokens(max_tokens)
+        if effective_max_tokens != max_tokens:
+            logger.warning(
+                "[Coach LLM] Clamped max_tokens from %d to %d",
+                max_tokens,
+                effective_max_tokens,
+            )
+
         headers = {
             "Authorization": f"Bearer {settings.openrouter_api_key}",
             "Content-Type": "application/json",
@@ -446,18 +613,15 @@ def get_coach_llm_generator():
         }
 
         primary_model = settings.coach_openrouter_model or settings.openrouter_model
-        # openrouter/free can be used when explicitly configured.
-        fallback_models = [
-            m
-            for m in settings.coach_openrouter_fallback_models
-            if m != "openrouter/auto"
-        ]
-        models_to_try = [primary_model] + fallback_models
+        fallback_models = list(settings.coach_openrouter_fallback_models)
+        models_to_try = resolve_coach_openrouter_models(
+            primary_model, fallback_models
+        )
 
         logger.info(
             "[Coach LLM] OpenRouter models=%s, max_tokens=%d",
             models_to_try,
-            max_tokens,
+            effective_max_tokens,
         )
 
         last_exception = None
@@ -471,81 +635,137 @@ def get_coach_llm_generator():
                     model,
                 )
 
-            payload = {
-                "model": model,
-                "messages": messages,
-                "stream": True,
-                "temperature": 0.1,
-                "top_p": 0.5,
-                "max_tokens": max_tokens,
-            }
+            for retry_index in range(COACH_OPENROUTER_RETRY_LIMIT + 1):
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "stream": True,
+                    "temperature": 0.1,
+                    "top_p": 0.5,
+                    "max_tokens": effective_max_tokens,
+                }
 
-            try:
-                chunk_count = 0
-                timeout_config = httpx.Timeout(
-                    settings.coach_llm_read_timeout,
-                    connect=5.0,
-                    read=settings.coach_llm_read_timeout,
-                    pool=5.0,
-                )
-                async with httpx.AsyncClient(timeout=timeout_config) as client:
-                    async with client.stream(
-                        "POST",
-                        f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                        json=payload,
-                        headers=headers,
-                    ) as response:
-                        if response.status_code >= 400 and response.status_code < 500:
-                            error_body = await response.aread()
-                            logger.error(
-                                "[Coach OpenRouter 4xx] Status: %s, Body: %s",
-                                response.status_code,
-                                error_body.decode("utf-8", errors="replace"),
-                            )
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            line = line.strip()
-                            if not line:
-                                continue
-                            if line.startswith("data: "):
-                                data_str = line[6:].strip()
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    data = json.loads(data_str)
-                                    delta = (
-                                        data.get("choices", [{}])[0]
-                                        .get("delta", {})
-                                        .get("content", "")
-                                    )
-                                    if delta:
-                                        chunk_count += 1
-                                        yield delta
-                                except json.JSONDecodeError:
+                try:
+                    chunk_count = 0
+                    empty_choice_count = 0
+                    malformed_chunk_count = 0
+                    timeout_config = httpx.Timeout(
+                        settings.coach_llm_read_timeout,
+                        connect=5.0,
+                        read=settings.coach_llm_read_timeout,
+                        pool=5.0,
+                    )
+                    async with httpx.AsyncClient(timeout=timeout_config) as client:
+                        async with client.stream(
+                            "POST",
+                            f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                            json=payload,
+                            headers=headers,
+                        ) as response:
+                            if response.status_code >= 400 and response.status_code < 500:
+                                error_body = await response.aread()
+                                logger.error(
+                                    "[Coach OpenRouter 4xx] Status: %s, Body: %s",
+                                    response.status_code,
+                                    error_body.decode("utf-8", errors="replace"),
+                                )
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                line = line.strip()
+                                if not line:
                                     continue
-                            else:
-                                if line and not line.startswith(":"):
-                                    logger.info(
-                                        "[Coach OpenRouter Raw] %s: %s", model, line
-                                    )
-                                    if "error" in line.lower():
-                                        logger.error(
-                                            "[Coach OpenRouter Error Detail] %s", line
+                                if line.startswith("data: "):
+                                    data_str = line[6:].strip()
+                                    if data_str == "[DONE]":
+                                        break
+                                    try:
+                                        data = json.loads(data_str)
+                                        delta, parse_reason = _parse_openrouter_stream_delta(
+                                            data
                                         )
+                                        if parse_reason in {
+                                            "missing_choices",
+                                            "empty_choices",
+                                        }:
+                                            empty_choice_count += 1
+                                        elif parse_reason in {
+                                            "non_object_payload",
+                                            "malformed_choice",
+                                        }:
+                                            malformed_chunk_count += 1
+                                        if delta:
+                                            chunk_count += 1
+                                            yield delta
+                                    except json.JSONDecodeError:
+                                        malformed_chunk_count += 1
+                                        continue
+                                else:
+                                    if line and not line.startswith(":"):
+                                        logger.info(
+                                            "[Coach OpenRouter Raw] %s: %s", model, line
+                                        )
+                                        if "error" in line.lower():
+                                            logger.error(
+                                                "[Coach OpenRouter Error Detail] %s", line
+                                            )
 
-                if chunk_count == 0:
-                    error_msg = f"Empty response (0 chunks) from {model}."
-                    logger.warning("[Coach LLM] %s", error_msg)
-                    last_exception = RuntimeError(error_msg)
-                    continue
-                logger.info(
-                    "[Coach LLM] Success: %d chunks from %s", chunk_count, model
-                )
-                return
-            except Exception as e:
-                logger.error("[Coach LLM] OpenRouter model %s failed: %s", model, e)
-                last_exception = e
-                continue
+                    if chunk_count == 0:
+                        if malformed_chunk_count > 0:
+                            empty_chunk_reason = "malformed_stream_payload"
+                        elif empty_choice_count > 0:
+                            empty_chunk_reason = "empty_choices"
+                        else:
+                            empty_chunk_reason = "empty_chunk"
+                        error_msg = (
+                            f"Empty response (0 chunks) from {model}. "
+                            f"reason={empty_chunk_reason}, empty_choices={empty_choice_count}, malformed={malformed_chunk_count}"
+                        )
+                        last_exception = RuntimeError(error_msg)
+                        if retry_index < COACH_OPENROUTER_RETRY_LIMIT:
+                            logger.warning(
+                                "[Coach LLM Retry] model=%s retry_index=%d/%d reason=%s",
+                                model,
+                                retry_index + 1,
+                                COACH_OPENROUTER_RETRY_LIMIT + 1,
+                                empty_chunk_reason,
+                            )
+                            await asyncio.sleep(
+                                COACH_OPENROUTER_RETRY_BACKOFF_SECONDS
+                                * (2**retry_index)
+                            )
+                            continue
+                        logger.warning("[Coach LLM] %s", error_msg)
+                        break
+                    if empty_choice_count > 0 or malformed_chunk_count > 0:
+                        logger.info(
+                            "[Coach LLM StreamParse] model=%s chunk_count=%d empty_choices=%d malformed_chunks=%d",
+                            model,
+                            chunk_count,
+                            empty_choice_count,
+                            malformed_chunk_count,
+                        )
+                    logger.info(
+                        "[Coach LLM] Success: %d chunks from %s", chunk_count, model
+                    )
+                    return
+                except Exception as e:
+                    retryable = is_retryable_coach_openrouter_error(e)
+                    logger.error(
+                        "[Coach LLM] OpenRouter model %s failed attempt=%d/%d retryable=%s: %s",
+                        model,
+                        retry_index + 1,
+                        COACH_OPENROUTER_RETRY_LIMIT + 1,
+                        retryable,
+                        e,
+                    )
+                    last_exception = e
+                    if retryable and retry_index < COACH_OPENROUTER_RETRY_LIMIT:
+                        await asyncio.sleep(
+                            COACH_OPENROUTER_RETRY_BACKOFF_SECONDS
+                            * (2**retry_index)
+                        )
+                        continue
+                    break
 
         raise last_exception or RuntimeError("All OpenRouter models failed")
 
@@ -589,7 +809,7 @@ def require_ai_internal_token(
     authorization: str = Header(default="", alias="Authorization"),
 ) -> None:
     settings = get_settings()
-    expected_token = (getattr(settings, "ai_internal_token", "") or "").strip()
+    expected_token = (getattr(settings, "resolved_ai_internal_token", "") or "").strip()
     endpoint = request.url.path if request is not None else "unknown"
 
     if not expected_token:

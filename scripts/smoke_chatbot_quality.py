@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """Run live chatbot quality checks for completion and stream endpoints.
 
-Runs 100 sequential baseball questions (or provided question list) against
-`/ai/chat/completion` and `/ai/chat/stream` and checks:
-- Table presence in response text.
-- Core section presence in response text.
-- Source line presence in response text.
+Runs 100 sequential chatbot questions (or a provided question list) against
+`/ai/chat/completion` and `/ai/chat/stream`.
 """
 
 from __future__ import annotations
@@ -37,11 +34,37 @@ SECTION_HEADERS = (
 TABLE_PATTERN = re.compile(r"(^|\n)\s*\|.+\|.+\|", re.MULTILINE)
 SECTION_PATTERN = re.compile(r"(^|\n)\s*#{1,3}\s*([^\n]+)")
 SOURCE_PATTERN = re.compile(r"(^|\n)\s*출처\s*[:：]", re.MULTILINE)
+BRIEFING_INTRO_PATTERN = re.compile(r"^\s*질문하신\s*`", re.MULTILINE)
+BRIEFING_SECTION_LINE_PATTERN = re.compile(
+    r"^\s*(?:#{1,3}\s*)?"
+    r"(핵심(?:\s*(?:요약|분석|결론|지표))?|요약|전망|분석|정리|결론|요점|상세 내역|핵심 지표|주요 지표|인사이트)"
+    r"\s*(?:[:：]|$)"
+)
+RAW_CHUNK_MARKERS = (
+    "README.md 쪽에서는",
+    ".md 쪽에서는",
+    "```",
+)
+LOW_DATA_FALLBACK_MARKERS = (
+    "이번 조회만으로는 질문에 시원하게 답할 만큼 데이터가 충분히 안 붙었습니다.",
+    "지금 조회로는 질문에 딱 맞는 규정 조항이 충분히 안 잡혔습니다.",
+    "지금 일정 조회로는 질문에 바로 꽂히는 경기 데이터가 충분히 안 잡혔습니다.",
+    "괜히 아는 척하지 않고 확인된 범위에서만 말씀드리겠습니다.",
+)
+DEFAULT_QUESTION_LIST_PATH = (
+    Path(__file__).resolve().with_name("smoke_chatbot_quality_regmix_100.txt")
+)
+DEFAULT_REGULATION_CANARY_PATH = (
+    Path(__file__).resolve().with_name("smoke_chatbot_quality_regulations_20.txt")
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run live quality checks for chatbot endpoints."
+        description=(
+            "Run live quality checks for chatbot endpoints. "
+            "Default question set is regmix 100 (team 80 + regulation 20)."
+        )
     )
     parser.add_argument(
         "--base-url",
@@ -58,7 +81,11 @@ def parse_args() -> argparse.Namespace:
         "--chat-question-list",
         type=str,
         default=None,
-        help="Optional path to newline-separated questions file.",
+        help=(
+            "Optional path to newline-separated questions file. "
+            f"Default: {DEFAULT_QUESTION_LIST_PATH}. "
+            f"Regulation canary: {DEFAULT_REGULATION_CANARY_PATH}."
+        ),
     )
     parser.add_argument(
         "--internal-api-key",
@@ -143,10 +170,25 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Always exit 0 even if checks fail.",
     )
+    parser.add_argument(
+        "--stream-fallback-ratio-max",
+        type=float,
+        default=0.40,
+        help="Maximum allowed fallback ratio for stream endpoint (default: 0.40).",
+    )
     return parser.parse_args()
 
 
 def _default_questions() -> List[str]:
+    if DEFAULT_QUESTION_LIST_PATH.exists():
+        questions = [
+            line.strip()
+            for line in DEFAULT_QUESTION_LIST_PATH.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if questions:
+            return questions
+
     teams = [
         "LG",
         "KT",
@@ -159,19 +201,19 @@ def _default_questions() -> List[str]:
         "키움",
         "NC",
     ]
-    topics = [
-        "시즌 요약",
-        "최근 5경기 흐름",
-        "최근 10경기 득점 추이",
-        "투수진 강점",
-        "타격 장단점",
-        "불펜 리스크",
-        "상대 전적 분석",
-        "수비 실책 분석",
-        "대형 이벤트 핵심 변수",
-        "플레이오프 가능성",
+    templates = [
+        "{team} 요즘 시즌 흐름 팬 눈높이로 한 번에 정리해줘.",
+        "{team} 최근 5경기 폼, 솔직히 올라오는 중이야 내려가는 중이야?",
+        "{team} 최근 10경기 득점 보면 타선 살아난 거야 식은 거야?",
+        "{team} 선발진 지금 믿고 가도 되는 상태인지 냉정하게 봐줘.",
+        "{team} 타선이 터질 때랑 침묵할 때 패턴 좀 현실적으로 짚어줘.",
+        "{team} 불펜 요즘 갈아 넣는 중이야? 필승조 퍼진 신호 있는지 봐줘.",
+        "{team} 상대 전적 보면 누구만 만나면 유독 꼬이는지 알려줘.",
+        "{team} 수비 실책 때문에 날린 경기들, 뼈아픈 장면 위주로 정리해줘.",
+        "{team} 큰 경기만 가면 흔들리는 구간이 어디인지 콕 집어줘.",
+        "{team} 이 페이스면 가을야구 갈 수 있어? 팬 입장에서 현실적으로 말해줘.",
     ]
-    return [f"{team} 야구 분석: {topic}" for team in teams for topic in topics]
+    return [template.format(team=team) for team in teams for template in templates]
 
 
 def _pid_alive(pid: int) -> bool:
@@ -317,40 +359,88 @@ def _has_table(text: str) -> bool:
 
 def _has_section(text: str) -> bool:
     normalized = re.sub(r"\*{1,2}", "", text)
-    for line_match in SECTION_PATTERN.finditer(normalized):
-        title = line_match.group(2).strip()
-        if any(section in title for section in SECTION_HEADERS):
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if BRIEFING_SECTION_LINE_PATTERN.match(line):
             return True
-    return any(
-        section in normalized
-        for section in (
-            "핵심 요약",
-            "핵심 분석",
-            "핵심 결론",
-            "주요 지표",
-            "상세 내역",
-            "핵심 지표",
-            "인사이트",
-            "정리",
-            "요약",
-        )
-    )
+        heading_match = SECTION_PATTERN.match(line)
+        if heading_match:
+            title = heading_match.group(2).strip()
+            if any(section in title for section in SECTION_HEADERS):
+                return True
+    return False
 
 
 def _has_source(text: str) -> bool:
     return bool(SOURCE_PATTERN.search(text)) or "출처" in text
 
 
+def _has_raw_chunk_marker(text: str) -> bool:
+    return any(marker in (text or "") for marker in RAW_CHUNK_MARKERS)
+
+
+def _has_briefing_intro(text: str) -> bool:
+    return bool(BRIEFING_INTRO_PATTERN.search(text or ""))
+
+
+def _has_low_data_fallback(text: str) -> bool:
+    return any(marker in (text or "") for marker in LOW_DATA_FALLBACK_MARKERS)
+
+
 def _evaluate_quality(text: str) -> Dict[str, bool]:
+    no_table_markup = not _has_table(text)
+    no_briefing_headers = not _has_section(text)
+    no_source_line = not _has_source(text)
+    no_raw_chunk_marker = not _has_raw_chunk_marker(text)
+    no_briefing_intro = not _has_briefing_intro(text)
+    no_low_data_fallback = not _has_low_data_fallback(text)
+    natural_chat = all(
+        (
+            no_table_markup,
+            no_briefing_headers,
+            no_source_line,
+            no_raw_chunk_marker,
+            no_briefing_intro,
+        )
+    )
     return {
-        "table_present": _has_table(text),
-        "section_present": _has_section(text),
-        "source_present": _has_source(text),
+        "natural_chat": natural_chat,
+        "no_table_markup": no_table_markup,
+        "no_briefing_headers": no_briefing_headers,
+        "no_source_line": no_source_line,
+        "no_raw_chunk_marker": no_raw_chunk_marker,
+        "no_briefing_intro": no_briefing_intro,
+        "no_low_data_fallback": no_low_data_fallback,
     }
 
 
 def _quality_pass(quality: Dict[str, bool]) -> bool:
-    return all(quality.values())
+    return bool(quality.get("natural_chat")) and bool(
+        quality.get("no_low_data_fallback")
+    )
+
+
+def _is_fallback_answer(text: str) -> bool:
+    return _has_low_data_fallback(text or "")
+
+
+def _empty_quality() -> Dict[str, bool]:
+    return _evaluate_quality("")
+
+
+def _fallback_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(items)
+    fallback_count = sum(
+        1 for item in items if _is_fallback_answer(str(item.get("answer", "")))
+    )
+    ratio = (fallback_count / total) if total else 0.0
+    return {
+        "total": total,
+        "fallback_count": fallback_count,
+        "fallback_ratio": round(ratio, 4),
+    }
 
 
 def _check_completion(
@@ -392,7 +482,7 @@ def _check_completion(
                     "error": last_error,
                     "latency_ms": round((time.perf_counter() - start) * 1000, 2),
                     "answer": None,
-                    "quality": {"table_present": False, "section_present": False, "source_present": False},
+                    "quality": _empty_quality(),
                     "quality_pass": False,
                     "attempt": attempt,
                     "cached": False,
@@ -434,7 +524,7 @@ def _check_completion(
         "error": last_error,
         "latency_ms": None,
         "answer": None,
-        "quality": {"table_present": False, "section_present": False, "source_present": False},
+        "quality": _empty_quality(),
         "quality_pass": False,
         "attempt": attempts,
         "cached": False,
@@ -499,7 +589,7 @@ def _check_stream(
                         "error": f"status={response.status_code}",
                         "latency_ms": round((time.perf_counter() - start) * 1000, 2),
                         "answer": None,
-                        "quality": {"table_present": False, "section_present": False, "source_present": False},
+                        "quality": _empty_quality(),
                         "quality_pass": False,
                         "attempt": attempt,
                         "event_order_ok": False,
@@ -594,7 +684,7 @@ def _check_stream(
         "error": last_error,
         "latency_ms": None,
         "answer": None,
-        "quality": {"table_present": False, "section_present": False, "source_present": False},
+        "quality": _empty_quality(),
         "quality_pass": False,
         "attempt": attempts,
         "event_order_ok": False,
@@ -676,14 +766,23 @@ def _endpoint_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         "error_rate": _ratio(error_count, total),
         "timeout_rate": _ratio(timeout_count, total),
         "latency_ms": latency_summary,
-        "quality_table_passed": sum(
-            1 for item in items if item.get("quality", {}).get("table_present")
+        "quality_natural_chat_passed": sum(
+            1 for item in items if item.get("quality", {}).get("natural_chat")
         ),
-        "quality_section_passed": sum(
-            1 for item in items if item.get("quality", {}).get("section_present")
+        "quality_no_table_markup_passed": sum(
+            1 for item in items if item.get("quality", {}).get("no_table_markup")
         ),
-        "quality_source_passed": sum(
-            1 for item in items if item.get("quality", {}).get("source_present")
+        "quality_no_briefing_headers_passed": sum(
+            1 for item in items if item.get("quality", {}).get("no_briefing_headers")
+        ),
+        "quality_no_source_line_passed": sum(
+            1 for item in items if item.get("quality", {}).get("no_source_line")
+        ),
+        "quality_no_raw_chunk_marker_passed": sum(
+            1 for item in items if item.get("quality", {}).get("no_raw_chunk_marker")
+        ),
+        "quality_no_low_data_fallback_passed": sum(
+            1 for item in items if item.get("quality", {}).get("no_low_data_fallback")
         ),
     }
 
@@ -701,6 +800,10 @@ def _extract_planner_mode(item: Dict[str, Any]) -> str:
         meta = item.get("meta")
         if isinstance(meta, dict):
             mode = meta.get("planner_mode")
+            if not isinstance(mode, str):
+                perf = meta.get("perf")
+                if isinstance(perf, dict):
+                    mode = perf.get("planner_mode")
     if isinstance(mode, str) and mode.strip():
         return mode.strip()
     return "unknown"
@@ -714,12 +817,19 @@ def _planner_mode_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {mode: _endpoint_metrics(group) for mode, group in grouped.items()}
 
 
-def _summarize_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _summarize_results(
+    results: List[Dict[str, Any]], *, stream_fallback_ratio_max: float
+) -> Dict[str, Any]:
     total = len(results)
     passed = sum(1 for item in results if item.get("ok"))
     failed = total - passed
     completion = [item for item in results if item.get("endpoint") == "/ai/chat/completion"]
     stream = [item for item in results if item.get("endpoint") == "/ai/chat/stream"]
+    completion_fallback_metrics = _fallback_metrics(completion)
+    stream_fallback_metrics = _fallback_metrics(stream)
+    stream_fallback_ratio_ok = (
+        stream_fallback_metrics["fallback_ratio"] <= stream_fallback_ratio_max
+    )
 
     summary: Dict[str, Any] = {
         "total": total,
@@ -729,20 +839,29 @@ def _summarize_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "completion_total": len(completion),
         "stream_passed": sum(1 for item in stream if item.get("ok")),
         "stream_total": len(stream),
-        "quality_table_passed": sum(
-            1
-            for item in results
-            if item.get("quality", {}).get("table_present")
+        "quality_natural_chat_passed": sum(
+            1 for item in results if item.get("quality", {}).get("natural_chat")
         ),
-        "quality_section_passed": sum(
-            1
-            for item in results
-            if item.get("quality", {}).get("section_present")
+        "quality_no_table_markup_passed": sum(
+            1 for item in results if item.get("quality", {}).get("no_table_markup")
         ),
-        "quality_source_passed": sum(
+        "quality_no_briefing_headers_passed": sum(
             1
             for item in results
-            if item.get("quality", {}).get("source_present")
+            if item.get("quality", {}).get("no_briefing_headers")
+        ),
+        "quality_no_source_line_passed": sum(
+            1 for item in results if item.get("quality", {}).get("no_source_line")
+        ),
+        "quality_no_raw_chunk_marker_passed": sum(
+            1
+            for item in results
+            if item.get("quality", {}).get("no_raw_chunk_marker")
+        ),
+        "quality_no_low_data_fallback_passed": sum(
+            1
+            for item in results
+            if item.get("quality", {}).get("no_low_data_fallback")
         ),
         "completion_metrics": _endpoint_metrics(completion),
         "stream_metrics": _endpoint_metrics(stream),
@@ -751,6 +870,10 @@ def _summarize_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             "completion": _planner_mode_metrics(completion),
             "stream": _planner_mode_metrics(stream),
         },
+        "completion_fallback_metrics": completion_fallback_metrics,
+        "stream_fallback_metrics": stream_fallback_metrics,
+        "stream_fallback_ratio_max": stream_fallback_ratio_max,
+        "stream_fallback_ratio_ok": stream_fallback_ratio_ok,
         "overall_error_rate": _ratio(failed, total),
         "overall_timeout_rate": _ratio(
             sum(1 for item in results if _is_timeout_result(item)),
@@ -769,9 +892,12 @@ def _build_report_payload(
     run_id: str,
     pid: int,
     lock_file: str,
+    stream_fallback_ratio_max: float,
     results: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    summary = _summarize_results(results)
+    summary = _summarize_results(
+        results, stream_fallback_ratio_max=stream_fallback_ratio_max
+    )
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "input": {
@@ -782,6 +908,7 @@ def _build_report_payload(
             "run_id": run_id,
             "pid": pid,
             "lock_file": lock_file,
+            "stream_fallback_ratio_max": stream_fallback_ratio_max,
         },
         "summary": summary,
         "results": results,
@@ -798,6 +925,7 @@ def _write_output_report(
     run_id: str,
     pid: int,
     lock_file: str,
+    stream_fallback_ratio_max: float,
     results: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     report = _build_report_payload(
@@ -808,6 +936,7 @@ def _write_output_report(
         run_id=run_id,
         pid=pid,
         lock_file=lock_file,
+        stream_fallback_ratio_max=stream_fallback_ratio_max,
         results=results,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -909,6 +1038,7 @@ def main() -> int:
                         run_id=run_id,
                         pid=os.getpid(),
                         lock_file=str(lock_path),
+                        stream_fallback_ratio_max=args.stream_fallback_ratio_max,
                         results=results,
                     )
 
@@ -920,6 +1050,7 @@ def main() -> int:
             run_id=run_id,
             pid=os.getpid(),
             lock_file=str(lock_path),
+            stream_fallback_ratio_max=args.stream_fallback_ratio_max,
             results=results,
         )
         summary = report["summary"]
@@ -935,6 +1066,7 @@ def main() -> int:
                 run_id=run_id,
                 pid=os.getpid(),
                 lock_file=str(lock_path),
+                stream_fallback_ratio_max=args.stream_fallback_ratio_max,
                 results=results,
             )
             print(f"report saved: {output_path}")
@@ -953,7 +1085,9 @@ def main() -> int:
             )
             print(f"summary saved: {summary_output}")
 
-        if args.strict and summary["failed"] > 0:
+        if args.strict and (
+            summary["failed"] > 0 or not summary.get("stream_fallback_ratio_ok", True)
+        ):
             return 1
         return 0
     finally:

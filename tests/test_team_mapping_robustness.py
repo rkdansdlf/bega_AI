@@ -82,6 +82,45 @@ class TestTeamMappingRobustness:
         assert "SSG" in params[1]  # [date, variants, variants]
         assert "SK" in params[1]
 
+    def test_game_tool_box_score_uses_inning_column(self, game_tool):
+        mock_cursor = game_tool.connection.cursor.return_value
+        mock_cursor.execute.reset_mock()
+        mock_cursor.fetchall.side_effect = [
+            [
+                {
+                    "game_id": "20250501SSLG0",
+                    "game_date": "2025-05-01",
+                    "home_team": "LG",
+                    "away_team": "SS",
+                    "home_score": 5,
+                    "away_score": 3,
+                    "game_status": "FINAL",
+                    "stadium": "잠실",
+                    "winning_team": "LG",
+                    "home_pitcher": "A",
+                    "away_pitcher": "B",
+                }
+            ],
+            [
+                {"inning": 1, "team_side": "home", "runs": 1},
+                {"inning": 1, "team_side": "away", "runs": 0},
+                {"inning": 2, "team_side": "home", "runs": 0},
+                {"inning": 2, "team_side": "away", "runs": 2},
+            ],
+            [
+                {"team_code": "LG", "total_hits": 8, "total_rbi": 5},
+                {"team_code": "SS", "total_hits": 6, "total_rbi": 3},
+            ],
+        ]
+
+        result = game_tool.get_game_box_score(date="2025-05-01")
+
+        inning_query = mock_cursor.execute.call_args_list[1][0][0]
+        assert "SELECT inning, team_side, runs" in inning_query
+        assert "inning_number" not in inning_query
+        assert result["games"][0]["box_score"]["home_1"] == 1
+        assert result["games"][0]["box_score"]["away_2"] == 2
+
     def test_db_tool_leaderboard_query_params(self, monkeypatch, mock_db_connection):
         monkeypatch.setenv("TEAM_CODE_READ_MODE", "canonical_only")
         monkeypatch.setenv("TEAM_CODE_CANONICAL_WINDOW_START", "2021")
@@ -215,3 +254,35 @@ def test_team_code_resolver_canonical_only(monkeypatch):
     outside = resolver.variants("SSG", 2019)
     assert "SSG" in outside
     assert "SK" in outside
+
+
+def test_team_code_resolver_english_aliases():
+    resolver = TeamCodeResolver()
+    assert resolver.resolve_canonical("KT Wiz") == "KT"
+    assert resolver.resolve_canonical("LG Twins") == "LG"
+    assert resolver.resolve_canonical("Hanwha Eagles") == "HH"
+
+
+def test_team_code_resolver_display_name_aliases():
+    resolver = TeamCodeResolver()
+    assert resolver.display_name("kt wiz") == "KT 위즈"
+    assert resolver.display_name("LG Twins") == "LG 트윈스"
+    assert resolver.display_name("Hanwha Eagles") == "한화 이글스"
+
+
+def test_team_code_resolver_sync_preserves_korean_display_name():
+    resolver = TeamCodeResolver()
+
+    resolver.sync_from_team_rows(
+        [
+            {
+                "franchise_id": 1,
+                "team_id": "KT",
+                "team_name": "kt wiz",
+                "current_code": "KT",
+            }
+        ]
+    )
+
+    assert resolver.code_to_name["KT"] == "KT 위즈"
+    assert resolver.display_name("kt wiz") == "KT 위즈"

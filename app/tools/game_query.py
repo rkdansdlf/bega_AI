@@ -245,10 +245,10 @@ class GameQueryTool:
 
                 # 1. 이닝별 점수 조회
                 inning_query = """
-                    SELECT inning_number, home_score, away_score 
-                    FROM game_inning_scores 
-                    WHERE game_id = %s 
-                    ORDER BY inning_number;
+                    SELECT inning, team_side, runs
+                    FROM game_inning_scores
+                    WHERE game_id = %s
+                    ORDER BY inning, team_side;
                 """
                 cursor.execute(inning_query, (game_id,))
                 innings = cursor.fetchall()
@@ -265,9 +265,13 @@ class GameQueryTool:
 
                 # 이닝 점수 매핑
                 for inning in innings:
-                    idx = inning["inning_number"]
-                    box_score[f"away_{idx}"] = inning["away_score"]
-                    box_score[f"home_{idx}"] = inning["home_score"]
+                    idx = inning["inning"]
+                    side = (inning.get("team_side") or "").strip().lower()
+                    runs = inning.get("runs") or 0
+                    if side == "away":
+                        box_score[f"away_{idx}"] = runs
+                    elif side == "home":
+                        box_score[f"home_{idx}"] = runs
 
                 game_dict["box_score"] = box_score
 
@@ -398,7 +402,14 @@ class GameQueryTool:
         return result
 
     def get_head_to_head(
-        self, team1: str, team2: str, year: int = None, limit: int = 10
+        self,
+        team1: str,
+        team2: str,
+        year: int = None,
+        limit: int = 10,
+        as_of_game_date: str | None = None,
+        exclude_game_id: str | None = None,
+        season_id: int | None = None,
     ) -> Dict[str, Any]:
         """
         두 팀 간의 직접 대결 기록을 조회합니다.
@@ -412,7 +423,15 @@ class GameQueryTool:
         Returns:
             팀 간 대결 기록
         """
-        logger.info(f"[GameQuery] Head to head: {team1} vs {team2}, Year: {year}")
+        logger.info(
+            "[GameQuery] Head to head: %s vs %s, Year: %s, season_id=%s, as_of=%s, exclude=%s",
+            team1,
+            team2,
+            year,
+            season_id,
+            as_of_game_date,
+            exclude_game_id,
+        )
 
         team1_normalized = self._normalize_team_name(team1, year)
         team2_normalized = self._normalize_team_name(team2, year)
@@ -451,6 +470,15 @@ class GameQueryTool:
             if year:
                 where_conditions.append("EXTRACT(YEAR FROM g.game_date) = %s")
                 query_params.append(year)
+            if season_id is not None:
+                where_conditions.append("g.season_id = %s")
+                query_params.append(season_id)
+            if as_of_game_date:
+                where_conditions.append("g.game_date < %s")
+                query_params.append(as_of_game_date)
+            if exclude_game_id:
+                where_conditions.append("g.game_id <> %s")
+                query_params.append(exclude_game_id)
 
             # 상세 경기 기록 조회
             games_query = f"""
@@ -1018,14 +1046,21 @@ class GameQueryTool:
 
             # 리그 타입 코드 매핑
             league_code_map = {"regular_season": 0, "korean_series": 5}
-            league_code = league_code_map.get(league_type, 0)
 
-            query = """
+            scoped_query = """
                 SELECT MAX(g.game_date) as last_game_date
                 FROM game g
                 LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
                 WHERE ks.season_year = %s
                   AND ks.league_type_code = %s
+                  AND (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
+                  AND g.game_status = 'COMPLETED';
+            """
+            all_games_query = """
+                SELECT MAX(g.game_date) as last_game_date
+                FROM game g
+                LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                WHERE ks.season_year = %s
                   AND (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
                   AND g.game_status = 'COMPLETED';
             """
@@ -1037,14 +1072,37 @@ class GameQueryTool:
                 team_variants,
                 self.team_resolver.query_mode,
             )
-            cursor.execute(query, (year, league_code, team_variants, team_variants))
-            row = cursor.fetchone()
+
+            row = None
+            resolved_scope = league_type
+            league_code = league_code_map.get(league_type)
+
+            if league_code is not None:
+                cursor.execute(
+                    scoped_query, (year, league_code, team_variants, team_variants)
+                )
+                row = cursor.fetchone()
+
+            if (not row or not row["last_game_date"]) and league_type != "all":
+                logger.info(
+                    "[GameQuery] No scoped last game for %s in %s (%s). Falling back to any completed game in season.",
+                    team_name,
+                    year,
+                    league_type,
+                )
+                cursor.execute(all_games_query, (year, team_variants, team_variants))
+                row = cursor.fetchone()
+                resolved_scope = "all"
 
             if row and row["last_game_date"]:
                 result["last_game_date"] = row["last_game_date"].strftime("%Y-%m-%d")
                 result["found"] = True
+                result["resolved_league_type"] = resolved_scope
                 logger.info(
-                    f"[GameQuery] Found last game for {team_name}: {result['last_game_date']}"
+                    "[GameQuery] Found last game for %s: %s (scope=%s)",
+                    team_name,
+                    result["last_game_date"],
+                    resolved_scope,
                 )
             else:
                 logger.warning(
