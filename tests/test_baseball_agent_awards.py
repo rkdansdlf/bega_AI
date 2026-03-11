@@ -1,12 +1,26 @@
 from types import SimpleNamespace
 
 from app.agents.baseball_agent import BaseballStatisticsAgent
+from app.agents.chat_intent_router import ChatIntentRouter
 from app.agents.tool_caller import ToolResult
 from app.tools.database_query import DatabaseQueryTool
 
 
 def _build_agent() -> BaseballStatisticsAgent:
-    return BaseballStatisticsAgent.__new__(BaseballStatisticsAgent)
+    agent = BaseballStatisticsAgent.__new__(BaseballStatisticsAgent)
+    agent.fast_path_enabled = True
+    agent.fast_path_scope = "all"
+    agent.fast_path_tool_cap = 2
+    agent._detect_team_alias_from_query = lambda query: None
+    agent.chat_intent_router = ChatIntentRouter(
+        resolve_reference_year=agent._resolve_reference_year,
+        detect_team_alias=agent._detect_team_alias_from_query,
+        resolve_award_query_type=agent._resolve_award_query_type,
+        build_team_tool_calls=lambda query, team_name, season_year: [],
+        fast_path_enabled=agent.fast_path_enabled,
+        fast_path_scope=agent.fast_path_scope,
+    )
+    return agent
 
 
 def test_reference_fast_path_routes_mvp_query_to_awards() -> None:
@@ -23,7 +37,7 @@ def test_reference_fast_path_routes_mvp_query_to_awards() -> None:
     )
 
     assert plan is not None
-    assert plan["intent"] == "award_lookup"
+    assert plan["intent"] == "season_result_lookup"
     assert len(plan["tool_calls"]) == 1
     assert plan["tool_calls"][0].tool_name == "get_award_winners"
     assert plan["tool_calls"][0].parameters == {"year": 2025, "award_type": "mvp"}

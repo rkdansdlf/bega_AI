@@ -137,6 +137,11 @@ async def draft_release_decision(
         raise HTTPException(status_code=404, detail="Unknown release decision scenario")
 
     settings = get_settings()
+    if not settings.openai_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY is required to use release decision drafting",
+        )
     try:
         agent = ResponsesReleaseDecisionAgent(
             workspace_root=WORKSPACE_ROOT,

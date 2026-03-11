@@ -1,23 +1,30 @@
-import os
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from app.config import get_settings
+
+from app.routers import vision
 
 AI_INTERNAL_TEST_TOKEN = "local-test-token"
-os.environ.setdefault("AI_INTERNAL_TOKEN", AI_INTERNAL_TEST_TOKEN)
-try:
-    get_settings.cache_clear()
-except AttributeError:
-    pass
 
-from app.main import app
 
-client = TestClient(
-    app,
-    headers={"X-Internal-Api-Key": AI_INTERNAL_TEST_TOKEN},
-)
+@pytest.fixture
+def client(monkeypatch):
+    test_app = FastAPI()
+    test_app.include_router(vision.router)
+    test_app.dependency_overrides[vision.rate_limit_vision_dependency] = lambda: None
+    monkeypatch.setattr(
+        "app.deps.get_settings",
+        lambda: SimpleNamespace(resolved_ai_internal_token=AI_INTERNAL_TEST_TOKEN),
+    )
+    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    with TestClient(
+        test_app,
+        headers={"X-Internal-Api-Key": AI_INTERNAL_TEST_TOKEN},
+    ) as test_client:
+        yield test_client
 
 
 @pytest.fixture
@@ -38,7 +45,9 @@ def mock_image_open():
         yield mock
 
 
-def test_analyze_ticket_gemini_success(mock_settings, mock_genai, mock_image_open):
+def test_analyze_ticket_gemini_success(
+    client, mock_settings, mock_genai, mock_image_open
+):
     # Configure settings for Gemini
     mock_settings.llm_provider = "gemini"
     mock_settings.gemini_api_key = "test_key"
@@ -72,7 +81,7 @@ def test_analyze_ticket_gemini_success(mock_settings, mock_genai, mock_image_ope
     mock_model.generate_content.assert_called_once()
 
 
-def test_analyze_ticket_openrouter_success(mock_settings):
+def test_analyze_ticket_openrouter_success(client, mock_settings):
     # Configure settings for OpenRouter
     mock_settings.llm_provider = "openrouter"
     mock_settings.openrouter_api_key = "test_router_key"
