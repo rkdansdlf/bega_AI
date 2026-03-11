@@ -71,8 +71,10 @@ class RegulationQueryTool:
     @contextmanager
     def _connection_scope(self, force_fresh: bool = False):
         conn = self.connection
-        if not force_fresh and conn is not None and not bool(
-            getattr(conn, "closed", False)
+        if (
+            not force_fresh
+            and conn is not None
+            and not bool(getattr(conn, "closed", False))
         ):
             yield conn
             return
@@ -199,18 +201,17 @@ class RegulationQueryTool:
         }
 
         try:
+
             def _run_once(conn: psycopg.Connection):
                 with conn.cursor(row_factory=dict_row) as cursor:
-                    cursor.execute(
-                        """
+                    cursor.execute("""
                         SELECT EXISTS(
                             SELECT 1
                             FROM information_schema.tables
                             WHERE table_schema = 'public'
                               AND table_name = 'rag_chunks'
                         );
-                        """
-                    )
+                        """)
                     row = cursor.fetchone()
                     table_exists = False
                     if row:
@@ -355,21 +356,17 @@ class RegulationQueryTool:
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
 
-            cursor.execute(
-                """
+            cursor.execute("""
                 SELECT EXISTS(
                     SELECT 1
                     FROM information_schema.tables
                     WHERE table_schema = 'public'
                       AND table_name = 'rag_chunks'
                 );
-                """
-            )
+                """)
             row = cursor.fetchone()
             if not (row and row[0]):
-                logger.warning(
-                    "[RegulationQuery] rag_chunks table is not available"
-                )
+                logger.warning("[RegulationQuery] rag_chunks table is not available")
                 result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
                 return result
 

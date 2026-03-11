@@ -20,7 +20,9 @@ def test_resolved_ai_internal_token_uses_local_dev_fallback(monkeypatch):
     assert settings.resolved_ai_internal_token == LOCAL_DEV_AI_INTERNAL_TOKEN
 
 
-def test_resolved_ai_internal_token_requires_explicit_value_for_non_local_origins(monkeypatch):
+def test_resolved_ai_internal_token_requires_explicit_value_for_non_local_origins(
+    monkeypatch,
+):
     monkeypatch.delenv("AI_INTERNAL_TOKEN", raising=False)
     monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
 
@@ -42,6 +44,4 @@ def test_settings_warns_when_openrouter_llm_and_openai_embeddings_are_mixed(
 
     Settings()
 
-    assert (
-        "Embeddings will call OpenAI directly, not OpenRouter." in caplog.text
-    )
+    assert "Embeddings will call OpenAI directly, not OpenRouter." in caplog.text

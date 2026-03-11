@@ -1468,7 +1468,9 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 )
 
         elif entity_filter.player_name:
-            logger.info(f"[RAG] Player-specific query: {entity_filter.player_name} (LLM expansion disabled for speed)")
+            logger.info(
+                f"[RAG] Player-specific query: {entity_filter.player_name} (LLM expansion disabled for speed)"
+            )
             # For specific player queries, use multi-query with relaxed filters
             player_filters = dict(final_filters)
             player_filters.pop("source_table", None)  # Remove source_table filter

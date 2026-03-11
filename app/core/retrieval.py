@@ -15,7 +15,6 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.errors import UndefinedTable
 
-
 logger = logging.getLogger(__name__)
 
 _INTERNAL_FILTER_INCLUDE_INNING_SCORES = "_include_game_inning_scores"
@@ -51,16 +50,14 @@ def _rag_chunks_exists(conn: psycopg.Connection) -> bool:
     try:
         _ensure_pgvector_session(conn)
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
+            cursor.execute("""
                 SELECT EXISTS(
                     SELECT 1
                     FROM information_schema.tables
                     WHERE table_schema = 'public'
                       AND table_name = 'rag_chunks'
                 );
-                """
-            )
+                """)
             row = cursor.fetchone()
             return bool(row[0]) if row else False
     except Exception:

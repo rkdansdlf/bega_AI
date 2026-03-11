@@ -70,5 +70,8 @@ def test_ingest_document_suffixes_multi_chunk_source_rows(monkeypatch) -> None:
 
     params = [call[1] for call in conn.cursor_obj.calls]
     assert [item[4] for item in params] == ["rule-2#part1", "rule-2#part2"]
-    assert [item[5] for item in params] == ["Multipart Doc (분할 1)", "Multipart Doc (분할 2)"]
+    assert [item[5] for item in params] == [
+        "Multipart Doc (분할 1)",
+        "Multipart Doc (분할 2)",
+    ]
     assert result == {"status": "ok", "chunks": 2}

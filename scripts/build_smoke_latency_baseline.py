@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-
 REPORTS_DIR = Path(__file__).resolve().parents[2] / "reports"
 PRESET_INPUTS = {
     "regmix_100": [
@@ -57,7 +56,9 @@ def _avg(values: List[float]) -> Optional[float]:
     return round(sum(values) / len(values), 6)
 
 
-def _collect_metric_values(reports: List[Dict[str, Any]], path: List[str]) -> List[float]:
+def _collect_metric_values(
+    reports: List[Dict[str, Any]], path: List[str]
+) -> List[float]:
     values: List[float] = []
     for report in reports:
         current: Any = report
@@ -71,17 +72,29 @@ def _collect_metric_values(reports: List[Dict[str, Any]], path: List[str]) -> Li
     return values
 
 
-def _build_endpoint_baseline(reports: List[Dict[str, Any]], endpoint_key: str) -> Dict[str, Any]:
+def _build_endpoint_baseline(
+    reports: List[Dict[str, Any]], endpoint_key: str
+) -> Dict[str, Any]:
     base_path = ["summary", endpoint_key]
     return {
         "pass_rate": _avg(_collect_metric_values(reports, base_path + ["pass_rate"])),
         "error_rate": _avg(_collect_metric_values(reports, base_path + ["error_rate"])),
-        "timeout_rate": _avg(_collect_metric_values(reports, base_path + ["timeout_rate"])),
+        "timeout_rate": _avg(
+            _collect_metric_values(reports, base_path + ["timeout_rate"])
+        ),
         "latency_ms": {
-            "p50": _avg(_collect_metric_values(reports, base_path + ["latency_ms", "p50"])),
-            "p95": _avg(_collect_metric_values(reports, base_path + ["latency_ms", "p95"])),
-            "p99": _avg(_collect_metric_values(reports, base_path + ["latency_ms", "p99"])),
-            "avg": _avg(_collect_metric_values(reports, base_path + ["latency_ms", "avg"])),
+            "p50": _avg(
+                _collect_metric_values(reports, base_path + ["latency_ms", "p50"])
+            ),
+            "p95": _avg(
+                _collect_metric_values(reports, base_path + ["latency_ms", "p95"])
+            ),
+            "p99": _avg(
+                _collect_metric_values(reports, base_path + ["latency_ms", "p99"])
+            ),
+            "avg": _avg(
+                _collect_metric_values(reports, base_path + ["latency_ms", "avg"])
+            ),
         },
     }
 

@@ -12,15 +12,17 @@ except ModuleNotFoundError:
 # We can import build_select_query directly from the script
 from scripts.ingest_from_kbo import TABLE_PROFILES, build_select_query
 
+
 @pytest.fixture
 def sample_since():
     return datetime(2025, 4, 1, 12, 0)
+
 
 def test_build_select_query_with_alias(sample_since):
     profile = {
         "select_sql": "SELECT bs.* FROM player_season_batting bs",
         "season_filter_column": "bs.season",
-        "since_filter_column": "bs.updated_at"
+        "since_filter_column": "bs.updated_at",
     }
     query, params = build_select_query(
         table="player_season_batting",
@@ -28,17 +30,18 @@ def test_build_select_query_with_alias(sample_since):
         pk_columns=["id"],
         limit=None,
         season_year=2025,
-        since=sample_since
+        since=sample_since,
     )
-    
+
     assert "WHERE bs.season = %s AND bs.updated_at >= %s" in query
     assert params == (2025, sample_since)
+
 
 def test_build_select_query_without_alias(sample_since):
     profile = {
         "select_sql": "SELECT * FROM team_name_mapping",
         "season_filter_column": None,
-        "since_filter_column": "updated_at"
+        "since_filter_column": "updated_at",
     }
     query, params = build_select_query(
         table="team_name_mapping",
@@ -46,17 +49,18 @@ def test_build_select_query_without_alias(sample_since):
         pk_columns=["full_name"],
         limit=None,
         season_year=None,
-        since=sample_since
+        since=sample_since,
     )
-    
+
     assert "WHERE updated_at >= %s" in query
     assert params == (sample_since,)
+
 
 def test_build_select_query_with_existing_where(sample_since):
     profile = {
         "select_sql": "SELECT tb.* FROM table_b tb WHERE tb.status = 'ACTIVE'",
         "season_filter_column": "tb.season",
-        "since_filter_column": "tb.updated_at"
+        "since_filter_column": "tb.updated_at",
     }
     query, params = build_select_query(
         table="table_b",
@@ -64,9 +68,9 @@ def test_build_select_query_with_existing_where(sample_since):
         pk_columns=["id"],
         limit=10,
         season_year=2024,
-        since=sample_since
+        since=sample_since,
     )
-    
+
     # Original string parsing logic injects AND when WHERE already exists
     assert "WHERE tb.status = 'ACTIVE'" in query
     assert "AND tb.season = %s AND tb.updated_at >= %s" in query
@@ -136,7 +140,9 @@ def test_build_select_query_appends_outer_where_after_nested_where(sample_since)
     )
 
     assert "WHERE home_score IS NOT NULL" in query
-    assert ") game_flow_rows\nWHERE season_year = %s AND latest_updated_at >= %s" in query
+    assert (
+        ") game_flow_rows\nWHERE season_year = %s AND latest_updated_at >= %s" in query
+    )
     assert params == (2025, sample_since)
 
 

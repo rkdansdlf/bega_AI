@@ -36,5 +36,6 @@ def get_security_event_counters() -> dict[str, int]:
     """테스트/모니터링용 보안 이벤트 스냅샷을 반환합니다."""
     with _lock:
         return {
-            f"{event}|{endpoint}|{detail}": count for (event, endpoint, detail), count in _events.items()
+            f"{event}|{endpoint}|{detail}": count
+            for (event, endpoint, detail), count in _events.items()
         }

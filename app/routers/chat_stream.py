@@ -138,7 +138,9 @@ def _validate_chat_payload(payload: Dict[str, Any]) -> None:
     try:
         payload_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     except TypeError as exc:
-        raise HTTPException(status_code=400, detail="요청 본문을 파싱할 수 없습니다.") from exc
+        raise HTTPException(
+            status_code=400, detail="요청 본문을 파싱할 수 없습니다."
+        ) from exc
 
     if payload_bytes > MAX_CHAT_REQUEST_BYTES:
         raise HTTPException(
@@ -295,9 +297,7 @@ def _normalize_chatbot_answer_text(answer: str) -> str:
 
         if stripped.startswith("|"):
             cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-            is_divider = all(
-                cell and set(cell) <= {"-", ":", " "} for cell in cells
-            )
+            is_divider = all(cell and set(cell) <= {"-", ":", " "} for cell in cells)
             if is_divider:
                 continue
             if not table_headers:
@@ -327,11 +327,12 @@ def _is_non_cacheable_response(response_text: str) -> bool:
     if not normalized:
         return True
     compact_markers = tuple(
-        _normalize_cache_guard_text(marker) for marker in _NON_CACHEABLE_RESPONSE_MARKERS
+        _normalize_cache_guard_text(marker)
+        for marker in _NON_CACHEABLE_RESPONSE_MARKERS
     )
-    return any(marker in normalized for marker in _NON_CACHEABLE_RESPONSE_MARKERS) or any(
-        marker in normalized for marker in compact_markers
-    )
+    return any(
+        marker in normalized for marker in _NON_CACHEABLE_RESPONSE_MARKERS
+    ) or any(marker in normalized for marker in compact_markers)
 
 
 def _safe_serialize(obj: Any) -> Any:
@@ -465,9 +466,7 @@ async def _stream_response(
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
-    context_messages = (
-        history if history else [{"role": "user", "content": question}]
-    )
+    context_messages = history if history else [{"role": "user", "content": question}]
 
     result: Optional[Dict[str, Any]] = None
     error_payload: Optional[Dict[str, Any]] = None
@@ -522,7 +521,9 @@ async def _stream_response(
                             full_response_chunks.append(delta)
                             yield {
                                 "event": "message",
-                                "data": json.dumps({"delta": delta}, ensure_ascii=False),
+                                "data": json.dumps(
+                                    {"delta": delta}, ensure_ascii=False
+                                ),
                             }
                 except Exception as exc:
                     answer_stream_error = str(exc)
@@ -534,7 +535,9 @@ async def _stream_response(
                     full_response_chunks.append(fallback_text)
                     yield {
                         "event": "message",
-                        "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
+                        "data": json.dumps(
+                            {"delta": fallback_text}, ensure_ascii=False
+                        ),
                     }
                     yield {
                         "event": "error",
@@ -554,7 +557,9 @@ async def _stream_response(
                 full_response_text = "".join(full_response_chunks)
                 yield {
                     "event": "message",
-                    "data": json.dumps({"delta": full_response_text}, ensure_ascii=False),
+                    "data": json.dumps(
+                        {"delta": full_response_text}, ensure_ascii=False
+                    ),
                 }
 
             full_response_text = "".join(full_response_chunks)
@@ -601,9 +606,7 @@ async def _stream_response(
                 "answer_sources": result.get("answer_sources", []),
                 "as_of_date": result.get("as_of_date"),
                 "fallback_reason": result.get("fallback_reason"),
-                "fallback_answer_used": bool(
-                    result.get("fallback_answer_used", False)
-                )
+                "fallback_answer_used": bool(result.get("fallback_answer_used", False))
                 or bool(answer_stream_error),
                 "perf": result.get("perf"),
                 "error": public_error,
@@ -716,9 +719,7 @@ async def _read_upload_with_limit(
 ) -> tuple[bytes, str]:
     content_type = _normalize_content_type(upload.content_type)
     if allowed_content_types is not None and content_type not in allowed_content_types:
-        raise HTTPException(
-            status_code=415, detail="지원되지 않는 파일 타입입니다."
-        )
+        raise HTTPException(status_code=415, detail="지원되지 않는 파일 타입입니다.")
 
     with tempfile.SpooledTemporaryFile(max_size=max_bytes, mode="w+b") as spool:
         total = 0

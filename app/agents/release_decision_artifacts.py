@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 from .release_decision_agent import ReleaseDecisionRunResult
 from .release_decision_eval import ReleaseDecisionEvalResult
 
-
 _SAFE_COMPONENT_PATTERN = re.compile(r"[^A-Za-z0-9_-]+")
 _SAFE_ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -117,9 +116,10 @@ class ReleaseDecisionArtifactStore:
             f"_{_slugify_component(decision)}"
         )
         candidate = base
-        while self._json_path(scenario, candidate).exists() or self._markdown_path(
-            scenario, candidate
-        ).exists():
+        while (
+            self._json_path(scenario, candidate).exists()
+            or self._markdown_path(scenario, candidate).exists()
+        ):
             candidate = f"{base}_{secrets.token_hex(3)}"
         return candidate
 
@@ -135,7 +135,9 @@ class ReleaseDecisionArtifactStore:
         evaluation: ReleaseDecisionEvaluateResponse | None,
         saved_at: datetime | None = None,
     ) -> ReleaseDecisionArtifactSummary:
-        saved_at_value = (saved_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        saved_at_value = (saved_at or datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        )
         artifact_id = self._allocate_artifact_id(
             scenario=scenario,
             decision=draft_response.draft.decision,
@@ -155,7 +157,8 @@ class ReleaseDecisionArtifactStore:
         json_path = self._json_path(scenario, artifact_id)
         markdown_path = self._markdown_path(scenario, artifact_id)
         json_text = (
-            json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
+            json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2)
+            + "\n"
         )
         markdown_text = markdown if markdown.endswith("\n") else f"{markdown}\n"
 
@@ -204,7 +207,9 @@ class ReleaseDecisionArtifactStore:
             scenario=record.scenario,
             decision=record.draft_response.draft.decision,
             eval_status=(
-                record.evaluation.evaluation.status if record.evaluation is not None else None
+                record.evaluation.evaluation.status
+                if record.evaluation is not None
+                else None
             ),
             saved_at_utc=record.saved_at_utc,
             markdown_filename=f"{record.artifact_id}.md",

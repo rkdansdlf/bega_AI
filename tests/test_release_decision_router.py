@@ -120,7 +120,9 @@ def test_draft_release_decision_returns_markdown_and_result(monkeypatch) -> None
             openai_api_key="test-openai-key",
         ),
     )
-    monkeypatch.setattr("app.routers.release_decision.get_settings", lambda: router_settings)
+    monkeypatch.setattr(
+        "app.routers.release_decision.get_settings", lambda: router_settings
+    )
     monkeypatch.setattr(
         "app.internal_auth.record_security_event", lambda *args, **kwargs: None
     )
@@ -203,7 +205,9 @@ def test_draft_release_decision_returns_503_without_openai_key(monkeypatch) -> N
             openai_api_key=None,
         ),
     )
-    monkeypatch.setattr("app.routers.release_decision.get_settings", lambda: router_settings)
+    monkeypatch.setattr(
+        "app.routers.release_decision.get_settings", lambda: router_settings
+    )
     monkeypatch.setattr(
         "app.internal_auth.record_security_event", lambda *args, **kwargs: None
     )
@@ -219,7 +223,9 @@ def test_draft_release_decision_returns_503_without_openai_key(monkeypatch) -> N
     assert "OPENAI_API_KEY" in response.json()["detail"]
 
 
-def test_save_release_decision_artifact_and_list_and_detail(tmp_path, monkeypatch) -> None:
+def test_save_release_decision_artifact_and_list_and_detail(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setattr(
         "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
@@ -227,7 +233,9 @@ def test_save_release_decision_artifact_and_list_and_detail(tmp_path, monkeypatc
     monkeypatch.setattr(
         "app.internal_auth.record_security_event", lambda *args, **kwargs: None
     )
-    monkeypatch.setattr("app.routers.release_decision.ARTIFACTS_ROOT", tmp_path / "reports")
+    monkeypatch.setattr(
+        "app.routers.release_decision.ARTIFACTS_ROOT", tmp_path / "reports"
+    )
 
     payload = {
         "scenario": "prediction_stage2",
@@ -296,7 +304,9 @@ def test_save_release_decision_artifact_and_list_and_detail(tmp_path, monkeypatc
         assert detail["draft_response"]["draft"]["decision"] == "NO_GO"
 
 
-def test_get_release_decision_artifact_returns_404_for_unknown_id(monkeypatch, tmp_path) -> None:
+def test_get_release_decision_artifact_returns_404_for_unknown_id(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setattr(
         "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
@@ -304,7 +314,9 @@ def test_get_release_decision_artifact_returns_404_for_unknown_id(monkeypatch, t
     monkeypatch.setattr(
         "app.internal_auth.record_security_event", lambda *args, **kwargs: None
     )
-    monkeypatch.setattr("app.routers.release_decision.ARTIFACTS_ROOT", tmp_path / "reports")
+    monkeypatch.setattr(
+        "app.routers.release_decision.ARTIFACTS_ROOT", tmp_path / "reports"
+    )
 
     with _build_client() as client:
         response = client.get(

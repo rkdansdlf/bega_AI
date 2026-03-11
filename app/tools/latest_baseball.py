@@ -23,7 +23,9 @@ class LatestBaseballSearchTool:
     @staticmethod
     def _build_query(query: str) -> str:
         query_lower = query.lower()
-        if any(token in query_lower for token in ("kbo", "야구", "프로야구", "baseball")):
+        if any(
+            token in query_lower for token in ("kbo", "야구", "프로야구", "baseball")
+        ):
             return query
         return f"KBO 프로야구 {query}"
 

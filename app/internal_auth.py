@@ -40,9 +40,8 @@ def require_ai_internal_token(
         )
 
     provided_token = (
-        (x_internal_api_key or "").strip()
-        or _extract_internal_token_from_authorization(authorization)
-    )
+        x_internal_api_key or ""
+    ).strip() or _extract_internal_token_from_authorization(authorization)
     if not provided_token or not secrets.compare_digest(provided_token, expected_token):
         record_security_event(
             "AI_INTERNAL_AUTH_REJECT",

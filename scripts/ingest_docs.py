@@ -98,8 +98,7 @@ def infer_doc_metadata(relative_path: str) -> dict[str, str]:
     ):
         knowledge_type = "rules_terms"
     elif any(
-        token in normalized
-        for token in ("strategy", "metric", "metrics", "game_types")
+        token in normalized for token in ("strategy", "metric", "metrics", "game_types")
     ):
         knowledge_type = "strategy_metrics"
     elif any(
@@ -163,7 +162,9 @@ async def main():
                 # Infer metadata from path
                 season_year = infer_season_year(file_path)
                 league_type_code = 0  # Default to 0 to satisfy NOT NULL constraint
-                relative_path = Path(file_path).resolve().relative_to(PROJECT_ROOT).as_posix()
+                relative_path = (
+                    Path(file_path).resolve().relative_to(PROJECT_ROOT).as_posix()
+                )
                 metadata = infer_doc_metadata(relative_path)
 
                 # 청크 분할 및 임베딩 생성

@@ -150,16 +150,22 @@ class ChatRendererRegistry:
         top_player = self._player_label(top_entry)
         if decision and decision.intent == ChatIntent.AMBIGUOUS_SUPERLATIVE:
             if decision.subject_type == "pitcher":
-                return self._render_pitcher_superlative(season_label, top_player, top_entry)
+                return self._render_pitcher_superlative(
+                    season_label, top_player, top_entry
+                )
             if decision.subject_type == "batter":
-                return self._render_batter_superlative(season_label, top_player, top_entry)
+                return self._render_batter_superlative(
+                    season_label, top_player, top_entry
+                )
         lines = [f"{season_label} {stat_name} 기준으로 보면 상위권은 이렇게 보입니다."]
         for index, entry in enumerate(leaderboard[:3], start=1):
             player_name = self._player_label(entry)
             stat_value = self.agent._format_deterministic_metric(
                 self.agent._extract_leaderboard_value(entry, raw_stat_name)
             )
-            lines.append(f"{index}위는 {player_name}이고, {stat_name}은 {stat_value}입니다.")
+            lines.append(
+                f"{index}위는 {player_name}이고, {stat_name}은 {stat_value}입니다."
+            )
         return "\n\n".join(lines[:4])
 
     def render_game_flow(self, query: str, data: dict[str, Any]) -> Optional[str]:
@@ -208,13 +214,18 @@ class ChatRendererRegistry:
                     or game.get("home_team")
                     or game.get("home_team_name")
                 )
-                away_score = self.agent._format_deterministic_metric(game.get("away_score"))
-                home_score = self.agent._format_deterministic_metric(game.get("home_score"))
-                game_summaries.append(f"{away_team} {away_score}-{home_score} {home_team}")
+                away_score = self.agent._format_deterministic_metric(
+                    game.get("away_score")
+                )
+                home_score = self.agent._format_deterministic_metric(
+                    game.get("home_score")
+                )
+                game_summaries.append(
+                    f"{away_team} {away_score}-{home_score} {home_team}"
+                )
 
             date_label = self.agent._format_deterministic_metric(
-                data.get("date")
-                or (data.get("query_params") or {}).get("date")
+                data.get("date") or (data.get("query_params") or {}).get("date")
             )
             if date_label == "확인 불가":
                 date_label = "그 날짜"
@@ -281,7 +292,10 @@ class ChatRendererRegistry:
                 metric_label = "팀 OPS"
             elif "타율" in query_lower:
                 metric_label = "팀 타율"
-            elif any(token in query_lower for token in ["평균자책", "평균 자책", "평균자책점", "방어율", "era"]):
+            elif any(
+                token in query_lower
+                for token in ["평균자책", "평균 자책", "평균자책점", "방어율", "era"]
+            ):
                 metric_label = "팀 평균자책점"
             elif "홈런" in query_lower:
                 metric_label = "팀 홈런"
@@ -290,7 +304,11 @@ class ChatRendererRegistry:
 
             if metric_label:
                 team_name = self.agent._detect_team_alias_from_query(query)
-                team_label = self.agent._format_team_display_name(team_name) if team_name else "해당 팀"
+                team_label = (
+                    self.agent._format_team_display_name(team_name)
+                    if team_name
+                    else "해당 팀"
+                )
                 return (
                     f"현재 연결된 자료에서는 {team_label} {metric_label}를 직접 확인하지 못했습니다.\n\n"
                     "확인되지 않은 팀 지표를 추정해서 답하지는 않겠습니다."
@@ -305,7 +323,10 @@ class ChatRendererRegistry:
             metric_label = "팀 OPS"
         elif "타율" in query_lower:
             metric_label = "팀 타율"
-        elif any(token in query_lower for token in ["평균자책", "평균 자책", "평균자책점", "방어율", "era"]):
+        elif any(
+            token in query_lower
+            for token in ["평균자책", "평균 자책", "평균자책점", "방어율", "era"]
+        ):
             metric_label = "팀 평균자책점"
         elif "홈런" in query_lower:
             metric_label = "팀 홈런"
@@ -314,7 +335,11 @@ class ChatRendererRegistry:
 
         if metric_label and any(token in query_lower for token in ["팀", "구단"]):
             team_name = self.agent._detect_team_alias_from_query(query)
-            team_label = self.agent._format_team_display_name(team_name) if team_name else "해당 팀"
+            team_label = (
+                self.agent._format_team_display_name(team_name)
+                if team_name
+                else "해당 팀"
+            )
             return (
                 f"현재 연결된 자료에서는 {team_label} {metric_label}를 직접 확인하지 못했습니다.\n\n"
                 "확인되지 않은 팀 지표를 추정해서 답하지는 않겠습니다."
@@ -381,7 +406,9 @@ class ChatRendererRegistry:
             "winning_team": game.get("winning_team_code") or game.get("winning_team"),
             "inning_lines_json": inning_lines,
             "source_table": "game_box_score",
-            "source_row_id": f"game_id={game.get('game_id')}" if game.get("game_id") else "",
+            "source_row_id": (
+                f"game_id={game.get('game_id')}" if game.get("game_id") else ""
+            ),
         }
 
     def _normalize_game_flow_answer(self, rendered: str) -> str:
@@ -411,8 +438,12 @@ class ChatRendererRegistry:
         basis_parts = []
         era = self.agent._format_deterministic_metric(top_entry.get("era"))
         whip = self.agent._format_deterministic_metric(top_entry.get("whip"))
-        strikeouts = self.agent._format_deterministic_metric(top_entry.get("strikeouts"))
-        innings_pitched = self.agent._format_deterministic_metric(top_entry.get("innings_pitched"))
+        strikeouts = self.agent._format_deterministic_metric(
+            top_entry.get("strikeouts")
+        )
+        innings_pitched = self.agent._format_deterministic_metric(
+            top_entry.get("innings_pitched")
+        )
         if era != "확인 불가":
             basis_parts.append(f"평균자책점(ERA) {era}")
         if whip != "확인 불가":

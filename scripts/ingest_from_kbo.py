@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from pathlib import Path
 import sys
+
 os.environ.setdefault("PYTEST_CURRENT_TEST", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -167,9 +168,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "markdown_docs_chatbot_kb_v2": {
         "description": "KBO 챗봇 심화 지식 베이스 V2",
-        "source_file": Path(__file__).parent.parent
-        / "docs"
-        / "KBO_CHATBOT_KB_V2.md",
+        "source_file": Path(__file__).parent.parent / "docs" / "KBO_CHATBOT_KB_V2.md",
         "source_table": "markdown_docs",
         "title": "KBO 챗봇 심화 지식 베이스 V2",
         "pk_hint": ["title"],
@@ -1403,7 +1402,7 @@ def build_select_query(
         if since is not None and since_filter_column:
             where_clauses.append(f"{since_filter_column} >= %s")
             params.append(since)
-            
+
         if where_clauses:
             has_where = bool(_find_top_level_keyword_positions(base_sql, "WHERE"))
             if has_where:
@@ -1584,8 +1583,7 @@ def _run_task_in_new_subinterpreter(task: RowPrepareTask) -> List[Dict[str, Any]
             task_json=task_json,
             result_queue=result_queue,
         )
-        interpreter.exec(
-            """
+        interpreter.exec("""
 import json
 from scripts.ingest_from_kbo import _build_chunk_payload_dicts_for_row
 
@@ -1601,15 +1599,16 @@ try:
     result_queue.put({"ok": True, "payloads": payloads})
 except Exception as exc:  # noqa: BLE001
     result_queue.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
-"""
-        )
+""")
         result = result_queue.get()
         if isinstance(result, dict) and result.get("ok"):
             payloads = result.get("payloads")
             if isinstance(payloads, list):
                 return payloads
         raise RuntimeError(
-            str(result.get("error")) if isinstance(result, dict) else "subinterp task failed"
+            str(result.get("error"))
+            if isinstance(result, dict)
+            else "subinterp task failed"
         )
     finally:
         interpreter.close()
@@ -1800,18 +1799,23 @@ def ingest_table(
                             "chunk_index": idx,
                             "league_scope": profile.get(
                                 "league_scope",
-                                "kbo+baseball"
-                                if profile.get("source_table") == "markdown_docs"
-                                else "kbo",
+                                (
+                                    "kbo+baseball"
+                                    if profile.get("source_table") == "markdown_docs"
+                                    else "kbo"
+                                ),
                             ),
                             "knowledge_type": profile.get(
                                 "knowledge_type",
-                                "rules_terms"
-                                if profile.get("source_table") == "kbo_regulations"
-                                else (
-                                    "strategy_metrics"
-                                    if profile.get("source_table") == "kbo_definitions"
-                                    else "document"
+                                (
+                                    "rules_terms"
+                                    if profile.get("source_table") == "kbo_regulations"
+                                    else (
+                                        "strategy_metrics"
+                                        if profile.get("source_table")
+                                        == "kbo_definitions"
+                                        else "document"
+                                    )
                                 ),
                             ),
                             "freshness": profile.get("freshness", "evergreen"),

@@ -137,7 +137,9 @@ def _default_chat_questions() -> List[str]:
 def _load_chat_questions(path: str | None, limit: int) -> List[str]:
     if path:
         p = Path(path)
-        questions = [line.strip() for line in p.read_text(encoding="utf-8").splitlines()]
+        questions = [
+            line.strip() for line in p.read_text(encoding="utf-8").splitlines()
+        ]
         questions = [line for line in questions if line]
         if not questions:
             raise ValueError(f"No questions found in {p}")
@@ -255,7 +257,9 @@ def check_completion(
                 "status_code": response.status_code,
                 "ok": ok,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 2),
-                "error": None if ok else f"unexpected_response:{_truncate(str(body), 240)}",
+                "error": (
+                    None if ok else f"unexpected_response:{_truncate(str(body), 240)}"
+                ),
                 "sample_response": body,
                 "attempt": attempt,
             }
@@ -395,7 +399,11 @@ def _check_stream_endpoint(
         "endpoint": endpoint_name,
         "status_code": status_code,
         "ok": False,
-        "latency_ms": None if last_exception is None else round((time.perf_counter() - started) * 1000, 2),
+        "latency_ms": (
+            None
+            if last_exception is None
+            else round((time.perf_counter() - started) * 1000, 2)
+        ),
         "error": error or last_exception,
         "sample_response": _truncate("\n".join(sample_lines)),
         "attempt": attempt,

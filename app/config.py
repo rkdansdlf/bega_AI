@@ -265,15 +265,11 @@ class Settings(BaseSettings):
     chat_fast_path_enabled: bool = Field(
         True, validation_alias="CHAT_FAST_PATH_ENABLED"
     )
-    chat_fast_path_scope: str = Field(
-        "team", validation_alias="CHAT_FAST_PATH_SCOPE"
-    )
+    chat_fast_path_scope: str = Field("team", validation_alias="CHAT_FAST_PATH_SCOPE")
     chat_fast_path_min_messages: int = Field(
         0, validation_alias="CHAT_FAST_PATH_MIN_MESSAGES"
     )
-    chat_fast_path_tool_cap: int = Field(
-        2, validation_alias="CHAT_FAST_PATH_TOOL_CAP"
-    )
+    chat_fast_path_tool_cap: int = Field(2, validation_alias="CHAT_FAST_PATH_TOOL_CAP")
     chat_fast_path_fallback_on_empty: bool = Field(
         True, validation_alias="CHAT_FAST_PATH_FALLBACK_ON_EMPTY"
     )
@@ -408,11 +404,15 @@ class Settings(BaseSettings):
             try:
                 parsed = json.loads(raw)
                 if isinstance(parsed, list):
-                    normalized = [str(origin).strip() for origin in parsed if str(origin).strip()]
+                    normalized = [
+                        str(origin).strip() for origin in parsed if str(origin).strip()
+                    ]
                     if normalized:
                         return normalized
             except Exception:
-                logger.warning("Failed to parse CORS_ORIGINS as JSON list; fallback to CSV parsing.")
+                logger.warning(
+                    "Failed to parse CORS_ORIGINS as JSON list; fallback to CSV parsing."
+                )
         parsed_csv = [origin.strip() for origin in raw.split(",") if origin.strip()]
         return parsed_csv or DEFAULT_CORS_ORIGINS
 

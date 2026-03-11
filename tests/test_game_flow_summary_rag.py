@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 from app.core.context_formatter import ContextFormatter
 from app.core.rag import RAGPipeline
-from scripts.benchmark_retrieval import DEFAULT_CASES, BenchmarkCase, _build_variant_filters
+from scripts.benchmark_retrieval import (
+    DEFAULT_CASES,
+    BenchmarkCase,
+    _build_variant_filters,
+)
 
 
 def test_context_formatter_prefers_game_flow_summary() -> None:
@@ -35,7 +39,7 @@ def test_context_formatter_prefers_game_flow_summary() -> None:
                         "[핵심 문장] LG 트윈스는 5회말 이후 리드를 잃지 않았습니다.",
                         "[상세]",
                         "- 득점 이닝: 한화 이글스 1회 1점 / LG 트윈스 5회 4점",
-                        "[META] {\"kind\": \"game_flow_summary\"}",
+                        '[META] {"kind": "game_flow_summary"}',
                         "[출처] KBO 경기 흐름 요약 (game_flow_summary#game_id=20250501LGHH0) / 기준일 2025-05-01",
                     ]
                 ),
@@ -197,8 +201,7 @@ def test_benchmark_cases_include_game_flow_narrative_bucket() -> None:
     assert len(narrative_cases) == 3
     assert all(case.expected_tool is None for case in narrative_cases)
     assert all(
-        case.expected_top_table == "game_flow_summary"
-        for case in narrative_cases
+        case.expected_top_table == "game_flow_summary" for case in narrative_cases
     )
 
 
