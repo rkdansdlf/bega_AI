@@ -1,0 +1,38 @@
+# Experimental image for CPython free-threaded runtime validation only.
+# Do not use this Dockerfile for default production deployment.
+FROM python:3.14t-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/home/appuser/.local/bin:${PATH}"
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libpq5 \
+    libjpeg62-turbo \
+    libpng16-16 \
+    zlib1g \
+    curl \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN python3 -m pip install --upgrade pip && \
+    python3 -m pip install --no-cache-dir --disable-pip-version-check -r requirements.txt && \
+    rm -rf /root/.cache/pip
+
+RUN useradd -m -u 1000 appuser
+COPY --chown=appuser:appuser . .
+
+USER appuser
+
+EXPOSE 8001
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]

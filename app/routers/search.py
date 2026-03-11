@@ -3,11 +3,12 @@
 from typing import Any, Dict, Optional, List
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
-from ..deps import get_db_connection, get_rag_pipeline
+from ..deps import get_rag_pipeline, require_ai_internal_token
 from ..core.entity_extractor import enhance_search_strategy
+from ..core.ratelimit import rate_limit_debug_dependency
 
 router = APIRouter(prefix="/ai/search", tags=["search"])
 
@@ -31,6 +32,8 @@ async def debug_search(
     team: Optional[str] = Query(None, description="팀명 (예: LG, KIA)"),
     use_multi_query: bool = Query(True, description="다중 쿼리 검색 사용 여부"),
     pipeline=Depends(get_rag_pipeline),
+    __: None = Depends(require_ai_internal_token),
+    _: None = Depends(rate_limit_debug_dependency),
 ):
     """
     검색 알고리즘을 자세히 분석하고 성능을 측정하는 디버깅 엔드포인트입니다.
@@ -118,6 +121,8 @@ async def debug_search(
 @router.get("/test-entity-extraction")
 async def test_entity_extraction(
     q: str = Query(..., min_length=2, description="엔티티 추출을 테스트할 질문"),
+    __: None = Depends(require_ai_internal_token),
+    _: None = Depends(rate_limit_debug_dependency),
 ):
     """
     질문에서 엔티티 추출이 올바르게 작동하는지 테스트하는 엔드포인트입니다.
@@ -149,6 +154,8 @@ async def compare_search_methods(
     q: str = Query(..., min_length=2, description="비교 테스트할 질문"),
     limit: int = Query(10, ge=1, le=20),
     pipeline=Depends(get_rag_pipeline),
+    __: None = Depends(require_ai_internal_token),
+    _: None = Depends(rate_limit_debug_dependency),
 ):
     """
     단일 쿼리 검색과 다중 쿼리 검색 성능을 비교하는 엔드포인트입니다.

@@ -1,0 +1,254 @@
+[
+  {
+    "id": "team_metric_kia_avg",
+    "question": "2025년 KIA 팀 타율 알려줘",
+    "required_all": ["KIA"],
+    "required_any": ["팀 타율", "타율은"],
+    "forbidden": ["1위는", "2위는", "3위는", "천성호", "손호영", "이주형"]
+  },
+  {
+    "id": "team_metric_lg_era",
+    "question": "2025년 LG 팀 평균자책점 알려줘",
+    "required_all": ["LG"],
+    "required_any": ["평균자책점", "팀 평균자책점", "ERA"],
+    "forbidden": ["상위권은 이렇게 보입니다", "1위는", "2위는", "3위는"]
+  },
+  {
+    "id": "team_metric_ssg_ops",
+    "question": "2025년 SSG 팀 OPS 알려줘",
+    "required_all": ["SSG"],
+    "required_any": ["팀 OPS", "OPS는"],
+    "forbidden": ["1위는", "2위는", "3위는"]
+  },
+  {
+    "id": "team_metric_dosan_hr",
+    "question": "2025년 두산 팀 홈런 알려줘",
+    "required_all": ["두산"],
+    "required_any": ["팀 홈런", "홈런은"],
+    "forbidden": ["1위는", "2위는", "3위는"]
+  },
+  {
+    "id": "team_metric_kt_rbi",
+    "question": "2025년 KT 팀 타점 알려줘",
+    "required_all": ["KT"],
+    "required_any": ["팀 타점", "타점은"],
+    "forbidden": ["1위는", "2위는", "3위는"]
+  },
+  {
+    "id": "team_rank_dosan_2025",
+    "question": "2025년 두산 팀 순위 알려줘",
+    "required_all": ["두산"],
+    "required_any": ["순위", "위"],
+    "forbidden": ["1위는", "2위는", "3위는"]
+  },
+  {
+    "id": "korean_series_2024",
+    "question": "2024년 한국시리즈 우승팀 알려줘",
+    "required_all": ["KIA 타이거즈"],
+    "required_any": ["우승", "우승팀"],
+    "forbidden": []
+  },
+  {
+    "id": "leaderboard_ops_2024",
+    "question": "2024년 OPS 1위 알려줘",
+    "required_all": ["김도영"],
+    "required_any": ["1위", "가장"],
+    "forbidden": ["나승엽", "윤동희"]
+  },
+  {
+    "id": "explainer_babip",
+    "question": "BABIP가 뭔지 알려줘",
+    "required_all": ["BABIP"],
+    "required_any": ["인플레이", "타구", "안타"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요", "분석 결과"]
+  },
+  {
+    "id": "explainer_abs",
+    "question": "자동 투구 판정 ABS는 어떤 원리야",
+    "required_all": ["ABS"],
+    "required_any": ["스트라이크존", "판정", "시스템"],
+    "forbidden": ["질문하신", "분석 결과", "README.md", "rules_terms.md"]
+  },
+  {
+    "id": "explainer_wpa",
+    "question": "승리확률기여도 WPA 설명해줘",
+    "required_all": ["WPA"],
+    "required_any": ["승리 확률", "플레이", "기여"],
+    "forbidden": ["##", "분석 결과", "근거:", "승부 예측"]
+  },
+  {
+    "id": "explainer_whip",
+    "question": "WHIP 뜻 설명해줘",
+    "required_all": ["WHIP"],
+    "required_any": ["주자", "이닝", "허용"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_qs",
+    "question": "QS가 뭐야",
+    "required_all": ["QS"],
+    "required_any": ["6이닝", "3자책점", "선발"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_changeup",
+    "question": "체인지업은 어떤 공이야",
+    "required_all": [],
+    "required_any": ["직구", "느린", "타이밍"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_hit_and_run",
+    "question": "히트앤런이 뭐야",
+    "required_all": [],
+    "required_any": ["주자", "스타트", "타자"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_setup_group",
+    "question": "필승조가 뭐야",
+    "required_all": [],
+    "required_any": ["불펜", "접전", "후반"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_framing",
+    "question": "포수 프레이밍이 뭐야",
+    "required_all": [],
+    "required_any": ["포수", "스트라이크", "판정"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_shift",
+    "question": "수비 시프트가 뭔지 알려줘",
+    "required_all": [],
+    "required_any": ["수비 위치", "타구", "타자"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_bunt",
+    "question": "번트 전략은 언제 써",
+    "required_all": [],
+    "required_any": ["주자 진루", "아웃", "희생"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_double_play",
+    "question": "병살타가 왜 치명적이야",
+    "required_all": [],
+    "required_any": ["아웃 2개", "주자", "득점 기회"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_balk",
+    "question": "보크는 어떤 경우야",
+    "required_all": [],
+    "required_any": ["투수", "주자", "반칙"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요", "확인된 답을 만들지 못했습니다"]
+  },
+  {
+    "id": "explainer_not_out",
+    "question": "스트라이크 아웃 낫아웃 설명해줘",
+    "required_all": [],
+    "required_any": ["포수", "1루", "삼진"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요", "응답이 중단되었습니다"]
+  },
+  {
+    "id": "explainer_tag_up",
+    "question": "태그업이 뭐야",
+    "required_all": [],
+    "required_any": ["주자", "플라이", "베이스"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "explainer_infield_fly",
+    "question": "인필드 플라이가 뭐야",
+    "required_all": [],
+    "required_any": ["내야", "뜬공", "타자 아웃"],
+    "forbidden": ["질문하신", "README.md", "rules_terms.md", "개요"]
+  },
+  {
+    "id": "regulation_strike_zone",
+    "question": "스트라이크존은 어떻게 정해져",
+    "required_all": [],
+    "required_any": ["무릎", "어깨", "홈플레이트"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "explainer_out_count",
+    "question": "야구에서 아웃카운트는 왜 3개야",
+    "required_all": [],
+    "required_any": ["3아웃", "공수 교대", "이닝"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "explainer_dh",
+    "question": "지명타자 제도 설명해줘",
+    "required_all": [],
+    "required_any": ["타격만", "투수 대신", "수비를 하지 않는"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_hbp_vs_ibb",
+    "question": "사구와 고의4구 규정 차이 있어",
+    "required_all": ["사구", "고의4구"],
+    "required_any": ["몸에 맞는 공", "볼넷", "고의로"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_tiebreak",
+    "question": "타이브레이크 규정 알려줘",
+    "required_all": [],
+    "required_any": ["무사 1,2루", "무사 1, 2루", "연장전"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_wildcard",
+    "question": "포스트시즌 와일드카드 규정 설명해줘",
+    "required_all": [],
+    "required_any": ["4위", "5위", "와일드카드"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_extra_innings",
+    "question": "연장전 규정 설명해줘",
+    "required_all": [],
+    "required_any": ["연장전", "12이닝", "무승부"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_video_review",
+    "question": "비디오 판독 대상 플레이 알려줘",
+    "required_all": [],
+    "required_any": ["판독", "홈런", "아웃"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_win_pitcher",
+    "question": "승리투수 요건은 어떻게 정해져",
+    "required_all": [],
+    "required_any": ["선발투수", "5이닝", "승리"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "latest_recent_matchup",
+    "question": "2025년 KIA와 삼성 최근 맞대결 알려줘",
+    "required_all": ["KIA", "삼성"],
+    "required_any": ["기준", "맞대결"],
+    "forbidden": ["**분석 결과:**", "분석 결과:", "##"]
+  },
+  {
+    "id": "latest_recent_performance",
+    "question": "김도영 최근 경기 활약 알려줘",
+    "required_all": ["김도영"],
+    "required_any": ["기준", "경기", "활약"],
+    "forbidden": ["**분석 결과:**", "분석 결과:", "##"]
+  },
+  {
+    "id": "latest_rank_race",
+    "question": "지금 5위 싸움 어떻게 돼",
+    "required_all": [],
+    "required_any": ["기준", "5위", "순위"],
+    "forbidden": ["**분석 결과:**", "분석 결과:", "##"]
+  }
+]

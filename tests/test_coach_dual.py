@@ -2,8 +2,6 @@
 Coach Dual-Team Analysis Tests
 """
 
-import pytest
-from unittest.mock import Mock, patch
 from app.routers.coach import _build_coach_query, _format_coach_context
 
 

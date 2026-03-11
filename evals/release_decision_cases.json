@@ -1,0 +1,42 @@
+[
+  {
+    "case_id": "prediction_stage2_hold",
+    "scenario": "prediction_stage2",
+    "task_prompt": "Prediction Stage 2 진행 여부를 판단하는 최신 rollout decision 초안을 작성하라.",
+    "seed_paths": [
+      "docs/qa/prediction_rollout_decision_20260306.md",
+      "docs/qa/prediction_rollout_gate_latest.md",
+      "docs/qa/prediction_stage1_sync_summary_latest.md",
+      "docs/qa/prediction_stage1_monitoring_20260305_20260306.md"
+    ],
+    "expected_decision": "NO_GO",
+    "required_keywords": [
+      "pending",
+      "표본 부족",
+      "24시간"
+    ],
+    "required_sources": [
+      "docs/qa/prediction_rollout_gate_latest.md",
+      "docs/qa/prediction_stage1_sync_summary_latest.md"
+    ]
+  },
+  {
+    "case_id": "stadium_release_go",
+    "scenario": "stadium_release",
+    "task_prompt": "Stadium 기능의 현재 release gate 결정을 작성하라.",
+    "seed_paths": [
+      "docs/qa/stadium-release-gate-20260304.md",
+      "docs/qa/stadium-guide-smoke-20260304.md"
+    ],
+    "expected_decision": "GO",
+    "required_keywords": [
+      "pass",
+      "5 passing, 0 failing",
+      "ready"
+    ],
+    "required_sources": [
+      "docs/qa/stadium-release-gate-20260304.md",
+      "docs/qa/stadium-guide-smoke-20260304.md"
+    ]
+  }
+]

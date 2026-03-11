@@ -53,16 +53,6 @@ def _format_ip(value: Any) -> Optional[str]:
     return f"{whole}.{fraction}이닝"
 
 
-def _format_percentage(value: Any, digits: int = 1) -> Optional[str]:
-    if value in NUMBER_SENTINELS:
-        return None
-    try:
-        pct = float(value) * 100
-    except (TypeError, ValueError):
-        return None
-    return f"{pct:.{digits}f}%"
-
-
 def _format_count(value: Any, suffix: str = "") -> Optional[str]:
     if value is None or value == "null" or value == "None":
         return None
@@ -147,6 +137,273 @@ def _detailed_lines(lines: Iterable[str]) -> str:
         return "[상세] 제공된 추가 세부 기록이 없습니다."
     bullet_lines = "\n".join(f"- {line}" for line in valid)
     return "[상세]\n" + bullet_lines
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    if value in NUMBER_SENTINELS:
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _parse_inning_lines(value: Any) -> List[Dict[str, Any]]:
+    if not value:
+        return []
+    raw_lines = value
+    if isinstance(value, str):
+        try:
+            raw_lines = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw_lines, list):
+        return []
+
+    parsed: List[Dict[str, Any]] = []
+    for item in raw_lines:
+        if not isinstance(item, dict):
+            continue
+        inning = _coerce_int(item.get("inning"), default=0)
+        if inning <= 0:
+            continue
+        parsed.append(
+            {
+                "inning": inning,
+                "home_runs": _coerce_int(item.get("home_runs")),
+                "away_runs": _coerce_int(item.get("away_runs")),
+                "is_extra": bool(item.get("is_extra")),
+            }
+        )
+    return sorted(parsed, key=lambda item: item["inning"])
+
+
+def _bucket_key(inning: int) -> str:
+    if inning <= 3:
+        return "early"
+    if inning <= 6:
+        return "middle"
+    if inning <= 9:
+        return "late"
+    return "extra"
+
+
+def _bucket_label(bucket: str) -> str:
+    labels = {
+        "early": "초반",
+        "middle": "중반",
+        "late": "후반",
+        "extra": "연장",
+    }
+    return labels.get(bucket, bucket)
+
+
+def _team_display_name(
+    row: Dict[str, Any],
+    *,
+    side: str,
+) -> str:
+    if side == "home":
+        return str(row.get("home_team_name") or row.get("home_team") or "홈팀")
+    return str(row.get("away_team_name") or row.get("away_team") or "원정팀")
+
+
+def _winning_team_name(
+    row: Dict[str, Any],
+    home_team: str,
+    away_team: str,
+) -> Optional[str]:
+    home_score = _coerce_int(row.get("home_score"))
+    away_score = _coerce_int(row.get("away_score"))
+    if home_score == away_score:
+        return None
+
+    winning_team = str(row.get("winning_team") or "").strip()
+    if winning_team:
+        if winning_team == str(row.get("home_team") or "").strip():
+            return home_team
+        if winning_team == str(row.get("away_team") or "").strip():
+            return away_team
+        return winning_team
+
+    return home_team if home_score > away_score else away_team
+
+
+def render_game_flow_summary(
+    row: Dict[str, Any],
+    *,
+    league_avg: Optional[Dict[str, Any]] = None,
+    percentiles: Optional[Dict[str, Any]] = None,
+    today_str: Optional[str],
+) -> str:
+    del league_avg, percentiles
+
+    today = _today_fallback(today_str)
+    game_date = str(row.get("game_date") or "경기일 미상")
+    home_team = _team_display_name(row, side="home")
+    away_team = _team_display_name(row, side="away")
+    home_score = _coerce_int(row.get("home_score"))
+    away_score = _coerce_int(row.get("away_score"))
+    winner_name = _winning_team_name(row, home_team, away_team)
+
+    inning_lines = _parse_inning_lines(row.get("inning_lines_json"))
+    scoring_innings = {"home": [], "away": []}
+    bucket_totals = {
+        "home": {"early": 0, "middle": 0, "late": 0, "extra": 0},
+        "away": {"early": 0, "middle": 0, "late": 0, "extra": 0},
+    }
+
+    tie_events = 0
+    lead_changes = 0
+    half_progression: List[Dict[str, Any]] = []
+    running_home = 0
+    running_away = 0
+    previous_sign = 0
+
+    for inning_line in inning_lines:
+        inning = inning_line["inning"]
+        bucket = _bucket_key(inning)
+        home_runs = inning_line["home_runs"]
+        away_runs = inning_line["away_runs"]
+
+        bucket_totals["home"][bucket] += home_runs
+        bucket_totals["away"][bucket] += away_runs
+
+        if away_runs > 0:
+            scoring_innings["away"].append(f"{inning}회 {away_runs}점")
+        if home_runs > 0:
+            scoring_innings["home"].append(f"{inning}회 {home_runs}점")
+
+        for side, runs in (("away", away_runs), ("home", home_runs)):
+            if side == "away":
+                running_away += runs
+            else:
+                running_home += runs
+
+            diff = running_home - running_away
+            current_sign = 1 if diff > 0 else -1 if diff < 0 else 0
+            if previous_sign != 0 and current_sign == 0:
+                tie_events += 1
+            elif (
+                previous_sign != 0
+                and current_sign != 0
+                and current_sign != previous_sign
+            ):
+                lead_changes += 1
+
+            half_progression.append(
+                {
+                    "label": f"{inning}회{'초' if side == 'away' else '말'}",
+                    "sign": current_sign,
+                }
+            )
+            previous_sign = current_sign
+
+    final_sign = 1 if home_score > away_score else -1 if away_score > home_score else 0
+    decisive_half: Optional[str] = None
+    if final_sign != 0:
+        for idx, half in enumerate(half_progression):
+            if half["sign"] != final_sign:
+                continue
+            if all(later["sign"] == final_sign for later in half_progression[idx:]):
+                decisive_half = str(half["label"])
+                break
+
+    bucket_summary = " / ".join(
+        f"{_bucket_label(bucket)} {away_team} {bucket_totals['away'][bucket]} - "
+        f"{bucket_totals['home'][bucket]} {home_team}"
+        for bucket in ("early", "middle", "late", "extra")
+    )
+    scoring_summary = (
+        f"{away_team} {_truncate_text(', '.join(scoring_innings['away']) or '득점 이닝 없음', 90)} / "
+        f"{home_team} {_truncate_text(', '.join(scoring_innings['home']) or '득점 이닝 없음', 90)}"
+    )
+
+    scoreboard = f"{away_team} {away_score}-{home_score} {home_team}"
+    if winner_name is None:
+        tl_dr = _tl_dr(
+            [
+                f"{game_date} {scoreboard} 무승부",
+                f"동점 복귀 {tie_events}회",
+                f"리드 체인지 {lead_changes}회",
+            ]
+        )
+        core = (
+            "[핵심 문장] "
+            f"{away_team}와 {home_team}는 {scoreboard}로 승부를 가리지 못했고, "
+            f"동점 복귀 {tie_events}회와 리드 체인지 {lead_changes}회가 있었습니다."
+        )
+    else:
+        decisive_phrase = (
+            f"{decisive_half}부터 리드를 지켰습니다"
+            if decisive_half
+            else "경기 흐름을 끝까지 지켜냈습니다"
+        )
+        tl_dr = _tl_dr(
+            [
+                f"{game_date} {scoreboard}",
+                f"{winner_name}가 {decisive_phrase}",
+                f"리드 체인지 {lead_changes}회",
+            ]
+        )
+        core = (
+            "[핵심 문장] "
+            f"{winner_name}는 {decisive_half or '경기 중후반'} 이후 리드를 잃지 않았고, "
+            f"동점 복귀 {tie_events}회와 리드 체인지 {lead_changes}회가 있었습니다."
+        )
+
+    detail_block = _detailed_lines(
+        [
+            f"득점 이닝: {_truncate_text(scoring_summary, 210)}",
+            f"흐름 지표: 동점 복귀 {tie_events}회, 리드 체인지 {lead_changes}회, "
+            f"결정적 반이닝 {decisive_half or '없음'}",
+            f"구간 득점: {_truncate_text(bucket_summary, 220)}",
+        ]
+    )
+
+    meta = {
+        "kind": "game_flow_summary",
+        "game_id": row.get("game_id"),
+        "game_date": game_date,
+        "home_team": home_team,
+        "away_team": away_team,
+        "home_score": home_score,
+        "away_score": away_score,
+        "tie_events": tie_events,
+        "lead_changes": lead_changes,
+        "decisive_half": decisive_half,
+        "aliases": [
+            away_team,
+            home_team,
+            row.get("away_team"),
+            row.get("home_team"),
+            row.get("game_id"),
+        ],
+        "bucket_totals": bucket_totals,
+    }
+
+    source = row.get("source_table", "game_flow_summary")
+    row_id = row.get("source_row_id", "")
+    source_line = f"[출처] KBO 경기 흐름 요약 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
+
+    rendered = "\n".join(
+        [
+            tl_dr,
+            core,
+            detail_block,
+            f"[META] {json.dumps(meta, ensure_ascii=False)}",
+            source_line,
+        ]
+    )
+    return _truncate_text(rendered, 800)
 
 
 def render_pitching_season(

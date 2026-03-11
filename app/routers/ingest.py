@@ -1,15 +1,15 @@
 """단일 문서를 벡터 DB에 수동 업서트하기 위한 API 라우터."""
 
-from typing import Any, Dict, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, BackgroundTasks
 from pydantic import BaseModel
 
 from ..config import get_settings
 from ..core.chunking import smart_chunks
 from ..core.embeddings import async_embed_texts
-from ..db import SCHEMA_SQL
-from ..deps import get_db_connection
+from ..deps import get_db_connection, require_ai_internal_token
+from ..core.ratelimit import rate_limit_debug_dependency
 
 router = APIRouter(prefix="/ai/ingest", tags=["ingest"])
 
@@ -25,14 +25,25 @@ class IngestPayload(BaseModel):
 
 
 @router.post("/")
-async def ingest_document(payload: IngestPayload, conn=Depends(get_db_connection)):
+async def ingest_document(
+    payload: IngestPayload,
+    conn=Depends(get_db_connection),
+    __: None = Depends(require_ai_internal_token),
+    _: None = Depends(rate_limit_debug_dependency),
+):
     settings = get_settings()
     chunks = smart_chunks(payload.content)
     embeddings = await async_embed_texts(chunks, settings)
+    chunk_count = len(chunks)
 
     with conn.cursor() as cur:
-        for chunk, embedding in zip(chunks, embeddings):
+        for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings), start=1):
             vector_literal = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
+            source_row_id = payload.source_row_id
+            title = payload.title
+            if chunk_count > 1:
+                source_row_id = f"{payload.source_row_id}#part{idx}"
+                title = f"{payload.title} (분할 {idx})"
             cur.execute(
                 """
                 INSERT INTO rag_chunks (season_year, team_id, player_id, source_table, source_row_id, title, content, embedding)
@@ -45,8 +56,8 @@ async def ingest_document(payload: IngestPayload, conn=Depends(get_db_connection
                     payload.team_id,
                     payload.player_id,
                     payload.source_table,
-                    payload.source_row_id,
-                    payload.title,
+                    source_row_id,
+                    title,
                     chunk,
                     vector_literal,
                 ),
@@ -71,6 +82,8 @@ async def run_ingestion_job(
     payload: RunIngestPayload,
     background_tasks: BackgroundTasks,
     settings=Depends(get_settings),
+    __: None = Depends(require_ai_internal_token),
+    _: None = Depends(rate_limit_debug_dependency),
 ):
     """KBO 데이터 인덱싱(Ingestion) 작업을 백그라운드에서 실행합니다."""
 

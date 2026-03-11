@@ -5,13 +5,26 @@
 """
 
 import logging
+import json
 from functools import lru_cache
 from typing import List, Optional
+from urllib.parse import urlparse
 
 from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5176",
+    "http://127.0.0.1:5176",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+LOCAL_DEV_AI_INTERNAL_TOKEN = "local-dev-ai-internal-token"
+LOCAL_DEV_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "host.docker.internal"}
 
 
 class Settings(BaseSettings):
@@ -33,15 +46,9 @@ class Settings(BaseSettings):
     debug: bool = False
     # CORS 설정(자격 증명 쿠키 사용 시 '* '는 허용되지 않음)
     # 로컬 개발 기준 기본값은 Vite/개발 서버에서 사용되는 대표 도메인으로 제한
-    cors_origins: List[str] = Field(
-        default_factory=lambda: [
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:5176",
-            "http://127.0.0.1:5176",
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ]
+    cors_origins_raw: str = Field(
+        default=",".join(DEFAULT_CORS_ORIGINS),
+        validation_alias="CORS_ORIGINS",
     )
 
     # --- 데이터베이스 설정 ---
@@ -52,6 +59,19 @@ class Settings(BaseSettings):
         None, validation_alias="SUPABASE_DB_URL"
     )
     _legacy_source_db_warned: bool = PrivateAttr(default=False)
+
+    def model_post_init(self, __context) -> None:
+        if (
+            self.llm_provider == "openrouter"
+            and self.embed_provider == "openai"
+            and self.openrouter_api_key
+        ):
+            logger.warning(
+                "LLM_PROVIDER=openrouter but EMBED_PROVIDER=openai. "
+                "Embeddings will call OpenAI directly, not OpenRouter. "
+                "If you intend to use OpenRouter embeddings, set EMBED_PROVIDER=openrouter "
+                "and OPENROUTER_EMBED_MODEL explicitly."
+            )
 
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
@@ -81,12 +101,12 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_API_KEY"
     )
     openrouter_model: str = Field(
-        "upstage/solar-pro-3:free", validation_alias="OPENROUTER_MODEL"
+        "openrouter/free", validation_alias="OPENROUTER_MODEL"
     )
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
-    # Default: openrouter/free - intelligent router that auto-selects available free models
+    # Default: no fallback by default; use OPENROUTER_FALLBACK_MODELS when explicitly set.
     openrouter_fallback_models_raw: str = Field(
-        "openrouter/free", validation_alias="OPENROUTER_FALLBACK_MODELS"
+        "", validation_alias="OPENROUTER_FALLBACK_MODELS"
     )
 
     @property
@@ -116,12 +136,22 @@ class Settings(BaseSettings):
     )
 
     # --- Coach LLM 설정 ---
+
+    # 내부 AI 호출 인증 토큰(헤더 또는 Bearer 토큰 지원)
+    # - 운영 기본 정책은 BFF(/api/ai/*) 경유이며, 외부 direct AI 공개는 금지합니다.
+    # - direct AI 호출을 허용하는 내부 환경에서는 AI_INTERNAL_TOKEN이 필수입니다.
+    # - AI_INTERNAL_TOKEN 미설정 상태의 direct AI 호출은 503(Service Unavailable)로 차단됩니다.
+    ai_internal_token: Optional[str] = Field(
+        None,
+        validation_alias="AI_INTERNAL_TOKEN",
+    )
+
     coach_llm_provider: str = Field("openrouter", validation_alias="COACH_LLM_PROVIDER")
     coach_max_output_tokens: int = Field(
         2000, validation_alias="COACH_MAX_OUTPUT_TOKENS"
     )  # 2000 tokens recommended per COACH_PROMPT_V2
     coach_openrouter_model: str = Field(
-        "upstage/solar-pro-3:free", validation_alias="COACH_OPENROUTER_MODEL"
+        "openrouter/free", validation_alias="COACH_OPENROUTER_MODEL"
     )
     coach_openrouter_fallback_models_raw: str = Field(
         "openrouter/free",
@@ -184,6 +214,65 @@ class Settings(BaseSettings):
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
     max_output_tokens: int = Field(4096, validation_alias="MAX_OUTPUT_TOKENS")
+    chat_dynamic_token_enabled: bool = Field(
+        True, validation_alias="CHAT_DYNAMIC_TOKEN_ENABLED"
+    )
+    chat_analysis_max_tokens: int = Field(
+        350, validation_alias="CHAT_ANALYSIS_MAX_TOKENS"
+    )
+    chat_answer_max_tokens_short: int = Field(
+        1400, validation_alias="CHAT_ANSWER_MAX_TOKENS_SHORT"
+    )
+    chat_answer_max_tokens_long: int = Field(
+        2600, validation_alias="CHAT_ANSWER_MAX_TOKENS_LONG"
+    )
+    chat_answer_max_tokens_team: int = Field(
+        900, validation_alias="CHAT_ANSWER_MAX_TOKENS_TEAM"
+    )
+    chat_tool_result_max_chars: int = Field(
+        2200, validation_alias="CHAT_TOOL_RESULT_MAX_CHARS"
+    )
+    chat_tool_result_max_items: int = Field(
+        8, validation_alias="CHAT_TOOL_RESULT_MAX_ITEMS"
+    )
+    chat_first_token_watchdog_seconds: float = Field(
+        20.0, validation_alias="CHAT_FIRST_TOKEN_WATCHDOG_SECONDS"
+    )
+    chat_first_token_retry_max_attempts: int = Field(
+        1, validation_alias="CHAT_FIRST_TOKEN_RETRY_MAX_ATTEMPTS"
+    )
+    chat_stream_first_token_watchdog_seconds: float = Field(
+        10.0, validation_alias="CHAT_STREAM_FIRST_TOKEN_WATCHDOG_SECONDS"
+    )
+    chat_stream_first_token_retry_max_attempts: int = Field(
+        1, validation_alias="CHAT_STREAM_FIRST_TOKEN_RETRY_MAX_ATTEMPTS"
+    )
+    chat_tool_parallel_enabled: bool = Field(
+        True, validation_alias="CHAT_TOOL_PARALLEL_ENABLED"
+    )
+    chat_tool_parallel_max_concurrency: int = Field(
+        2, validation_alias="CHAT_TOOL_PARALLEL_MAX_CONCURRENCY"
+    )
+    chat_openrouter_empty_chunk_retries: int = Field(
+        2, validation_alias="CHAT_OPENROUTER_EMPTY_CHUNK_RETRIES"
+    )
+    chat_openrouter_empty_chunk_backoff_ms: int = Field(
+        400, validation_alias="CHAT_OPENROUTER_EMPTY_CHUNK_BACKOFF_MS"
+    )
+    chat_perf_metrics_enabled: bool = Field(
+        True, validation_alias="CHAT_PERF_METRICS_ENABLED"
+    )
+    chat_fast_path_enabled: bool = Field(
+        True, validation_alias="CHAT_FAST_PATH_ENABLED"
+    )
+    chat_fast_path_scope: str = Field("team", validation_alias="CHAT_FAST_PATH_SCOPE")
+    chat_fast_path_min_messages: int = Field(
+        0, validation_alias="CHAT_FAST_PATH_MIN_MESSAGES"
+    )
+    chat_fast_path_tool_cap: int = Field(2, validation_alias="CHAT_FAST_PATH_TOOL_CAP")
+    chat_fast_path_fallback_on_empty: bool = Field(
+        True, validation_alias="CHAT_FAST_PATH_FALLBACK_ON_EMPTY"
+    )
 
     # --- Monitoring ---
     sentry_dsn: Optional[str] = Field(None, validation_alias="SENTRY_DSN")
@@ -196,6 +285,42 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"지원되지 않는 EMBED_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
             )
+        return value
+
+    @field_validator("chat_openrouter_empty_chunk_retries")
+    def _validate_chat_openrouter_empty_chunk_retries(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("CHAT_OPENROUTER_EMPTY_CHUNK_RETRIES must be >= 0")
+        return value
+
+    @field_validator("chat_openrouter_empty_chunk_backoff_ms")
+    def _validate_chat_openrouter_empty_chunk_backoff_ms(cls, value: int) -> int:
+        if value < 50:
+            raise ValueError("CHAT_OPENROUTER_EMPTY_CHUNK_BACKOFF_MS must be >= 50")
+        return value
+
+    @field_validator("chat_first_token_watchdog_seconds")
+    def _validate_chat_first_token_watchdog_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("CHAT_FIRST_TOKEN_WATCHDOG_SECONDS must be > 0")
+        return value
+
+    @field_validator("chat_stream_first_token_watchdog_seconds")
+    def _validate_chat_stream_first_token_watchdog_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("CHAT_STREAM_FIRST_TOKEN_WATCHDOG_SECONDS must be > 0")
+        return value
+
+    @field_validator("chat_first_token_retry_max_attempts")
+    def _validate_chat_first_token_retry_max_attempts(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("CHAT_FIRST_TOKEN_RETRY_MAX_ATTEMPTS must be >= 0")
+        return value
+
+    @field_validator("chat_stream_first_token_retry_max_attempts")
+    def _validate_chat_stream_first_token_retry_max_attempts(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("CHAT_STREAM_FIRST_TOKEN_RETRY_MAX_ATTEMPTS must be >= 0")
         return value
 
     @field_validator("llm_provider")
@@ -232,19 +357,88 @@ class Settings(BaseSettings):
             raise ValueError("Moderation threshold 값은 1 이상이어야 합니다.")
         return value
 
+    @field_validator(
+        "chat_analysis_max_tokens",
+        "chat_answer_max_tokens_short",
+        "chat_answer_max_tokens_long",
+        "chat_tool_result_max_chars",
+        "chat_tool_result_max_items",
+        "chat_tool_parallel_max_concurrency",
+        "chat_fast_path_tool_cap",
+    )
+    def _validate_chat_positive_threshold(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Chat optimization threshold 값은 1 이상이어야 합니다.")
+        return value
+
+    @field_validator("chat_fast_path_min_messages")
+    def _validate_chat_fast_path_min_messages(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("CHAT_FAST_PATH_MIN_MESSAGES must be >= 0")
+        return value
+
+    @field_validator("chat_fast_path_scope")
+    def _validate_chat_fast_path_scope(cls, value: str) -> str:
+        allowed = {"team"}
+        if value not in allowed:
+            raise ValueError(
+                f"지원되지 않는 CHAT_FAST_PATH_SCOPE '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
+            )
+        return value
+
     @property
     def cors_allowed_origins(self) -> List[str]:
         """CORS 정책에 따라 허용된 출처 목록을 반환합니다."""
-        if "*" in self.cors_origins:
-            return [
-                "http://localhost:5173",
-                "http://127.0.0.1:5173",
-                "http://localhost:5176",
-                "http://127.0.0.1:5176",
-                "http://localhost:3000",
-                "http://127.0.0.1:3000",
-            ]
-        return self.cors_origins
+        origins = self.cors_origins
+        if "*" in origins:
+            return DEFAULT_CORS_ORIGINS
+        return origins
+
+    @property
+    def cors_origins(self) -> List[str]:
+        """CORS_ORIGINS 값을 JSON 배열/콤마 구분 문자열 모두 허용해 파싱합니다."""
+        raw = (self.cors_origins_raw or "").strip()
+        if not raw:
+            return DEFAULT_CORS_ORIGINS
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    normalized = [
+                        str(origin).strip() for origin in parsed if str(origin).strip()
+                    ]
+                    if normalized:
+                        return normalized
+            except Exception:
+                logger.warning(
+                    "Failed to parse CORS_ORIGINS as JSON list; fallback to CSV parsing."
+                )
+        parsed_csv = [origin.strip() for origin in raw.split(",") if origin.strip()]
+        return parsed_csv or DEFAULT_CORS_ORIGINS
+
+    @property
+    def is_local_dev_environment(self) -> bool:
+        origins = self.cors_origins
+        if not origins:
+            return False
+        return all(self._is_local_origin(origin) for origin in origins)
+
+    @property
+    def resolved_ai_internal_token(self) -> Optional[str]:
+        configured = (self.ai_internal_token or "").strip()
+        if configured:
+            return configured
+        if self.is_local_dev_environment:
+            return LOCAL_DEV_AI_INTERNAL_TOKEN
+        return None
+
+    @staticmethod
+    def _is_local_origin(origin: str) -> bool:
+        try:
+            hostname = (urlparse(origin).hostname or "").strip().lower()
+        except ValueError:
+            return False
+        return hostname in LOCAL_DEV_HOSTS
 
     @property
     def database_url(self) -> str:

@@ -240,9 +240,13 @@ async def get_cached_response(conn, cache_key: str) -> Optional[Dict[str, Any]]:
     Returns:
         캐시 히트 시 {"response_text", "intent", "model_name",
                        "hit_count", "expires_at"} 딕셔너리,
-        미스 또는 만료 시 None.
+        미스, 만료, 또는 오류 시 None (테이블 미존재 포함).
     """
-    return await run_in_threadpool(_get_sync, conn, cache_key)
+    try:
+        return await run_in_threadpool(_get_sync, conn, cache_key)
+    except Exception as exc:
+        logger.warning("[ChatCache] get failed for key %.8s: %s", cache_key, exc)
+        return None  # 캐시 미스로 처리 — 챗봇 응답 흐름은 정상 진행
 
 
 async def save_to_cache(
