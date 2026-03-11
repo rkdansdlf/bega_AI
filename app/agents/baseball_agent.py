@@ -849,9 +849,7 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"문서 검색 도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_search_latest_baseball(
-        self, query: str, limit: int = 5
-    ) -> ToolResult:
+    def _tool_search_latest_baseball(self, query: str, limit: int = 5) -> ToolResult:
         """최신 야구 정보 검색 도구의 래퍼 함수"""
         try:
             result = self.latest_baseball_tool.search_latest_baseball(query, limit)
@@ -1971,7 +1969,9 @@ class BaseballStatisticsAgent:
         try:
             # 1단계: 팀 순위 조회로 포스트시즌 진출 여부 확인
             rank_result = self._tool_get_team_rank(team_name, year)
-            rank_found = bool(rank_result.data.get("found")) if rank_result.data else False
+            rank_found = (
+                bool(rank_result.data.get("found")) if rank_result.data else False
+            )
 
             if not rank_result.success or not rank_found:
                 # 순위 정보를 찾을 수 없는 경우, 기본적으로 한국시리즈로 시도
@@ -2190,7 +2190,9 @@ class BaseballStatisticsAgent:
         }
         return award_display_map.get(award_type, str(award_type))
 
-    def _resolve_award_query_type(self, query: str, entity_filter: Any) -> Optional[str]:
+    def _resolve_award_query_type(
+        self, query: str, entity_filter: Any
+    ) -> Optional[str]:
         query_lower = query.lower()
         if (
             any(keyword in query for keyword in ["한국시리즈", "코리안시리즈"])
@@ -2213,9 +2215,7 @@ class BaseballStatisticsAgent:
 
         return None
 
-    def _tool_get_award_winners(
-        self, year: int, award_type: str = None
-    ) -> ToolResult:
+    def _tool_get_award_winners(self, year: int, award_type: str = None) -> ToolResult:
         """시즌 수상자 조회 도구"""
         try:
             result = self.db_query_tool.get_award_winners(year, award_type)
@@ -2227,7 +2227,9 @@ class BaseballStatisticsAgent:
                     message=f"DB 조회 오류: {result['error']}",
                 )
 
-            display_award = self._display_award_type(result.get("award_type") or award_type)
+            display_award = self._display_award_type(
+                result.get("award_type") or award_type
+            )
 
             if not result["found"]:
                 return ToolResult(
@@ -2469,7 +2471,18 @@ class BaseballStatisticsAgent:
             return False
         if any(
             token in query_lower
-            for token in ["1위", "2위", "3위", "상위", "리더", "누가", "누구", "최고", "제일", "가장"]
+            for token in [
+                "1위",
+                "2위",
+                "3위",
+                "상위",
+                "리더",
+                "누가",
+                "누구",
+                "최고",
+                "제일",
+                "가장",
+            ]
         ):
             return False
         return any(token in query_lower for token in ["팀", "구단"]) and any(
@@ -2510,9 +2523,7 @@ class BaseballStatisticsAgent:
             return current_year - 1
         return current_year
 
-    def _resolve_chat_intent(
-        self, query: str, entity_filter: Any
-    ) -> IntentDecision:
+    def _resolve_chat_intent(self, query: str, entity_filter: Any) -> IntentDecision:
         return self.chat_intent_router.resolve(query, entity_filter)
 
     def _intent_decision_to_plan(
@@ -2752,7 +2763,8 @@ class BaseballStatisticsAgent:
 
         extracted_date = None
         if "오늘" in query_lower and any(
-            keyword in query_lower for keyword in ["경기", "일정", "중계", "몇 시", "몇시"]
+            keyword in query_lower
+            for keyword in ["경기", "일정", "중계", "몇 시", "몇시"]
         ):
             extracted_date = datetime.now().strftime("%Y-%m-%d")
         else:
@@ -3032,7 +3044,9 @@ class BaseballStatisticsAgent:
         filtered: List[ToolCall] = []
         seen = set()
         team_metric_query = self._is_team_metric_query_text(query)
-        team_query = self._is_team_analysis_query(query, entity_filter) or team_metric_query
+        team_query = (
+            self._is_team_analysis_query(query, entity_filter) or team_metric_query
+        )
         low_value_for_team = {"get_current_datetime", "get_baseball_season_info"}
         player_focused_tools = {
             "get_career_stats",
@@ -3073,7 +3087,9 @@ class BaseballStatisticsAgent:
         for raw_call in tool_calls:
             call = self._coerce_tool_call(raw_call)
             if call is None:
-                logger.warning("[Planner] skip invalid llm tool_call format: %s", raw_call)
+                logger.warning(
+                    "[Planner] skip invalid llm tool_call format: %s", raw_call
+                )
                 continue
 
             if team_query and call.tool_name in low_value_for_team:
@@ -3087,7 +3103,11 @@ class BaseballStatisticsAgent:
                     call.tool_name,
                 )
                 continue
-            if team_query and no_explicit_player and call.tool_name in player_focused_tools:
+            if (
+                team_query
+                and no_explicit_player
+                and call.tool_name in player_focused_tools
+            ):
                 logger.info(
                     "[Planner] drop player-focused tool_call for team query: %s",
                     call.tool_name,
@@ -3352,7 +3372,10 @@ class BaseballStatisticsAgent:
         if any(token in query_lower for token in document_fallback_tokens):
             return True
 
-        return grounding_mode in {"baseball_explainer", "long_tail_entity"} or intent in {
+        return grounding_mode in {
+            "baseball_explainer",
+            "long_tail_entity",
+        } or intent in {
             "baseball_explainer",
             "long_tail_entity",
             "season_result_lookup",
@@ -3649,7 +3672,9 @@ class BaseballStatisticsAgent:
 
             if heuristic_answer:
                 heuristic_verified = True
-                heuristic_data_sources = [{"tool": "builtin_knowledge", "verified": True}]
+                heuristic_data_sources = [
+                    {"tool": "builtin_knowledge", "verified": True}
+                ]
 
             if not heuristic_answer:
                 heuristic_answer = self._build_known_latest_answer(
@@ -3660,7 +3685,9 @@ class BaseballStatisticsAgent:
                 )
                 if heuristic_answer:
                     heuristic_verified = True
-                    heuristic_data_sources = [{"tool": "builtin_latest", "verified": True}]
+                    heuristic_data_sources = [
+                        {"tool": "builtin_latest", "verified": True}
+                    ]
 
             if not heuristic_answer:
                 query_lower = query.lower()
@@ -3680,7 +3707,9 @@ class BaseballStatisticsAgent:
                 ):
                     team_name = self._detect_team_alias_from_query(query)
                     year_match = re.search(r"(20\d{2})년", query)
-                    year = int(year_match.group(1)) if year_match else datetime.now().year
+                    year = (
+                        int(year_match.group(1)) if year_match else datetime.now().year
+                    )
                     if team_name:
                         heuristic_tool_calls = self._build_team_fast_path_tool_calls(
                             query, team_name, year
@@ -3736,23 +3765,41 @@ class BaseballStatisticsAgent:
                     "verified": heuristic_verified,
                     "data_sources": heuristic_data_sources,
                     "intent": intent,
-                    "error": None if heuristic_verified else "analysis_temporarily_unavailable",
+                    "error": (
+                        None
+                        if heuristic_verified
+                        else "analysis_temporarily_unavailable"
+                    ),
                     "planner_mode": (
-                        "analysis_error_fallback" if heuristic_verified else "analysis_error"
+                        "analysis_error_fallback"
+                        if heuristic_verified
+                        else "analysis_error"
                     ),
                     "grounding_mode": (
-                        "structured_kbo" if heuristic_tool_results else "baseball_explainer"
-                    ) if heuristic_verified else "unsupported",
+                        (
+                            "structured_kbo"
+                            if heuristic_tool_results
+                            else "baseball_explainer"
+                        )
+                        if heuristic_verified
+                        else "unsupported"
+                    ),
                     "source_tier": (
-                        "database" if heuristic_tool_results else "builtin"
-                    ) if heuristic_verified else "none",
+                        ("database" if heuristic_tool_results else "builtin")
+                        if heuristic_verified
+                        else "none"
+                    ),
                     "answer_sources": [],
                     "as_of_date": datetime.now().date().isoformat(),
                     "fallback_reason": (
-                        "analysis_error_fast_path_recovery"
-                        if heuristic_tool_results
-                        else "analysis_error_builtin_recovery"
-                    ) if heuristic_verified else "analysis_temporarily_unavailable",
+                        (
+                            "analysis_error_fast_path_recovery"
+                            if heuristic_tool_results
+                            else "analysis_error_builtin_recovery"
+                        )
+                        if heuristic_verified
+                        else "analysis_temporarily_unavailable"
+                    ),
                 },
             }
             return
@@ -3908,7 +3955,9 @@ class BaseballStatisticsAgent:
             "message": "분석된 데이터를 바탕으로 답변을 생성하고 있습니다...",
         }
         context["planner_mode"] = planner_mode
-        grounding_mode = self._resolve_grounding_mode(intent, analysis_result, tool_results)
+        grounding_mode = self._resolve_grounding_mode(
+            intent, analysis_result, tool_results
+        )
         source_tier = self._source_tier_from_tool_results(
             tool_results, analysis_result.get("source_tier")
         )
@@ -3946,9 +3995,7 @@ class BaseballStatisticsAgent:
                 )
             effective_retry_max_attempts = 0
         elif request_mode == "stream":
-            effective_watchdog_seconds = (
-                self.chat_stream_first_token_watchdog_seconds
-            )
+            effective_watchdog_seconds = self.chat_stream_first_token_watchdog_seconds
             effective_retry_max_attempts = (
                 self.chat_stream_first_token_retry_max_attempts
             )
@@ -4013,7 +4060,9 @@ class BaseballStatisticsAgent:
                 except StopAsyncIteration:
                     answer_iterator = None
                 except Exception as exc:
-                    logger.error("[BaseballAgent] Answer stream prefetch failed: %s", exc)
+                    logger.error(
+                        "[BaseballAgent] Answer stream prefetch failed: %s", exc
+                    )
                     answer_error = "temporary_generation_issue"
                     answer_verified = False
                     answer_iterator = None
@@ -4182,7 +4231,9 @@ class BaseballStatisticsAgent:
             # 3. WPA (Win Probability) -> 게이지/텍스트
             if "predicted_winner" in res.data and "win_probability" in res.data:
                 pass
-            elif "win_probability" in res.data and isinstance(res.data.get("percent"), str):
+            elif "win_probability" in res.data and isinstance(
+                res.data.get("percent"), str
+            ):
                 viz_list.append(
                     {
                         "type": "wpa_gauge",
@@ -4246,9 +4297,7 @@ class BaseballStatisticsAgent:
             separators=(",", ":"),
         )
         if len(data_json) > self.chat_tool_result_max_chars:
-            data_json = (
-                f"{data_json[: self.chat_tool_result_max_chars]}...(truncated)"
-            )
+            data_json = f"{data_json[: self.chat_tool_result_max_chars]}...(truncated)"
         return data_json
 
     def _clean_answer_prompt_snippet(self, text: Any, max_chars: int = 260) -> str:
@@ -4555,23 +4604,17 @@ class BaseballStatisticsAgent:
         if "타율" in query_lower:
             if batting_avg is None:
                 return None
-            answer = (
-                f"{season_label} 팀 타율은 {self._format_deterministic_metric(batting_avg)}입니다."
-            )
+            answer = f"{season_label} 팀 타율은 {self._format_deterministic_metric(batting_avg)}입니다."
             if batting_avg_rank:
                 answer += f" 팀 타율 순위는 {self._format_deterministic_metric(batting_avg_rank)}입니다."
             if batting_ops is not None:
-                answer += (
-                    f" 같이 보면 팀 OPS는 {self._format_deterministic_metric(batting_ops)}입니다."
-                )
+                answer += f" 같이 보면 팀 OPS는 {self._format_deterministic_metric(batting_ops)}입니다."
             return answer
 
         if "ops" in query_lower:
             if batting_ops is None:
                 return None
-            answer = (
-                f"{season_label} 팀 OPS는 {self._format_deterministic_metric(batting_ops)}입니다."
-            )
+            answer = f"{season_label} 팀 OPS는 {self._format_deterministic_metric(batting_ops)}입니다."
             if batting_ops_rank:
                 answer += f" OPS 순위는 {self._format_deterministic_metric(batting_ops_rank)}입니다."
             if batting_avg is not None:
@@ -4584,11 +4627,11 @@ class BaseballStatisticsAgent:
         ):
             if avg_era is None:
                 return None
-            answer = (
-                f"{season_label} 팀 평균자책점은 {self._format_deterministic_metric(avg_era)}입니다."
-            )
+            answer = f"{season_label} 팀 평균자책점은 {self._format_deterministic_metric(avg_era)}입니다."
             if era_rank:
-                answer += f" 리그 순위는 {self._format_deterministic_metric(era_rank)}입니다."
+                answer += (
+                    f" 리그 순위는 {self._format_deterministic_metric(era_rank)}입니다."
+                )
             if qs_rate:
                 answer += f" 선발 QS 비율은 {self._format_deterministic_metric(qs_rate)}입니다."
             return answer
@@ -4596,11 +4639,11 @@ class BaseballStatisticsAgent:
         if "홈런" in query_lower:
             if total_hr is None:
                 return None
-            answer = (
-                f"{season_label} 팀 홈런은 {self._format_deterministic_metric(total_hr)}개입니다."
-            )
+            answer = f"{season_label} 팀 홈런은 {self._format_deterministic_metric(total_hr)}개입니다."
             if batting_ops is not None:
-                answer += f" 팀 OPS는 {self._format_deterministic_metric(batting_ops)}입니다."
+                answer += (
+                    f" 팀 OPS는 {self._format_deterministic_metric(batting_ops)}입니다."
+                )
             if batting_ops_rank:
                 answer += f" OPS 순위는 {self._format_deterministic_metric(batting_ops_rank)}입니다."
             return answer
@@ -4608,13 +4651,13 @@ class BaseballStatisticsAgent:
         if "타점" in query_lower:
             if total_rbi is None:
                 return None
-            answer = (
-                f"{season_label} 팀 타점은 {self._format_deterministic_metric(total_rbi)}점입니다."
-            )
+            answer = f"{season_label} 팀 타점은 {self._format_deterministic_metric(total_rbi)}점입니다."
             if batting_avg is not None:
                 answer += f" 팀 타율은 {self._format_deterministic_metric(batting_avg)}입니다."
             if batting_ops is not None:
-                answer += f" 팀 OPS는 {self._format_deterministic_metric(batting_ops)}입니다."
+                answer += (
+                    f" 팀 OPS는 {self._format_deterministic_metric(batting_ops)}입니다."
+                )
             return answer
 
         return None
@@ -4651,7 +4694,11 @@ class BaseballStatisticsAgent:
                 "즉 선발투수의 안정적인 기본 역할 수행 여부를 빠르게 확인할 때 자주 쓰는 지표로 이해하면 됩니다."
             )
 
-        if "부상자 명단" in query_lower or query_lower.strip() == "il" or " il " in f" {query_lower} ":
+        if (
+            "부상자 명단" in query_lower
+            or query_lower.strip() == "il"
+            or " il " in f" {query_lower} "
+        ):
             return (
                 "IL은 부상 때문에 바로 경기에 뛰기 어려운 선수를 관리하는 부상자 명단 개념으로 이해하면 됩니다.\n\n"
                 "팬 입장에서는 선수가 일시적으로 엔트리 운영에서 빠지고, 복귀 여부는 공식 엔트리 변동과 등록·말소 기록으로 확인한다고 보면 가장 정확합니다.\n\n"
@@ -4665,7 +4712,11 @@ class BaseballStatisticsAgent:
                 "즉 빠른 공처럼 보이게 속인 뒤 속도 차로 타이밍을 빼앗는 공이라고 보면 됩니다."
             )
 
-        if "wpa" in query_lower or "승리확률기여도" in query_lower or "승리 확률 기여도" in query_lower:
+        if (
+            "wpa" in query_lower
+            or "승리확률기여도" in query_lower
+            or "승리 확률 기여도" in query_lower
+        ):
             return (
                 "WPA는 한 플레이가 팀의 승리 확률을 얼마나 올리거나 내렸는지 보여주는 지표입니다.\n\n"
                 "같은 안타라도 9회 동점 상황에서 나온 안타는 승리 확률을 크게 바꾸기 때문에 WPA가 크게 오르고, 점수 차가 큰 상황의 안타는 변화폭이 작습니다.\n\n"
@@ -4686,8 +4737,10 @@ class BaseballStatisticsAgent:
                 "즉 접전 리드를 끝까지 지켜야 할 때 먼저 떠올리는 불펜 묶음이라고 보면 됩니다."
             )
 
-        if "단디" in query_lower or "쎄리" in query_lower or (
-            "nc" in query_lower and "마스코트" in query_lower
+        if (
+            "단디" in query_lower
+            or "쎄리" in query_lower
+            or ("nc" in query_lower and "마스코트" in query_lower)
         ):
             return (
                 "NC 다이노스의 대표 마스코트는 단디와 쎄리입니다.\n\n"
@@ -4703,7 +4756,9 @@ class BaseballStatisticsAgent:
                 "즉 포수의 수비 기술이 스트라이크 판정에 간접적으로 영향을 줄 수 있는 영역이라고 이해하면 됩니다."
             )
 
-        if "수비 시프트" in query_lower or ("시프트" in query_lower and "수비" in query_lower):
+        if "수비 시프트" in query_lower or (
+            "시프트" in query_lower and "수비" in query_lower
+        ):
             return (
                 "수비 시프트는 타자의 타구 방향 성향에 맞춰 야수들의 수비 위치를 평소와 다르게 옮겨 두는 전술입니다.\n\n"
                 "예를 들어 당겨 치는 타자라면 내야수나 외야수를 그 방향으로 더 붙여서 자주 가는 타구를 먼저 막으려는 의도가 큽니다.\n\n"
@@ -4740,10 +4795,9 @@ class BaseballStatisticsAgent:
                 "즉 득점권 생산성은 찬스에서 얼마나 점수를 실속 있게 가져오느냐를 보는 지표라고 이해하면 됩니다."
             )
 
-        if (
-            "좌타자" in query_lower
-            and "우타자" in query_lower
-        ) or ("좌타" in query_lower and "우타" in query_lower):
+        if ("좌타자" in query_lower and "우타자" in query_lower) or (
+            "좌타" in query_lower and "우타" in query_lower
+        ):
             return (
                 "좌타자와 우타자의 차이는 단순히 서는 방향만이 아니라 수비 시프트, 투수 매치업, 타구 방향, 주루 이점까지 경기 운영에 영향을 준다는 점에 있습니다.\n\n"
                 "예를 들어 좌타자는 1루까지 한 걸음이 짧아 내야안타나 병살 회피에서 조금 유리할 수 있고, 우타자는 좌완·우완 상대 체감이나 밀어치기 패턴이 다르게 나타나기도 합니다.\n\n"
@@ -4824,7 +4878,9 @@ class BaseballStatisticsAgent:
                 "즉 3아웃은 한 팀의 공격 단위를 끊어 이닝과 공수 교대 리듬을 만드는 기본 규칙이라고 보면 됩니다."
             )
 
-        if "대표 라이벌" in query_lower or ("라이벌" in query_lower and "매치업" in query_lower):
+        if "대표 라이벌" in query_lower or (
+            "라이벌" in query_lower and "매치업" in query_lower
+        ):
             return (
                 "KBO에서 대표 라이벌 매치업으로 가장 자주 거론되는 건 두산과 LG의 잠실 라이벌입니다.\n\n"
                 "같은 잠실구장을 쓰고 수도권 팬층이 겹쳐서 경기 자체의 긴장감과 화제성이 꾸준히 큰 편입니다.\n\n"
@@ -4847,8 +4903,13 @@ class BaseballStatisticsAgent:
 
         if "맞대결" not in query:
             query_lower = query.lower()
-            if any(token in query_lower for token in ["최근 경기", "최근 활약", "요즘 활약"]):
-                player_match = re.search(r"([A-Za-z가-힣]+)\s+최근", re.sub(r"\d{4}년", "", query))
+            if any(
+                token in query_lower
+                for token in ["최근 경기", "최근 활약", "요즘 활약"]
+            ):
+                player_match = re.search(
+                    r"([A-Za-z가-힣]+)\s+최근", re.sub(r"\d{4}년", "", query)
+                )
                 if not player_match:
                     return None
                 player_name = player_match.group(1).strip()
@@ -4858,7 +4919,9 @@ class BaseballStatisticsAgent:
                     f"지금 확보된 자료가 {player_name}의 실제 최근 경기 기록이나 활약 요약이 아니라서, 최근 폼을 추정해서 말하진 않겠습니다.\n\n"
                     "최근 경기 로그나 공식 기록 자료가 붙으면 경기별 활약 흐름으로 다시 정리할 수 있습니다."
                 )
-            if "5위" in query_lower and any(token in query_lower for token in ["싸움", "순위", "경쟁"]):
+            if "5위" in query_lower and any(
+                token in query_lower for token in ["싸움", "순위", "경쟁"]
+            ):
                 as_of_label = as_of_date or datetime.now().strftime("%Y-%m-%d")
                 return (
                     f"{as_of_label} 기준으로 현재 5위 순위 경쟁 상황은 연결된 최신 자료에서 직접 확인되지 않았습니다.\n\n"
@@ -4952,7 +5015,11 @@ class BaseballStatisticsAgent:
             "지금 전력 흐름은 읽힙니다."
         )
 
-        if "가을야구" in query_lower or "플레이오프" in query_lower or "플옵" in query_lower:
+        if (
+            "가을야구" in query_lower
+            or "플레이오프" in query_lower
+            or "플옵" in query_lower
+        ):
             summary_line = (
                 f"{year}년 {team_name}는 타격 순위 {ops_rank or '확인 불가'}, "
                 f"평균자책 관련 지표 {era_rank or '확인 불가'} 수준이라 "
@@ -4970,7 +5037,12 @@ class BaseballStatisticsAgent:
                 f"평균자책 {avg_era if avg_era is not None else '확인 불가'} 기준으로 보면 "
                 "완전히 불안정하다고 보긴 어렵지만 꾸준함은 더 확인이 필요합니다."
             )
-        elif "타선" in query_lower or "득점" in query_lower or "침묵" in query_lower or "터질" in query_lower:
+        elif (
+            "타선" in query_lower
+            or "득점" in query_lower
+            or "침묵" in query_lower
+            or "터질" in query_lower
+        ):
             summary_line = (
                 f"{year}년 {team_name} 타선은 팀 OPS {ops if ops is not None else '확인 불가'}, "
                 f"팀 타율 {avg if avg is not None else '확인 불가'}, 홈런 {total_hr if total_hr is not None else '확인 불가'} 기준으로 "
@@ -5068,13 +5140,27 @@ class BaseballStatisticsAgent:
             )
         detail_lines = detail_lines[:4]
         if not detail_lines:
-            detail_lines.append("- 현재 확보된 DB 결과 기준으로 팀 전력의 큰 흐름만 확인 가능하며, 세부 원인 분해는 제한적입니다.")
+            detail_lines.append(
+                "- 현재 확보된 DB 결과 기준으로 팀 전력의 큰 흐름만 확인 가능하며, 세부 원인 분해는 제한적입니다."
+            )
 
         table_rows = [
             ("팀 타율", avg if avg is not None else "확인 불가", "타선 정확도"),
-            ("팀 OPS", ops if ops is not None else "확인 불가", f"리그 순위 {ops_rank or '확인 불가'}"),
-            ("선발 QS 비율", qs_rate or "확인 불가", f"평균자책 {avg_era if avg_era is not None else '확인 불가'}"),
-            ("불펜 비중", bullpen_share or "확인 불가", f"리그 평균 {league_bullpen_share or '확인 불가'}"),
+            (
+                "팀 OPS",
+                ops if ops is not None else "확인 불가",
+                f"리그 순위 {ops_rank or '확인 불가'}",
+            ),
+            (
+                "선발 QS 비율",
+                qs_rate or "확인 불가",
+                f"평균자책 {avg_era if avg_era is not None else '확인 불가'}",
+            ),
+            (
+                "불펜 비중",
+                bullpen_share or "확인 불가",
+                f"리그 평균 {league_bullpen_share or '확인 불가'}",
+            ),
         ]
 
         insight_lines = []
@@ -5095,26 +5181,23 @@ class BaseballStatisticsAgent:
                 "- 실책, 상대 전적, 큰 경기 대응력처럼 세부 맥락이 필요한 항목은 전용 도구를 붙이면 더 정확해집니다."
             )
         if not insight_lines:
-            insight_lines.append("- 현재 도구 결과만으로는 기본 전력 흐름까지는 확인 가능하지만 세부 원인 진단은 제한적입니다.")
+            insight_lines.append(
+                "- 현재 도구 결과만으로는 기본 전력 흐름까지는 확인 가능하지만 세부 원인 진단은 제한적입니다."
+            )
         insight_lines = insight_lines[:2]
 
         table_text = "\n".join(
-            f"| {label} | {value} | {meaning} |"
-            for label, value, meaning in table_rows
+            f"| {label} | {value} | {meaning} |" for label, value, meaning in table_rows
         )
 
         return (
             "## 요약\n"
             f"{summary_line}\n\n"
-            "## 상세 내역\n"
-            + "\n".join(detail_lines)
-            + "\n\n## 핵심 지표\n"
+            "## 상세 내역\n" + "\n".join(detail_lines) + "\n\n## 핵심 지표\n"
             "| 항목 | 수치 | 해석 |\n"
             "| --- | --- | --- |\n"
             f"{table_text}\n\n"
-            "## 인사이트\n"
-            + "\n".join(insight_lines)
-            + "\n\n출처: DB 조회 결과"
+            "## 인사이트\n" + "\n".join(insight_lines) + "\n\n출처: DB 조회 결과"
         )
 
     def _format_chatbot_table_row(self, cells: List[str]) -> Optional[str]:
@@ -5306,7 +5389,9 @@ class BaseballStatisticsAgent:
             if stripped.startswith("질문하신 "):
                 flush_table()
                 continue
-            if stripped.startswith("분석 결과:") or stripped.startswith("**분석 결과:**"):
+            if stripped.startswith("분석 결과:") or stripped.startswith(
+                "**분석 결과:**"
+            ):
                 flush_table()
                 continue
             if lowered.startswith("출처:") or lowered.startswith("- 출처:"):
@@ -5462,7 +5547,9 @@ class BaseballStatisticsAgent:
 
         query_text = processed_query  # 전처리된 쿼리 사용
         # TODO(phase2): 팀 분석/선수 분석별 경량 planner 프롬프트 분리
-        is_team_query_for_planner = self._is_team_analysis_query(query_text, entity_filter)
+        is_team_query_for_planner = self._is_team_analysis_query(
+            query_text, entity_filter
+        )
         detected_team_for_planner = (
             getattr(entity_filter, "team_id", None)
             or extract_team(query_text)
@@ -5755,16 +5842,22 @@ class BaseballStatisticsAgent:
                 "베이스",
                 "시프트",
             ]
-            if fallback_tool is None and any(keyword in query for keyword in regulation_keywords):
+            if fallback_tool is None and any(
+                keyword in query for keyword in regulation_keywords
+            ):
                 fallback_tool = ToolCall(
                     tool_name="search_regulations", parameters={"query": query}
                 )
                 analysis = f"규정/규칙 관련 질문: '{query}'"
 
             # 팀 순위 질문 감지
-            elif fallback_tool is None and entity_filter.team_id and any(
-                word in query_lower
-                for word in ["순위", "성적", "기록", "랭킹", "정규시즌"]
+            elif (
+                fallback_tool is None
+                and entity_filter.team_id
+                and any(
+                    word in query_lower
+                    for word in ["순위", "성적", "기록", "랭킹", "정규시즌"]
+                )
             ):
                 fallback_tool = ToolCall(
                     tool_name="get_team_rank",
@@ -5904,8 +5997,12 @@ class BaseballStatisticsAgent:
                     )
 
             # 3. 선수 개인 기록 질문
-            elif fallback_tool is None and potential_player_name and not any(
-                word in query_lower for word in ["순위", "리더보드", "랭킹"]
+            elif (
+                fallback_tool is None
+                and potential_player_name
+                and not any(
+                    word in query_lower for word in ["순위", "리더보드", "랭킹"]
+                )
             ):
                 fallback_tool = ToolCall(
                     tool_name="get_career_stats",
@@ -6002,9 +6099,7 @@ class BaseballStatisticsAgent:
 
         if requested_type and requested_type != "any" and len(awards) == 1:
             winner = awards[0]
-            team_text = (
-                f" ({winner['team_name']})" if winner.get("team_name") else ""
-            )
+            team_text = f" ({winner['team_name']})" if winner.get("team_name") else ""
             summary = (
                 f"{year}년 KBO {self._display_award_type(requested_type)} 수상자는 "
                 f"{winner['player_name']}{team_text}입니다."
@@ -6041,8 +6136,16 @@ class BaseballStatisticsAgent:
         )
 
     def _build_player_stats_answer(self, data: Dict[str, Any]) -> Optional[str]:
-        batting = data.get("batting_stats") if isinstance(data.get("batting_stats"), dict) else None
-        pitching = data.get("pitching_stats") if isinstance(data.get("pitching_stats"), dict) else None
+        batting = (
+            data.get("batting_stats")
+            if isinstance(data.get("batting_stats"), dict)
+            else None
+        )
+        pitching = (
+            data.get("pitching_stats")
+            if isinstance(data.get("pitching_stats"), dict)
+            else None
+        )
         if not batting and not pitching:
             return None
 
@@ -6051,7 +6154,9 @@ class BaseballStatisticsAgent:
             or (pitching or {}).get("player_name")
             or data.get("player_name")
         )
-        season_label = "통산" if data.get("career") else f"{data.get('year', '해당')}시즌"
+        season_label = (
+            "통산" if data.get("career") else f"{data.get('year', '해당')}시즌"
+        )
         rows: List[str] = []
         detail_lines: List[str] = []
 
@@ -6091,7 +6196,9 @@ class BaseballStatisticsAgent:
 
         rows = rows[:4]
         detail_lines = detail_lines[:2]
-        summary = f"{player_name}의 {season_label} 기록은 DB 기준으로 바로 확인 가능합니다."
+        summary = (
+            f"{player_name}의 {season_label} 기록은 DB 기준으로 바로 확인 가능합니다."
+        )
         if batting and not pitching:
             summary = (
                 f"{player_name}의 {season_label} 타격 기록은 "
@@ -6148,7 +6255,9 @@ class BaseballStatisticsAgent:
             f"- 표에는 상위 {len(top_entries)}명만 요약했고, 전체 적격 인원은 {self._format_deterministic_metric(data.get('total_qualified_players'))}명입니다.",
         ]
         if team_filter:
-            detail_lines[1] = f"- 팀 필터는 {team_filter}로 적용됐고, 적격 인원은 {self._format_deterministic_metric(data.get('total_qualified_players'))}명입니다."
+            detail_lines[1] = (
+                f"- 팀 필터는 {team_filter}로 적용됐고, 적격 인원은 {self._format_deterministic_metric(data.get('total_qualified_players'))}명입니다."
+            )
 
         return (
             "## 요약\n"
@@ -6213,9 +6322,7 @@ class BaseballStatisticsAgent:
         if not games:
             detail_lines = [f"- 조회 날짜는 {date}입니다."]
             if team_filter != "확인 불가":
-                detail_lines.append(
-                    f"- 팀 필터는 {team_filter} 기준으로 적용됐습니다."
-                )
+                detail_lines.append(f"- 팀 필터는 {team_filter} 기준으로 적용됐습니다.")
                 summary_line = (
                     f"{date} 일정 중 {team_filter} 기준으로 잡힌 경기는 없습니다."
                 )
@@ -6248,7 +6355,12 @@ class BaseballStatisticsAgent:
             away_score = self._format_deterministic_metric(game.get("away_score"))
             if status == "COMPLETED":
                 completed_count += 1
-            score_text = f"{away_score}-{home_score}" if game.get("home_score") is not None and game.get("away_score") is not None else "-"
+            score_text = (
+                f"{away_score}-{home_score}"
+                if game.get("home_score") is not None
+                and game.get("away_score") is not None
+                else "-"
+            )
             rows.append(
                 "| "
                 + f"{self._format_team_display_name(game.get('away_team'))} @ {self._format_team_display_name(game.get('home_team'))} | "
@@ -6260,7 +6372,9 @@ class BaseballStatisticsAgent:
         detail_lines = [f"- 조회 날짜는 {date}입니다."]
         if team_filter != "확인 불가":
             detail_lines.append(f"- 팀 필터는 {team_filter} 기준으로 적용됐습니다.")
-        detail_lines.append(f"- 확인된 경기 수는 {len(games)}경기이며, 종료 상태로 잡힌 경기는 {completed_count}경기입니다.")
+        detail_lines.append(
+            f"- 확인된 경기 수는 {len(games)}경기이며, 종료 상태로 잡힌 경기는 {completed_count}경기입니다."
+        )
 
         return (
             "## 요약\n"
@@ -6397,9 +6511,7 @@ class BaseballStatisticsAgent:
 
         return "\n\n".join(lines[:3])
 
-    def _extract_leaderboard_value(
-        self, entry: Dict[str, Any], stat_name: str
-    ) -> Any:
+    def _extract_leaderboard_value(self, entry: Dict[str, Any], stat_name: str) -> Any:
         stat_key = str(stat_name or "").lower()
         candidate_keys = [
             "value",
@@ -6481,7 +6593,8 @@ class BaseballStatisticsAgent:
         )
 
         asks_superlative = any(
-            token in query_lower for token in ["최고", "제일", "가장", "누가", "누구야", "잘한"]
+            token in query_lower
+            for token in ["최고", "제일", "가장", "누가", "누구야", "잘한"]
         )
         role_label = "선수"
         if "투수" in query_lower:
@@ -6506,7 +6619,9 @@ class BaseballStatisticsAgent:
             stat_value = self._format_deterministic_metric(
                 self._extract_leaderboard_value(entry, raw_stat_name)
             )
-            lines.append(f"{index}위는 {player_name}이고, {stat_name}은 {stat_value}입니다.")
+            lines.append(
+                f"{index}위는 {player_name}이고, {stat_name}은 {stat_value}입니다."
+            )
 
         return "\n\n".join(lines[:4])
 
@@ -6659,7 +6774,9 @@ class BaseballStatisticsAgent:
 
         if not lines:
             return None
-        lines.append("예외 조항까지 보려면 규정 이름을 조금 더 좁혀서 다시 물어보는 편이 정확합니다.")
+        lines.append(
+            "예외 조항까지 보려면 규정 이름을 조금 더 좁혀서 다시 물어보는 편이 정확합니다."
+        )
         return "\n\n".join(lines[:4])
 
     def _build_games_by_date_chat_answer(self, data: Dict[str, Any]) -> Optional[str]:
@@ -6682,9 +6799,7 @@ class BaseballStatisticsAgent:
 
         intro = f"{date} 일정은 DB 기준으로 {len(games)}경기 잡혀 있습니다."
         if team_filter != "확인 불가":
-            intro = (
-                f"{date} 일정 중 {team_filter} 기준으로 보면 {len(games)}경기 잡혀 있습니다."
-            )
+            intro = f"{date} 일정 중 {team_filter} 기준으로 보면 {len(games)}경기 잡혀 있습니다."
 
         lines = [intro]
         for game in games[:2]:
@@ -6692,13 +6807,23 @@ class BaseballStatisticsAgent:
             home_team = self._format_team_display_name(game.get("home_team"))
             stadium = self._format_deterministic_metric(game.get("stadium"))
             status_value = game.get("status") or game.get("game_status")
-            status = self._format_game_status_to_korean(status_value) or self._format_deterministic_metric(
+            status = self._format_game_status_to_korean(
                 status_value
-            )
+            ) or self._format_deterministic_metric(status_value)
             raw_status = str(status_value or "").strip().upper()
-            completed_status = raw_status == "COMPLETED" or status in {"완료", "종료", "경기 종료"}
-            scheduled_status = raw_status in {"SCHEDULED", "PRE_GAME"} or status in {"예정", "경기 전"}
-            live_status = raw_status in {"IN_PROGRESS", "LIVE"} or status in {"진행 중", "경기 중"}
+            completed_status = raw_status == "COMPLETED" or status in {
+                "완료",
+                "종료",
+                "경기 종료",
+            }
+            scheduled_status = raw_status in {"SCHEDULED", "PRE_GAME"} or status in {
+                "예정",
+                "경기 전",
+            }
+            live_status = raw_status in {"IN_PROGRESS", "LIVE"} or status in {
+                "진행 중",
+                "경기 중",
+            }
             home_score = game.get("home_score")
             away_score = game.get("away_score")
             if home_score is not None and away_score is not None:
@@ -6740,7 +6865,9 @@ class BaseballStatisticsAgent:
         team_name = self._format_team_display_name(data.get("team_name"))
         year = self._format_deterministic_metric(data.get("year"))
         team_games = data.get("team_games") or data.get("all_games") or []
-        first_game = team_games[0] if isinstance(team_games, list) and team_games else {}
+        first_game = (
+            team_games[0] if isinstance(team_games, list) and team_games else {}
+        )
 
         if not isinstance(first_game, dict) or not first_game:
             return f"{year} {team_name}의 마지막 경기는 {last_game_date}입니다."
@@ -6770,22 +6897,24 @@ class BaseballStatisticsAgent:
         if stadium != "확인 불가":
             lead = f"{year} {team_name}의 마지막 경기는 {last_game_date} {stadium}에서 열렸습니다."
 
-        if isinstance(team_score, (int, float)) and isinstance(opponent_score, (int, float)):
+        if isinstance(team_score, (int, float)) and isinstance(
+            opponent_score, (int, float)
+        ):
             if team_score > opponent_score:
                 result_text = f"{opponent_team}를 상대로 {team_score}-{opponent_score}로 이기고 시즌을 마쳤습니다."
             elif team_score < opponent_score:
                 result_text = f"{opponent_team}를 상대로 {team_score}-{opponent_score}로 졌습니다."
             else:
-                result_text = f"{opponent_team}와 {team_score}-{opponent_score} 무승부였습니다."
+                result_text = (
+                    f"{opponent_team}와 {team_score}-{opponent_score} 무승부였습니다."
+                )
 
             if (
                 data.get("league_type") == "korean_series"
                 and data.get("team_rank") == 1
                 and team_score > opponent_score
             ):
-                result_text = (
-                    f"{opponent_team}를 상대로 {team_score}-{opponent_score}로 이기면서 우승으로 시즌을 마쳤습니다."
-                )
+                result_text = f"{opponent_team}를 상대로 {team_score}-{opponent_score}로 이기면서 우승으로 시즌을 마쳤습니다."
 
             return f"{lead} {result_text}"
 
@@ -6922,9 +7051,7 @@ class BaseballStatisticsAgent:
 
         if requested_type and requested_type != "any" and len(awards) == 1:
             winner = awards[0]
-            team_text = (
-                f" ({winner['team_name']})" if winner.get("team_name") else ""
-            )
+            team_text = f" ({winner['team_name']})" if winner.get("team_name") else ""
             return (
                 f"{year}년 {self._display_award_type(requested_type)} 수상자는 "
                 f"{winner['player_name']}{team_text}입니다."
@@ -7081,24 +7208,16 @@ class BaseballStatisticsAgent:
             query, extract_entities_from_query(query)
         )
         planner_mode = (
-            str(context.get("planner_mode", ""))
-            if isinstance(context, dict)
-            else ""
+            str(context.get("planner_mode", "")) if isinstance(context, dict) else ""
         )
         grounding_mode = (
-            str(context.get("grounding_mode", ""))
-            if isinstance(context, dict)
-            else ""
+            str(context.get("grounding_mode", "")) if isinstance(context, dict) else ""
         )
         explicit_source_tier = (
-            str(context.get("source_tier", ""))
-            if isinstance(context, dict)
-            else ""
+            str(context.get("source_tier", "")) if isinstance(context, dict) else ""
         )
         as_of_date = (
-            str(context.get("as_of_date", ""))
-            if isinstance(context, dict)
-            else ""
+            str(context.get("as_of_date", "")) if isinstance(context, dict) else ""
         )
         is_fast_path_answer = planner_mode == "fast_path"
         request_mode = (
@@ -7161,9 +7280,7 @@ class BaseballStatisticsAgent:
                     tool_data_summary.append(f"데이터: (직렬화 실패)")
 
                 found_flag = (
-                    result_data.get("found")
-                    if isinstance(result_data, dict)
-                    else None
+                    result_data.get("found") if isinstance(result_data, dict) else None
                 )
                 data_sources.append(
                     {
@@ -7397,7 +7514,15 @@ class BaseballStatisticsAgent:
 
             if any(
                 keyword in query_lower
-                for keyword in ["규정", "규칙", "fa", "드래프트", "엔트리", "로스터", "판정"]
+                for keyword in [
+                    "규정",
+                    "규칙",
+                    "fa",
+                    "드래프트",
+                    "엔트리",
+                    "로스터",
+                    "판정",
+                ]
             ):
                 summary_line = (
                     "규정은 설명할 수 있는데, 지금 잡힌 조항만으로 핵심을 딱 잘라 말하기엔 살짝 모자랍니다.\n"
@@ -7417,7 +7542,10 @@ class BaseballStatisticsAgent:
                     "- 규정 질문은 키워드가 넓으면 안 봐도 될 조항까지 같이 딸려옵니다.",
                     "- 제도명 하나만 정확히 찍어주셔도 답변 선명도가 확 올라갑니다.",
                 ]
-            elif any(keyword in query_lower for keyword in ["마지막 경기", "최근 경기 언제", "최종전"]):
+            elif any(
+                keyword in query_lower
+                for keyword in ["마지막 경기", "최근 경기 언제", "최종전"]
+            ):
                 summary_line = (
                     "현재 연결된 자료에서는 마지막 경기 날짜를 확정하지 못했습니다.\n"
                     "확인되지 않은 날짜를 추정해서 답하지는 않겠습니다."
@@ -7436,7 +7564,10 @@ class BaseballStatisticsAgent:
                     "- 마지막 경기 질문은 정규시즌인지 포스트시즌인지 빠지면 빈값이 나오기 쉽습니다.",
                     "- 시즌 연도와 경기 범위를 같이 주는 방식이 제일 안정적입니다.",
                 ]
-            elif any(keyword in query_lower for keyword in ["오늘", "일정", "중계", "몇 시", "몇시"]):
+            elif any(
+                keyword in query_lower
+                for keyword in ["오늘", "일정", "중계", "몇 시", "몇시"]
+            ):
                 summary_line = (
                     "현재 연결된 일정 자료에서는 질문에 맞는 경기 정보를 확정하지 못했습니다.\n"
                     "없는 경기를 있는 것처럼 답하지는 않겠습니다."
@@ -7456,7 +7587,8 @@ class BaseballStatisticsAgent:
                     "- 비시즌이거나 경기 없는 날이면 빈 결과가 정상일 수 있습니다.",
                 ]
             elif contains_team_token and any(
-                keyword in query_lower for keyword in ["순위", "몇 위", "몇위", "승률", "승패"]
+                keyword in query_lower
+                for keyword in ["순위", "몇 위", "몇위", "승률", "승패"]
             ):
                 summary_line = (
                     "당장 몇 위인지 딱 찍고 싶은데, 지금 붙은 순위표로는 그 말을 자신 있게 못 하겠습니다.\n"
@@ -7510,7 +7642,18 @@ class BaseballStatisticsAgent:
                 ]
             elif any(
                 keyword in query_lower
-                for keyword in ["성적", "기록", "타율", "ops", "홈런", "타점", "era", "whip", "세이브", "홀드"]
+                for keyword in [
+                    "성적",
+                    "기록",
+                    "타율",
+                    "ops",
+                    "홈런",
+                    "타점",
+                    "era",
+                    "whip",
+                    "세이브",
+                    "홀드",
+                ]
             ):
                 summary_line = (
                     "선수 기록 바로 꺼내고 싶은데, 이번 조회에선 선수명이나 시즌 매칭이 흐릿합니다.\n"
@@ -7537,15 +7680,11 @@ class BaseballStatisticsAgent:
             low_data_answer = (
                 "## 요약\n"
                 f"{summary_line}\n\n"
-                "## 상세 내역\n"
-                + "\n".join(detail_lines)
-                + "\n\n## 핵심 지표\n"
+                "## 상세 내역\n" + "\n".join(detail_lines) + "\n\n## 핵심 지표\n"
                 "| 항목 | 상태 |\n"
                 "| --- | --- |\n"
                 f"{table_text}\n\n"
-                "## 인사이트\n"
-                + "\n".join(insight_lines)
-                + "\n\n출처: DB 조회 결과"
+                "## 인사이트\n" + "\n".join(insight_lines) + "\n\n출처: DB 조회 결과"
             )
             if persona == "chat":
                 low_data_answer = self._build_chat_low_data_answer(query, tool_results)

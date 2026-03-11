@@ -190,7 +190,9 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.SEASON_RESULT_LOOKUP,
                 planner_mode="fast_path",
-                tool_calls=[ToolCall("get_korean_series_winner", {"year": season_year})],
+                tool_calls=[
+                    ToolCall("get_korean_series_winner", {"year": season_year})
+                ],
                 subject_type="runner_up",
                 season_year=season_year,
                 metric_policy="runner_up_lookup",
@@ -202,7 +204,9 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.SEASON_RESULT_LOOKUP,
                 planner_mode="fast_path",
-                tool_calls=[ToolCall("get_korean_series_winner", {"year": season_year})],
+                tool_calls=[
+                    ToolCall("get_korean_series_winner", {"year": season_year})
+                ],
                 subject_type="champion",
                 season_year=season_year,
                 metric_policy="champion_lookup",
@@ -350,7 +354,12 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.SEASON_RESULT_LOOKUP,
                 planner_mode="fast_path",
-                tool_calls=[ToolCall("get_team_last_game", {"team_name": team_name, "year": season_year})],
+                tool_calls=[
+                    ToolCall(
+                        "get_team_last_game",
+                        {"team_name": team_name, "year": season_year},
+                    )
+                ],
                 subject_type="team_last_game",
                 season_year=season_year,
                 metric_policy="team_last_game",
@@ -362,7 +371,11 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.SEASON_RESULT_LOOKUP,
                 planner_mode="fast_path",
-                tool_calls=[ToolCall("get_team_rank", {"team_name": team_name, "year": season_year})],
+                tool_calls=[
+                    ToolCall(
+                        "get_team_rank", {"team_name": team_name, "year": season_year}
+                    )
+                ],
                 subject_type="team_rank",
                 season_year=season_year,
                 metric_policy="team_rank",
@@ -565,7 +578,17 @@ class ChatIntentRouter:
             "용어",
             "구종",
         ]
-        explainer_verbs = ["뜻", "의미", "왜", "설명", "해설", "어떻게", "기준", "차이", "뭐야"]
+        explainer_verbs = [
+            "뜻",
+            "의미",
+            "왜",
+            "설명",
+            "해설",
+            "어떻게",
+            "기준",
+            "차이",
+            "뭐야",
+        ]
         return any(token in query_lower for token in explainer_subjects) and any(
             token in query_lower for token in explainer_verbs
         )
@@ -634,7 +657,8 @@ class ChatIntentRouter:
 
     def _extract_date(self, query: str, query_lower: str) -> Optional[str]:
         if "오늘" in query_lower and any(
-            keyword in query_lower for keyword in ["경기", "일정", "중계", "몇 시", "몇시"]
+            keyword in query_lower
+            for keyword in ["경기", "일정", "중계", "몇 시", "몇시"]
         ):
             return datetime.now().strftime("%Y-%m-%d")
         for pattern in [
@@ -661,7 +685,16 @@ class ChatIntentRouter:
             return None
         if any(
             token in query_lower
-            for token in ["투수", "타자", "홈런", "ops", "era", "탈삼진", "타점", "선수"]
+            for token in [
+                "투수",
+                "타자",
+                "홈런",
+                "ops",
+                "era",
+                "탈삼진",
+                "타점",
+                "선수",
+            ]
         ):
             return None
 
@@ -704,7 +737,18 @@ class ChatIntentRouter:
             return False
         if any(
             token in query_lower
-            for token in ["1위", "2위", "3위", "상위", "리더", "누가", "누구", "최고", "제일", "가장"]
+            for token in [
+                "1위",
+                "2위",
+                "3위",
+                "상위",
+                "리더",
+                "누가",
+                "누구",
+                "최고",
+                "제일",
+                "가장",
+            ]
         ):
             return False
 
@@ -724,14 +768,19 @@ class ChatIntentRouter:
             token in query_lower for token in team_metric_tokens
         )
 
-    def _is_team_analysis_query(self, query_lower: str, team_name: Optional[str]) -> bool:
+    def _is_team_analysis_query(
+        self, query_lower: str, team_name: Optional[str]
+    ) -> bool:
         if not self._fast_path_enabled or self._fast_path_scope != "team":
             return False
         if not team_name:
             return False
         if self._is_regulation_query(query_lower):
             return False
-        if any(keyword in query_lower for keyword in ["언제", "날짜", "몇 시", "몇시", "예매", "중계"]):
+        if any(
+            keyword in query_lower
+            for keyword in ["언제", "날짜", "몇 시", "몇시", "예매", "중계"]
+        ):
             return False
         team_analysis_keywords = [
             "분석",
@@ -779,11 +828,31 @@ class ChatIntentRouter:
         ]
         if any(keyword in query_lower for keyword in team_analysis_keywords):
             return True
-        if any(phrase in query_lower for phrase in ["어때", "가능성", "괜찮아", "문제", "보이니", "냉정", "현실적으로"]):
+        if any(
+            phrase in query_lower
+            for phrase in [
+                "어때",
+                "가능성",
+                "괜찮아",
+                "문제",
+                "보이니",
+                "냉정",
+                "현실적으로",
+            ]
+        ):
             return True
         return any(marker in query_lower for marker in ["최근", "요즘", "폼"]) and any(
             marker in query_lower
-            for marker in ["득점", "타선", "선발", "선발진", "불펜", "수비", "상대 전적", "상대전적"]
+            for marker in [
+                "득점",
+                "타선",
+                "선발",
+                "선발진",
+                "불펜",
+                "수비",
+                "상대 전적",
+                "상대전적",
+            ]
         )
 
     def _is_regulation_query(self, query_lower: str) -> bool:
@@ -827,7 +896,13 @@ class ChatIntentRouter:
         )
 
     def _is_champion_query(self, query_lower: str) -> bool:
-        champion_keywords = ["우승팀", "챔피언", "한국시리즈 우승", "코시 우승", "우승한 팀"]
+        champion_keywords = [
+            "우승팀",
+            "챔피언",
+            "한국시리즈 우승",
+            "코시 우승",
+            "우승한 팀",
+        ]
         champion_future_keywords = ["가능성", "할까", "할 수", "예상", "예측", "후보"]
         return any(keyword in query_lower for keyword in champion_keywords) and not any(
             keyword in query_lower for keyword in champion_future_keywords
@@ -880,13 +955,24 @@ class ChatIntentRouter:
         if self._resolve_leaderboard_spec(query_lower):
             return False
         return any(
-            token in query_lower for token in ["최고", "제일", "가장", "누가", "누구야", "잘한"]
+            token in query_lower
+            for token in ["최고", "제일", "가장", "누가", "누구야", "잘한"]
         )
 
     def _is_box_score_query(self, query_lower: str) -> bool:
         return any(
             keyword in query_lower
-            for keyword in ["박스스코어", "box score", "이닝별", "이닝별 득점", "몇 점", "7회", "8회", "9회", "연장"]
+            for keyword in [
+                "박스스코어",
+                "box score",
+                "이닝별",
+                "이닝별 득점",
+                "몇 점",
+                "7회",
+                "8회",
+                "9회",
+                "연장",
+            ]
         )
 
     def _is_game_flow_narrative_query(self, query_lower: str) -> bool:
@@ -906,10 +992,16 @@ class ChatIntentRouter:
         )
 
     def _is_team_rank_query(self, query_lower: str) -> bool:
-        return any(keyword in query_lower for keyword in ["순위", "몇 위", "몇위", "승률", "승패"])
+        return any(
+            keyword in query_lower
+            for keyword in ["순위", "몇 위", "몇위", "승률", "승패"]
+        )
 
     def _is_team_last_game_query(self, query_lower: str) -> bool:
-        return any(keyword in query_lower for keyword in ["마지막 경기", "최근 경기 언제", "최종전"])
+        return any(
+            keyword in query_lower
+            for keyword in ["마지막 경기", "최근 경기 언제", "최종전"]
+        )
 
     def _is_player_lookup_query(self, query_lower: str) -> bool:
         return any(

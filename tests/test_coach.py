@@ -40,6 +40,7 @@ def _build_game_evidence(**overrides):
     base.update(overrides)
     return GameEvidence(**base)
 
+
 # ============================================================
 # Coach Validator Tests
 # ============================================================
@@ -119,8 +120,13 @@ class TestCoachValidator:
         assert response.sentiment == "negative"
         assert len(response.key_metrics) == 1
         assert response.key_metrics[0].is_critical is True
-        assert response.analysis.verdict == "선발 이닝이 짧아지면 불펜 과부하가 먼저 터질 가능성이 큽니다."
-        assert response.analysis.why_it_matters == ["불펜 소모는 접전 후반 카드 선택 폭을 줄입니다."]
+        assert (
+            response.analysis.verdict
+            == "선발 이닝이 짧아지면 불펜 과부하가 먼저 터질 가능성이 큽니다."
+        )
+        assert response.analysis.why_it_matters == [
+            "불펜 소모는 접전 후반 카드 선택 폭을 줄입니다."
+        ]
         assert len(response.analysis.risks) == 1
         assert response.analysis.risks[0].level == 0
 
@@ -365,7 +371,10 @@ class TestCoachErrorMaskingHelpers:
         )
 
     def test_sanitize_cache_error_code_falls_back_for_unknown(self):
-        from app.routers.coach import COACH_INTERNAL_ERROR_CODE, _sanitize_cache_error_code
+        from app.routers.coach import (
+            COACH_INTERNAL_ERROR_CODE,
+            _sanitize_cache_error_code,
+        )
 
         assert _sanitize_cache_error_code("db_timeout_with_internal_trace") == (
             COACH_INTERNAL_ERROR_CODE
@@ -384,7 +393,10 @@ class TestCoachErrorMaskingHelpers:
         assert message == _cache_error_message_for_user(COACH_INTERNAL_ERROR_CODE)
 
     def test_coach_public_error_payload_masks_unknown_code(self):
-        from app.routers.coach import COACH_INTERNAL_ERROR_CODE, _coach_public_error_payload
+        from app.routers.coach import (
+            COACH_INTERNAL_ERROR_CODE,
+            _coach_public_error_payload,
+        )
 
         payload = _coach_public_error_payload("internal_stacktrace_xxx")
         assert payload["code"] == COACH_INTERNAL_ERROR_CODE
@@ -707,7 +719,10 @@ class TestCoachFastPath:
                     "metrics": {"batting": {"ops": 0.754}},
                     "fatigue_index": {"bullpen_share": "31.0%"},
                 },
-                "recent": {"found": True, "summary": {"wins": 0, "losses": 0, "draws": 0, "run_diff": 0}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 0, "losses": 0, "draws": 0, "run_diff": 0},
+                },
             },
             "away": {
                 "summary": {"found": True, "top_batters": []},
@@ -729,7 +744,9 @@ class TestCoachFastPath:
 
         assert supported == ["starter", "bullpen", "batting"]
 
-    def test_resolve_supported_focuses_requires_minimum_recent_and_matchup_samples(self):
+    def test_resolve_supported_focuses_requires_minimum_recent_and_matchup_samples(
+        self,
+    ):
         from app.routers.coach import _resolve_supported_focuses
 
         evidence = _build_game_evidence(
@@ -741,15 +758,33 @@ class TestCoachFastPath:
         tool_results = {
             "home": {
                 "summary": {"found": True, "top_batters": []},
-                "advanced": {"found": True, "metrics": {"batting": {"ops": 0.754}}, "fatigue_index": {"bullpen_share": "31.0%"}},
-                "recent": {"found": True, "summary": {"wins": 1, "losses": 0, "draws": 0, "run_diff": 1}},
+                "advanced": {
+                    "found": True,
+                    "metrics": {"batting": {"ops": 0.754}},
+                    "fatigue_index": {"bullpen_share": "31.0%"},
+                },
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 1, "losses": 0, "draws": 0, "run_diff": 1},
+                },
             },
             "away": {
                 "summary": {"found": True, "top_batters": []},
-                "advanced": {"found": True, "metrics": {"batting": {"ops": 0.731}}, "fatigue_index": {"bullpen_share": "28.5%"}},
-                "recent": {"found": True, "summary": {"wins": 0, "losses": 1, "draws": 0, "run_diff": -1}},
+                "advanced": {
+                    "found": True,
+                    "metrics": {"batting": {"ops": 0.731}},
+                    "fatigue_index": {"bullpen_share": "28.5%"},
+                },
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 0, "losses": 1, "draws": 0, "run_diff": -1},
+                },
             },
-            "matchup": {"found": True, "games": [{"game_id": "prev1"}], "summary": {"team1_wins": 1, "team2_wins": 0, "draws": 0}},
+            "matchup": {
+                "found": True,
+                "games": [{"game_id": "prev1"}],
+                "summary": {"team1_wins": 1, "team2_wins": 0, "draws": 0},
+            },
         }
 
         supported = _resolve_supported_focuses(
@@ -799,7 +834,9 @@ class TestCoachFastPath:
         assert len(sanitized["games"]) == 4
         assert sanitized["found"] is True
 
-    def test_execute_coach_tools_parallel_passes_postseason_season_id(self, monkeypatch):
+    def test_execute_coach_tools_parallel_passes_postseason_season_id(
+        self, monkeypatch
+    ):
         from app.routers import coach as coach_router
 
         captured = {}
@@ -960,7 +997,9 @@ class TestCoachFastPath:
             "home": {
                 "summary": {
                     "found": True,
-                    "top_batters": [{"player_name": "홍창기", "ops": 0.901, "home_runs": 3}],
+                    "top_batters": [
+                        {"player_name": "홍창기", "ops": 0.901, "home_runs": 3}
+                    ],
                     "top_pitchers": [{"player_name": "임찬규", "era": 3.21, "wins": 1}],
                 },
                 "advanced": {
@@ -968,20 +1007,30 @@ class TestCoachFastPath:
                     "metrics": {"batting": {"ops": 0.754}},
                     "fatigue_index": {"bullpen_share": "31.0%"},
                 },
-                "recent": {"found": True, "summary": {"wins": 6, "losses": 4, "draws": 0, "run_diff": 8}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 6, "losses": 4, "draws": 0, "run_diff": 8},
+                },
             },
             "away": {
                 "summary": {
                     "found": True,
-                    "top_batters": [{"player_name": "강백호", "ops": 0.877, "home_runs": 4}],
-                    "top_pitchers": [{"player_name": "쿠에바스", "era": 2.98, "wins": 2}],
+                    "top_batters": [
+                        {"player_name": "강백호", "ops": 0.877, "home_runs": 4}
+                    ],
+                    "top_pitchers": [
+                        {"player_name": "쿠에바스", "era": 2.98, "wins": 2}
+                    ],
                 },
                 "advanced": {
                     "found": True,
                     "metrics": {"batting": {"ops": 0.731}},
                     "fatigue_index": {"bullpen_share": "28.5%"},
                 },
-                "recent": {"found": True, "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -5}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -5},
+                },
             },
             "matchup": {"summary": {"team1_wins": 5, "team2_wins": 3, "draws": 0}},
         }
@@ -1001,7 +1050,10 @@ class TestCoachFastPath:
         assert any("라인업" in item for item in fact_sheet.caveat_lines)
         assert "강백호" in fact_sheet.allowed_entity_names
         assert "0.754" in fact_sheet.allowed_numeric_tokens
-        assert "31%" in fact_sheet.allowed_numeric_tokens or "31.0%" in fact_sheet.allowed_numeric_tokens
+        assert (
+            "31%" in fact_sheet.allowed_numeric_tokens
+            or "31.0%" in fact_sheet.allowed_numeric_tokens
+        )
 
     def test_collect_allowed_entity_names_includes_summary_item_players(self):
         from app.routers.coach import _collect_allowed_entity_names
@@ -1017,7 +1069,9 @@ class TestCoachFastPath:
         assert "김도영" in allowed_names
         assert "오스틴" in allowed_names
 
-    def test_validate_response_against_fact_sheet_rejects_unsupported_numeric_claim(self):
+    def test_validate_response_against_fact_sheet_rejects_unsupported_numeric_claim(
+        self,
+    ):
         from app.core.coach_grounding import validate_response_against_fact_sheet
         from app.routers.coach import (
             _build_coach_fact_sheet,
@@ -1034,7 +1088,10 @@ class TestCoachFastPath:
                     "metrics": {"batting": {"ops": 0.754}},
                     "fatigue_index": {"bullpen_share": "31.0%"},
                 },
-                "recent": {"found": True, "summary": {"wins": 6, "losses": 4, "draws": 0, "run_diff": 8}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 6, "losses": 4, "draws": 0, "run_diff": 8},
+                },
             },
             "away": {
                 "summary": {"found": True, "top_batters": [], "top_pitchers": []},
@@ -1043,7 +1100,10 @@ class TestCoachFastPath:
                     "metrics": {"batting": {"ops": 0.731}},
                     "fatigue_index": {"bullpen_share": "28.5%"},
                 },
-                "recent": {"found": True, "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -5}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -5},
+                },
             },
             "matchup": {},
         }
@@ -1068,7 +1128,9 @@ class TestCoachFastPath:
         assert "unsupported_numeric_claim" in validation.reasons
         assert "0.812" in validation.unsupported_numeric_tokens
 
-    def test_validate_response_against_fact_sheet_rejects_unconfirmed_lineup_claim(self):
+    def test_validate_response_against_fact_sheet_rejects_unconfirmed_lineup_claim(
+        self,
+    ):
         from app.core.coach_grounding import validate_response_against_fact_sheet
         from app.routers.coach import (
             _build_coach_fact_sheet,
@@ -1082,8 +1144,16 @@ class TestCoachFastPath:
             away_lineup=[],
         )
         tool_results = {
-            "home": {"summary": {"found": True}, "advanced": {"found": True}, "recent": {"found": False}},
-            "away": {"summary": {"found": True}, "advanced": {"found": True}, "recent": {"found": False}},
+            "home": {
+                "summary": {"found": True},
+                "advanced": {"found": True},
+                "recent": {"found": False},
+            },
+            "away": {
+                "summary": {"found": True},
+                "advanced": {"found": True},
+                "recent": {"found": False},
+            },
             "matchup": {},
         }
         fact_sheet = _build_coach_fact_sheet(

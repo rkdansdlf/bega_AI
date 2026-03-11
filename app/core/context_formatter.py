@@ -592,7 +592,9 @@ class ContextFormatter:
                 )
                 home_score = base_game.get("home_score", "?")
                 away_score = base_game.get("away_score", "?")
-                metadata_game = game_group.get("game_metadata") or game_group.get("game")
+                metadata_game = game_group.get("game_metadata") or game_group.get(
+                    "game"
+                )
                 stadium = ""
                 if metadata_game:
                     stadium = metadata_game.get("stadium_name") or metadata_game.get(

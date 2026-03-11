@@ -140,9 +140,13 @@ class AnalysisSection(BaseModel):
     strengths: List[str] = Field(default_factory=list, description="강점 목록")
     weaknesses: List[str] = Field(default_factory=list, description="약점 목록")
     risks: List[RiskItem] = Field(default_factory=list, description="위험 요소 목록")
-    why_it_matters: List[str] = Field(default_factory=list, description="판단 근거 목록")
+    why_it_matters: List[str] = Field(
+        default_factory=list, description="판단 근거 목록"
+    )
     swing_factors: List[str] = Field(default_factory=list, description="승부 변수 목록")
-    watch_points: List[str] = Field(default_factory=list, description="체크 포인트 목록")
+    watch_points: List[str] = Field(
+        default_factory=list, description="체크 포인트 목록"
+    )
     uncertainty: List[str] = Field(default_factory=list, description="불확실성 목록")
 
     @field_validator("summary", "verdict", mode="before")
@@ -540,7 +544,9 @@ def validate_coach_response(response: CoachResponse) -> List[str]:
         warnings.append("analysis.verdict가 비어있습니다. 판단 문장을 권장합니다.")
 
     if not response.analysis.why_it_matters:
-        warnings.append("analysis.why_it_matters가 비어있습니다. 판단 근거 보강이 필요합니다.")
+        warnings.append(
+            "analysis.why_it_matters가 비어있습니다. 판단 근거 보강이 필요합니다."
+        )
 
     # coach_note 길이 확인
     if len(response.coach_note) < 20:

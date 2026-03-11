@@ -45,9 +45,7 @@ def test_collect_mismatches_flags_postseason_stage_scope_errors() -> None:
 
 
 def test_mismatch_exit_code_fails_only_for_dry_run_mismatches() -> None:
-    mismatches = [
-        MismatchRow("ignored", date(2025, 10, 6), "SS", "NC", 264, 5, 2, 261)
-    ]
+    mismatches = [MismatchRow("ignored", date(2025, 10, 6), "SS", "NC", 264, 5, 2, 261)]
 
     assert mismatch_exit_code(mismatches, apply=False, fail_on_mismatch=True) == 2
     assert mismatch_exit_code(mismatches, apply=True, fail_on_mismatch=True) == 0

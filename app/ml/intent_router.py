@@ -15,9 +15,7 @@ MODEL_PATH = Path(__file__).with_name("intent_router.joblib")
 
 
 def rule_intent(question: str) -> Optional[str]:
-    game_lookup_pattern = (
-        r"(박스스코어|box score|이닝별 득점|이닝별|몇 점|7회|8회|9회|연장|경기 흐름|흐름 요약|승부처|언제 갈렸|역전|동점 흐름|초중후반 득점|득점 양상)"
-    )
+    game_lookup_pattern = r"(박스스코어|box score|이닝별 득점|이닝별|몇 점|7회|8회|9회|연장|경기 흐름|흐름 요약|승부처|언제 갈렸|역전|동점 흐름|초중후반 득점|득점 양상)"
     team_metric_pattern = (
         r"((팀|구단).*(타율|OPS|ops|평균자책|평균 자책|평균자책점|ERA|era|방어율|홈런|타점)|"
         r"(타율|OPS|ops|평균자책|평균 자책|평균자책점|ERA|era|방어율|홈런|타점).*(팀|구단))"

@@ -247,7 +247,9 @@ def test_fetch_backend_match_meta_falls_back_when_detail_endpoint_fails():
             return httpx.Response(500, json={"message": "server error"})
         raise AssertionError(f"unexpected path: {request.url.path}")
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://testserver")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://testserver"
+    )
     try:
         backend_meta = fetch_backend_match_meta(client, "http://testserver", record)
     finally:
@@ -264,7 +266,9 @@ def test_call_coach_analyze_returns_clean_error_payload_for_non_200():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text='{"detail":"Unauthorized"}')
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://testserver")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://testserver"
+    )
     try:
         capture = call_coach_analyze(
             client,
@@ -284,7 +288,9 @@ def test_call_coach_analyze_returns_timeout_payload() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("read timed out", request=request)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://testserver")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://testserver"
+    )
     try:
         capture = call_coach_analyze(
             client,
@@ -381,9 +387,13 @@ def test_validate_capture_hard_fails_on_grounding_reason_codes_without_fallback(
     assert "manual_detail fallback 발생" not in soft_warnings
 
 
-def test_resolve_default_internal_api_key_reads_local_env_files(tmp_path: Path, monkeypatch):
+def test_resolve_default_internal_api_key_reads_local_env_files(
+    tmp_path: Path, monkeypatch
+):
     monkeypatch.delenv("AI_INTERNAL_TOKEN", raising=False)
-    (tmp_path / ".env.prod").write_text("AI_INTERNAL_TOKEN=file-token\n", encoding="utf-8")
+    (tmp_path / ".env.prod").write_text(
+        "AI_INTERNAL_TOKEN=file-token\n", encoding="utf-8"
+    )
 
     assert resolve_default_internal_api_key(tmp_path) == "file-token"
 

@@ -136,12 +136,19 @@ def _collect_response_text_segments(response_data: Dict[str, Any]) -> List[str]:
         str(analysis.get("verdict") or ""),
         " ".join(str(item) for item in analysis.get("strengths", []) or []),
         " ".join(str(item) for item in analysis.get("weaknesses", []) or []),
-        " ".join(str(item.get("description") or "") for item in analysis.get("risks", []) or []),
+        " ".join(
+            str(item.get("description") or "")
+            for item in analysis.get("risks", []) or []
+        ),
         " ".join(str(item) for item in analysis.get("why_it_matters", []) or []),
         " ".join(str(item) for item in analysis.get("swing_factors", []) or []),
         " ".join(str(item) for item in analysis.get("watch_points", []) or []),
         " ".join(str(item) for item in analysis.get("uncertainty", []) or []),
-        " ".join(str(item.get("value") or "") for item in key_metrics if isinstance(item, dict)),
+        " ".join(
+            str(item.get("value") or "")
+            for item in key_metrics
+            if isinstance(item, dict)
+        ),
     ]
     return [segment for segment in segments if segment]
 

@@ -28,7 +28,6 @@ from ..agents.release_decision_eval import (
 from ..config import get_settings
 from ..internal_auth import require_ai_internal_token
 
-
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 EVAL_CASES_PATH = WORKSPACE_ROOT / "bega_AI" / "evals" / "release_decision_cases.json"
 ARTIFACTS_ROOT = WORKSPACE_ROOT / "reports" / "release-decision"
@@ -88,7 +87,9 @@ def _load_release_eval_cases():
     try:
         return load_eval_cases(EVAL_CASES_PATH)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"release eval cases unavailable: {exc}") from exc
+        raise HTTPException(
+            status_code=503, detail=f"release eval cases unavailable: {exc}"
+        ) from exc
 
 
 def _artifact_store() -> ReleaseDecisionArtifactStore:
@@ -174,7 +175,9 @@ async def evaluate_release_decision_draft(
     cases = _load_release_eval_cases()
     case = next((item for item in cases if item.case_id == payload.case_id), None)
     if case is None:
-        raise HTTPException(status_code=404, detail="Unknown release decision eval case")
+        raise HTTPException(
+            status_code=404, detail="Unknown release decision eval case"
+        )
 
     evaluation = evaluate_release_decision(payload.draft, case)
     return ReleaseDecisionEvaluateResponse(
@@ -232,7 +235,9 @@ async def get_release_decision_artifact(
     try:
         return _artifact_store().load_artifact(artifact_id)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Unknown release decision artifact") from exc
+        raise HTTPException(
+            status_code=404, detail="Unknown release decision artifact"
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,

@@ -43,7 +43,9 @@ def test_render_low_data_team_analysis_uses_query_without_unboundlocalerror() ->
     assert "팀 OPS" in rendered
 
 
-def test_render_low_data_generic_metric_fallback_uses_query_without_unboundlocalerror() -> None:
+def test_render_low_data_generic_metric_fallback_uses_query_without_unboundlocalerror() -> (
+    None
+):
     registry = ChatRendererRegistry(_StubAgent())
     decision = IntentDecision(intent=ChatIntent.UNKNOWN, subject_type=None)
 

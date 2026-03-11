@@ -7,7 +7,6 @@ from .security_metrics import record_security_event
 
 from fastapi import HTTPException, Request
 
-
 TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT = os.getenv(
     "AI_TRUST_X_FORWARDED_FOR", "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -78,7 +77,9 @@ def _dependency_factory(
     limiter: InMemoryRateLimiter, *, trust_x_forwarded_for: bool = False, name: str
 ):
     async def _dependency(request: Request) -> None:
-        client_key = _extract_client_key(request, trust_x_forwarded_for=trust_x_forwarded_for)
+        client_key = _extract_client_key(
+            request, trust_x_forwarded_for=trust_x_forwarded_for
+        )
         try:
             await limiter.check(client_key)
         except HTTPException as exc:
@@ -89,6 +90,7 @@ def _dependency_factory(
                     detail=name,
                 )
             raise
+
     return _dependency
 
 
@@ -96,31 +98,31 @@ def _dependency_factory(
 rate_limit_chat_dependency = _dependency_factory(
     CHAT_RATE_LIMITER,
     trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
-    name="chat"
+    name="chat",
 )
 rate_limit_chat_voice_dependency = _dependency_factory(
     CHAT_VOICE_RATE_LIMITER,
     trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
-    name="chat_voice"
+    name="chat_voice",
 )
 
 # The Coach/비전 API는 처리 비용이 크므로 stricter 규칙 적용
 rate_limit_coach_dependency = _dependency_factory(
     COACH_RATE_LIMITER,
     trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
-    name="coach"
+    name="coach",
 )
 rate_limit_vision_dependency = _dependency_factory(
     VISION_RATE_LIMITER,
     trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
-    name="vision"
+    name="vision",
 )
 
 # 디버그/관리 성격 엔드포인트(검색/인제스트)는 별도 제한치
 rate_limit_debug_dependency = _dependency_factory(
     DEBUG_RATE_LIMITER,
     trust_x_forwarded_for=TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT,
-    name="debug"
+    name="debug",
 )
 
 

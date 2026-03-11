@@ -376,17 +376,13 @@ def get_agent(
         # Build model list to try (블록된 모델은 건너뛰고, 없으면 primary로 복귀)
         primary_model = settings.openrouter_model
         fallback_models = settings.openrouter_fallback_models
-        models_to_try = _resolve_model_candidates(
-            primary_model, fallback_models
-        )
+        models_to_try = _resolve_model_candidates(primary_model, fallback_models)
         logger.info(
             f"[LLM] Models to try (filtered): {models_to_try}, max_tokens={effective_max_tokens}"
         )
 
         last_exception = None
-        empty_chunk_retries = max(
-            0, int(settings.chat_openrouter_empty_chunk_retries)
-        )
+        empty_chunk_retries = max(0, int(settings.chat_openrouter_empty_chunk_retries))
         empty_chunk_backoff_ms = max(
             50, int(settings.chat_openrouter_empty_chunk_backoff_ms)
         )
@@ -473,9 +469,9 @@ def get_agent(
                         )
                         last_exception = RuntimeError(error_msg)
                         if retry_index < empty_chunk_retries:
-                            backoff_seconds = (
-                                empty_chunk_backoff_ms / 1000.0
-                            ) * (2**retry_index)
+                            backoff_seconds = (empty_chunk_backoff_ms / 1000.0) * (
+                                2**retry_index
+                            )
                             await asyncio.sleep(backoff_seconds)
                             continue
                         break
@@ -614,9 +610,7 @@ def get_coach_llm_generator():
 
         primary_model = settings.coach_openrouter_model or settings.openrouter_model
         fallback_models = list(settings.coach_openrouter_fallback_models)
-        models_to_try = resolve_coach_openrouter_models(
-            primary_model, fallback_models
-        )
+        models_to_try = resolve_coach_openrouter_models(primary_model, fallback_models)
 
         logger.info(
             "[Coach LLM] OpenRouter models=%s, max_tokens=%d",
@@ -662,7 +656,10 @@ def get_coach_llm_generator():
                             json=payload,
                             headers=headers,
                         ) as response:
-                            if response.status_code >= 400 and response.status_code < 500:
+                            if (
+                                response.status_code >= 400
+                                and response.status_code < 500
+                            ):
                                 error_body = await response.aread()
                                 logger.error(
                                     "[Coach OpenRouter 4xx] Status: %s, Body: %s",
@@ -680,8 +677,8 @@ def get_coach_llm_generator():
                                         break
                                     try:
                                         data = json.loads(data_str)
-                                        delta, parse_reason = _parse_openrouter_stream_delta(
-                                            data
+                                        delta, parse_reason = (
+                                            _parse_openrouter_stream_delta(data)
                                         )
                                         if parse_reason in {
                                             "missing_choices",
@@ -706,7 +703,8 @@ def get_coach_llm_generator():
                                         )
                                         if "error" in line.lower():
                                             logger.error(
-                                                "[Coach OpenRouter Error Detail] %s", line
+                                                "[Coach OpenRouter Error Detail] %s",
+                                                line,
                                             )
 
                     if chunk_count == 0:
@@ -761,8 +759,7 @@ def get_coach_llm_generator():
                     last_exception = e
                     if retryable and retry_index < COACH_OPENROUTER_RETRY_LIMIT:
                         await asyncio.sleep(
-                            COACH_OPENROUTER_RETRY_BACKOFF_SECONDS
-                            * (2**retry_index)
+                            COACH_OPENROUTER_RETRY_BACKOFF_SECONDS * (2**retry_index)
                         )
                         continue
                     break
@@ -824,9 +821,9 @@ def require_ai_internal_token(
             detail="AI internal authentication is not configured",
         )
 
-    provided_token = ((x_internal_api_key or "").strip() or _extract_internal_token_from_authorization(
-        authorization
-    ))
+    provided_token = (
+        x_internal_api_key or ""
+    ).strip() or _extract_internal_token_from_authorization(authorization)
     if not provided_token or not secrets.compare_digest(provided_token, expected_token):
         record_security_event(
             "AI_INTERNAL_AUTH_REJECT",

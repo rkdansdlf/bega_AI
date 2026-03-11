@@ -14,11 +14,9 @@ from app.agents.release_decision_agent import (
 
 
 def test_extract_json_object_accepts_code_fence() -> None:
-    payload = _extract_json_object(
-        """```json
+    payload = _extract_json_object("""```json
         {"decision":"GO","summary":"ok"}
-        ```"""
-    )
+        ```""")
     assert payload["decision"] == "GO"
 
 
@@ -39,10 +37,15 @@ def test_workspace_document_tools_search_and_read(tmp_path: Path) -> None:
     assert searched["results"][0]["path"] == "docs/gate.md"
 
     read = tools.read_document("docs/gate.md", start_line=2, max_lines=1)
-    assert read["excerpt"][0]["text"] == "Prediction Stage 2는 표본 부족으로 Pending 상태입니다."
+    assert (
+        read["excerpt"][0]["text"]
+        == "Prediction Stage 2는 표본 부족으로 Pending 상태입니다."
+    )
 
 
-def test_workspace_document_tools_rejects_paths_outside_workspace(tmp_path: Path) -> None:
+def test_workspace_document_tools_rejects_paths_outside_workspace(
+    tmp_path: Path,
+) -> None:
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
     (tmp_path / "docs" / "gate.md").write_text("# Gate\n", encoding="utf-8")

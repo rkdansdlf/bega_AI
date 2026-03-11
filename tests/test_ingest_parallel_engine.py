@@ -35,7 +35,13 @@ def test_parse_args_parallel_engine_custom(monkeypatch: Any) -> None:
 
 def test_prepare_rows_for_engine_falls_back_to_thread(monkeypatch: Any) -> None:
     tasks = [
-        ("teams", {"team_id": "HH", "team_name": "한화"}, "team_id=HH", False, "2026-01-01")
+        (
+            "teams",
+            {"team_id": "HH", "team_name": "한화"},
+            "team_id=HH",
+            False,
+            "2026-01-01",
+        )
     ]
 
     def _raise(*_: Any, **__: Any) -> List[List[Dict[str, Any]]]:

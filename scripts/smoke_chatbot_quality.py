@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-
 SECTION_HEADERS = (
     "핵심",
     "요약",
@@ -183,7 +182,9 @@ def _default_questions() -> List[str]:
     if DEFAULT_QUESTION_LIST_PATH.exists():
         questions = [
             line.strip()
-            for line in DEFAULT_QUESTION_LIST_PATH.read_text(encoding="utf-8").splitlines()
+            for line in DEFAULT_QUESTION_LIST_PATH.read_text(
+                encoding="utf-8"
+            ).splitlines()
             if line.strip()
         ]
         if questions:
@@ -463,10 +464,15 @@ def _check_completion(
     for attempt in range(1, attempts + 1):
         start = time.perf_counter()
         try:
-            response = client.post(f"{base_url}/ai/chat/completion", json=payload, headers=headers)
+            response = client.post(
+                f"{base_url}/ai/chat/completion", json=payload, headers=headers
+            )
             if _is_transient_status(response.status_code) and attempt < attempts:
                 if response.status_code == 429:
-                    delay = max(_retry_delay(response, rate_limit_base_delay), rate_limit_base_delay)
+                    delay = max(
+                        _retry_delay(response, rate_limit_base_delay),
+                        rate_limit_base_delay,
+                    )
                 else:
                     delay = _transient_backoff(rate_limit_base_delay, attempt)
                 time.sleep(delay)
@@ -574,7 +580,10 @@ def _check_stream(
 
                 if _is_transient_status(response.status_code) and attempt < attempts:
                     if response.status_code == 429:
-                        delay = max(_retry_delay(response, rate_limit_base_delay), rate_limit_base_delay)
+                        delay = max(
+                            _retry_delay(response, rate_limit_base_delay),
+                            rate_limit_base_delay,
+                        )
                     else:
                         delay = _transient_backoff(rate_limit_base_delay, attempt)
                     time.sleep(delay)
@@ -641,7 +650,10 @@ def _check_stream(
                 event_done = event_positions.get("done", 1e9)
                 event_order_ok = (
                     event_order < event_message < event_meta < event_done
-                    if all(pos != 1e9 for pos in (event_order, event_message, event_meta, event_done))
+                    if all(
+                        pos != 1e9
+                        for pos in (event_order, event_message, event_meta, event_done)
+                    )
                     else False
                 )
                 quality_ok = _quality_pass(quality)
@@ -694,7 +706,12 @@ def _check_stream(
     }
 
 
-def _print_progress(index: int, total: int, completion_result: Dict[str, Any], stream_result: Dict[str, Any]) -> None:
+def _print_progress(
+    index: int,
+    total: int,
+    completion_result: Dict[str, Any],
+    stream_result: Dict[str, Any],
+) -> None:
     c_ok = "O" if completion_result.get("ok") else "X"
     s_ok = "O" if stream_result.get("ok") else "X"
     print(
@@ -721,7 +738,9 @@ def _percentile(sorted_values: List[float], percentile: float) -> Optional[float
     if lower == upper:
         return round(sorted_values[lower], 2)
     weight = rank - lower
-    value = sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * weight
+    value = (
+        sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * weight
+    )
     return round(value, 2)
 
 
@@ -751,7 +770,9 @@ def _endpoint_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         "min": round(latency_values[0], 2) if latency_values else None,
         "max": round(latency_values[-1], 2) if latency_values else None,
         "avg": (
-            round(sum(latency_values) / len(latency_values), 2) if latency_values else None
+            round(sum(latency_values) / len(latency_values), 2)
+            if latency_values
+            else None
         ),
         "p50": _percentile(latency_values, 0.50),
         "p95": _percentile(latency_values, 0.95),
@@ -823,7 +844,9 @@ def _summarize_results(
     total = len(results)
     passed = sum(1 for item in results if item.get("ok"))
     failed = total - passed
-    completion = [item for item in results if item.get("endpoint") == "/ai/chat/completion"]
+    completion = [
+        item for item in results if item.get("endpoint") == "/ai/chat/completion"
+    ]
     stream = [item for item in results if item.get("endpoint") == "/ai/chat/stream"]
     completion_fallback_metrics = _fallback_metrics(completion)
     stream_fallback_metrics = _fallback_metrics(stream)
@@ -846,22 +869,16 @@ def _summarize_results(
             1 for item in results if item.get("quality", {}).get("no_table_markup")
         ),
         "quality_no_briefing_headers_passed": sum(
-            1
-            for item in results
-            if item.get("quality", {}).get("no_briefing_headers")
+            1 for item in results if item.get("quality", {}).get("no_briefing_headers")
         ),
         "quality_no_source_line_passed": sum(
             1 for item in results if item.get("quality", {}).get("no_source_line")
         ),
         "quality_no_raw_chunk_marker_passed": sum(
-            1
-            for item in results
-            if item.get("quality", {}).get("no_raw_chunk_marker")
+            1 for item in results if item.get("quality", {}).get("no_raw_chunk_marker")
         ),
         "quality_no_low_data_fallback_passed": sum(
-            1
-            for item in results
-            if item.get("quality", {}).get("no_low_data_fallback")
+            1 for item in results if item.get("quality", {}).get("no_low_data_fallback")
         ),
         "completion_metrics": _endpoint_metrics(completion),
         "stream_metrics": _endpoint_metrics(stream),
@@ -940,7 +957,9 @@ def _write_output_report(
         results=results,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     return report
 
 
@@ -1018,7 +1037,9 @@ def main() -> int:
                     base_url,
                     question,
                     history_payload=history_payload,
-                    headers={"X-Internal-Api-Key": headers.get("X-Internal-Api-Key", "")},
+                    headers={
+                        "X-Internal-Api-Key": headers.get("X-Internal-Api-Key", "")
+                    },
                     rate_limit_retries=args.rate_limit_max_retries,
                     rate_limit_base_delay=args.rate_limit_base_delay,
                     stream_style=args.stream_style,

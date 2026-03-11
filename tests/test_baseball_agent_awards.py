@@ -18,7 +18,9 @@ def test_reference_fast_path_routes_mvp_query_to_awards() -> None:
         award_type="mvp",
     )
 
-    plan = agent._build_reference_fast_path_plan("25년 mvp 선수가 누구야", entity_filter)
+    plan = agent._build_reference_fast_path_plan(
+        "25년 mvp 선수가 누구야", entity_filter
+    )
 
     assert plan is not None
     assert plan["intent"] == "award_lookup"

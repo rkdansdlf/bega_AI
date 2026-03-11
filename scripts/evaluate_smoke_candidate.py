@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-
 REPORTS_DIR = Path(__file__).resolve().parents[2] / "reports"
 PRESET_BASELINES = {
     "regmix_100": REPORTS_DIR / "smoke_latency_baseline_regmix_100.json",
@@ -32,7 +31,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Use canonical baseline JSON for a named preset.",
     )
-    parser.add_argument("--candidate", required=True, help="Candidate summary JSON path.")
+    parser.add_argument(
+        "--candidate", required=True, help="Candidate summary JSON path."
+    )
     parser.add_argument("--output", default=None, help="Optional output JSON path.")
     parser.add_argument(
         "--p95-improve-threshold",
@@ -81,13 +82,17 @@ def _resolve_baseline_path(args: argparse.Namespace) -> str:
     raise ValueError("Either --baseline or --baseline-preset must be provided.")
 
 
-def _safe_ratio_delta(candidate: Optional[float], baseline: Optional[float]) -> Optional[float]:
+def _safe_ratio_delta(
+    candidate: Optional[float], baseline: Optional[float]
+) -> Optional[float]:
     if candidate is None or baseline is None or baseline == 0:
         return None
     return (candidate - baseline) / baseline
 
 
-def _extract_baseline_endpoint(baseline: Dict[str, Any], endpoint: str) -> Dict[str, Optional[float]]:
+def _extract_baseline_endpoint(
+    baseline: Dict[str, Any], endpoint: str
+) -> Dict[str, Optional[float]]:
     base = baseline.get("metrics", {}).get(endpoint, {})
     latency = base.get("latency_ms", {})
     return {
@@ -97,7 +102,9 @@ def _extract_baseline_endpoint(baseline: Dict[str, Any], endpoint: str) -> Dict[
     }
 
 
-def _extract_candidate_endpoint(candidate: Dict[str, Any], endpoint: str) -> Dict[str, Optional[float]]:
+def _extract_candidate_endpoint(
+    candidate: Dict[str, Any], endpoint: str
+) -> Dict[str, Optional[float]]:
     endpoint_key = f"{endpoint}_metrics"
     base = candidate.get("summary", {}).get(endpoint_key, {})
     latency = base.get("latency_ms", {})
@@ -138,7 +145,9 @@ def evaluate_candidate(
             baseline_metrics["error_rate"] is not None
             and candidate_metrics["error_rate"] is not None
         ):
-            error_rate_delta = candidate_metrics["error_rate"] - baseline_metrics["error_rate"]
+            error_rate_delta = (
+                candidate_metrics["error_rate"] - baseline_metrics["error_rate"]
+            )
         if (
             baseline_metrics["timeout_rate"] is not None
             and candidate_metrics["timeout_rate"] is not None
@@ -152,13 +161,19 @@ def evaluate_candidate(
         elif p95_delta_ratio > p95_regression_threshold:
             failures.append(f"{endpoint}:p95_regression")
 
-        if error_rate_delta is not None and error_rate_delta > error_rate_increase_threshold:
+        if (
+            error_rate_delta is not None
+            and error_rate_delta > error_rate_increase_threshold
+        ):
             failures.append(f"{endpoint}:error_rate_increase")
-        if timeout_rate_delta is not None and timeout_rate_delta > timeout_rate_increase_threshold:
+        if (
+            timeout_rate_delta is not None
+            and timeout_rate_delta > timeout_rate_increase_threshold
+        ):
             failures.append(f"{endpoint}:timeout_rate_increase")
 
-        improved = (
-            p95_delta_ratio is not None and p95_delta_ratio <= (-1.0 * p95_improve_threshold)
+        improved = p95_delta_ratio is not None and p95_delta_ratio <= (
+            -1.0 * p95_improve_threshold
         )
         improvement_flags.append(improved)
         endpoint_results[endpoint] = {

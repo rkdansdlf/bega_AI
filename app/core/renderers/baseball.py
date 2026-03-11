@@ -313,9 +313,7 @@ def render_game_flow_summary(
         for idx, half in enumerate(half_progression):
             if half["sign"] != final_sign:
                 continue
-            if all(
-                later["sign"] == final_sign for later in half_progression[idx:]
-            ):
+            if all(later["sign"] == final_sign for later in half_progression[idx:]):
                 decisive_half = str(half["label"])
                 break
 
@@ -394,9 +392,7 @@ def render_game_flow_summary(
 
     source = row.get("source_table", "game_flow_summary")
     row_id = row.get("source_row_id", "")
-    source_line = (
-        f"[출처] KBO 경기 흐름 요약 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
-    )
+    source_line = f"[출처] KBO 경기 흐름 요약 ({source}{'#' if row_id else ''}{row_id}) / 기준일 {today}"
 
     rendered = "\n".join(
         [

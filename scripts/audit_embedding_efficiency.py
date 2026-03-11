@@ -120,7 +120,9 @@ def _build_where_clause(
     return "WHERE " + " AND ".join(clauses), params
 
 
-def _trim_json_samples(rows: Sequence[Dict[str, Any]], keys: Sequence[str], top: int) -> None:
+def _trim_json_samples(
+    rows: Sequence[Dict[str, Any]], keys: Sequence[str], top: int
+) -> None:
     for row in rows:
         for key in keys:
             value = row.get(key)

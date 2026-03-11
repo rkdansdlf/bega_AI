@@ -199,7 +199,9 @@ def test_ai_vision_ticket_accepts_internal_token(monkeypatch):
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
     monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.routers.vision._read_ticket_image_with_limit", _sentinel_reader)
+    monkeypatch.setattr(
+        "app.routers.vision._read_ticket_image_with_limit", _sentinel_reader
+    )
 
     with _build_client() as client:
         response = client.post(

@@ -165,7 +165,9 @@ class WorkspaceDocumentTools:
 
     def _is_within_workspace(self, path: Path) -> bool:
         resolved = path.resolve()
-        return resolved == self.workspace_root or self.workspace_root in resolved.parents
+        return (
+            resolved == self.workspace_root or self.workspace_root in resolved.parents
+        )
 
     def _normalize_allowed_roots(self, roots: Sequence[Path | str]) -> list[Path]:
         normalized: list[Path] = []
@@ -189,13 +191,17 @@ class WorkspaceDocumentTools:
                 return False
         except FileNotFoundError:
             return False
-        return any(root == resolved or root in resolved.parents for root in self.allowed_roots)
+        return any(
+            root == resolved or root in resolved.parents for root in self.allowed_roots
+        )
 
     def _candidate_files(self, path_prefix: str | None = None) -> Iterable[Path]:
         prefix_path: Path | None = None
         if path_prefix:
             prefix_candidate = (self.workspace_root / path_prefix).resolve()
-            if prefix_candidate.exists() and self._is_within_workspace(prefix_candidate):
+            if prefix_candidate.exists() and self._is_within_workspace(
+                prefix_candidate
+            ):
                 prefix_path = prefix_candidate
 
         search_roots = [prefix_path] if prefix_path is not None else self.allowed_roots
@@ -252,14 +258,18 @@ class WorkspaceDocumentTools:
     ) -> dict[str, Any]:
         limit = max(1, min(int(limit), 20))
         normalized_query = query.strip().lower()
-        tokens = [token for token in re.split(r"\W+", normalized_query) if len(token) >= 2]
+        tokens = [
+            token for token in re.split(r"\W+", normalized_query) if len(token) >= 2
+        ]
         matches: list[dict[str, Any]] = []
 
         for candidate in self._candidate_files(path_prefix=path_prefix):
             rel_path = self._relative_path(candidate)
             score = 0
             excerpts: list[dict[str, Any]] = []
-            for line_number, raw_line in enumerate(self._read_text(candidate).splitlines(), start=1):
+            for line_number, raw_line in enumerate(
+                self._read_text(candidate).splitlines(), start=1
+            ):
                 line = raw_line.strip()
                 if not line:
                     continue
@@ -288,7 +298,11 @@ class WorkspaceDocumentTools:
                 )
 
         matches.sort(key=lambda item: (-int(item["score"]), str(item["path"])))
-        return {"query": query, "results": matches[:limit], "count": len(matches[:limit])}
+        return {
+            "query": query,
+            "results": matches[:limit],
+            "count": len(matches[:limit]),
+        }
 
     def read_document(
         self,
@@ -339,7 +353,9 @@ class ResponsesReleaseDecisionAgent:
         )
         resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if client is None and not resolved_api_key:
-            raise ValueError("OPENAI_API_KEY is required to use ResponsesReleaseDecisionAgent")
+            raise ValueError(
+                "OPENAI_API_KEY is required to use ResponsesReleaseDecisionAgent"
+            )
         self.client = client or OpenAI(api_key=resolved_api_key)
         self.model = model or os.environ.get("OPENAI_RESPONSES_MODEL", "gpt-4.1-mini")
         self.max_tool_rounds = max(1, int(max_tool_rounds))
@@ -420,7 +436,9 @@ class ResponsesReleaseDecisionAgent:
         task_prompt: str,
         seed_paths: Sequence[str],
     ) -> str:
-        seed_block = "\n".join(f"- {path}" for path in seed_paths) if seed_paths else "- 없음"
+        seed_block = (
+            "\n".join(f"- {path}" for path in seed_paths) if seed_paths else "- 없음"
+        )
         return (
             f"Scenario: {scenario}\n"
             f"Workspace root: {self.workspace_root}\n"
@@ -431,7 +449,9 @@ class ResponsesReleaseDecisionAgent:
             "Return only the final JSON object after using tools."
         )
 
-    def _execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _execute_tool(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
         if tool_name == "list_documents":
             return self.tools.list_documents(**arguments)
         if tool_name == "search_documents":

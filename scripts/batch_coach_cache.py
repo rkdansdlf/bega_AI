@@ -324,7 +324,9 @@ def collect_batch_allowed_entity_names(tool_results: Dict[str, Any]) -> set[str]
     return names
 
 
-def build_batch_fact_sheet(context: str, tool_results: Dict[str, Any]) -> CoachFactSheet:
+def build_batch_fact_sheet(
+    context: str, tool_results: Dict[str, Any]
+) -> CoachFactSheet:
     fact_lines = [
         line.lstrip("- ").strip()
         for line in context.splitlines()

@@ -12,7 +12,7 @@ def test_scan_code_usage_counts_expected_patterns(tmp_path) -> None:
             [
                 "from __future__ import annotations",
                 "import concurrent.interpreters",
-                "value = t\"hello {name}\"",
+                'value = t"hello {name}"',
                 "try:",
                 "    pass",
                 "except (TypeError, ValueError):",

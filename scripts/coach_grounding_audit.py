@@ -21,7 +21,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def _detect_workspace_root(start: Path) -> Path:
     current = start.resolve()
     while True:
-        if (current / "docker-compose.yml").exists() or (current / ".env.prod").exists():
+        if (current / "docker-compose.yml").exists() or (
+            current / ".env.prod"
+        ).exists():
             return current
         if current.parent == current:
             return start.resolve()
@@ -110,6 +112,7 @@ class BackendMatchMeta:
     detail_status_code: Optional[int] = None
     detail_error: Optional[str] = None
 
+
 def _read_env_file_value(path: Path, key: str) -> str:
     return _read_env_file_entries(path).get(key, "")
 
@@ -119,7 +122,9 @@ def resolve_default_internal_api_key(project_root: Path = WORKSPACE_ROOT) -> str
     if env_value:
         return env_value
     for filename in LOCAL_TOKEN_ENV_FILES:
-        token = _read_env_file_value(project_root / filename, "AI_INTERNAL_TOKEN").strip()
+        token = _read_env_file_value(
+            project_root / filename, "AI_INTERNAL_TOKEN"
+        ).strip()
         if token:
             return token
     return ""
@@ -318,7 +323,9 @@ def _resolve_backend_league_type_code(backend_meta: BackendMatchMeta) -> Optiona
     if backend_meta.league_type == "REGULAR":
         return 0
     if backend_meta.league_type == "POST":
-        return BACKEND_POSTSEASON_CODE.get(str(backend_meta.post_season_series or "").strip().upper())
+        return BACKEND_POSTSEASON_CODE.get(
+            str(backend_meta.post_season_series or "").strip().upper()
+        )
     return None
 
 
@@ -499,7 +506,9 @@ def build_diagnosis_summary(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]
         code for item in records for code in (item.get("root_causes") or [])
     )
     league_counts = Counter(_league_bucket(item.get("stage_label")) for item in records)
-    stage_counts = Counter(str(item.get("stage_label") or "UNKNOWN") for item in records)
+    stage_counts = Counter(
+        str(item.get("stage_label") or "UNKNOWN") for item in records
+    )
     return {
         "total_games": len(records),
         "quality_distribution": {
@@ -591,10 +600,7 @@ def select_validation_samples(
         candidate = None
         if reserved_pair:
             anchor = reserved_pair[0]
-            if (
-                str(anchor.get("game_id")) not in selected_ids
-                and predicate(anchor)
-            ):
+            if str(anchor.get("game_id")) not in selected_ids and predicate(anchor):
                 candidate = anchor
         if candidate is None:
             candidate = first_match(predicate)
@@ -687,9 +693,7 @@ def fetch_backend_match_meta(
         else:
             detail_error = "match_detail_invalid_payload"
     else:
-        detail_error = (
-            f"match_detail_failed game_id={game_id} status={detail_response.status_code}"
-        )
+        detail_error = f"match_detail_failed game_id={game_id} status={detail_response.status_code}"
 
     home_pitcher = None
     away_pitcher = None
@@ -982,7 +986,9 @@ def validate_capture(
             hard_failures.append(f"{request_mode} meta.{field_name} 누락")
 
     if meta.get("data_quality") == "insufficient" and not meta.get("used_evidence"):
-        soft_warnings.append(f"{request_mode} insufficient 대비 used_evidence 비어 있음")
+        soft_warnings.append(
+            f"{request_mode} insufficient 대비 used_evidence 비어 있음"
+        )
 
     if (
         record.get("expected_data_quality") == "grounded"
@@ -1010,12 +1016,16 @@ def validate_capture(
         target.append(f"{request_mode} unsupported numeric claim detected")
 
     if isinstance(structured_response, dict):
-        soft_warnings.extend(detect_unconfirmed_data_claims(record, structured_response))
+        soft_warnings.extend(
+            detect_unconfirmed_data_claims(record, structured_response)
+        )
 
     return hard_failures, soft_warnings
 
 
-def detect_reused_matchup_briefs(results: Sequence[Dict[str, Any]]) -> Dict[str, List[str]]:
+def detect_reused_matchup_briefs(
+    results: Sequence[Dict[str, Any]],
+) -> Dict[str, List[str]]:
     grouped: Dict[tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
     for result in results:
         grouped[_matchup_key(result["diagnosis"])].append(result)
@@ -1058,15 +1068,23 @@ def validate_records(
         write=max(timeout_seconds, 10.0),
         pool=max(timeout_seconds, 10.0),
     )
-    with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as backend_client, httpx.Client(
+    with httpx.Client(
+        timeout=timeout_seconds, follow_redirects=True
+    ) as backend_client, httpx.Client(
         timeout=coach_timeout,
         follow_redirects=True,
     ) as coach_client:
         ensure_backend_available(backend_client, backend_base_url)
         for record in _sorted_records(records):
-            backend_meta = fetch_backend_match_meta(backend_client, backend_base_url, record)
-            payload_auto = build_request_payload(record, backend_meta, REQUEST_MODE_AUTO)
-            payload_manual = build_request_payload(record, backend_meta, REQUEST_MODE_MANUAL)
+            backend_meta = fetch_backend_match_meta(
+                backend_client, backend_base_url, record
+            )
+            payload_auto = build_request_payload(
+                record, backend_meta, REQUEST_MODE_AUTO
+            )
+            payload_manual = build_request_payload(
+                record, backend_meta, REQUEST_MODE_MANUAL
+            )
             auto_capture = call_coach_analyze(
                 coach_client, backend_base_url, payload_auto, headers
             )
@@ -1161,7 +1179,9 @@ def build_recommendations(records: Sequence[Dict[str, Any]]) -> List[str]:
         for item in records
     )
     if postseason_missing_series:
-        recommendations.append("포스트시즌 season/stage 매핑과 series 계산 쿼리를 점검하세요.")
+        recommendations.append(
+            "포스트시즌 season/stage 매핑과 series 계산 쿼리를 점검하세요."
+        )
 
     if not recommendations:
         recommendations.append("즉시 조치할 데이터 적재 경고는 감지되지 않았습니다.")
@@ -1312,7 +1332,9 @@ def load_validation_input(
         records = load_diagnosis_report(diagnosis_json)
         if game_ids:
             requested = set(game_ids)
-            records = [item for item in records if str(item.get("game_id")) in requested]
+            records = [
+                item for item in records if str(item.get("game_id")) in requested
+            ]
         if max_games > 0:
             return _sorted_records(records)[:max_games]
         return _sorted_records(records)
@@ -1419,7 +1441,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             validation=validation,
         )
         paths = write_report_files(report, output_dir)
-        print(json.dumps({"summary": report["summary"], "paths": paths}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"summary": report["summary"], "paths": paths},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
         hard_failure_count = report["summary"]["validation"]["hard_failure_count"]
         if args.strict and hard_failure_count > 0:

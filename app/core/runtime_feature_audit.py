@@ -12,7 +12,6 @@ import sys
 import sysconfig
 from typing import Any, Dict, Iterable
 
-
 _FUTURE_ANNOTATIONS_PATTERN = re.compile(
     r"from\s+__future__\s+import\s+annotations", re.MULTILINE
 )

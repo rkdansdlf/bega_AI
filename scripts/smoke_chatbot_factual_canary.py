@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Tuple
 
 import httpx
 
-
 DEFAULT_CASES_PATH = (
     Path(__file__).resolve().with_name("smoke_chatbot_factual_canary_cases.json")
 )
@@ -199,7 +198,9 @@ def _evaluate_answer(case: Dict[str, Any], answer: str | None) -> Dict[str, Any]
     forbidden = [str(item) for item in case.get("forbidden") or []]
 
     required_all_pass, missing_required_all = _match_substrings(answer, required_all)
-    required_any_pass, missing_required_any = _match_any_substrings(answer, required_any)
+    required_any_pass, missing_required_any = _match_any_substrings(
+        answer, required_any
+    )
     forbidden_pass, found_forbidden = _forbidden_substrings(answer, forbidden)
 
     checks = {
@@ -311,13 +312,17 @@ def main() -> int:
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        output_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         print(f"report saved: {output_path}")
 
     if args.summary_output:
         summary_path = Path(args.summary_output)
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         print(f"summary saved: {summary_path}")
 
     return 0 if (summary["failed"] == 0 or not args.strict) else 1

@@ -147,7 +147,9 @@ def _serialize_tool_result(result: Any) -> str:
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
-def _contains_expected_substrings(payload: Any, expected_substrings: tuple[str, ...]) -> bool:
+def _contains_expected_substrings(
+    payload: Any, expected_substrings: tuple[str, ...]
+) -> bool:
     if not expected_substrings:
         return True
     haystack = _serialize_tool_result(payload)
@@ -166,7 +168,9 @@ def _plan_tools(agent: BaseballStatisticsAgent, case: BenchmarkCase) -> Dict[str
     }
 
 
-def _execute_first_tool(agent: BaseballStatisticsAgent, plan: Dict[str, Any]) -> Dict[str, Any]:
+def _execute_first_tool(
+    agent: BaseballStatisticsAgent, plan: Dict[str, Any]
+) -> Dict[str, Any]:
     tool_calls = plan.get("tool_calls", [])
     if not tool_calls:
         return {
@@ -228,13 +232,17 @@ async def _run_variant(
     try:
         start_time = time.perf_counter()
         embedding = await async_embed_query(case.query, settings)
-        docs = similarity_search(
-            connection,
-            embedding,
-            limit=limit,
-            filters=filters,
-            keyword=None,
-        ) if embedding else []
+        docs = (
+            similarity_search(
+                connection,
+                embedding,
+                limit=limit,
+                filters=filters,
+                keyword=None,
+            )
+            if embedding
+            else []
+        )
         elapsed_ms = (time.perf_counter() - start_time) * 1000
     except Exception as exc:
         message = str(exc)
@@ -250,8 +258,12 @@ async def _run_variant(
             error=message,
         )
 
-    context_lengths = [len(doc.get("content", "")) for doc in docs if doc.get("content")]
-    source_tables = [str(doc.get("source_table", "")) for doc in docs if doc.get("source_table")]
+    context_lengths = [
+        len(doc.get("content", "")) for doc in docs if doc.get("content")
+    ]
+    source_tables = [
+        str(doc.get("source_table", "")) for doc in docs if doc.get("source_table")
+    ]
     avg_context_chars = (
         round(sum(context_lengths) / len(context_lengths), 2)
         if context_lengths
@@ -285,21 +297,33 @@ def _aggregate_results(case_results: List[Dict[str, Any]]) -> Dict[str, Any]:
             variant_rows = [row[variant_name] for row in rows]
             successful_rows = [row for row in variant_rows if not row.get("error")]
             variants[variant_name] = {
-                "avg_latency_ms": round(
-                    sum(row["retrieval_latency_ms"] for row in successful_rows)
-                    / len(successful_rows),
-                    2,
-                ) if successful_rows else 0.0,
-                "avg_context_chars": round(
-                    sum(row["avg_context_chars"] for row in successful_rows)
-                    / len(successful_rows),
-                    2,
-                ) if successful_rows else 0.0,
-                "top_k_hit_rate": round(
-                    sum(1 for row in successful_rows if row["top_k_hit"])
-                    / len(successful_rows),
-                    4,
-                ) if successful_rows else 0.0,
+                "avg_latency_ms": (
+                    round(
+                        sum(row["retrieval_latency_ms"] for row in successful_rows)
+                        / len(successful_rows),
+                        2,
+                    )
+                    if successful_rows
+                    else 0.0
+                ),
+                "avg_context_chars": (
+                    round(
+                        sum(row["avg_context_chars"] for row in successful_rows)
+                        / len(successful_rows),
+                        2,
+                    )
+                    if successful_rows
+                    else 0.0
+                ),
+                "top_k_hit_rate": (
+                    round(
+                        sum(1 for row in successful_rows if row["top_k_hit"])
+                        / len(successful_rows),
+                        4,
+                    )
+                    if successful_rows
+                    else 0.0
+                ),
                 "error_count": sum(1 for row in variant_rows if row.get("error")),
             }
         summary[category] = {
@@ -333,8 +357,7 @@ async def run_benchmark(limit: int) -> Dict[str, Any]:
                 tool_choice_ok = not planned_tool_names
             else:
                 tool_choice_ok = bool(
-                    planned_tool_names
-                    and planned_tool_names[0] == case.expected_tool
+                    planned_tool_names and planned_tool_names[0] == case.expected_tool
                 )
             expected_facts_ok = _contains_expected_substrings(
                 tool_result.get("data", {}),

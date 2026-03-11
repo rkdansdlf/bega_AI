@@ -61,8 +61,10 @@ class DocumentQueryTool:
     @contextmanager
     def _connection_scope(self, force_fresh: bool = False):
         conn = self.connection
-        if not force_fresh and conn is not None and not bool(
-            getattr(conn, "closed", False)
+        if (
+            not force_fresh
+            and conn is not None
+            and not bool(getattr(conn, "closed", False))
         ):
             yield conn
             return
@@ -231,12 +233,16 @@ class DocumentQueryTool:
             "regulation",
         }:
             score += 0.06
-        if self._matches_any(query_lower, STRATEGY_METRIC_KEYWORDS) and knowledge_type in {
+        if self._matches_any(
+            query_lower, STRATEGY_METRIC_KEYWORDS
+        ) and knowledge_type in {
             "strategy_metrics",
             "metric_explainer",
         }:
             score += 0.06
-        if self._matches_any(query_lower, CULTURE_HISTORY_KEYWORDS) and knowledge_type in {
+        if self._matches_any(
+            query_lower, CULTURE_HISTORY_KEYWORDS
+        ) and knowledge_type in {
             "culture_history",
             "long_tail_entity",
         }:
@@ -250,7 +256,9 @@ class DocumentQueryTool:
         self, query_lower: str, doc: Dict[str, Any]
     ) -> Dict[str, Any]:
         normalized = dict(doc)
-        meta = normalized.get("meta") if isinstance(normalized.get("meta"), dict) else {}
+        meta = (
+            normalized.get("meta") if isinstance(normalized.get("meta"), dict) else {}
+        )
         content = str(normalized.get("content", "") or "").strip()
         if len(content) > 720:
             content = content[:720].rsplit(" ", 1)[0] + "..."

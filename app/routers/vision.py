@@ -15,7 +15,6 @@ from PIL import Image
 import io
 import tempfile
 
-
 router = APIRouter(prefix="/vision", tags=["vision"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -34,7 +33,9 @@ async def _read_ticket_image_with_limit(
 ) -> tuple[bytes, str]:
     content_type = _normalize_content_type(file.content_type)
     if allowed_content_types is not None and content_type not in allowed_content_types:
-        raise HTTPException(status_code=415, detail="지원되지 않는 이미지 파일 타입입니다.")
+        raise HTTPException(
+            status_code=415, detail="지원되지 않는 이미지 파일 타입입니다."
+        )
 
     with tempfile.SpooledTemporaryFile(max_size=max_bytes, mode="w+b") as spool:
         total = 0
@@ -188,9 +189,7 @@ async def analyze_ticket_image(
         )
     except Exception:
         logger.exception("Error processing ticket image")
-        raise HTTPException(
-            status_code=500, detail="Failed to analyze ticket image"
-        )
+        raise HTTPException(status_code=500, detail="Failed to analyze ticket image")
 
 
 @router.post("/seat-view-classify", response_model=SeatViewClassification)

@@ -12,7 +12,6 @@ from typing import Dict, List, Any, Callable, Optional
 from dataclasses import dataclass
 import inspect
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -115,9 +114,7 @@ class ToolCaller:
             normalized = dict(parameters)
         else:
             normalized = {
-                key: value
-                for key, value in parameters.items()
-                if key in sig.parameters
+                key: value for key, value in parameters.items() if key in sig.parameters
             }
         dropped = set(parameters.keys()) - set(normalized.keys())
 
@@ -210,8 +207,10 @@ class ToolCaller:
         tool_function = tool_info["function"]
 
         try:
-            normalized_parameters, missing_required, dropped_params = self._normalize_parameters(
-                tool_call.tool_name, tool_function, tool_call.parameters
+            normalized_parameters, missing_required, dropped_params = (
+                self._normalize_parameters(
+                    tool_call.tool_name, tool_function, tool_call.parameters
+                )
             )
 
             if dropped_params:

@@ -1057,7 +1057,9 @@ class DatabaseQueryTool:
 
             deduped_keys = set()
             for row in rows:
-                normalized_type = self._normalize_award_type_value(row.get("award_type"))
+                normalized_type = self._normalize_award_type_value(
+                    row.get("award_type")
+                )
                 if requested_type and normalized_type != requested_type:
                     continue
 
@@ -1076,7 +1078,9 @@ class DatabaseQueryTool:
                 display_team_name = raw_team_name
                 if isinstance(raw_team_name, str) and raw_team_name:
                     try:
-                        display_team_name = self.get_team_name(raw_team_name) or raw_team_name
+                        display_team_name = (
+                            self.get_team_name(raw_team_name) or raw_team_name
+                        )
                     except Exception:
                         display_team_name = raw_team_name
 
@@ -1534,7 +1538,9 @@ class DatabaseQueryTool:
             if "cursor" in locals():
                 cursor.close()
 
-        self._record_team_query_result("get_team_by_season_rank", str(rank), year, result)
+        self._record_team_query_result(
+            "get_team_by_season_rank", str(rank), year, result
+        )
         return result
 
     def get_team_basic_info(self, team_name: str) -> Dict[str, Any]:

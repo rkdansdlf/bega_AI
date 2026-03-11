@@ -150,7 +150,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def _detect_workspace_root(start: Path) -> Path:
     current = start.resolve()
     while True:
-        if (current / "docker-compose.yml").exists() or (current / ".env.prod").exists():
+        if (current / "docker-compose.yml").exists() or (
+            current / ".env.prod"
+        ).exists():
             return current
         if current.parent == current:
             return start.resolve()
@@ -727,10 +729,7 @@ def load_targets(
         ):
             resolved_game_status = "COMPLETED"
         game_status_bucket = _normalize_game_status_bucket(resolved_game_status)
-        if (
-            status_bucket_filter != "ANY"
-            and game_status_bucket != status_bucket_filter
-        ):
+        if status_bucket_filter != "ANY" and game_status_bucket != status_bucket_filter:
             continue
         game_lineups = lineup_by_game.get(str(game_id), {})
         lineup_signature = build_lineup_signature(
@@ -1242,7 +1241,10 @@ async def async_main(args: argparse.Namespace) -> int:
     cache_state_filter = parse_cache_state_filter(args.cache_state_filter)
     question_override = parse_question_override(args.question_override)
 
-    if league_type in POSTSEASON_LEAGUE_TYPES and not args.allow_postseason_stage_mismatch:
+    if (
+        league_type in POSTSEASON_LEAGUE_TYPES
+        and not args.allow_postseason_stage_mismatch
+    ):
         _ensure_postseason_stage_integrity(years)
 
     targets = load_targets(
@@ -1258,7 +1260,9 @@ async def async_main(args: argparse.Namespace) -> int:
     )
     failed_cache_keys = load_failed_cache_keys(args.retry_failures_from_report)
     if failed_cache_keys:
-        targets = [target for target in targets if target.cache_key in failed_cache_keys]
+        targets = [
+            target for target in targets if target.cache_key in failed_cache_keys
+        ]
     targets = _filter_targets_by_cache_state(targets, cache_state_filter)
 
     if not targets:
@@ -1287,7 +1291,9 @@ async def async_main(args: argparse.Namespace) -> int:
         if args.internal_api_key:
             default_headers["X-Internal-Api-Key"] = args.internal_api_key
         results = []
-        async with httpx.AsyncClient(timeout=timeout, headers=default_headers) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, headers=default_headers
+        ) as client:
             per_target_timeout = max(
                 args.timeout + DONE_WAIT_SECONDS + TARGET_TIMEOUT_BUFFER_SECONDS,
                 args.timeout,

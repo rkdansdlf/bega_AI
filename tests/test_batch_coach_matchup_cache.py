@@ -67,11 +67,19 @@ def test_classify_meta_result_accepts_evidence_fallback_generation() -> None:
 
 
 def test_is_retryable_failure_reason_handles_transient_categories() -> None:
-    assert _is_retryable_failure_reason("http_429:{\"detail\":\"Rate limit\"}") is True
+    assert _is_retryable_failure_reason('http_429:{"detail":"Rate limit"}') is True
     assert _is_retryable_failure_reason("ReadTimeout") is True
     assert _is_retryable_failure_reason("ReadError") is True
-    assert _is_retryable_failure_reason("Server disconnected without sending a response.") is True
-    assert _is_retryable_failure_reason("peer closed connection without sending complete message body") is True
+    assert (
+        _is_retryable_failure_reason("Server disconnected without sending a response.")
+        is True
+    )
+    assert (
+        _is_retryable_failure_reason(
+            "peer closed connection without sending complete message body"
+        )
+        is True
+    )
     assert _is_retryable_failure_reason("coach_internal_error") is True
     assert _is_retryable_failure_reason("target_wall_timeout") is True
     assert _is_retryable_failure_reason("failed_locked") is True
@@ -316,7 +324,9 @@ def test_build_cache_verification_result_marks_completed_row_as_cache_hit() -> N
     assert result["meta"]["generation_mode"] == "evidence_fallback"
 
 
-def test_collect_cache_verification_results_marks_missing_rows_failed(monkeypatch) -> None:
+def test_collect_cache_verification_results_marks_missing_rows_failed(
+    monkeypatch,
+) -> None:
     target = MatchupTarget(
         cache_key="missing",
         game_id="20250310SSHH0",
@@ -346,7 +356,9 @@ def test_collect_cache_verification_results_marks_missing_rows_failed(monkeypatc
     assert results[0]["reason"] == "missing_cache_row"
 
 
-def test_build_terminal_cache_result_if_available_uses_completed_row(monkeypatch) -> None:
+def test_build_terminal_cache_result_if_available_uses_completed_row(
+    monkeypatch,
+) -> None:
     target = MatchupTarget(
         cache_key="completed",
         game_id="20250310SSHH0",
@@ -459,7 +471,9 @@ def test_call_analyze_with_retries_succeeds_after_retry(monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(batch_module, "call_analyze_with_deadline", _fake_call)
-    monkeypatch.setattr(batch_module, "_build_terminal_cache_result_if_available", lambda target: None)
+    monkeypatch.setattr(
+        batch_module, "_build_terminal_cache_result_if_available", lambda target: None
+    )
     monkeypatch.setattr(batch_module.asyncio, "sleep", _fast_sleep)
 
     result = asyncio.run(
@@ -478,7 +492,9 @@ def test_call_analyze_with_retries_succeeds_after_retry(monkeypatch) -> None:
     assert result["meta"]["attempt"] == 2
 
 
-def test_call_analyze_with_retries_clears_locked_cache_before_retry(monkeypatch) -> None:
+def test_call_analyze_with_retries_clears_locked_cache_before_retry(
+    monkeypatch,
+) -> None:
     target = MatchupTarget(
         cache_key="retry-locked",
         game_id="20250310SSHH0",
@@ -510,7 +526,9 @@ def test_call_analyze_with_retries_clears_locked_cache_before_retry(monkeypatch)
         return None
 
     monkeypatch.setattr(batch_module, "call_analyze_with_deadline", _fake_call)
-    monkeypatch.setattr(batch_module, "_build_terminal_cache_result_if_available", lambda target: None)
+    monkeypatch.setattr(
+        batch_module, "_build_terminal_cache_result_if_available", lambda target: None
+    )
     monkeypatch.setattr(batch_module, "force_rebuild_delete", lambda keys: 1)
     monkeypatch.setattr(batch_module.asyncio, "sleep", _fast_sleep)
 
