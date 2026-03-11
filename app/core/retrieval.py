@@ -18,6 +18,12 @@ from psycopg.errors import UndefinedTable
 
 logger = logging.getLogger(__name__)
 
+_INTERNAL_FILTER_INCLUDE_INNING_SCORES = "_include_game_inning_scores"
+_INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES = "_exclude_source_tables"
+_SUPPRESSED_SOURCE_TABLES = ("game_inning_scores",)
+_PGVECTOR_SEARCH_PATH = "public, extensions, security"
+_IVFFLAT_PROBES = 512
+
 
 def _vector_literal(vector: Sequence[float]) -> str:
     """Python 리스트 형태의 벡터를 pgvector가 인식하는 문자열 형태로 변환합니다.
@@ -27,9 +33,23 @@ def _vector_literal(vector: Sequence[float]) -> str:
     return "[" + ",".join(f"{v:.8f}" for v in vector) + "]"
 
 
+def _ensure_pgvector_search_path(conn: psycopg.Connection) -> None:
+    """pgvector 타입과 연산자를 찾을 수 있도록 search_path를 보정합니다."""
+    with conn.cursor() as cursor:
+        cursor.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
+
+
+def _ensure_pgvector_session(conn: psycopg.Connection) -> None:
+    """pgvector 검색 세션 설정을 보정합니다."""
+    with conn.cursor() as cursor:
+        cursor.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
+        cursor.execute(f"SET ivfflat.probes = {_IVFFLAT_PROBES}")
+
+
 def _rag_chunks_exists(conn: psycopg.Connection) -> bool:
     """`rag_chunks` 테이블이 존재하는지 확인합니다."""
     try:
+        _ensure_pgvector_session(conn)
         with conn.cursor() as cursor:
             cursor.execute(
                 """
@@ -78,13 +98,50 @@ def similarity_search(
         logger.warning("[Search] rag_chunks table is not available.")
         return []
 
+    include_game_inning_scores = False
+    exclude_source_tables: List[str] = []
+    cleaned_filters: Dict[str, Any] = {}
+    if filters:
+        include_game_inning_scores = bool(
+            filters.get(_INTERNAL_FILTER_INCLUDE_INNING_SCORES)
+        )
+        raw_excluded_tables = filters.get(_INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES)
+        if isinstance(raw_excluded_tables, str):
+            exclude_source_tables = [raw_excluded_tables]
+        elif isinstance(raw_excluded_tables, Sequence):
+            exclude_source_tables = [
+                str(value) for value in raw_excluded_tables if value
+            ]
+        cleaned_filters = {
+            key: value
+            for key, value in filters.items()
+            if key
+            not in {
+                _INTERNAL_FILTER_INCLUDE_INNING_SCORES,
+                _INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES,
+            }
+        }
+        if cleaned_filters.get("source_table") == "game_inning_scores":
+            include_game_inning_scores = True
+
     # 기본값: PostgreSQL pgvector 사용
     filter_clauses: List[str] = ["embedding IS NOT NULL"]  # 임베딩이 없는 문서는 제외
     filter_params: List[Any] = []
 
+    suppressed_tables: List[str] = []
+    if not include_game_inning_scores:
+        suppressed_tables.extend(_SUPPRESSED_SOURCE_TABLES)
+    for source_table in exclude_source_tables:
+        if source_table not in suppressed_tables:
+            suppressed_tables.append(source_table)
+
+    for source_table in suppressed_tables:
+        filter_clauses.append("source_table <> %s")
+        filter_params.append(source_table)
+
     # 제공된 필터 조건을 SQL WHERE 절로 변환합니다.
-    if filters:
-        for key, value in filters.items():
+    if cleaned_filters:
+        for key, value in cleaned_filters.items():
             if value is None:
                 continue
             # JSON field filtering support (e.g., "meta.league")
@@ -186,6 +243,7 @@ def similarity_search(
     start_time = time.perf_counter()
 
     try:
+        _ensure_pgvector_session(conn)
         with conn.cursor(row_factory=dict_row) as cur:
             # HNSW 검색 정확도 튜닝 (Recall 향상)
             cur.execute("SET LOCAL hnsw.ef_search = 100;")
