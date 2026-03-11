@@ -135,8 +135,8 @@ class TestTeamMappingRobustness:
         call_args = mock_cursor.execute.call_args
         query, params = call_args[0]
 
-        # Verify IN/ANY clause is used (implementation detail: ANY(%s))
-        assert "psb.team_code = ANY(%s)" in query
+        # Verify ANY clause is used regardless of the selected SQL alias.
+        assert "team_code = ANY(%s)" in query
 
         # Verify params contain variants
         # Params order: [year, year, [variants], min_pa, limit]

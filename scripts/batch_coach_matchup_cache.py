@@ -182,12 +182,23 @@ def _normalize_game_status_bucket(game_status: Optional[str]) -> str:
     return "UNKNOWN"
 
 
+def _resolve_postseason_repair_module_path() -> Path:
+    candidates = (
+        PROJECT_ROOT / "scripts" / "repair_postseason_season_ids.py",
+        WORKSPACE_ROOT / "scripts" / "repair_postseason_season_ids.py",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 def _load_postseason_repair_module() -> Any:
     global _POSTSEASON_REPAIR_MODULE
     if _POSTSEASON_REPAIR_MODULE is not None:
         return _POSTSEASON_REPAIR_MODULE
 
-    module_path = WORKSPACE_ROOT / "scripts" / "repair_postseason_season_ids.py"
+    module_path = _resolve_postseason_repair_module_path()
     spec = importlib.util.spec_from_file_location(
         "root_repair_postseason_season_ids",
         module_path,

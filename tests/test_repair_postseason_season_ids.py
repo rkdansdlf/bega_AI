@@ -3,9 +3,20 @@ import importlib.util
 from pathlib import Path
 import sys
 
-MODULE_PATH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "repair_postseason_season_ids.py"
-)
+
+def _resolve_module_path() -> Path:
+    test_file = Path(__file__).resolve()
+    candidates = (
+        test_file.parents[1] / "scripts" / "repair_postseason_season_ids.py",
+        test_file.parents[2] / "scripts" / "repair_postseason_season_ids.py",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+MODULE_PATH = _resolve_module_path()
 MODULE_SPEC = importlib.util.spec_from_file_location(
     "repair_postseason_season_ids_root",
     MODULE_PATH,

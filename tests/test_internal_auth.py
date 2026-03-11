@@ -170,7 +170,8 @@ def test_chat_completion_accepts_internal_token(monkeypatch):
     body = response.json()
     assert body["cached"] is False
     assert body["intent"] == "test"
-    assert "## 상세 내역" in body["answer"]
+    assert "상태는 정상입니다." in body["answer"]
+    assert "내부 토큰 인증 통과" in body["answer"]
 
 
 def test_ai_vision_ticket_requires_internal_token(monkeypatch):
