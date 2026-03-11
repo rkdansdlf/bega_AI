@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -27,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.core.coach_cache_key import (
     build_coach_cache_key,
     build_focus_signature,
+    build_lineup_signature,
+    build_starter_signature,
     normalize_focus,
 )
 from app.deps import get_connection_pool
@@ -37,22 +40,187 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-LEAGUE_TYPE_TO_CODE = {
-    "REGULAR": 0,
-    "PRE": 2,
-    "POST": 5,
+CACHE_SCHEMA_VERSION = "v5"
+PROMPT_VERSION = "v10_postseason_matchup_scope"
+LOCAL_TOKEN_ENV_FILES = (".env.prod", ".env")
+LEAGUE_TYPE_TO_CODES = {
+    "REGULAR": (0,),
+    "PRE": (1,),
+    "POST": (2, 3, 4, 5),
 }
 LEAGUE_CODE_TO_TYPE = {
     0: "REGULAR",
-    2: "PRE",
+    1: "PRE",
+    2: "POST",
+    3: "POST",
+    4: "POST",
     5: "POST",
 }
 MATCHUP_FOCUS = ["matchup", "recent_form"]
 AUTO_BRIEF_FOCUS = ["recent_form"]
-VALID_REQUEST_MODES = ("auto_brief", "manual_detail")
+VALID_REQUEST_MODES = ("manual_detail",)
+VALID_TARGET_ORDERS = ("asc", "desc")
+VALID_STATUS_BUCKET_FILTERS = ("ANY", "COMPLETED", "LIVE", "SCHEDULED")
+VALID_CACHE_STATE_FILTERS = (
+    "ANY",
+    "MISSING",
+    "COMPLETED",
+    "FAILED",
+    "PENDING",
+    "UNRESOLVED",
+)
+RETRYABLE_FAILURE_PREFIXES = (
+    "http_429:",
+    "http_500:",
+    "http_502:",
+    "http_503:",
+    "http_504:",
+    "readtimeout",
+    "readerror",
+    "server disconnected",
+    "peer closed connection",
+    "coach_internal_error",
+    "target_wall_timeout",
+    "failed_locked",
+    "missing_done_event_timeout",
+    "empty_response_stream",
+    "missing_done_event",
+    "분석 처리 중 오류가 발생했습니다.",
+)
 DONE_WAIT_SECONDS = 20.0
 DONE_WAIT_INTERVAL_SECONDS = 1.0
+TARGET_TIMEOUT_BUFFER_SECONDS = 15.0
 COACH_YEAR_MIN = 1982
+POSTSEASON_LEAGUE_TYPES = {"POST", "ANY"}
+LEAGUE_CODE_TO_STAGE = {
+    0: "REGULAR",
+    1: "PRE",
+    2: "WC",
+    3: "SEMI_PO",
+    4: "PO",
+    5: "KS",
+}
+
+
+def _read_env_file_entries(path: Path) -> Dict[str, str]:
+    if not path.exists():
+        return {}
+
+    entries: Dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        entries[key] = value.strip().strip('"').strip("'")
+    return entries
+
+
+def _preload_workspace_env(project_root: Path) -> None:
+    for filename in LOCAL_TOKEN_ENV_FILES:
+        for key, value in _read_env_file_entries(project_root / filename).items():
+            os.environ.setdefault(key, value)
+
+
+def resolve_default_internal_api_key(project_root: Path) -> str:
+    env_value = (os.getenv("AI_INTERNAL_TOKEN", "") or "").strip()
+    if env_value:
+        return env_value
+
+    for filename in LOCAL_TOKEN_ENV_FILES:
+        token = (
+            _read_env_file_entries(project_root / filename).get("AI_INTERNAL_TOKEN", "")
+            or ""
+        ).strip()
+        if token:
+            return token
+    return ""
+
+
+def _league_codes_for_type(league_type: str) -> tuple[int, ...]:
+    return LEAGUE_TYPE_TO_CODES[league_type]
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _detect_workspace_root(start: Path) -> Path:
+    current = start.resolve()
+    while True:
+        if (current / "docker-compose.yml").exists() or (current / ".env.prod").exists():
+            return current
+        if current.parent == current:
+            return start.resolve()
+        current = current.parent
+
+
+WORKSPACE_ROOT = _detect_workspace_root(PROJECT_ROOT)
+_preload_workspace_env(WORKSPACE_ROOT)
+_POSTSEASON_REPAIR_MODULE: Any = None
+
+
+def _normalize_name_token(value: Optional[str]) -> Optional[str]:
+    normalized = " ".join(str(value or "").split()).strip()
+    return normalized or None
+
+
+def _normalize_game_status_bucket(game_status: Optional[str]) -> str:
+    normalized = str(game_status or "").strip().upper()
+    if normalized in {"COMPLETED", "FINAL", "FINISHED", "DONE", "END", "E", "F"}:
+        return "COMPLETED"
+    if normalized in {"LIVE", "IN_PROGRESS", "INPROGRESS", "PLAYING"}:
+        return "LIVE"
+    if normalized in {"SCHEDULED", "READY", "NOT_STARTED", "PENDING"}:
+        return "SCHEDULED"
+    if normalized in {"POSTPONED", "CANCELLED", "CANCELED", "SUSPENDED"}:
+        return "COMPLETED"
+    return "UNKNOWN"
+
+
+def _load_postseason_repair_module() -> Any:
+    global _POSTSEASON_REPAIR_MODULE
+    if _POSTSEASON_REPAIR_MODULE is not None:
+        return _POSTSEASON_REPAIR_MODULE
+
+    module_path = WORKSPACE_ROOT / "scripts" / "repair_postseason_season_ids.py"
+    spec = importlib.util.spec_from_file_location(
+        "root_repair_postseason_season_ids",
+        module_path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed_to_load_repair_module path={module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _POSTSEASON_REPAIR_MODULE = module
+    return module
+
+
+def _postseason_mismatch_error_message(mismatches: List[Any]) -> str:
+    if not mismatches:
+        return ""
+    sample_ids = ", ".join(str(item.game_id) for item in mismatches[:3])
+    return (
+        "postseason_season_id_mismatch_detected "
+        f"count={len(mismatches)} sample={sample_ids} "
+        "run scripts/repair_postseason_season_ids.py --years <year> --apply first"
+    )
+
+
+def _ensure_postseason_stage_integrity(years: List[int]) -> None:
+    repair_module = _load_postseason_repair_module()
+    pool = get_connection_pool()
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            stages_by_year = repair_module.load_season_stages(cur, years)
+            games = repair_module.load_games(cur, years)
+    mismatches = repair_module.collect_mismatches(games, stages_by_year)
+    if mismatches:
+        raise RuntimeError(_postseason_mismatch_error_message(mismatches))
 
 
 @dataclass
@@ -65,9 +233,42 @@ class MatchupTarget:
     game_type: str
     home_team_id: str
     away_team_id: str
+    league_type_code: int
+    stage_label: str
+    series_game_no: Optional[int]
+    game_status_bucket: str
+    starter_signature: str
+    lineup_signature: str
     request_focus: List[str]
     request_mode: str
     question_override: Optional[str]
+
+
+def _build_analyze_payload(target: MatchupTarget) -> Dict[str, Any]:
+    league_context: Dict[str, Any] = {
+        "season": target.season_id,
+        "season_year": target.season_year,
+        "game_date": target.game_date,
+        "league_type": target.game_type,
+        "league_type_code": target.league_type_code,
+        "round": target.stage_label,
+        "stage_label": target.stage_label,
+    }
+    if target.series_game_no is not None:
+        league_context["game_no"] = target.series_game_no
+        league_context["series_game_no"] = target.series_game_no
+
+    payload: Dict[str, Any] = {
+        "home_team_id": target.home_team_id,
+        "away_team_id": target.away_team_id,
+        "league_context": league_context,
+        "focus": target.request_focus,
+        "request_mode": target.request_mode,
+        "game_id": target.game_id,
+    }
+    if target.question_override:
+        payload["question_override"] = target.question_override
+    return payload
 
 
 def parse_years(raw: str) -> List[int]:
@@ -93,7 +294,7 @@ def parse_focus(raw: str | None, *, default: List[str]) -> List[str]:
 
 
 def parse_request_mode(raw: str | None) -> str:
-    mode = str(raw or "auto_brief").strip().lower()
+    mode = str(raw or "manual_detail").strip().lower()
     if mode not in VALID_REQUEST_MODES:
         raise ValueError(
             f"mode must be one of {', '.join(VALID_REQUEST_MODES)} (got={raw!r})"
@@ -101,11 +302,61 @@ def parse_request_mode(raw: str | None) -> str:
     return mode
 
 
+def parse_target_order(raw: str | None) -> str:
+    normalized = str(raw or "asc").strip().lower()
+    if normalized not in VALID_TARGET_ORDERS:
+        raise ValueError(
+            f"order must be one of {', '.join(VALID_TARGET_ORDERS)} (got={raw!r})"
+        )
+    return normalized
+
+
+def parse_status_bucket_filter(raw: str | None) -> str:
+    normalized = str(raw or "ANY").strip().upper()
+    if normalized not in VALID_STATUS_BUCKET_FILTERS:
+        raise ValueError(
+            "status-bucket must be one of "
+            f"{', '.join(VALID_STATUS_BUCKET_FILTERS)} (got={raw!r})"
+        )
+    return normalized
+
+
+def parse_cache_state_filter(raw: str | None) -> str:
+    normalized = str(raw or "ANY").strip().upper()
+    if normalized not in VALID_CACHE_STATE_FILTERS:
+        raise ValueError(
+            "cache-state-filter must be one of "
+            f"{', '.join(VALID_CACHE_STATE_FILTERS)} (got={raw!r})"
+        )
+    return normalized
+
+
 def parse_question_override(raw: str | None) -> Optional[str]:
     if raw is None:
         return None
     normalized = " ".join(raw.split())
     return normalized or None
+
+
+def load_failed_cache_keys(report_path: str | None) -> set[str]:
+    if not report_path:
+        return set()
+
+    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    details = payload.get("details")
+    if not isinstance(details, list):
+        raise ValueError("quality report details must be a list")
+
+    failed_cache_keys: set[str] = set()
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "").strip().lower() != "failed":
+            continue
+        cache_key = str(item.get("cache_key") or "").strip()
+        if cache_key:
+            failed_cache_keys.add(cache_key)
+    return failed_cache_keys
 
 
 def _is_done_marker(data_str: str) -> bool:
@@ -136,6 +387,24 @@ def _extract_error_message(data_str: str) -> str | None:
     return None
 
 
+def _classify_meta_result(meta_payload: Dict[str, Any]) -> tuple[str, str]:
+    cache_state = str(meta_payload.get("cache_state") or "")
+    validation_status = str(meta_payload.get("validation_status") or "")
+    generation_mode = str(meta_payload.get("generation_mode") or "")
+
+    if cache_state == "FAILED_LOCKED":
+        return "failed", "failed_locked"
+    if meta_payload.get("in_progress") is True:
+        return "in_progress", "pending_wait"
+    if meta_payload.get("cached") is True:
+        return "skipped", "cache_hit"
+    if validation_status == "success":
+        return "generated", "generated"
+    if validation_status == "fallback" and generation_mode == "evidence_fallback":
+        return "generated", "generated_fallback"
+    return "failed", cache_state.lower() if cache_state else "validation_fallback"
+
+
 def _normalize_status_counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
     summary = {
         "generated": 0,
@@ -150,6 +419,19 @@ def _normalize_status_counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
         else:
             summary["failed"] += 1
     return summary
+
+
+def _sort_targets(
+    targets: List[MatchupTarget],
+    *,
+    order: str,
+) -> List[MatchupTarget]:
+    reverse = order == "desc"
+    return sorted(
+        targets,
+        key=lambda target: (target.game_date, target.game_id),
+        reverse=reverse,
+    )
 
 
 def _fetch_cache_state(
@@ -173,6 +455,154 @@ def _fetch_cache_state(
         return status, response_json, error_message
     except Exception:
         return None
+
+
+def _fetch_cache_rows(
+    cache_keys: List[str],
+) -> Dict[str, tuple[str, Any, Optional[str]]]:
+    if not cache_keys:
+        return {}
+
+    with get_connection_pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT cache_key, status, response_json, error_message
+            FROM coach_analysis_cache
+            WHERE cache_key = ANY(%s)
+            """,
+            (cache_keys,),
+        ).fetchall()
+
+    return {
+        str(row[0]): (
+            str(row[1] or ""),
+            row[2],
+            row[3],
+        )
+        for row in rows
+    }
+
+
+def _normalize_cache_state_label(
+    row: Optional[tuple[str, Any, Optional[str]]],
+) -> str:
+    if row is None:
+        return "MISSING"
+
+    status = str(row[0] or "").strip().upper()
+    if status == "COMPLETED":
+        return "COMPLETED"
+    if status == "FAILED":
+        return "FAILED"
+    if status in {"PENDING", "PENDING_WAIT", "FAILED_LOCKED"}:
+        return "PENDING"
+    return "FAILED"
+
+
+def _filter_targets_by_cache_state(
+    targets: List[MatchupTarget],
+    cache_state_filter: str,
+) -> List[MatchupTarget]:
+    if cache_state_filter == "ANY" or not targets:
+        return targets
+
+    row_by_cache_key = _fetch_cache_rows([target.cache_key for target in targets])
+    filtered: List[MatchupTarget] = []
+    for target in targets:
+        state = _normalize_cache_state_label(row_by_cache_key.get(target.cache_key))
+        if cache_state_filter == "UNRESOLVED":
+            if state != "COMPLETED":
+                filtered.append(target)
+            continue
+        if state == cache_state_filter:
+            filtered.append(target)
+    return filtered
+
+
+def _extract_cached_meta(response_json: Any) -> Dict[str, Any]:
+    if not isinstance(response_json, dict):
+        return {}
+
+    meta = response_json.get("meta")
+    if isinstance(meta, dict):
+        return dict(meta)
+    return {}
+
+
+def _build_cache_verification_result(
+    target: MatchupTarget,
+    row: Optional[tuple[str, Any, Optional[str]]],
+) -> Dict[str, Any]:
+    result = _build_result_shell(target)
+    if row is None:
+        result["reason"] = "missing_cache_row"
+        return result
+
+    cache_state, response_json, error_message = row
+    normalized_state = str(cache_state or "").strip().upper()
+
+    if normalized_state == "COMPLETED":
+        meta = _extract_cached_meta(response_json)
+        meta.setdefault("cached", True)
+        meta.setdefault("in_progress", False)
+        meta.setdefault("cache_state", normalized_state)
+        result["meta"] = meta
+        result["status"], result["reason"] = _classify_meta_result(meta)
+        return result
+
+    if normalized_state in {"PENDING", "PENDING_WAIT"}:
+        result["status"] = "in_progress"
+        result["reason"] = normalized_state.lower()
+        result["meta"] = {"cache_state": normalized_state, "in_progress": True}
+        return result
+
+    if normalized_state == "FAILED_LOCKED":
+        result["reason"] = "failed_locked"
+        result["meta"] = {"cache_state": normalized_state}
+        return result
+
+    if normalized_state == "FAILED":
+        result["reason"] = str(error_message or "failed_cache_row")
+        result["meta"] = {"cache_state": normalized_state}
+        return result
+
+    result["reason"] = (
+        f"unexpected_cache_state:{normalized_state.lower()}"
+        if normalized_state
+        else "unexpected_cache_state"
+    )
+    result["meta"] = {"cache_state": normalized_state}
+    return result
+
+
+def _build_terminal_cache_result_if_available(
+    target: MatchupTarget,
+) -> Optional[Dict[str, Any]]:
+    row = _fetch_cache_state(target.cache_key)
+    if row is None:
+        return None
+
+    cache_state = str(row[0] or "").strip().upper()
+    if cache_state in {"COMPLETED", "FAILED", "FAILED_LOCKED"}:
+        return _build_cache_verification_result(target, row)
+    return None
+
+
+def _is_retryable_failure_reason(reason: str | None) -> bool:
+    normalized = str(reason or "").strip().lower()
+    if not normalized:
+        return False
+    return normalized.startswith(RETRYABLE_FAILURE_PREFIXES)
+
+
+def collect_cache_verification_results(
+    targets: List[MatchupTarget],
+) -> List[Dict[str, Any]]:
+    row_by_cache_key = _fetch_cache_rows([target.cache_key for target in targets])
+    return [
+        _build_cache_verification_result(target, row_by_cache_key.get(target.cache_key))
+        for target in targets
+    ]
 
 
 async def _wait_cache_completion(
@@ -203,6 +633,8 @@ def load_targets(
     question_override: Optional[str],
     offset: int,
     limit: Optional[int],
+    order: str = "asc",
+    status_bucket_filter: str = "ANY",
 ) -> List[MatchupTarget]:
     resolver = TeamCodeResolver()
     pool = get_connection_pool()
@@ -210,8 +642,8 @@ def load_targets(
     where_parts = ["ks.season_year = ANY(%s)"]
     params: List[Any] = [years]
     if league_type != "ANY":
-        where_parts.append("ks.league_type_code = %s")
-        params.append(LEAGUE_TYPE_TO_CODE[league_type])
+        where_parts.append("ks.league_type_code = ANY(%s)")
+        params.append(list(_league_codes_for_type(league_type)))
 
     where_sql = " AND ".join(where_parts)
     query = f"""
@@ -220,6 +652,11 @@ def load_targets(
             g.home_team,
             g.away_team,
             g.game_date,
+            g.game_status,
+            g.home_pitcher,
+            g.away_pitcher,
+            g.home_score,
+            g.away_score,
             g.season_id,
             ks.season_year,
             ks.league_type_code
@@ -231,15 +668,41 @@ def load_targets(
 
     with pool.connection() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()
+        lineup_rows = conn.execute(
+            """
+            SELECT game_id, team_code, player_name, batting_order
+            FROM game_lineups
+            WHERE game_id = ANY(%s)
+              AND COALESCE(is_starter, true) = true
+            ORDER BY game_id ASC, team_code ASC, batting_order ASC NULLS LAST, player_name ASC
+            """,
+            ([str(row[0]) for row in rows],),
+        ).fetchall()
+
+    lineup_by_game: Dict[str, Dict[str, List[str]]] = {}
+    for lineup_row in lineup_rows or []:
+        game_id = str(lineup_row[0])
+        team_code = resolver.resolve_canonical(lineup_row[1])
+        player_name = _normalize_name_token(lineup_row[2])
+        if not team_code or not player_name:
+            continue
+        game_entry = lineup_by_game.setdefault(game_id, {})
+        game_entry.setdefault(team_code, []).append(player_name)
 
     deduped: List[MatchupTarget] = []
     seen = set()
+    postseason_game_numbers: Dict[tuple[int, str, str], int] = {}
     for row in rows:
         (
             game_id,
             home_team,
             away_team,
             game_date,
+            game_status,
+            home_pitcher,
+            away_pitcher,
+            home_score,
+            away_score,
             season_id,
             season_year,
             league_code,
@@ -253,23 +716,64 @@ def load_targets(
         ):
             continue
 
-        game_type = LEAGUE_CODE_TO_TYPE.get(int(league_code), "UNKNOWN")
-        dedupe_key = (home_canonical, away_canonical, int(season_year), game_type)
+        normalized_league_code = int(league_code)
+        game_type = LEAGUE_CODE_TO_TYPE.get(normalized_league_code, "UNKNOWN")
+        stage_label = LEAGUE_CODE_TO_STAGE.get(normalized_league_code, "UNKNOWN")
+        resolved_game_status = str(game_status or "UNKNOWN")
+        if (
+            resolved_game_status.strip().upper() in {"", "UNKNOWN"}
+            and home_score is not None
+            and away_score is not None
+        ):
+            resolved_game_status = "COMPLETED"
+        game_status_bucket = _normalize_game_status_bucket(resolved_game_status)
+        if (
+            status_bucket_filter != "ANY"
+            and game_status_bucket != status_bucket_filter
+        ):
+            continue
+        game_lineups = lineup_by_game.get(str(game_id), {})
+        lineup_signature = build_lineup_signature(
+            [
+                *game_lineups.get(home_canonical, []),
+                *game_lineups.get(away_canonical, []),
+            ]
+        )
+        starter_signature = build_starter_signature(
+            _normalize_name_token(home_pitcher),
+            _normalize_name_token(away_pitcher),
+        )
+        series_game_no: Optional[int] = None
+        if normalized_league_code in {2, 3, 4, 5}:
+            matchup_key = (
+                int(season_id),
+                min(home_canonical, away_canonical),
+                max(home_canonical, away_canonical),
+            )
+            previous_game_count = postseason_game_numbers.get(matchup_key, 0)
+            series_game_no = previous_game_count + 1
+            postseason_game_numbers[matchup_key] = series_game_no
+        dedupe_key = str(game_id)
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
 
         cache_key, _payload = build_coach_cache_key(
-            schema_version="v3",
-            prompt_version="v5_focus",
+            schema_version=CACHE_SCHEMA_VERSION,
+            prompt_version=PROMPT_VERSION,
             home_team_code=home_canonical,
             away_team_code=away_canonical,
             year=int(season_year),
             game_type=game_type,
             focus=request_focus,
-            question_override=(
-                None if request_mode == "auto_brief" else question_override
-            ),
+            question_override=question_override,
+            game_id=str(game_id),
+            league_type_code=normalized_league_code,
+            stage_label=stage_label,
+            starter_signature=starter_signature,
+            lineup_signature=lineup_signature,
+            request_mode=request_mode,
+            game_status_bucket=game_status_bucket,
         )
         deduped.append(
             MatchupTarget(
@@ -285,13 +789,20 @@ def load_targets(
                 game_type=game_type,
                 home_team_id=home_canonical,
                 away_team_id=away_canonical,
+                league_type_code=normalized_league_code,
+                stage_label=stage_label,
+                series_game_no=series_game_no,
+                game_status_bucket=game_status_bucket,
+                starter_signature=starter_signature,
+                lineup_signature=lineup_signature,
                 request_focus=list(request_focus),
                 request_mode=request_mode,
                 question_override=question_override,
             )
         )
 
-    sliced = deduped[offset:]
+    ordered = _sort_targets(deduped, order=order)
+    sliced = ordered[offset:]
     if limit is not None and limit >= 0:
         sliced = sliced[:limit]
     return sliced
@@ -310,31 +821,8 @@ def force_rebuild_delete(cache_keys: List[str]) -> int:
     return result.rowcount or 0
 
 
-async def call_analyze(
-    *,
-    client: httpx.AsyncClient,
-    base_url: str,
-    target: MatchupTarget,
-) -> Dict[str, Any]:
-    payload = {
-        "home_team_id": target.home_team_id,
-        "away_team_id": target.away_team_id,
-        "league_context": {
-            "season": target.season_id,
-            "season_year": target.season_year,
-            "game_date": target.game_date,
-            "league_type": target.game_type,
-            "round": None,
-            "game_no": None,
-        },
-        "focus": target.request_focus,
-        "request_mode": target.request_mode,
-        "game_id": target.game_id,
-    }
-    if target.request_mode != "auto_brief" and target.question_override:
-        payload["question_override"] = target.question_override
-
-    result: Dict[str, Any] = {
+def _build_result_shell(target: MatchupTarget) -> Dict[str, Any]:
+    return {
         "cache_key": target.cache_key,
         "game_id": target.game_id,
         "home_team_id": target.home_team_id,
@@ -345,6 +833,16 @@ async def call_analyze(
         "reason": None,
         "meta": {},
     }
+
+
+async def call_analyze(
+    *,
+    client: httpx.AsyncClient,
+    base_url: str,
+    target: MatchupTarget,
+) -> Dict[str, Any]:
+    payload = _build_analyze_payload(target)
+    result: Dict[str, Any] = _build_result_shell(target)
 
     current_event = "message"
     saw_done = False
@@ -452,25 +950,85 @@ async def call_analyze(
         return result
 
     result["meta"] = meta_payload
-    cache_state = str(meta_payload.get("cache_state") or "")
-    validation_status = str(meta_payload.get("validation_status") or "")
-
-    if cache_state == "FAILED_LOCKED":
-        result["status"] = "failed"
-        result["reason"] = "failed_locked"
-    elif meta_payload.get("in_progress") is True:
-        result["status"] = "in_progress"
-        result["reason"] = "pending_wait"
-    elif meta_payload.get("cached") is True:
-        result["status"] = "skipped"
-        result["reason"] = "cache_hit"
-    elif validation_status == "success":
-        result["status"] = "generated"
-        result["reason"] = "generated"
-    else:
-        result["status"] = "failed"
-        result["reason"] = cache_state.lower() if cache_state else "validation_fallback"
+    result["status"], result["reason"] = _classify_meta_result(meta_payload)
     return result
+
+
+async def call_analyze_with_deadline(
+    *,
+    client: httpx.AsyncClient,
+    base_url: str,
+    target: MatchupTarget,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    try:
+        return await asyncio.wait_for(
+            call_analyze(
+                client=client,
+                base_url=base_url,
+                target=target,
+            ),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        recovered = _build_terminal_cache_result_if_available(target)
+        if recovered is not None:
+            recovered_meta = dict(recovered.get("meta") or {})
+            recovered_meta.setdefault("timeout_seconds", round(timeout_seconds, 3))
+            recovered["meta"] = recovered_meta
+            return recovered
+        result = _build_result_shell(target)
+        result["reason"] = "target_wall_timeout"
+        result["meta"] = {"timeout_seconds": round(timeout_seconds, 3)}
+        return result
+
+
+async def call_analyze_with_retries(
+    *,
+    client: httpx.AsyncClient,
+    base_url: str,
+    target: MatchupTarget,
+    timeout_seconds: float,
+    max_attempts: int,
+    retry_backoff_seconds: float,
+) -> Dict[str, Any]:
+    attempts_allowed = max(1, int(max_attempts))
+    backoff_seconds = max(0.0, float(retry_backoff_seconds))
+    last_result = _build_result_shell(target)
+
+    for attempt in range(1, attempts_allowed + 1):
+        item = await call_analyze_with_deadline(
+            client=client,
+            base_url=base_url,
+            target=target,
+            timeout_seconds=timeout_seconds,
+        )
+        item_meta = dict(item.get("meta") or {})
+        item_meta["attempt"] = attempt
+        item["meta"] = item_meta
+        last_result = item
+
+        if item.get("status") != "failed":
+            return item
+
+        recovered = _build_terminal_cache_result_if_available(target)
+        if recovered is not None:
+            recovered_meta = dict(recovered.get("meta") or {})
+            recovered_meta["attempt"] = attempt
+            recovered["meta"] = recovered_meta
+            return recovered
+
+        reason = str(item.get("reason") or "")
+        if attempt >= attempts_allowed or not _is_retryable_failure_reason(reason):
+            return item
+
+        if reason.startswith("failed_locked"):
+            deleted = force_rebuild_delete([target.cache_key])
+            item["meta"]["retry_deleted_cache_rows"] = deleted
+
+        await asyncio.sleep(backoff_seconds * attempt)
+
+    return last_result
 
 
 def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -540,6 +1098,10 @@ def summarize_matchup_results(
     )
     warnings_total = 0
     critical_over_limit_count = 0
+    llm_manual_count = 0
+    evidence_fallback_count = 0
+    deterministic_auto_count = 0
+    focus_section_missing_count = 0
     seen_cache_keys: set[str] = set()
     target_teams: set[str] = set()
     failure_reasons: list[str] = []
@@ -550,6 +1112,18 @@ def summarize_matchup_results(
             warnings_total += int(warnings)
         if item.get("critical_over_limit"):
             critical_over_limit_count += 1
+
+        meta = item.get("meta") or {}
+        generation_mode = str(meta.get("generation_mode") or "")
+        if generation_mode == "llm_manual":
+            llm_manual_count += 1
+        elif generation_mode == "evidence_fallback":
+            evidence_fallback_count += 1
+        elif generation_mode == "deterministic_auto":
+            deterministic_auto_count += 1
+
+        if bool(meta.get("focus_section_missing")):
+            focus_section_missing_count += 1
 
         cache_key = item.get("cache_key")
         if isinstance(cache_key, str):
@@ -627,6 +1201,25 @@ def summarize_matchup_results(
             if status_counts["generated"]
             else 0.0
         ),
+        "llm_manual_count": llm_manual_count,
+        "evidence_fallback_count": evidence_fallback_count,
+        "deterministic_auto_count": deterministic_auto_count,
+        "llm_manual_rate": (
+            round(llm_manual_count / status_counts["generated"], 4)
+            if status_counts["generated"]
+            else 0.0
+        ),
+        "fallback_rate": (
+            round(evidence_fallback_count / status_counts["generated"], 4)
+            if status_counts["generated"]
+            else 0.0
+        ),
+        "focus_section_missing_count": focus_section_missing_count,
+        "focus_section_missing_rate": (
+            round(focus_section_missing_count / status_counts["generated"], 4)
+            if status_counts["generated"]
+            else 0.0
+        ),
         "critical_over_limit_rate": (
             round(critical_over_limit_count / status_counts["generated"], 4)
             if status_counts["generated"]
@@ -643,15 +1236,14 @@ async def async_main(args: argparse.Namespace) -> int:
     years = parse_years(args.years)
     league_type = parse_league_type(args.league_type)
     request_mode = parse_request_mode(args.mode)
-    request_focus = parse_focus(
-        args.focus,
-        default=AUTO_BRIEF_FOCUS if request_mode == "auto_brief" else MATCHUP_FOCUS,
-    )
-    question_override = (
-        parse_question_override(args.question_override)
-        if request_mode != "auto_brief"
-        else None
-    )
+    request_focus = parse_focus(args.focus, default=MATCHUP_FOCUS)
+    target_order = parse_target_order(args.order)
+    status_bucket_filter = parse_status_bucket_filter(args.status_bucket)
+    cache_state_filter = parse_cache_state_filter(args.cache_state_filter)
+    question_override = parse_question_override(args.question_override)
+
+    if league_type in POSTSEASON_LEAGUE_TYPES and not args.allow_postseason_stage_mismatch:
+        _ensure_postseason_stage_integrity(years)
 
     targets = load_targets(
         years=years,
@@ -661,36 +1253,61 @@ async def async_main(args: argparse.Namespace) -> int:
         question_override=question_override,
         offset=max(0, args.offset),
         limit=args.limit,
+        order=target_order,
+        status_bucket_filter=status_bucket_filter,
     )
+    failed_cache_keys = load_failed_cache_keys(args.retry_failures_from_report)
+    if failed_cache_keys:
+        targets = [target for target in targets if target.cache_key in failed_cache_keys]
+    targets = _filter_targets_by_cache_state(targets, cache_state_filter)
 
     if not targets:
         print("No matchup targets found.")
         return 0
+
+    if args.verify_cache_only and args.force_rebuild:
+        raise ValueError("force-rebuild cannot be combined with verify-cache-only")
 
     if args.force_rebuild:
         deleted = force_rebuild_delete([target.cache_key for target in targets])
         print(f"Force rebuild enabled. deleted_cache_rows={deleted}")
 
     start_time = datetime.now()
-    timeout = httpx.Timeout(args.timeout, connect=min(10.0, args.timeout))
-    default_headers: Dict[str, str] = {}
-    if args.internal_api_key:
-        default_headers["X-Internal-Api-Key"] = args.internal_api_key
-    results: List[Dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=timeout, headers=default_headers) as client:
-        for idx, target in enumerate(targets, start=1):
-            item = await call_analyze(
-                client=client,
-                base_url=args.base_url,
-                target=target,
-            )
-            results.append(item)
+    results: List[Dict[str, Any]]
+    if args.verify_cache_only:
+        results = collect_cache_verification_results(targets)
+        for idx, (target, item) in enumerate(zip(targets, results), start=1):
             print(
                 f"[{idx}/{len(targets)}] {target.season_year} {target.home_team_id} vs {target.away_team_id} "
                 f"-> {item['status']} ({item.get('reason')})"
             )
-            if idx < len(targets):
-                await asyncio.sleep(max(0.0, args.delay_seconds))
+    else:
+        timeout = httpx.Timeout(args.timeout, connect=min(10.0, args.timeout))
+        default_headers: Dict[str, str] = {}
+        if args.internal_api_key:
+            default_headers["X-Internal-Api-Key"] = args.internal_api_key
+        results = []
+        async with httpx.AsyncClient(timeout=timeout, headers=default_headers) as client:
+            per_target_timeout = max(
+                args.timeout + DONE_WAIT_SECONDS + TARGET_TIMEOUT_BUFFER_SECONDS,
+                args.timeout,
+            )
+            for idx, target in enumerate(targets, start=1):
+                item = await call_analyze_with_retries(
+                    client=client,
+                    base_url=args.base_url,
+                    target=target,
+                    timeout_seconds=per_target_timeout,
+                    max_attempts=args.max_attempts,
+                    retry_backoff_seconds=args.retry_backoff_seconds,
+                )
+                results.append(item)
+                print(
+                    f"[{idx}/{len(targets)}] {target.season_year} {target.home_team_id} vs {target.away_team_id} "
+                    f"-> {item['status']} ({item.get('reason')})"
+                )
+                if idx < len(targets):
+                    await asyncio.sleep(max(0.0, args.delay_seconds))
 
     summary = summarize_matchup_results(
         results=results,
@@ -708,9 +1325,17 @@ async def async_main(args: argparse.Namespace) -> int:
             "focus": request_focus,
             "mode": request_mode,
             "force_rebuild": args.force_rebuild,
+            "max_attempts": args.max_attempts,
+            "retry_backoff_seconds": args.retry_backoff_seconds,
             "offset": args.offset,
             "limit": args.limit,
+            "order": target_order,
+            "status_bucket": status_bucket_filter,
+            "cache_state_filter": cache_state_filter,
             "question_override": question_override,
+            "allow_postseason_stage_mismatch": args.allow_postseason_stage_mismatch,
+            "retry_failures_from_report": args.retry_failures_from_report,
+            "verify_cache_only": args.verify_cache_only,
         },
         "details": results,
         "run_started_at": start_time.isoformat(),
@@ -739,7 +1364,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--internal-api-key",
-        default=os.getenv("AI_INTERNAL_TOKEN", ""),
+        default=resolve_default_internal_api_key(WORKSPACE_ROOT),
         help="Value for X-Internal-Api-Key when calling protected AI endpoints.",
     )
     parser.add_argument(
@@ -765,6 +1390,24 @@ def parse_args() -> argparse.Namespace:
         help="Max matchup targets to process.",
     )
     parser.add_argument(
+        "--order",
+        default="asc",
+        choices=VALID_TARGET_ORDERS,
+        help="Target order after dedupe: asc (oldest first) or desc (latest first).",
+    )
+    parser.add_argument(
+        "--status-bucket",
+        default="ANY",
+        choices=VALID_STATUS_BUCKET_FILTERS,
+        help="Filter targets by normalized game status bucket.",
+    )
+    parser.add_argument(
+        "--cache-state-filter",
+        default="ANY",
+        choices=VALID_CACHE_STATE_FILTERS,
+        help="Filter targets by cache row state: ANY, MISSING, COMPLETED, FAILED, PENDING, UNRESOLVED.",
+    )
+    parser.add_argument(
         "--delay-seconds",
         type=float,
         default=1.0,
@@ -782,10 +1425,22 @@ def parse_args() -> argparse.Namespace:
         help="Delete selected matchup cache keys before replaying requests.",
     )
     parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Max attempts per target for retryable failures.",
+    )
+    parser.add_argument(
+        "--retry-backoff-seconds",
+        type=float,
+        default=5.0,
+        help="Base backoff seconds before retrying a retryable failure.",
+    )
+    parser.add_argument(
         "--mode",
-        default="auto_brief",
+        default="manual_detail",
         choices=VALID_REQUEST_MODES,
-        help="Request mode: auto_brief or manual_detail.",
+        help="Request mode for per-game prewarm. auto_brief is intentionally excluded.",
     )
     parser.add_argument(
         "--focus",
@@ -799,6 +1454,21 @@ def parse_args() -> argparse.Namespace:
         "--quality-report",
         default=None,
         help="Output quality report JSON.",
+    )
+    parser.add_argument(
+        "--retry-failures-from-report",
+        default=None,
+        help="Replay only failed cache keys from a prior quality report JSON.",
+    )
+    parser.add_argument(
+        "--verify-cache-only",
+        action="store_true",
+        help="Skip coach API calls and verify target cache rows directly from the database.",
+    )
+    parser.add_argument(
+        "--allow-postseason-stage-mismatch",
+        action="store_true",
+        help="Bypass postseason season_id/stage integrity preflight guard.",
     )
     return parser.parse_args()
 

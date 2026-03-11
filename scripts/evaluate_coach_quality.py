@@ -16,6 +16,9 @@ DEFAULT_THRESHOLDS = {
     "warning_rate_max": 0.15,
     "critical_over_limit_rate_max": 0.05,
     "drift_rate_max": 0.02,
+    "llm_manual_rate_min": 0.1,
+    "fallback_rate_max": 0.9,
+    "focus_section_missing_rate_max": 0.2,
     "validator_fail_max": 0,
     "cache_invalid_year_max": 0,
     "legacy_residual_max": 0,
@@ -140,9 +143,13 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     warning_rate_denominator = 0
     critical_rate_numerator = 0.0
     critical_rate_denominator = 0
+    llm_manual_rate_numerator = 0.0
+    fallback_rate_numerator = 0.0
+    focus_missing_rate_numerator = 0.0
     drift_rate_numerator = 0.0
     drift_rate_denominator = 0
     drift_reports = 0
+    coach_generation_reports = 0
 
     observed_years: Set[int] = set()
     observed_game_types: Set[str] = set()
@@ -180,6 +187,27 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
             critical_rate_numerator += critical_rate * success
             critical_rate_denominator += success
 
+        llm_manual_rate = _as_float(summary.get("llm_manual_rate"))
+        if success > 0:
+            llm_manual_rate_numerator += llm_manual_rate * success
+
+        fallback_rate = _as_float(summary.get("fallback_rate"))
+        if success > 0:
+            fallback_rate_numerator += fallback_rate * success
+
+        focus_missing_rate = _as_float(summary.get("focus_section_missing_rate"))
+        if success > 0:
+            focus_missing_rate_numerator += focus_missing_rate * success
+        if any(
+            key in summary
+            for key in (
+                "llm_manual_rate",
+                "fallback_rate",
+                "focus_section_missing_rate",
+            )
+        ):
+            coach_generation_reports += 1
+
         if "drift_rate" in summary and summary.get("drift_rate") is not None:
             drift_rate = _as_float(summary.get("drift_rate"))
             drift_reports += 1
@@ -208,6 +236,21 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
         if critical_rate_denominator > 0
         else 0.0
     )
+    llm_manual_rate = (
+        round(llm_manual_rate_numerator / warning_rate_denominator, 4)
+        if warning_rate_denominator > 0
+        else 0.0
+    )
+    fallback_rate = (
+        round(fallback_rate_numerator / warning_rate_denominator, 4)
+        if warning_rate_denominator > 0
+        else 0.0
+    )
+    focus_section_missing_rate = (
+        round(focus_missing_rate_numerator / warning_rate_denominator, 4)
+        if warning_rate_denominator > 0
+        else 0.0
+    )
     drift_rate = (
         round(drift_rate_numerator / drift_rate_denominator, 4)
         if drift_rate_denominator > 0
@@ -227,8 +270,12 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
         "legacy_residual_total": legacy_residual_total,
         "warning_rate": warning_rate,
         "critical_over_limit_rate": critical_over_limit_rate,
+        "llm_manual_rate": llm_manual_rate,
+        "fallback_rate": fallback_rate,
+        "focus_section_missing_rate": focus_section_missing_rate,
         "drift_rate": drift_rate,
         "drift_reports": drift_reports,
+        "coach_generation_reports": coach_generation_reports,
         "observed_target_years": sorted(observed_years),
         "observed_game_types": sorted(observed_game_types),
         "observed_focus_signatures": sorted(observed_focus_signatures),
@@ -269,6 +316,22 @@ def evaluate_quality(
         thresholds["critical_over_limit_rate_max"]
     ):
         failure_codes.append("critical_over_limit_fail")
+
+    if _as_int(metrics.get("coach_generation_reports")) > 0:
+        if _as_float(metrics.get("llm_manual_rate")) < _as_float(
+            thresholds["llm_manual_rate_min"]
+        ):
+            failure_codes.append("llm_manual_rate_fail")
+
+        if _as_float(metrics.get("fallback_rate")) > _as_float(
+            thresholds["fallback_rate_max"]
+        ):
+            failure_codes.append("fallback_rate_fail")
+
+        if _as_float(metrics.get("focus_section_missing_rate")) > _as_float(
+            thresholds["focus_section_missing_rate_max"]
+        ):
+            failure_codes.append("focus_section_missing_rate_fail")
 
     drift_reports = _as_int(metrics.get("drift_reports"))
     if drift_reports > 0 and _as_float(metrics.get("drift_rate")) > _as_float(
@@ -364,6 +427,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--drift-rate-max", type=float, default=DEFAULT_THRESHOLDS["drift_rate_max"]
     )
     parser.add_argument(
+        "--llm-manual-rate-min",
+        type=float,
+        default=DEFAULT_THRESHOLDS["llm_manual_rate_min"],
+    )
+    parser.add_argument(
+        "--fallback-rate-max",
+        type=float,
+        default=DEFAULT_THRESHOLDS["fallback_rate_max"],
+    )
+    parser.add_argument(
+        "--focus-section-missing-rate-max",
+        type=float,
+        default=DEFAULT_THRESHOLDS["focus_section_missing_rate_max"],
+    )
+    parser.add_argument(
         "--required-generated-success",
         type=int,
         default=0,
@@ -398,6 +476,9 @@ def main() -> int:
         "warning_rate_max": args.warning_rate_max,
         "critical_over_limit_rate_max": args.critical_over_limit_rate_max,
         "drift_rate_max": args.drift_rate_max,
+        "llm_manual_rate_min": args.llm_manual_rate_min,
+        "fallback_rate_max": args.fallback_rate_max,
+        "focus_section_missing_rate_max": args.focus_section_missing_rate_max,
     }
     required_years = parse_years_csv(args.require_years)
 

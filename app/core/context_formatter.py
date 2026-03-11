@@ -47,7 +47,7 @@ class ContextFormatter:
             )
 
         # 경기 상세 질문
-        if intent == "game_detail" or entity_filter.game_date:
+        if intent in {"game_detail", "game_lookup"} or entity_filter.game_date:
             return self._format_game_detail(processed_data, query, entity_filter, year)
 
         # 선수 이동/이적 질문
@@ -556,45 +556,86 @@ class ContextFormatter:
             for doc in raw_docs:
                 if doc.get("source_table") in [
                     "game",
+                    "game_flow_summary",
                     "game_metadata",
-                    "game_inning_scores",
                 ]:
                     games.append(doc)
 
         if games:
-            # 경기별로 그룹화
-            seen_games = set()
+            grouped_games: Dict[str, Dict[str, Any]] = {}
+            ordered_game_ids: List[str] = []
             for game in games:
                 game_id = game.get("game_id")
-                if game_id and game_id not in seen_games:
-                    seen_games.add(game_id)
+                if not game_id:
+                    continue
+                if game_id not in grouped_games:
+                    grouped_games[game_id] = {}
+                    ordered_game_ids.append(game_id)
+                grouped_games[game_id][str(game.get("source_table"))] = game
 
-                    home_team = game.get("home_team_name") or game.get("home_team", "")
-                    away_team = game.get("away_team_name") or game.get("away_team", "")
-                    home_score = game.get("home_score", "?")
-                    away_score = game.get("away_score", "?")
-                    stadium = game.get("stadium_name") or game.get("stadium", "")
-                    date = game.get("game_date", "")
+            for game_id in ordered_game_ids:
+                game_group = grouped_games[game_id]
+                base_game = (
+                    game_group.get("game_flow_summary")
+                    or game_group.get("game")
+                    or game_group.get("game_metadata")
+                    or next(iter(game_group.values()))
+                )
+                if not base_game:
+                    continue
 
-                    context_parts.append(f"\n**{date} {away_team} @ {home_team}**")
+                home_team = base_game.get("home_team_name") or base_game.get(
+                    "home_team", ""
+                )
+                away_team = base_game.get("away_team_name") or base_game.get(
+                    "away_team", ""
+                )
+                home_score = base_game.get("home_score", "?")
+                away_score = base_game.get("away_score", "?")
+                metadata_game = game_group.get("game_metadata") or game_group.get("game")
+                stadium = ""
+                if metadata_game:
+                    stadium = metadata_game.get("stadium_name") or metadata_game.get(
+                        "stadium", ""
+                    )
+                date = base_game.get("game_date", "")
+
+                context_parts.append(f"\n**{date} {away_team} @ {home_team}**")
+
+                summary_game = game_group.get("game_flow_summary")
+                if summary_game:
+                    summary_text = self._clean_game_flow_summary_content(
+                        summary_game.get("content", "")
+                    )
+                    if summary_text:
+                        context_parts.append(summary_text)
+                else:
                     context_parts.append(
                         f"- 스코어: {away_team} {away_score} - {home_score} {home_team}"
                     )
-                    if stadium:
-                        context_parts.append(f"- 구장: {stadium}")
 
-                    # 관중, 경기시간 등 추가 정보
-                    attendance = game.get("attendance") or game.get("crowd")
-                    if attendance:
-                        context_parts.append(
-                            f"- 관중: {attendance:,}명"
-                            if isinstance(attendance, int)
-                            else f"- 관중: {attendance}"
-                        )
+                if stadium:
+                    context_parts.append(f"- 구장: {stadium}")
 
-                    game_time = game.get("game_duration") or game.get("game_time")
-                    if game_time:
-                        context_parts.append(f"- 경기 시간: {game_time}")
+                attendance = None
+                if metadata_game:
+                    attendance = metadata_game.get("attendance") or metadata_game.get(
+                        "crowd"
+                    )
+                if attendance:
+                    context_parts.append(
+                        f"- 관중: {attendance:,}명"
+                        if isinstance(attendance, int)
+                        else f"- 관중: {attendance}"
+                    )
+
+                game_time = None
+                if metadata_game:
+                    game_time = metadata_game.get("game_duration") or metadata_game.get(
+                        "game_time"
+                    )
+                if game_time:
+                    context_parts.append(f"- 경기 시간: {game_time}")
         else:
             if game_date:
                 context_parts.append(f"\n{game_date} 경기 정보를 찾을 수 없습니다.")
@@ -602,6 +643,19 @@ class ContextFormatter:
                 context_parts.append(f"\n경기 정보를 찾을 수 없습니다.")
 
         return "\n".join(context_parts)
+
+    def _clean_game_flow_summary_content(self, content: str) -> str:
+        if not content:
+            return ""
+        lines = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("[META]") or stripped.startswith("[출처]"):
+                continue
+            lines.append(stripped)
+        return "\n".join(lines)
 
     def _format_player_movement(
         self, processed_data: Dict[str, Any], query: str, entity_filter, year: int

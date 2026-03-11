@@ -243,6 +243,24 @@ LEAGUE_TYPE_MAPPING = {
 
 # 수상 유형 매핑 테이블 (사용자 입력 → 표준 수상명)
 AWARD_MAPPING = {
+    # 더 구체적인 MVP 계열을 먼저 매칭
+    "한국시리즈 MVP": "korean_series_mvp",
+    "한국시리즈 mvp": "korean_series_mvp",
+    "한국시리즈 엠브이피": "korean_series_mvp",
+    "코리안시리즈 MVP": "korean_series_mvp",
+    "코리안시리즈 mvp": "korean_series_mvp",
+    "코리안시리즈 엠브이피": "korean_series_mvp",
+    "KS MVP": "korean_series_mvp",
+    "KS mvp": "korean_series_mvp",
+    "KS 엠브이피": "korean_series_mvp",
+    "올스타전 MVP": "all_star_mvp",
+    "올스타전 mvp": "all_star_mvp",
+    "올스타전 엠브이피": "all_star_mvp",
+    "올스타 MVP": "all_star_mvp",
+    "올스타 mvp": "all_star_mvp",
+    "올스타 엠브이피": "all_star_mvp",
+    "All-Star MVP": "all_star_mvp",
+    "all-star mvp": "all_star_mvp",
     # MVP
     "MVP": "mvp",
     "엠브이피": "mvp",

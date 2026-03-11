@@ -13,6 +13,14 @@ def test_build_canonical_source_row_id_game_metadata() -> None:
     )
 
 
+def test_build_canonical_source_row_id_game_flow_summary() -> None:
+    row = {"game_id": "20250501LGHH0", "home_score": 4, "away_score": 1}
+    assert (
+        build_canonical_source_row_id(row, "game_flow_summary")
+        == "game_id=20250501LGHH0"
+    )
+
+
 def test_build_canonical_source_row_id_stadium_alias() -> None:
     row = {"stadium_id": "CHANGWON"}
     assert build_canonical_source_row_id(row, "stadiums") == "stadium_id=NCPARK"

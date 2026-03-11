@@ -10,7 +10,15 @@ from fastapi.openapi.utils import get_openapi
 
 from .config import get_settings
 from .deps import lifespan
-from .routers import chat_stream, search, ingest, vision, coach, moderation
+from .routers import (
+    chat_stream,
+    search,
+    ingest,
+    vision,
+    coach,
+    moderation,
+    release_decision,
+)
 
 
 def create_app() -> FastAPI:
@@ -58,6 +66,7 @@ def create_app() -> FastAPI:
     app.include_router(coach.router)
     app.include_router(coach.router, prefix="/ai")
     app.include_router(moderation.router)
+    app.include_router(release_decision.router)
 
     def _custom_openapi():
         if app.openapi_schema:
@@ -92,6 +101,7 @@ def create_app() -> FastAPI:
             "/ai/vision",
             "/ai/search",
             "/ai/ingest",
+            "/ai/release-decision",
         )
         for path, operations in openapi_schema.get("paths", {}).items():
             if any(path.startswith(prefix) for prefix in protected_prefixes):

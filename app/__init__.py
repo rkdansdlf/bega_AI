@@ -15,7 +15,11 @@ def get_app():
 
 
 def _should_init_app() -> bool:
-    return not (os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules)
+    return not (
+        os.getenv("PYTEST_CURRENT_TEST")
+        or "pytest" in sys.modules
+        or os.getenv("BEGA_SKIP_APP_INIT") == "1"
+    )
 
 
 app = get_app() if _should_init_app() else None
