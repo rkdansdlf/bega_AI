@@ -9,10 +9,18 @@ from typing import Dict, List, Any, Optional, Tuple
 import logging
 import time
 import threading
-from psycopg.rows import dict_row
 from psycopg import Connection as PgConnection
+from psycopg.rows import dict_row
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
+from app.tools.team_mapping_loader import (
+    fetch_team_mapping_rows,
+    load_team_mappings_with_retry,
+)
 from app.tools.team_resolution_metrics import get_team_resolution_metrics
+from app.tools.team_mapping_snapshot import (
+    load_team_mapping_snapshot,
+    update_team_mapping_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +136,8 @@ class DatabaseQueryTool:
         self.TEAM_VARIANTS = self.team_resolver.team_variants
         self.TEAM_CODE_TO_NAME = self.team_resolver.code_to_name
         self._table_columns_cache: Dict[str, set[str]] = {}
+        self.mapping_dependency_degraded = False
+        self.mapping_dependency_reason: Optional[str] = None
 
         # DB에서 최신 매핑 로드하여 위 딕셔너리 정밀 업데이트
         self._load_team_mappings()
@@ -147,48 +157,43 @@ class DatabaseQueryTool:
             "포": "포수",
         }
 
+    def _fetch_team_mapping_rows(self, connection: PgConnection) -> List[Dict[str, Any]]:
+        return fetch_team_mapping_rows(connection)
+
+    def _apply_team_mapping_rows(self, rows: List[Dict[str, Any]], source: str) -> None:
+        if not rows:
+            return
+
+        logger.info(
+            "[DatabaseQuery] Loading mappings for %d franchise entries from %s",
+            len(rows),
+            source,
+        )
+        self.team_resolver.sync_from_team_rows(rows)
+        update_team_mapping_snapshot(rows)
+        logger.info(
+            "[DatabaseQuery] SQL Team mappings (Stats vs Game) synchronized using %s.",
+            source,
+        )
+
     def _load_team_mappings(self):
         """OCI DB의 teams 테이블과 franchise_id를 활용하여 팀 매핑 정보를 동적으로 로드합니다."""
-        try:
-            cursor = self.connection.cursor(row_factory=dict_row)
-
-            # franchise current_code를 우선 적용하고 정렬을 결정적으로 고정
-            query = """
-                SELECT
-                    t.team_id,
-                    t.team_name,
-                    t.franchise_id,
-                    t.founded_year,
-                    t.is_active,
-                    tf.current_code
-                FROM teams t
-                JOIN team_franchises tf ON tf.id = t.franchise_id
-                WHERE t.franchise_id IS NOT NULL
-                ORDER BY
-                    t.franchise_id,
-                    CASE WHEN t.team_id = tf.current_code THEN 0 ELSE 1 END,
-                    t.is_active DESC,
-                    t.founded_year DESC,
-                    t.team_id ASC;
-            """
-            cursor.execute(query)
-            rows = cursor.fetchall()
-
-            if rows:
-                logger.info(
-                    f"[DatabaseQuery] Loading mappings for {len(rows)} franchise entries from OCI"
-                )
-                self.team_resolver.sync_from_team_rows(rows)
-
-                logger.info(
-                    "[DatabaseQuery] SQL Team mappings (Stats vs Game) synchronized using OCI."
-                )
-
-            cursor.close()
-        except Exception as e:
-            logger.warning(
-                f"[DatabaseQuery] Failed to load mappings from OCI: {e}. Using defaults."
-            )
+        result = load_team_mappings_with_retry(
+            connection=self.connection,
+            fetch_rows=self._fetch_team_mapping_rows,
+            apply_rows=self._apply_team_mapping_rows,
+            apply_snapshot_rows=self.team_resolver.sync_from_team_rows,
+            load_snapshot=load_team_mapping_snapshot,
+            logger=logger,
+            primary_source="OCI",
+            primary_failure_message="[DatabaseQuery] Failed to load mappings from OCI: %s. Retrying with fresh connection.",
+            retry_source="OCI retry connection",
+            retry_failure_message="[DatabaseQuery] Retry loading mappings from OCI failed: %s",
+            snapshot_warning_message="[DatabaseQuery] Using last-good team mapping snapshot (%d rows).",
+            defaults_warning_message="[DatabaseQuery] Falling back to built-in default team mappings.",
+        )
+        self.mapping_dependency_degraded = result.degraded
+        self.mapping_dependency_reason = result.reason
 
     def _get_table_columns(self, table_name: str) -> set[str]:
         cached = self._table_columns_cache.get(table_name)

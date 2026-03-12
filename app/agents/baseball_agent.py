@@ -21,6 +21,7 @@ from ..tools.regulation_query import RegulationQueryTool
 from ..tools.game_query import GameQueryTool
 from ..tools.document_query import DocumentQueryTool
 from ..tools.latest_baseball import LatestBaseballSearchTool
+from ..tools.team_display import replace_team_codes
 from ..core.chat_cache_key import has_temporal_keyword
 from ..core.tools.datetime_tool import (
     get_current_datetime,
@@ -109,27 +110,33 @@ TEAM_CODE_TO_NAME = {
     "키움": "키움 히어로즈",
 }
 
+INVALID_PLAYER_NAME_TOKENS = {
+    "보면",
+    "요약",
+    "흐름",
+    "강점",
+    "약점",
+    "리스크",
+    "페이스",
+    "가을야구",
+    "플레이오프",
+    "분석",
+    "시즌",
+    "최근",
+}
 
-def _replace_team_codes(data: Any) -> Any:
-    """Recursively replace team codes with full names in a data structure."""
-    if isinstance(data, dict):
-        new_dict = {}
-        for k, v in data.items():
-            # 키에 'team'이 포함되어 있고, 값이 코드 사전에 있는 경우 변환
-            if "team" in k and isinstance(v, str) and v in TEAM_CODE_TO_NAME:
-                new_dict[k] = TEAM_CODE_TO_NAME[v]
-            else:
-                new_dict[k] = _replace_team_codes(v)
-        return new_dict
-    elif isinstance(data, list):
-        return [_replace_team_codes(item) for item in data]
-    else:
-        # 값 자체가 팀 코드인 경우도 변환 (예: winning_team: "LG")
-        if isinstance(data, str) and data in TEAM_CODE_TO_NAME:
-            return TEAM_CODE_TO_NAME[data]
-        return data
+TEAM_LLM_ALLOWED_TOOLS = {
+    "get_team_summary",
+    "get_team_advanced_metrics",
+    "get_team_rank",
+    "get_team_last_game",
+}
 
-
+PLAYER_LLM_ALLOWED_TOOLS = {
+    "validate_player",
+    "get_player_stats",
+    "get_career_stats",
+}
 class BaseballStatisticsAgent:
     """
     야구 통계 전문 에이전트
@@ -918,47 +925,51 @@ class BaseballStatisticsAgent:
         if self._team_name_cache is not None:
             return self._team_name_cache
 
-        # DB 테이블 team_name_mapping이 없으므로 정적 매핑 사용
-        mapping = {
-            "HH": "한화 이글스",
-            "KIA": "KIA 타이거즈",
-            "HT": "KIA 타이거즈",
-            "KT": "KT 위즈",
-            "LG": "LG 트윈스",
-            "LT": "롯데 자이언츠",
-            "NC": "NC 다이노스",
-            "DB": "두산 베어스",
-            "DO": "두산 베어스",
-            "OB": "두산 베어스",
-            "SSG": "SSG 랜더스",
-            "SK": "SSG 랜더스",
-            "SS": "삼성 라이온즈",
-            "KH": "키움 히어로즈",
-            "KI": "키움 히어로즈",
-            "WO": "키움 히어로즈",
-            "한화": "한화 이글스",
-            "기아": "KIA 타이거즈",
-            "두산": "두산 베어스",
-            "롯데": "롯데 자이언츠",
-            "삼성": "삼성 라이온즈",
-            "키움": "키움 히어로즈",
-            "NC": "NC 다이노스",
-            "KT": "KT 위즈",
-            "LG": "LG 트윈스",
-        }
+        mapping = dict(TEAM_CODE_TO_NAME)
+
+        resolver = getattr(getattr(self, "db_query_tool", None), "team_resolver", None)
+        if resolver is not None:
+            for team_code, display_name in getattr(
+                resolver, "code_to_name", {}
+            ).items():
+                if isinstance(team_code, str) and isinstance(display_name, str):
+                    mapping[team_code] = display_name
+
+            for alias in getattr(resolver, "name_to_canonical", {}).keys():
+                if not isinstance(alias, str) or not alias.strip():
+                    continue
+                display_name = resolver.display_name(alias)
+                if isinstance(display_name, str) and display_name.strip():
+                    mapping[alias] = display_name
 
         self._team_name_cache = mapping
         return mapping
-
-        # 이전 DB 조회 코드는 제거됨 (테이블 없음)
 
     def _convert_team_id_to_name(self, team_id: str) -> str:
         """팀 ID를 팀명으로 변환합니다."""
         if not team_id:
             return team_id
 
+        db_query_tool = getattr(self, "db_query_tool", None)
+        if db_query_tool is not None and hasattr(db_query_tool, "get_team_name"):
+            try:
+                resolved_name = db_query_tool.get_team_name(team_id)
+            except Exception as exc:
+                logger.debug(
+                    "[BaseballAgent] Failed to resolve team name via DatabaseQueryTool for %s: %s",
+                    team_id,
+                    exc,
+                )
+            else:
+                if (
+                    isinstance(resolved_name, str)
+                    and resolved_name.strip()
+                    and resolved_name != team_id
+                ):
+                    return resolved_name
+
         mapping = self._load_team_name_mapping()
-        return mapping.get(team_id, team_id)  # 매핑이 없으면 원래 ID 반환
+        return mapping.get(team_id, team_id)
 
     def _format_game_info_with_team_names(
         self, game_info: Dict[str, Any]
@@ -2558,6 +2569,140 @@ class BaseballStatisticsAgent:
             "fallback_reason": decision.fallback_reason,
         }
 
+    def _extract_llm_planner_player_name(self, entity_filter: Any) -> Optional[str]:
+        for attr_name in ("player_name", "person_name", "name"):
+            value = getattr(entity_filter, attr_name, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _has_explicit_player_name(self, entity_filter: Any) -> bool:
+        player_name = self._extract_llm_planner_player_name(entity_filter)
+        return (
+            isinstance(player_name, str)
+            and len(player_name) >= 2
+            and player_name not in INVALID_PLAYER_NAME_TOKENS
+        )
+
+    def _build_team_llm_planner_prompt(
+        self,
+        *,
+        query_text: str,
+        current_date: str,
+        current_year: int,
+        team_name: str,
+        entity_context: str,
+    ) -> str:
+        return (
+            "너는 KBO 도구 라우터다. 반드시 JSON만 출력한다.\n"
+            "목표: 팀 분석 질문에 필요한 최소 도구만 계획한다.\n"
+            "규칙:\n"
+            "1) tool_calls 최대 2개\n"
+            "2) 허용 도구: get_team_summary, get_team_advanced_metrics, get_team_rank, get_team_last_game\n"
+            "3) 우선순위: get_team_summary, get_team_advanced_metrics\n"
+            "4) 선수명이 질문에 명시되지 않으면 선수용 도구는 금지한다.\n"
+            "5) parameters.year는 질문에서 해석된 연도 또는 기본 시즌 연도를 사용한다.\n\n"
+            "출력 형식:\n"
+            "{\n"
+            '  "analysis": "문장",\n'
+            '  "tool_calls": [{"tool_name":"...", "parameters": {...}}],\n'
+            '  "expected_result": "문장"\n'
+            "}\n\n"
+            f"현재 날짜: {current_date}\n"
+            f"기본 시즌 연도: {current_year}\n"
+            f"팀: {team_name}\n"
+            f"질문: {query_text}"
+            f"{entity_context}\n"
+        )
+
+    def _build_player_llm_planner_prompt(
+        self,
+        *,
+        query_text: str,
+        current_date: str,
+        current_year: int,
+        player_name: str,
+        entity_context: str,
+    ) -> str:
+        prefers_career = any(token in query_text.lower() for token in ["통산", "커리어", "총"])
+        primary_tool = "get_career_stats" if prefers_career else "get_player_stats"
+        secondary_tool = "get_player_stats" if prefers_career else "get_career_stats"
+        return (
+            "너는 KBO 도구 라우터다. 반드시 JSON만 출력한다.\n"
+            "목표: 선수 분석 질문에 필요한 최소 도구만 계획한다.\n"
+            "규칙:\n"
+            "1) tool_calls 최대 2개\n"
+            "2) 허용 도구: validate_player, get_player_stats, get_career_stats\n"
+            f"3) 우선순위: {primary_tool}, {secondary_tool}\n"
+            "4) 이름 확인이 불확실할 때만 validate_player를 먼저 사용한다.\n"
+            "5) 통산/커리어/총 질문이면 get_career_stats를 우선한다.\n"
+            "6) 그 외에는 get_player_stats를 우선하고 year는 질문 연도 또는 기본 시즌 연도를 사용한다.\n"
+            "7) 팀/리더보드/규정/문서 검색 도구는 금지한다.\n\n"
+            "출력 형식:\n"
+            "{\n"
+            '  "analysis": "문장",\n'
+            '  "tool_calls": [{"tool_name":"...", "parameters": {...}}],\n'
+            '  "expected_result": "문장"\n'
+            "}\n\n"
+            f"현재 날짜: {current_date}\n"
+            f"기본 시즌 연도: {current_year}\n"
+            f"선수: {player_name}\n"
+            f"질문: {query_text}"
+            f"{entity_context}\n"
+        )
+
+    def _select_llm_planner_prompt(
+        self,
+        *,
+        query_text: str,
+        query: str,
+        entity_filter: Any,
+        current_date: str,
+        current_year: int,
+        entity_context: str,
+    ) -> tuple[str, str]:
+        is_team_query = self._is_team_analysis_query(query_text, entity_filter)
+        detected_team = (
+            getattr(entity_filter, "team_id", None)
+            or extract_team(query_text)
+            or self._detect_team_alias_from_query(query_text)
+        )
+        if is_team_query and detected_team:
+            return (
+                self._build_team_llm_planner_prompt(
+                    query_text=query_text,
+                    current_date=current_date,
+                    current_year=current_year,
+                    team_name=detected_team,
+                    entity_context=entity_context,
+                ),
+                "team_llm_planner",
+            )
+
+        if self._has_explicit_player_name(entity_filter):
+            return (
+                self._build_player_llm_planner_prompt(
+                    query_text=query_text,
+                    current_date=current_date,
+                    current_year=current_year,
+                    player_name=self._extract_llm_planner_player_name(entity_filter),
+                    entity_context=entity_context,
+                ),
+                "player_llm_planner",
+            )
+
+        return (
+            SYSTEM_PROMPT.format(
+                current_date=current_date,
+                current_year=current_year,
+                last_year=current_year - 1,
+                two_years_ago=current_year - 2,
+                query_text=query_text,
+                query=query,
+            ),
+            "default_llm_planner",
+        )
+
     def _coerce_tool_call(self, raw_call: Any) -> Optional[ToolCall]:
         if isinstance(raw_call, ToolCall):
             return raw_call
@@ -3037,6 +3182,7 @@ class BaseballStatisticsAgent:
         *,
         query: str,
         entity_filter: Any,
+        planner_mode: str = "default_llm_planner",
     ) -> List[ToolCall]:
         if not tool_calls:
             return []
@@ -3062,27 +3208,33 @@ class BaseballStatisticsAgent:
             "get_team_rank",
             "get_team_last_game",
         }
-        player_name = getattr(entity_filter, "player_name", None)
-        invalid_player_tokens = {
-            "보면",
-            "요약",
-            "흐름",
-            "강점",
-            "약점",
-            "리스크",
-            "페이스",
-            "가을야구",
-            "플레이오프",
-            "분석",
-            "시즌",
-            "최근",
-        }
-        has_valid_player = (
-            isinstance(player_name, str)
-            and len(player_name.strip()) >= 2
-            and player_name.strip() not in invalid_player_tokens
-        )
+        player_name = self._extract_llm_planner_player_name(entity_filter)
+        has_valid_player = bool(player_name)
         no_explicit_player = not has_valid_player
+        is_career_query = any(
+            token in query.lower() for token in ["통산", "커리어", "총"]
+        )
+        allowed_tools: Optional[set[str]] = None
+        preferred_order: List[str] = []
+        tool_cap: Optional[int] = None
+
+        if planner_mode == "team_llm_planner":
+            allowed_tools = TEAM_LLM_ALLOWED_TOOLS
+            preferred_order = [
+                "get_team_summary",
+                "get_team_advanced_metrics",
+                "get_team_rank",
+                "get_team_last_game",
+            ]
+            tool_cap = 2
+        elif planner_mode == "player_llm_planner":
+            allowed_tools = PLAYER_LLM_ALLOWED_TOOLS
+            preferred_order = (
+                ["get_career_stats", "get_player_stats", "validate_player"]
+                if is_career_query
+                else ["get_player_stats", "get_career_stats", "validate_player"]
+            )
+            tool_cap = 2
 
         for raw_call in tool_calls:
             call = self._coerce_tool_call(raw_call)
@@ -3092,6 +3244,13 @@ class BaseballStatisticsAgent:
                 )
                 continue
 
+            if allowed_tools is not None and call.tool_name not in allowed_tools:
+                logger.info(
+                    "[Planner] drop tool_call outside planner scope mode=%s tool=%s",
+                    planner_mode,
+                    call.tool_name,
+                )
+                continue
             if team_query and call.tool_name in low_value_for_team:
                 logger.info(
                     "[Planner] drop low-value team tool_call: %s", call.tool_name
@@ -3110,6 +3269,16 @@ class BaseballStatisticsAgent:
             ):
                 logger.info(
                     "[Planner] drop player-focused tool_call for team query: %s",
+                    call.tool_name,
+                )
+                continue
+            if (
+                planner_mode == "player_llm_planner"
+                and no_explicit_player
+                and call.tool_name != "validate_player"
+            ):
+                logger.info(
+                    "[Planner] drop player tool_call without validated player: %s",
                     call.tool_name,
                 )
                 continue
@@ -3141,6 +3310,42 @@ class BaseballStatisticsAgent:
                         len(fallback_team_calls),
                     )
                     return fallback_team_calls
+
+        if planner_mode == "player_llm_planner" and not filtered and player_name:
+            fallback_parameters: Dict[str, Any] = {
+                "player_name": player_name,
+                "position": getattr(entity_filter, "position_type", None) or "both",
+            }
+            if is_career_query:
+                filtered = [
+                    ToolCall(
+                        tool_name="get_career_stats",
+                        parameters=fallback_parameters,
+                    )
+                ]
+            else:
+                fallback_parameters["year"] = self._resolve_reference_year(
+                    query, entity_filter
+                )
+                filtered = [
+                    ToolCall(
+                        tool_name="get_player_stats",
+                        parameters=fallback_parameters,
+                    )
+                ]
+
+        if preferred_order and filtered:
+            preferred_rank = {
+                tool_name: idx for idx, tool_name in enumerate(preferred_order)
+            }
+            filtered.sort(
+                key=lambda call: (
+                    preferred_rank.get(call.tool_name, len(preferred_order)),
+                    call.tool_name,
+                )
+            )
+        if tool_cap is not None:
+            filtered = filtered[:tool_cap]
 
         return filtered
 
@@ -3618,7 +3823,7 @@ class BaseballStatisticsAgent:
         yield {"type": "status", "message": "질문 의도를 분석하고 있습니다..."}
         analysis_result = await self._analyze_query_and_plan_tools(query, context)
         analysis_ms = round((time.perf_counter() - analysis_started_at) * 1000, 2)
-        planner_mode = analysis_result.get("planner_mode", "llm")
+        planner_mode = analysis_result.get("planner_mode", "default_llm_planner")
         fallback_triggered = False
         intent = analysis_result.get("intent") or intent
 
@@ -3919,9 +4124,11 @@ class BaseballStatisticsAgent:
 
                 if self._has_meaningful_tool_results(fallback_results):
                     analysis_result = llm_fallback_plan
-                    analysis_result["planner_mode"] = "llm"
+                    analysis_result["planner_mode"] = llm_fallback_plan.get(
+                        "planner_mode", "default_llm_planner"
+                    )
                     tool_results = fallback_results
-                    planner_mode = "llm"
+                    planner_mode = analysis_result["planner_mode"]
 
         fallback_plan = self._build_low_grounding_fallback_plan(
             query, analysis_result, tool_results
@@ -4288,7 +4495,10 @@ class BaseballStatisticsAgent:
 
     def _serialize_tool_data_for_prompt(self, data: Any) -> str:
         """도구 결과를 길이 제한 내 JSON 문자열로 직렬화합니다."""
-        sanitized_data = _replace_team_codes(data)
+        sanitized_data = replace_team_codes(
+            data,
+            team_name_resolver=self._convert_team_id_to_name,
+        )
         compact_data = self._compact_tool_payload_for_prompt(sanitized_data)
         data_json = json.dumps(
             compact_data,
@@ -5487,16 +5697,18 @@ class BaseballStatisticsAgent:
             (datetime.now() - llm_analysis_started).total_seconds() * 1000, 2
         )
         if "planner_mode" not in llm_plan:
-            llm_plan["planner_mode"] = "llm"
+            llm_plan["planner_mode"] = "default_llm_planner"
         llm_plan["analysis_ms"] = analysis_ms
         original_count = len(llm_plan.get("tool_calls", []))
         llm_plan["tool_calls"] = self._soft_filter_llm_tool_calls(
             llm_plan.get("tool_calls", []),
             query=query,
             entity_filter=entity_filter,
+            planner_mode=llm_plan["planner_mode"],
         )
         logger.info(
-            "[PlannerDecision] mode=llm team_query=%s tool_count=%d->%d",
+            "[PlannerDecision] mode=%s team_query=%s tool_count=%d->%d",
+            llm_plan["planner_mode"],
             self._is_team_analysis_query(query, entity_filter),
             original_count,
             len(llm_plan.get("tool_calls", [])),
@@ -5546,46 +5758,19 @@ class BaseballStatisticsAgent:
             )
 
         query_text = processed_query  # 전처리된 쿼리 사용
-        # TODO(phase2): 팀 분석/선수 분석별 경량 planner 프롬프트 분리
-        is_team_query_for_planner = self._is_team_analysis_query(
-            query_text, entity_filter
+        analysis_prompt, planner_mode = self._select_llm_planner_prompt(
+            query_text=query_text,
+            query=query,
+            entity_filter=entity_filter,
+            current_date=current_date,
+            current_year=current_year,
+            entity_context=entity_context,
         )
-        detected_team_for_planner = (
-            getattr(entity_filter, "team_id", None)
-            or extract_team(query_text)
-            or self._detect_team_alias_from_query(query_text)
+        logger.info(
+            "[Planner] selected llm planner mode=%s query=%s",
+            planner_mode,
+            query_text,
         )
-        if is_team_query_for_planner and detected_team_for_planner:
-            analysis_prompt = (
-                "너는 KBO 도구 라우터다. 반드시 JSON만 출력한다.\n"
-                "목표: 팀 분석 질문에 필요한 최소 도구만 계획한다.\n"
-                "규칙:\n"
-                "1) tool_calls 최대 2개\n"
-                "2) 우선순위: get_team_summary, get_team_advanced_metrics\n"
-                "3) 선수명 미명시 시 선수용 도구(get_player_stats/get_career_stats 등) 금지\n"
-                "4) parameters.year는 질문 연도/기본 시즌 연도 사용\n\n"
-                "출력 형식:\n"
-                "{\n"
-                '  "analysis": "문장",\n'
-                '  "tool_calls": [{"tool_name":"...", "parameters": {...}}],\n'
-                '  "expected_result": "문장"\n'
-                "}\n\n"
-                f"현재 날짜: {current_date}\n"
-                f"기본 시즌 연도: {current_year}\n"
-                f"팀: {detected_team_for_planner}\n"
-                f"질문: {query_text}\n"
-            )
-        else:
-            analysis_prompt = SYSTEM_PROMPT.format(
-                current_date=current_date,
-                current_year=current_year,
-                last_year=current_year - 1,
-                two_years_ago=current_year - 2,
-                query_text=query_text,
-                query=query,
-            )
-
-        logger.info(f"[TEST] query: {query_text}")
 
         try:
             # LLM 호출하여 분석 결과 받기
@@ -5600,7 +5785,7 @@ class BaseballStatisticsAgent:
             )
             if (
                 self.chat_dynamic_token_enabled
-                and is_team_query_for_planner
+                and planner_mode in {"team_llm_planner", "player_llm_planner"}
                 and isinstance(analysis_max_tokens, int)
             ):
                 analysis_max_tokens = min(220, analysis_max_tokens)
@@ -5643,6 +5828,7 @@ class BaseballStatisticsAgent:
                     ],
                     "expected_result": "상위 타자 순위",
                     "error": None,
+                    "planner_mode": planner_mode,
                 }
 
             # JSON 파싱
@@ -5727,6 +5913,7 @@ class BaseballStatisticsAgent:
                 "tool_calls": tool_calls,
                 "expected_result": analysis_data.get("expected_result", ""),
                 "error": None,
+                "planner_mode": planner_mode,
             }
 
         except json.JSONDecodeError as e:
@@ -6059,6 +6246,7 @@ class BaseballStatisticsAgent:
                 "tool_calls": [fallback_tool],
                 "expected_result": "조회 결과",
                 "error": None,
+                "planner_mode": planner_mode,
             }
         except Exception as e:
             logger.exception(f"[BaseballAgent] Error in query analysis: {e}")
@@ -6067,6 +6255,7 @@ class BaseballStatisticsAgent:
                 "tool_calls": [],
                 "expected_result": "",
                 "error": f"질문 분석 오류: {e}",
+                "planner_mode": planner_mode,
             }
 
     def _format_deterministic_metric(self, value: Any) -> str:
@@ -6436,7 +6625,12 @@ class BaseballStatisticsAgent:
         return f"{normalized[: limit - 1].rstrip()}…"
 
     def _format_team_display_name(self, team_value: Any) -> str:
-        return self._format_deterministic_metric(_replace_team_codes(team_value))
+        return self._format_deterministic_metric(
+            replace_team_codes(
+                team_value,
+                team_name_resolver=self._convert_team_id_to_name,
+            )
+        )
 
     def _build_player_stats_chat_answer(self, data: Dict[str, Any]) -> Optional[str]:
         player_name = self._format_deterministic_metric(data.get("player_name"))
