@@ -10,7 +10,16 @@ from typing import Dict, List, Any
 import psycopg
 from psycopg.rows import dict_row
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
+from app.tools.team_display import resolve_team_display_name
+from app.tools.team_mapping_loader import (
+    fetch_team_mapping_rows,
+    load_team_mappings_with_retry,
+)
 from app.tools.team_resolution_metrics import get_team_resolution_metrics
+from app.tools.team_mapping_snapshot import (
+    load_team_mapping_snapshot,
+    update_team_mapping_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,53 +41,52 @@ class GameQueryTool:
         self.TEAM_CODE_TO_NAME = self.team_resolver.code_to_name
         self.NAME_TO_CODE = self.team_resolver.name_to_canonical
         self.TEAM_VARIANTS = self.team_resolver.team_variants
+        self.mapping_dependency_degraded = False
+        self.mapping_dependency_reason: str | None = None
 
         # DB에서 최신 매핑 로드
         self._load_team_mappings()
 
+    def _fetch_team_mapping_rows(
+        self, connection: psycopg.Connection
+    ) -> List[Dict[str, Any]]:
+        return fetch_team_mapping_rows(connection)
+
+    def _apply_team_mapping_rows(self, rows: List[Dict[str, Any]], source: str) -> None:
+        if not rows:
+            return
+
+        logger.info("[GameQuery] Syncing %d franchise entries from %s", len(rows), source)
+        self.team_resolver.sync_from_team_rows(rows)
+        update_team_mapping_snapshot(rows)
+        logger.info(
+            "[GameQuery] Game Team codes synchronized using %s.",
+            source,
+        )
+
     def _load_team_mappings(self):
         """OCI DB의 teams 테이블과 franchise_id를 활용하여 팀 매핑 정보를 동적으로 로드합니다."""
-        try:
-            cursor = self.connection.cursor(row_factory=dict_row)
-            query = """
-                SELECT
-                    t.team_id,
-                    t.team_name,
-                    t.franchise_id,
-                    t.founded_year,
-                    t.is_active,
-                    tf.current_code
-                FROM teams t
-                JOIN team_franchises tf ON tf.id = t.franchise_id
-                WHERE t.franchise_id IS NOT NULL
-                ORDER BY
-                    t.franchise_id,
-                    CASE WHEN t.team_id = tf.current_code THEN 0 ELSE 1 END,
-                    t.is_active DESC,
-                    t.founded_year DESC,
-                    t.team_id ASC;
-            """
-            cursor.execute(query)
-            rows = cursor.fetchall()
-
-            if rows:
-                logger.info(
-                    f"[GameQuery] Syncing {len(rows)} franchise entries from OCI"
-                )
-                self.team_resolver.sync_from_team_rows(rows)
-
-                logger.info(
-                    "[GameQuery] Game Team codes synchronized using OCI franchise IDs."
-                )
-
-            cursor.close()
-        except Exception as e:
-            logger.warning(
-                f"[GameQuery] Dynamic mapping failed from OCI: {e}. Using defaults."
-            )
+        result = load_team_mappings_with_retry(
+            connection=self.connection,
+            fetch_rows=self._fetch_team_mapping_rows,
+            apply_rows=self._apply_team_mapping_rows,
+            apply_snapshot_rows=self.team_resolver.sync_from_team_rows,
+            load_snapshot=load_team_mapping_snapshot,
+            logger=logger,
+            primary_source="OCI franchise IDs",
+            primary_failure_message="[GameQuery] Dynamic mapping failed from OCI: %s. Retrying with fresh connection.",
+            retry_source="OCI retry connection",
+            retry_failure_message="[GameQuery] Retry loading dynamic mapping from OCI failed: %s",
+            snapshot_warning_message="[GameQuery] Using last-good team mapping snapshot (%d rows).",
+            defaults_warning_message="[GameQuery] Dynamic mapping fallback is using defaults.",
+        )
+        self.mapping_dependency_degraded = result.degraded
+        self.mapping_dependency_reason = result.reason
 
     def get_team_name(self, team_code: str) -> str:
-        return self.team_resolver.display_name(team_code)
+        return str(
+            resolve_team_display_name(team_code, self.team_resolver.display_name)
+        )
 
     def get_team_code(self, team_input: str, season_year: int | None = None) -> str:
         return self.team_resolver.resolve_canonical(team_input, season_year)

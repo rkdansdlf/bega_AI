@@ -242,6 +242,210 @@ class TestTeamMappingRobustness:
         assert result["error"] == "unsupported_team_for_regular_analysis"
         assert result["reason"] == "unsupported_team_for_regular_analysis"
 
+    def test_db_tool_mapping_retry_recovers_with_fresh_connection(
+        self, monkeypatch, mock_db_connection
+    ):
+        rows = [
+            {
+                "team_id": "HT",
+                "team_name": "해태 타이거즈",
+                "franchise_id": 1,
+                "founded_year": 1982,
+                "is_active": False,
+                "current_code": "KIA",
+            }
+        ]
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _fake_fetch(self, connection):
+            if connection is mock_db_connection:
+                raise RuntimeError("primary oci unavailable")
+            return rows
+
+        monkeypatch.setattr(
+            DatabaseQueryTool,
+            "_fetch_team_mapping_rows",
+            _fake_fetch,
+        )
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+
+        tool = DatabaseQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "oci_retry_recovered"
+        assert tool.get_team_code("HT", 2024) == "KIA"
+
+    def test_game_tool_mapping_retry_recovers_with_fresh_connection(
+        self, monkeypatch, mock_db_connection
+    ):
+        rows = [
+            {
+                "team_id": "HT",
+                "team_name": "해태 타이거즈",
+                "franchise_id": 1,
+                "founded_year": 1982,
+                "is_active": False,
+                "current_code": "KIA",
+            }
+        ]
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _fake_fetch(self, connection):
+            if connection is mock_db_connection:
+                raise RuntimeError("primary oci unavailable")
+            return rows
+
+        monkeypatch.setattr(
+            GameQueryTool,
+            "_fetch_team_mapping_rows",
+            _fake_fetch,
+        )
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+
+        tool = GameQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "oci_retry_recovered"
+        assert tool.get_team_name("HT") == "해태 타이거즈"
+
+    def test_game_tool_mapping_uses_last_good_snapshot_on_retry_failure(
+        self, monkeypatch, mock_db_connection
+    ):
+        snapshot_rows = [
+            {
+                "team_id": "SK",
+                "team_name": "SK 와이번스",
+                "franchise_id": 2,
+                "founded_year": 2000,
+                "is_active": False,
+                "current_code": "SSG",
+            }
+        ]
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _always_fail(self, _connection):
+            raise RuntimeError("oci closed")
+
+        monkeypatch.setattr(GameQueryTool, "_fetch_team_mapping_rows", _always_fail)
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr(
+            "app.tools.game_query.load_team_mapping_snapshot",
+            lambda: snapshot_rows,
+        )
+
+        tool = GameQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "last_good_snapshot"
+        assert tool.get_team_code("SK", 2024) == "SSG"
+
+    def test_db_tool_mapping_uses_last_good_snapshot_on_retry_failure(
+        self, monkeypatch, mock_db_connection
+    ):
+        snapshot_rows = [
+            {
+                "team_id": "SK",
+                "team_name": "SK 와이번스",
+                "franchise_id": 2,
+                "founded_year": 2000,
+                "is_active": False,
+                "current_code": "SSG",
+            }
+        ]
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _always_fail(self, _connection):
+            raise RuntimeError("oci closed")
+
+        monkeypatch.setattr(DatabaseQueryTool, "_fetch_team_mapping_rows", _always_fail)
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr(
+            "app.tools.database_query.load_team_mapping_snapshot",
+            lambda: snapshot_rows,
+        )
+
+        tool = DatabaseQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "last_good_snapshot"
+        assert tool.get_team_name("SK") == "SK 와이번스"
+
+    def test_db_tool_mapping_falls_back_to_defaults_without_snapshot(
+        self, monkeypatch, mock_db_connection
+    ):
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _always_fail(self, _connection):
+            raise RuntimeError("oci closed")
+
+        monkeypatch.setattr(DatabaseQueryTool, "_fetch_team_mapping_rows", _always_fail)
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr(
+            "app.tools.database_query.load_team_mapping_snapshot",
+            lambda: [],
+        )
+
+        tool = DatabaseQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "defaults"
+        assert tool.get_team_code("KIA", 2024) == "KIA"
+
 
 def test_team_code_resolver_canonical_only(monkeypatch):
     monkeypatch.setenv("TEAM_CODE_READ_MODE", "canonical_only")

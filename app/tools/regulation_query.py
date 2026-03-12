@@ -11,6 +11,21 @@ from typing import Dict, Any, List
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.errors import UndefinedTable
+from .pooled_connection import connection_scope, run_with_fresh_connection_retry
+from .query_logging import (
+    ACTION_FIND_RELATED_REGULATIONS,
+    ACTION_GET_REGULATION_BY_CATEGORY,
+    ACTION_SEARCH_REGULATION,
+    ACTION_VALIDATE_REGULATION_REFERENCE,
+    REGULATION_QUERY_COMPONENT,
+    build_retry_warning_message,
+    log_dependency_missing,
+    log_query_empty,
+    log_query_error,
+    log_query_start,
+    log_query_success,
+)
+from .query_result import apply_error, apply_list_results, build_search_result
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +39,8 @@ class RegulationQueryTool:
     2. 정확한 조항과 출처 제공
     3. 추측이나 해석 없이 공식 규정만 인용
     """
+
+    COMPONENT = REGULATION_QUERY_COMPONENT
 
     def __init__(self, connection: psycopg.Connection):
         self.connection = connection
@@ -70,19 +87,54 @@ class RegulationQueryTool:
 
     @contextmanager
     def _connection_scope(self, force_fresh: bool = False):
-        conn = self.connection
-        if (
-            not force_fresh
-            and conn is not None
-            and not bool(getattr(conn, "closed", False))
-        ):
+        with connection_scope(self.connection, force_fresh=force_fresh) as conn:
             yield conn
-            return
 
-        from ..deps import get_connection_pool
+    def _retry_warning_message(self, action: str) -> str:
+        return build_retry_warning_message(self.COMPONENT, action)
 
-        with get_connection_pool().connection() as pooled_conn:
-            yield pooled_conn
+    def _log_query_start(self, action: str, value: str) -> None:
+        log_query_start(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            value=value,
+        )
+
+    def _log_query_success(
+        self, action: str, count: int, detail: str | None = None
+    ) -> None:
+        log_query_success(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            count=count,
+            detail=detail,
+        )
+
+    def _log_query_empty(self, action: str, value: str) -> None:
+        log_query_empty(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            value=value,
+        )
+
+    def _log_dependency_missing(self, action: str, dependency: str) -> None:
+        log_dependency_missing(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            dependency=dependency,
+        )
+
+    def _log_query_error(self, action: str, error: str) -> None:
+        log_query_error(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            error=error,
+        )
 
     def _normalize_regulation_query(self, query: str) -> str:
         text = " ".join((query or "").strip().split())
@@ -178,6 +230,88 @@ class RegulationQueryTool:
 
         return sorted(terms, key=lambda value: (-len(value), value))
 
+    @staticmethod
+    def _row_truthy_value(row: Any) -> bool:
+        if not row:
+            return False
+        if hasattr(row, "get"):
+            for key in ("exists", "?column?", "present"):
+                if key in row:
+                    return bool(row.get(key))
+            try:
+                return bool(next(iter(row.values())))
+            except Exception:
+                return False
+        try:
+            return bool(row[0])
+        except Exception:
+            return bool(row)
+
+    def _rag_chunks_table_available(self, conn: psycopg.Connection) -> bool:
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("""
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'rag_chunks'
+                ) AS present;
+                """)
+            return self._row_truthy_value(cursor.fetchone())
+
+    def _search_regulation_once(
+        self, conn: psycopg.Connection, query: str, limit: int
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        if not self._rag_chunks_table_available(conn):
+            return None, None
+
+        with conn.cursor(row_factory=dict_row) as cursor:
+            text_search_query = """
+                SELECT 
+                    id,
+                    title,
+                    content,
+                    source_table,
+                    meta->>'document_type' as document_type,
+                    meta->>'category' as category,
+                    meta->>'regulation_code' as regulation_code,
+                    CASE 
+                        WHEN title ILIKE %s THEN 0.9
+                        WHEN content ILIKE %s THEN 0.7
+                        ELSE 0.5
+                    END as similarity_score
+                FROM rag_chunks 
+                WHERE source_table IN ('kbo_regulations', 'markdown_docs')
+                AND (
+                    content ILIKE %s 
+                    OR title ILIKE %s
+                )
+                ORDER BY similarity_score DESC, title
+                LIMIT %s;
+            """
+            search_terms = self._build_regulation_search_terms(query)
+            rows: list[dict[str, Any]] = []
+            matched_term = None
+
+            for search_term in search_terms:
+                search_pattern = f"%{search_term}%"
+                cursor.execute(
+                    text_search_query,
+                    (
+                        search_pattern,
+                        search_pattern,
+                        search_pattern,
+                        search_pattern,
+                        limit,
+                    ),
+                )
+                rows = cursor.fetchall()
+                if rows:
+                    matched_term = search_term
+                    break
+
+            return rows, matched_term
+
     def search_regulation(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """
         규정 관련 질문을 검색합니다.
@@ -189,146 +323,97 @@ class RegulationQueryTool:
         Returns:
             검색 결과 딕셔너리
         """
-        logger.info(f"[RegulationQuery] Searching regulations for: {query}")
+        self._log_query_start(ACTION_SEARCH_REGULATION, query)
 
-        result = {
-            "query": query,
-            "regulations": [],
-            "found": False,
-            "total_found": 0,
-            "categories": [],
-            "error": None,
-        }
+        result = build_search_result(
+            query=query,
+            regulations=[],
+            total_found=0,
+            categories=[],
+        )
 
         try:
-
-            def _run_once(conn: psycopg.Connection):
-                with conn.cursor(row_factory=dict_row) as cursor:
-                    cursor.execute("""
-                        SELECT EXISTS(
-                            SELECT 1
-                            FROM information_schema.tables
-                            WHERE table_schema = 'public'
-                              AND table_name = 'rag_chunks'
-                        );
-                        """)
-                    row = cursor.fetchone()
-                    table_exists = False
-                    if row:
-                        if hasattr(row, "get"):
-                            for key in ("exists", "?column?", "present"):
-                                if key in row:
-                                    table_exists = bool(row.get(key))
-                                    break
-                            if not table_exists:
-                                try:
-                                    table_exists = bool(next(iter(row.values())))
-                                except Exception:
-                                    table_exists = False
-                        else:
-                            try:
-                                table_exists = bool(row[0])
-                            except Exception:
-                                table_exists = bool(row)
-                    if not table_exists:
-                        return None, None
-
-                    text_search_query = """
-                        SELECT 
-                            id,
-                            title,
-                            content,
-                            source_table,
-                            meta->>'document_type' as document_type,
-                            meta->>'category' as category,
-                            meta->>'regulation_code' as regulation_code,
-                            CASE 
-                                WHEN title ILIKE %s THEN 0.9
-                                WHEN content ILIKE %s THEN 0.7
-                                ELSE 0.5
-                            END as similarity_score
-                        FROM rag_chunks 
-                        WHERE source_table IN ('kbo_regulations', 'markdown_docs')
-                        AND (
-                            content ILIKE %s 
-                            OR title ILIKE %s
-                        )
-                        ORDER BY similarity_score DESC, title
-                        LIMIT %s;
-                    """
-                    search_terms = self._build_regulation_search_terms(query)
-                    rows = []
-                    matched_term = None
-
-                    for search_term in search_terms:
-                        search_pattern = f"%{search_term}%"
-                        cursor.execute(
-                            text_search_query,
-                            (
-                                search_pattern,
-                                search_pattern,
-                                search_pattern,
-                                search_pattern,
-                                limit,
-                            ),
-                        )
-                        rows = cursor.fetchall()
-                        if rows:
-                            matched_term = search_term
-                            break
-
-                    return rows, matched_term
-
-            try:
-                with self._connection_scope() as conn:
-                    rows, matched_term = _run_once(conn)
-            except Exception as exc:
-                if "connection is closed" not in str(exc).lower():
-                    raise
-                logger.warning(
-                    "[RegulationQuery] Retrying with a fresh connection: %s",
-                    exc,
-                )
-                with self._connection_scope(force_fresh=True) as conn:
-                    rows, matched_term = _run_once(conn)
+            rows, matched_term = run_with_fresh_connection_retry(
+                connection=self.connection,
+                operation=lambda conn: self._search_regulation_once(conn, query, limit),
+                logger=logger,
+                retry_warning_message=self._retry_warning_message(
+                    ACTION_SEARCH_REGULATION
+                ),
+            )
 
             if rows is None:
-                logger.warning("[RegulationQuery] rag_chunks table is not available")
-                result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
+                self._log_dependency_missing(ACTION_SEARCH_REGULATION, "rag_chunks")
+                apply_error(result, "검색 인덱스(rag_chunks)가 준비되지 않았습니다.")
                 return result
 
             if rows:
-                result["regulations"] = [dict(row) for row in rows]
-                result["found"] = True
-                result["total_found"] = len(rows)
-
                 categories = set()
                 for row in rows:
                     if row.get("category"):
                         categories.add(row["category"])
-                result["categories"] = list(categories)
-                result["matched_query"] = matched_term
+                apply_list_results(
+                    result,
+                    field="regulations",
+                    rows=rows,
+                    total_field="total_found",
+                    row_mapper=dict,
+                    extra_updates={
+                        "categories": list(categories),
+                        "matched_query": matched_term,
+                    },
+                )
 
-                logger.info(
-                    "[RegulationQuery] Found %s regulations via text search (matched=%s)",
-                    len(rows),
-                    matched_term,
+                self._log_query_success(
+                    ACTION_SEARCH_REGULATION,
+                    count=len(rows),
+                    detail=f"matched_query={matched_term}",
                 )
             else:
-                logger.warning(
-                    "[RegulationQuery] No regulations found for: %s",
-                    query,
-                )
+                self._log_query_empty(ACTION_SEARCH_REGULATION, query)
 
         except Exception as e:
             if isinstance(e, UndefinedTable):
-                logger.error(f"[RegulationQuery] rag_chunks table not found: {e}")
-                result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
+                self._log_query_error(ACTION_SEARCH_REGULATION, str(e))
+                apply_error(result, "검색 인덱스(rag_chunks)가 준비되지 않았습니다.")
             else:
-                logger.error(f"[RegulationQuery] Database error: {e}")
-                result["error"] = f"데이터베이스 오류: {e}"
+                self._log_query_error(ACTION_SEARCH_REGULATION, str(e))
+                apply_error(result, f"데이터베이스 오류: {e}")
 
         return result
+
+    def _get_regulation_by_category_once(
+        self, conn: psycopg.Connection, category: str, limit: int
+    ) -> list[dict[str, Any]] | None:
+        if not self._rag_chunks_table_available(conn):
+            return None
+
+        keywords = self.regulation_categories.get(category, [])
+        if not keywords:
+            raise ValueError(f"알 수 없는 카테고리: {category}")
+
+        keyword_conditions = " OR ".join([f"content ILIKE %s" for _ in keywords])
+        query = f"""
+            SELECT 
+                id,
+                title,
+                content,
+                source_table,
+                meta->>'document_type' as document_type,
+                meta->>'category' as category,
+                meta->>'regulation_code' as regulation_code
+            FROM rag_chunks 
+            WHERE source_table = 'kbo_regulations'
+            AND ({keyword_conditions})
+            ORDER BY title
+            LIMIT %s;
+        """
+
+        search_patterns = [f"%{keyword}%" for keyword in keywords] + [limit]
+
+        with conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, search_patterns)
+            return cursor.fetchall()
 
     def get_regulation_by_category(
         self, category: str, limit: int = 10
@@ -343,88 +428,60 @@ class RegulationQueryTool:
         Returns:
             카테고리별 규정 결과
         """
-        logger.info(f"[RegulationQuery] Getting regulations for category: {category}")
+        self._log_query_start(ACTION_GET_REGULATION_BY_CATEGORY, category)
 
-        result = {
-            "category": category,
-            "regulations": [],
-            "found": False,
-            "total_found": 0,
-            "error": None,
-        }
+        result = build_search_result(
+            category=category,
+            regulations=[],
+            total_found=0,
+        )
 
         try:
-            cursor = self.connection.cursor(row_factory=dict_row)
+            rows = run_with_fresh_connection_retry(
+                connection=self.connection,
+                operation=lambda conn: self._get_regulation_by_category_once(
+                    conn, category, limit
+                ),
+                logger=logger,
+                retry_warning_message=self._retry_warning_message(
+                    ACTION_GET_REGULATION_BY_CATEGORY
+                ),
+            )
 
-            cursor.execute("""
-                SELECT EXISTS(
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                      AND table_name = 'rag_chunks'
-                );
-                """)
-            row = cursor.fetchone()
-            if not (row and row[0]):
-                logger.warning("[RegulationQuery] rag_chunks table is not available")
-                result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
+            if rows is None:
+                self._log_dependency_missing(
+                    ACTION_GET_REGULATION_BY_CATEGORY,
+                    "rag_chunks",
+                )
+                apply_error(result, "검색 인덱스(rag_chunks)가 준비되지 않았습니다.")
                 return result
-
-            cursor = self.connection.cursor(row_factory=dict_row)
-
-            # 카테고리별 키워드 가져오기
-            keywords = self.regulation_categories.get(category, [])
-
-            if not keywords:
-                result["error"] = f"알 수 없는 카테고리: {category}"
-                return result
-
-            # 키워드 기반 검색
-            keyword_conditions = " OR ".join([f"content ILIKE %s" for _ in keywords])
-            query = f"""
-                SELECT 
-                    id,
-                    title,
-                    content,
-                    source_table,
-                    meta->>'document_type' as document_type,
-                    meta->>'category' as category,
-                    meta->>'regulation_code' as regulation_code
-                FROM rag_chunks 
-                WHERE source_table = 'kbo_regulations'
-                AND ({keyword_conditions})
-                ORDER BY title
-                LIMIT %s;
-            """
-
-            # 검색 패턴 준비
-            search_patterns = [f"%{keyword}%" for keyword in keywords] + [limit]
-
-            cursor.execute(query, search_patterns)
-            rows = cursor.fetchall()
 
             if rows:
-                result["regulations"] = [dict(row) for row in rows]
-                result["found"] = True
-                result["total_found"] = len(rows)
-                logger.info(
-                    f"[RegulationQuery] Found {len(rows)} regulations for category {category}"
+                apply_list_results(
+                    result,
+                    field="regulations",
+                    rows=rows,
+                    total_field="total_found",
+                    row_mapper=dict,
+                )
+                self._log_query_success(
+                    ACTION_GET_REGULATION_BY_CATEGORY,
+                    count=len(rows),
+                    detail=f"category={category}",
                 )
             else:
-                logger.warning(
-                    f"[RegulationQuery] No regulations found for category: {category}"
-                )
+                self._log_query_empty(ACTION_GET_REGULATION_BY_CATEGORY, category)
 
         except Exception as e:
             if isinstance(e, UndefinedTable):
-                logger.error(f"[RegulationQuery] rag_chunks table not found: {e}")
-                result["error"] = "검색 인덱스(rag_chunks)가 준비되지 않았습니다."
+                self._log_query_error(ACTION_GET_REGULATION_BY_CATEGORY, str(e))
+                apply_error(result, "검색 인덱스(rag_chunks)가 준비되지 않았습니다.")
+            elif isinstance(e, ValueError):
+                self._log_query_error(ACTION_GET_REGULATION_BY_CATEGORY, str(e))
+                apply_error(result, str(e))
             else:
-                logger.error(f"[RegulationQuery] Category search error: {e}")
-                result["error"] = f"카테고리 검색 오류: {e}"
-        finally:
-            if "cursor" in locals():
-                cursor.close()
+                self._log_query_error(ACTION_GET_REGULATION_BY_CATEGORY, str(e))
+                apply_error(result, f"카테고리 검색 오류: {e}")
 
         return result
 
@@ -438,7 +495,7 @@ class RegulationQueryTool:
         Returns:
             관련 규정 검색 결과
         """
-        logger.info(f"[RegulationQuery] Finding related regulations for topic: {topic}")
+        self._log_query_start(ACTION_FIND_RELATED_REGULATIONS, topic)
 
         # 주제에 따른 카테고리 매핑
         topic_to_category = {
@@ -466,28 +523,10 @@ class RegulationQueryTool:
             # 일반 검색
             return self.search_regulation(topic)
 
-    def validate_regulation_reference(self, regulation_code: str) -> Dict[str, Any]:
-        """
-        규정 조항 번호로 해당 규정이 존재하는지 확인합니다.
-
-        Args:
-            regulation_code: 규정 조항 번호 (예: "01-1", "02-3")
-
-        Returns:
-            규정 유효성 검증 결과
-        """
-        logger.info(f"[RegulationQuery] Validating regulation: {regulation_code}")
-
-        result = {
-            "regulation_code": regulation_code,
-            "exists": False,
-            "regulation": None,
-            "error": None,
-        }
-
-        try:
-            cursor = self.connection.cursor(row_factory=dict_row)
-
+    def _validate_regulation_reference_once(
+        self, conn: psycopg.Connection, regulation_code: str
+    ) -> dict[str, Any] | None:
+        with conn.cursor(row_factory=dict_row) as cursor:
             query = """
                 SELECT 
                     id,
@@ -503,21 +542,55 @@ class RegulationQueryTool:
 
             cursor.execute(query, (regulation_code,))
             row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def validate_regulation_reference(self, regulation_code: str) -> Dict[str, Any]:
+        """
+        규정 조항 번호로 해당 규정이 존재하는지 확인합니다.
+
+        Args:
+            regulation_code: 규정 조항 번호 (예: "01-1", "02-3")
+
+        Returns:
+            규정 유효성 검증 결과
+        """
+        self._log_query_start(ACTION_VALIDATE_REGULATION_REFERENCE, regulation_code)
+
+        result = {
+            "regulation_code": regulation_code,
+            "exists": False,
+            "regulation": None,
+            "error": None,
+        }
+
+        try:
+            row = run_with_fresh_connection_retry(
+                connection=self.connection,
+                operation=lambda conn: self._validate_regulation_reference_once(
+                    conn, regulation_code
+                ),
+                logger=logger,
+                retry_warning_message=self._retry_warning_message(
+                    ACTION_VALIDATE_REGULATION_REFERENCE
+                ),
+            )
 
             if row:
                 result["exists"] = True
-                result["regulation"] = dict(row)
-                logger.info(f"[RegulationQuery] Found regulation: {regulation_code}")
+                result["regulation"] = row
+                self._log_query_success(
+                    ACTION_VALIDATE_REGULATION_REFERENCE,
+                    count=1,
+                    detail=f"regulation_code={regulation_code}",
+                )
             else:
-                logger.warning(
-                    f"[RegulationQuery] Regulation not found: {regulation_code}"
+                self._log_query_empty(
+                    ACTION_VALIDATE_REGULATION_REFERENCE,
+                    regulation_code,
                 )
 
         except Exception as e:
-            logger.error(f"[RegulationQuery] Validation error: {e}")
-            result["error"] = f"검증 오류: {e}"
-        finally:
-            if "cursor" in locals():
-                cursor.close()
+            self._log_query_error(ACTION_VALIDATE_REGULATION_REFERENCE, str(e))
+            apply_error(result, f"검증 오류: {e}")
 
         return result

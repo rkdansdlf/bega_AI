@@ -10,6 +10,7 @@ NUMBER_SENTINELS = {"", None, "null", "None"}
 
 from app.core import kbo_metrics
 from app.core.entity_extractor import POS_ABBR_TO_NAME
+from app.tools.team_display import resolve_team_display_name
 
 _LEAGUE_CONTEXT = kbo_metrics.LeagueContext()
 
@@ -212,8 +213,16 @@ def _team_display_name(
     side: str,
 ) -> str:
     if side == "home":
-        return str(row.get("home_team_name") or row.get("home_team") or "홈팀")
-    return str(row.get("away_team_name") or row.get("away_team") or "원정팀")
+        return str(
+            row.get("home_team_name")
+            or resolve_team_display_name(row.get("home_team"))
+            or "홈팀"
+        )
+    return str(
+        row.get("away_team_name")
+        or resolve_team_display_name(row.get("away_team"))
+        or "원정팀"
+    )
 
 
 def _winning_team_name(
@@ -232,7 +241,7 @@ def _winning_team_name(
             return home_team
         if winning_team == str(row.get("away_team") or "").strip():
             return away_team
-        return winning_team
+        return str(resolve_team_display_name(winning_team))
 
     return home_team if home_score > away_score else away_team
 
