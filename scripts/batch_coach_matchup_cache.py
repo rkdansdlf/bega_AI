@@ -41,7 +41,7 @@ logging.basicConfig(
 )
 
 CACHE_SCHEMA_VERSION = "v5"
-PROMPT_VERSION = "v10_postseason_matchup_scope"
+PROMPT_VERSION = "v11_completed_review_tone"
 LOCAL_TOKEN_ENV_FILES = (".env.prod", ".env")
 LEAGUE_TYPE_TO_CODES = {
     "REGULAR": (0,),
@@ -92,6 +92,13 @@ DONE_WAIT_INTERVAL_SECONDS = 1.0
 TARGET_TIMEOUT_BUFFER_SECONDS = 15.0
 COACH_YEAR_MIN = 1982
 POSTSEASON_LEAGUE_TYPES = {"POST", "ANY"}
+PENDING_RECHECK_SECONDS = 120.0
+RETRYABLE_CACHE_ERROR_CODES = {
+    "empty_response",
+    "no_json_found",
+    "json_decode_error",
+    "oci_mapping_degraded",
+}
 LEAGUE_CODE_TO_STAGE = {
     0: "REGULAR",
     1: "PRE",
@@ -449,12 +456,13 @@ def _sort_targets(
 
 def _fetch_cache_state(
     cache_key: str,
-) -> Optional[tuple[str, Any, Optional[str]]]:
+) -> Optional[tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]]:
     try:
         with get_connection_pool().connection() as conn:
             row = conn.execute(
                 """
-                SELECT status, response_json, error_message
+                SELECT status, response_json, error_message, error_code, attempt_count,
+                       updated_at, lease_expires_at, last_heartbeat_at
                 FROM coach_analysis_cache
                 WHERE cache_key = %s
                 """,
@@ -465,21 +473,33 @@ def _fetch_cache_state(
         status = str(row[0] or "")
         response_json = row[1]
         error_message = row[2]
-        return status, response_json, error_message
+        error_code = row[3]
+        attempt_count = int(row[4] or 0)
+        return (
+            status,
+            response_json,
+            error_message,
+            error_code,
+            attempt_count,
+            row[5],
+            row[6],
+            row[7],
+        )
     except Exception:
         return None
 
 
 def _fetch_cache_rows(
     cache_keys: List[str],
-) -> Dict[str, tuple[str, Any, Optional[str]]]:
+) -> Dict[str, tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]]:
     if not cache_keys:
         return {}
 
     with get_connection_pool().connection() as conn:
         rows = conn.execute(
             """
-            SELECT cache_key, status, response_json, error_message
+            SELECT cache_key, status, response_json, error_message, error_code,
+                   attempt_count, updated_at, lease_expires_at, last_heartbeat_at
             FROM coach_analysis_cache
             WHERE cache_key = ANY(%s)
             """,
@@ -491,13 +511,18 @@ def _fetch_cache_rows(
             str(row[1] or ""),
             row[2],
             row[3],
+            row[4],
+            int(row[5] or 0),
+            row[6],
+            row[7],
+            row[8],
         )
         for row in rows
     }
 
 
 def _normalize_cache_state_label(
-    row: Optional[tuple[str, Any, Optional[str]]],
+    row: Optional[tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]],
 ) -> str:
     if row is None:
         return "MISSING"
@@ -536,22 +561,48 @@ def _extract_cached_meta(response_json: Any) -> Dict[str, Any]:
     if not isinstance(response_json, dict):
         return {}
 
-    meta = response_json.get("meta")
+    meta = response_json.get("_meta")
+    if not isinstance(meta, dict):
+        meta = response_json.get("meta")
     if isinstance(meta, dict):
         return dict(meta)
     return {}
 
 
+def _is_retryable_cache_error_code(code: Any) -> bool:
+    return str(code or "").strip().lower() in RETRYABLE_CACHE_ERROR_CODES
+
+
+def _is_retryable_failed_row(
+    *,
+    error_code: Any,
+    error_message: Any,
+    attempt_count: Any,
+) -> bool:
+    if _is_retryable_cache_error_code(error_code):
+        return int(attempt_count or 0) < 3
+    return _is_retryable_failure_reason(str(error_message or ""))
+
+
 def _build_cache_verification_result(
     target: MatchupTarget,
-    row: Optional[tuple[str, Any, Optional[str]]],
+    row: Optional[tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]],
 ) -> Dict[str, Any]:
     result = _build_result_shell(target)
     if row is None:
         result["reason"] = "missing_cache_row"
         return result
 
-    cache_state, response_json, error_message = row
+    (
+        cache_state,
+        response_json,
+        error_message,
+        error_code,
+        attempt_count,
+        _updated_at,
+        _lease_expires_at,
+        _last_heartbeat_at,
+    ) = row
     normalized_state = str(cache_state or "").strip().upper()
 
     if normalized_state == "COMPLETED":
@@ -565,18 +616,46 @@ def _build_cache_verification_result(
 
     if normalized_state in {"PENDING", "PENDING_WAIT"}:
         result["status"] = "in_progress"
-        result["reason"] = normalized_state.lower()
-        result["meta"] = {"cache_state": normalized_state, "in_progress": True}
+        result["reason"] = "pending_wait"
+        result["meta"] = {
+            "cache_state": normalized_state,
+            "in_progress": True,
+            "pending_wait": True,
+            "recheck_after_seconds": PENDING_RECHECK_SECONDS,
+            "attempt_count": int(attempt_count or 0),
+        }
         return result
 
     if normalized_state == "FAILED_LOCKED":
         result["reason"] = "failed_locked"
-        result["meta"] = {"cache_state": normalized_state}
+        result["meta"] = {
+            "cache_state": normalized_state,
+            "failure_class": "locked_terminal",
+            "cache_error_code": error_code,
+            "attempt_count": int(attempt_count or 0),
+        }
         return result
 
     if normalized_state == "FAILED":
-        result["reason"] = str(error_message or "failed_cache_row")
-        result["meta"] = {"cache_state": normalized_state}
+        retryable_failure = _is_retryable_failed_row(
+            error_code=error_code,
+            error_message=error_message,
+            attempt_count=attempt_count,
+        )
+        result["reason"] = str(
+            error_code
+            or error_message
+            or ("retryable_failed" if retryable_failure else "failed_cache_row")
+        )
+        result["meta"] = {
+            "cache_state": normalized_state,
+            "cache_error_code": error_code,
+            "attempt_count": int(attempt_count or 0),
+            "retryable_failure": retryable_failure,
+            "failure_class": (
+                "retryable_failed" if retryable_failure else "locked_terminal"
+            ),
+        }
         return result
 
     result["reason"] = (
@@ -627,9 +706,9 @@ async def _wait_cache_completion(
         if row is None:
             return None, None, None, False
 
-        status, response_json, error_message = row
+        status, response_json, error_message, error_code, *_ = row
         if status in {"COMPLETED", "FAILED"}:
-            return status, response_json, error_message, True
+            return status, response_json, str(error_code or error_message or ""), True
         if status in {"PENDING", "PENDING_WAIT", "FAILED_LOCKED"}:
             # continue polling
             pass
@@ -1112,6 +1191,10 @@ def summarize_matchup_results(
     evidence_fallback_count = 0
     deterministic_auto_count = 0
     focus_section_missing_count = 0
+    retryable_failed_count = 0
+    locked_terminal_count = 0
+    pending_wait_count = 0
+    pending_wait_recovered_count = 0
     seen_cache_keys: set[str] = set()
     target_teams: set[str] = set()
     failure_reasons: list[str] = []
@@ -1124,6 +1207,7 @@ def summarize_matchup_results(
             critical_over_limit_count += 1
 
         meta = item.get("meta") or {}
+        failure_class = str(meta.get("failure_class") or "")
         generation_mode = str(meta.get("generation_mode") or "")
         if generation_mode == "llm_manual":
             llm_manual_count += 1
@@ -1134,6 +1218,14 @@ def summarize_matchup_results(
 
         if bool(meta.get("focus_section_missing")):
             focus_section_missing_count += 1
+        if item.get("status") == "in_progress":
+            pending_wait_count += 1
+        if failure_class == "retryable_failed":
+            retryable_failed_count += 1
+        if failure_class == "locked_terminal":
+            locked_terminal_count += 1
+        if meta.get("recovered_from") == "pending_wait":
+            pending_wait_recovered_count += 1
 
         cache_key = item.get("cache_key")
         if isinstance(cache_key, str):
@@ -1230,6 +1322,18 @@ def summarize_matchup_results(
             if status_counts["generated"]
             else 0.0
         ),
+        "pending_wait_count": pending_wait_count,
+        "pending_wait_recovered_count": pending_wait_recovered_count,
+        "pending_wait_recovery_rate": (
+            round(pending_wait_recovered_count / pending_wait_count, 4)
+            if pending_wait_count
+            else 0.0
+        ),
+        "retryable_failed_count": retryable_failed_count,
+        "retryable_failed_rate": (
+            round(retryable_failed_count / total, 4) if total else 0.0
+        ),
+        "locked_terminal_count": locked_terminal_count,
         "critical_over_limit_rate": (
             round(critical_over_limit_count / status_counts["generated"], 4)
             if status_counts["generated"]
@@ -1240,6 +1344,38 @@ def summarize_matchup_results(
         "failure_reasons": sorted(set(failure_reasons)),
         "failure_category_counts": failure_category_counts,
     }
+
+
+def _is_retryable_failure_result(item: Dict[str, Any]) -> bool:
+    if item.get("status") != "failed":
+        return False
+    meta = item.get("meta") or {}
+    if bool(meta.get("retryable_failure")):
+        return True
+    if str(meta.get("failure_class") or "") == "retryable_failed":
+        return True
+    return _is_retryable_failure_reason(str(item.get("reason") or ""))
+
+
+def _normalize_recovered_pending_result(item: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(item)
+    meta = dict(normalized.get("meta") or {})
+    if normalized.get("status") == "in_progress":
+        normalized["meta"] = meta
+        return normalized
+
+    meta["recovered_from"] = "pending_wait"
+    normalized["meta"] = meta
+    if normalized.get("status") == "skipped" and normalized.get("reason") == "cache_hit":
+        generation_mode = str(meta.get("generation_mode") or "")
+        normalized["status"] = "generated"
+        if generation_mode == "llm_manual":
+            normalized["reason"] = "generated"
+        elif generation_mode == "evidence_fallback":
+            normalized["reason"] = "generated_fallback"
+        else:
+            normalized["reason"] = "generated_recovered_pending"
+    return normalized
 
 
 async def async_main(args: argparse.Namespace) -> int:
@@ -1325,6 +1461,72 @@ async def async_main(args: argparse.Namespace) -> int:
                 )
                 if idx < len(targets):
                     await asyncio.sleep(max(0.0, args.delay_seconds))
+            result_by_cache_key = {
+                str(item.get("cache_key") or ""): item for item in results
+            }
+            recovery_passes = max(0, int(args.recovery_pass_count))
+            for recovery_pass in range(1, recovery_passes + 1):
+                pending_targets = [
+                    target
+                    for target in targets
+                    if (result_by_cache_key.get(target.cache_key) or {}).get("status")
+                    == "in_progress"
+                ]
+                retryable_failed_targets = [
+                    target
+                    for target in targets
+                    if _is_retryable_failure_result(
+                        result_by_cache_key.get(target.cache_key) or {}
+                    )
+                ]
+                if not pending_targets and not retryable_failed_targets:
+                    break
+
+                if pending_targets:
+                    await asyncio.sleep(max(0.0, args.pending_recheck_seconds))
+                    rechecked_results = collect_cache_verification_results(
+                        pending_targets
+                    )
+                    for item in rechecked_results:
+                        recovered_item = _normalize_recovered_pending_result(item)
+                        recovered_meta = dict(recovered_item.get("meta") or {})
+                        recovered_meta["recovery_pass"] = recovery_pass
+                        recovered_item["meta"] = recovered_meta
+                        result_by_cache_key[recovered_item["cache_key"]] = recovered_item
+                        print(
+                            f"[recovery:{recovery_pass}] {recovered_item['cache_key']} "
+                            f"-> {recovered_item['status']} ({recovered_item.get('reason')})"
+                        )
+
+                replay_targets = [
+                    target
+                    for target in retryable_failed_targets
+                    if _is_retryable_failure_result(
+                        result_by_cache_key.get(target.cache_key) or {}
+                    )
+                ]
+                for target in replay_targets:
+                    item = await call_analyze_with_retries(
+                        client=client,
+                        base_url=args.base_url,
+                        target=target,
+                        timeout_seconds=per_target_timeout,
+                        max_attempts=args.max_attempts,
+                        retry_backoff_seconds=args.retry_backoff_seconds,
+                    )
+                    item_meta = dict(item.get("meta") or {})
+                    item_meta["recovery_pass"] = recovery_pass
+                    item["meta"] = item_meta
+                    result_by_cache_key[target.cache_key] = item
+                    print(
+                        f"[retry:{recovery_pass}] {target.season_year} {target.home_team_id} vs {target.away_team_id} "
+                        f"-> {item['status']} ({item.get('reason')})"
+                    )
+                    await asyncio.sleep(max(0.0, args.delay_seconds))
+            results = [
+                result_by_cache_key.get(target.cache_key, _build_result_shell(target))
+                for target in targets
+            ]
 
     summary = summarize_matchup_results(
         results=results,
@@ -1353,6 +1555,8 @@ async def async_main(args: argparse.Namespace) -> int:
             "allow_postseason_stage_mismatch": args.allow_postseason_stage_mismatch,
             "retry_failures_from_report": args.retry_failures_from_report,
             "verify_cache_only": args.verify_cache_only,
+            "recovery_pass_count": args.recovery_pass_count,
+            "pending_recheck_seconds": args.pending_recheck_seconds,
         },
         "details": results,
         "run_started_at": start_time.isoformat(),
@@ -1486,6 +1690,18 @@ def parse_args() -> argparse.Namespace:
         "--allow-postseason-stage-mismatch",
         action="store_true",
         help="Bypass postseason season_id/stage integrity preflight guard.",
+    )
+    parser.add_argument(
+        "--recovery-pass-count",
+        type=int,
+        default=1,
+        help="How many recovery passes to run after the initial slice.",
+    )
+    parser.add_argument(
+        "--pending-recheck-seconds",
+        type=float,
+        default=PENDING_RECHECK_SECONDS,
+        help="Wait seconds before rechecking pending_wait targets.",
     )
     return parser.parse_args()
 

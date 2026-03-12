@@ -28,6 +28,7 @@ from .query_transformer import QueryTransformer, multi_query_retrieval
 from .context_formatter import ContextFormatter
 from ..agents.baseball_agent import BaseballStatisticsAgent
 from .wpa_calculator import WPACalculator
+from .retry_utils import llm_retry
 
 logger = logging.getLogger(__name__)
 
@@ -649,8 +650,9 @@ class RAGPipeline:
                 f"모든 LLM 제공자가 실패했습니다. 주 제공자({provider}): {e}"
             )
 
+    @llm_retry
     async def _generate_with_openrouter(
-        self, messages: Sequence[Dict[str, str]], max_retries: int = 3
+        self, messages: Sequence[Dict[str, str]]
     ) -> str:
         if not self.settings.openrouter_api_key:
             raise RuntimeError(
@@ -669,78 +671,35 @@ class RAGPipeline:
             "max_tokens": self.settings.max_output_tokens,
         }
 
-        last_exception = None
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
 
-        for attempt in range(max_retries):
-            try:
-                # Exponential backoff with jitter
-                if attempt > 0:
-                    base_delay = 2 ** (attempt - 1)  # 1, 2, 4 seconds
-                    jitter = random.uniform(
-                        0.1, 0.5
-                    )  # Add randomness to prevent thundering herd
-                    delay = base_delay + jitter
-                    logger.info(
-                        f"[OpenRouter] Retry attempt {attempt + 1}/{max_retries}, waiting {delay:.2f}s"
-                    )
-                    await asyncio.sleep(delay)
+        response.raise_for_status()
+        data = response.json()
 
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(
-                        f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                        json=payload,
-                        headers=headers,
-                    )
+        choices = data.get("choices", [])
+        if not choices:
+            error_msg = f"OpenRouter 응답에 choices가 없습니다. Keys: {list(data.keys())}"
+            logger.error(f"[OpenRouter] {error_msg}")
+            raise RuntimeError(error_msg)
 
-                response.raise_for_status()
-                data = response.json()
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
 
-                # 디버깅을 위한 응답 로깅 (첫 번째 시도에서만)
-                if attempt == 0:
-                    logger.info(f"[OpenRouter] Response status: {response.status_code}")
-                    logger.debug(
-                        f"[OpenRouter] Response data keys: {list(data.keys())}"
-                    )
+        if not content:
+            error_msg = f"OpenRouter 응답이 비어 있습니다. Message keys: {list(message.keys())}"
+            logger.error(f"[OpenRouter] {error_msg}")
+            raise RuntimeError(error_msg)
 
-                choices = data.get("choices", [])
-                if not choices:
-                    error_msg = f"OpenRouter 응답에 choices가 없습니다. Keys: {list(data.keys())}"
-                    logger.error(f"[OpenRouter] {error_msg}")
-                    raise RuntimeError(error_msg)
+        return content
 
-                message = choices[0].get("message", {})
-                content = message.get("content", "")
-
-                if not content:
-                    error_msg = f"OpenRouter 응답이 비어 있습니다. Message keys: {list(message.keys())}"
-                    logger.error(f"[OpenRouter] {error_msg}")
-                    raise RuntimeError(error_msg)
-
-                logger.info(
-                    f"[OpenRouter] Successfully generated response on attempt {attempt + 1}"
-                )
-                return content
-
-            except (httpx.RequestError, httpx.HTTPStatusError, RuntimeError) as e:
-                last_exception = e
-                logger.warning(
-                    f"[OpenRouter] Attempt {attempt + 1}/{max_retries} failed: {e}"
-                )
-
-                # If it's the last attempt, don't wait
-                if attempt == max_retries - 1:
-                    break
-
-        # All retries failed
-        logger.error(
-            f"[OpenRouter] All {max_retries} attempts failed. Last error: {last_exception}"
-        )
-        raise RuntimeError(
-            f"OpenRouter API 호출이 {max_retries}번 모두 실패했습니다. 마지막 오류: {last_exception}"
-        )
-
+    @llm_retry
     async def _generate_with_gemini(
-        self, messages: Sequence[Dict[str, str]], max_retries: int = 3
+        self, messages: Sequence[Dict[str, str]]
     ) -> str:
         """Google Gemini API를 사용하여 응답을 생성합니다."""
         if not self.settings.gemini_api_key:
@@ -785,68 +744,27 @@ class RAGPipeline:
         url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
         params = {"key": self.settings.gemini_api_key}
 
-        last_exception = None
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, json=payload, params=params)
 
-        for attempt in range(max_retries):
-            try:
-                # Exponential backoff with jitter
-                if attempt > 0:
-                    base_delay = 2 ** (attempt - 1)
-                    jitter = random.uniform(0.1, 0.5)
-                    delay = base_delay + jitter
-                    logger.info(
-                        f"[Gemini] Retry attempt {attempt + 1}/{max_retries}, waiting {delay:.2f}s"
-                    )
-                    await asyncio.sleep(delay)
+        response.raise_for_status()
+        data = response.json()
 
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(url, json=payload, params=params)
+        candidates = data.get("candidates", [])
+        if not candidates:
+            error_msg = f"Gemini 응답에 candidates가 없습니다. Keys: {list(data.keys())}"
+            logger.error(f"[Gemini] {error_msg}")
+            raise RuntimeError(error_msg)
 
-                response.raise_for_status()
-                data = response.json()
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
 
-                # 디버깅을 위한 응답 로깅 (첫 번째 시도에서만)
-                if attempt == 0:
-                    logger.info(f"[Gemini] Response status: {response.status_code}")
-                    logger.debug(f"[Gemini] Response data keys: {list(data.keys())}")
+        if not parts or not parts[0].get("text"):
+            error_msg = f"Gemini 응답이 비어 있습니다. Content: {content}"
+            logger.warning(f"[Gemini] {error_msg}")
+            return "Gemini가 응답을 생성하지 못했습니다. (빈 응답)"
 
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    error_msg = f"Gemini 응답에 candidates가 없습니다. Keys: {list(data.keys())}"
-                    logger.error(f"[Gemini] {error_msg}")
-                    raise RuntimeError(error_msg)
-
-                content = candidates[0].get("content", {})
-                parts = content.get("parts", [])
-
-                if not parts or not parts[0].get("text"):
-                    error_msg = f"Gemini 응답이 비어 있습니다. Content: {content}"
-                    logger.warning(f"[Gemini] {error_msg}")
-                    # 에러를 던지는 대신 구체적인 메시지 반환 또는 다음 단계로 유도
-                    return "Gemini가 응답을 생성하지 못했습니다. (빈 응답)"
-
-                result = parts[0]["text"]
-                logger.info(
-                    f"[Gemini] Successfully generated response on attempt {attempt + 1}"
-                )
-                return result
-
-            except (httpx.RequestError, httpx.HTTPStatusError, RuntimeError) as e:
-                last_exception = e
-                logger.warning(
-                    f"[Gemini] Attempt {attempt + 1}/{max_retries} failed: {e}"
-                )
-
-                if attempt == max_retries - 1:
-                    break
-
-        # All retries failed
-        logger.error(
-            f"[Gemini] All {max_retries} attempts failed. Last error: {last_exception}"
-        )
-        raise RuntimeError(
-            f"Gemini API 호출이 {max_retries}번 모두 실패했습니다. 마지막 오류: {last_exception}"
-        )
+        return parts[0]["text"]
 
     def _is_statistical_query(self, query: str, entity_filter) -> bool:
         """

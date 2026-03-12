@@ -10,6 +10,8 @@ from scripts.batch_coach_matchup_cache import (
     _build_analyze_payload,
     _build_cache_verification_result,
     _is_retryable_failure_reason,
+    _is_retryable_failure_result,
+    _normalize_recovered_pending_result,
     _postseason_mismatch_error_message,
     _sort_targets,
     _build_terminal_cache_result_if_available,
@@ -170,9 +172,9 @@ def test_build_analyze_payload_includes_postseason_stage_context() -> None:
 
 def test_normalize_cache_state_label_maps_missing_and_pending_rows() -> None:
     assert _normalize_cache_state_label(None) == "MISSING"
-    assert _normalize_cache_state_label(("completed", {}, None)) == "COMPLETED"
-    assert _normalize_cache_state_label(("failed", None, "x")) == "FAILED"
-    assert _normalize_cache_state_label(("failed_locked", None, "x")) == "PENDING"
+    assert _normalize_cache_state_label(("completed", {}, None, None, 0, None, None, None)) == "COMPLETED"
+    assert _normalize_cache_state_label(("failed", None, "x", None, 0, None, None, None)) == "FAILED"
+    assert _normalize_cache_state_label(("failed_locked", None, "x", None, 0, None, None, None)) == "PENDING"
 
 
 def test_filter_targets_by_cache_state_returns_only_unresolved(monkeypatch) -> None:
@@ -238,8 +240,8 @@ def test_filter_targets_by_cache_state_returns_only_unresolved(monkeypatch) -> N
         batch_module,
         "_fetch_cache_rows",
         lambda keys: {
-            "completed": ("COMPLETED", {"meta": {}}, None),
-            "pending": ("FAILED_LOCKED", None, None),
+            "completed": ("COMPLETED", {"_meta": {}}, None, None, 1, None, None, None),
+            "pending": ("FAILED_LOCKED", None, None, None, 1, None, None, None),
         },
     )
 
@@ -309,11 +311,16 @@ def test_build_cache_verification_result_marks_completed_row_as_cache_hit() -> N
         (
             "COMPLETED",
             {
-                "meta": {
+                "_meta": {
                     "validation_status": "fallback",
                     "generation_mode": "evidence_fallback",
                 }
             },
+            None,
+            None,
+            1,
+            None,
+            None,
             None,
         ),
     )
@@ -322,6 +329,69 @@ def test_build_cache_verification_result_marks_completed_row_as_cache_hit() -> N
     assert result["reason"] == "cache_hit"
     assert result["meta"]["cached"] is True
     assert result["meta"]["generation_mode"] == "evidence_fallback"
+
+
+def test_build_cache_verification_result_marks_retryable_failed_row() -> None:
+    target = MatchupTarget(
+        cache_key="retryable-failed",
+        game_id="20250310SSHH1",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    result = _build_cache_verification_result(
+        target,
+        ("FAILED", None, "empty_response", "empty_response", 1, None, None, None),
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "empty_response"
+    assert result["meta"]["retryable_failure"] is True
+    assert result["meta"]["failure_class"] == "retryable_failed"
+
+
+def test_build_cache_verification_result_marks_pending_wait_row() -> None:
+    target = MatchupTarget(
+        cache_key="pending-row",
+        game_id="20250310SSHH2",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    result = _build_cache_verification_result(
+        target,
+        ("PENDING", None, None, None, 2, None, None, None),
+    )
+
+    assert result["status"] == "in_progress"
+    assert result["reason"] == "pending_wait"
+    assert result["meta"]["recheck_after_seconds"] == batch_module.PENDING_RECHECK_SECONDS
 
 
 def test_collect_cache_verification_results_marks_missing_rows_failed(
@@ -384,7 +454,12 @@ def test_build_terminal_cache_result_if_available_uses_completed_row(
         "_fetch_cache_state",
         lambda cache_key: (
             "COMPLETED",
-            {"meta": {"validation_status": "success"}},
+            {"_meta": {"validation_status": "success"}},
+            None,
+            None,
+            1,
+            None,
+            None,
             None,
         ),
     )
@@ -394,6 +469,48 @@ def test_build_terminal_cache_result_if_available_uses_completed_row(
     assert result is not None
     assert result["status"] == "skipped"
     assert result["reason"] == "cache_hit"
+
+
+def test_is_retryable_failure_result_uses_failure_class() -> None:
+    assert (
+        _is_retryable_failure_result(
+            {
+                "status": "failed",
+                "reason": "empty_response",
+                "meta": {"failure_class": "retryable_failed"},
+            }
+        )
+        is True
+    )
+
+
+def test_normalize_recovered_pending_result_promotes_cache_hit() -> None:
+    item = _normalize_recovered_pending_result(
+        {
+            "status": "skipped",
+            "reason": "cache_hit",
+            "meta": {"generation_mode": "evidence_fallback"},
+            "cache_key": "k",
+        }
+    )
+
+    assert item["status"] == "generated"
+    assert item["reason"] == "generated_fallback"
+    assert item["meta"]["recovered_from"] == "pending_wait"
+
+
+def test_normalize_recovered_pending_result_keeps_in_progress_unrecovered() -> None:
+    item = _normalize_recovered_pending_result(
+        {
+            "status": "in_progress",
+            "reason": "pending_wait",
+            "meta": {},
+            "cache_key": "k2",
+        }
+    )
+
+    assert item["status"] == "in_progress"
+    assert "recovered_from" not in item["meta"]
 
 
 def test_call_analyze_with_deadline_returns_failed_on_wall_timeout(
