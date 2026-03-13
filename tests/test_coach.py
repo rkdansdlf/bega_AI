@@ -160,6 +160,41 @@ class TestCoachValidator:
         assert response is None
         assert error is not None
 
+    def test_parse_response_sanitizes_control_chars(self):
+        """제어문자가 섞인 응답도 정리 후 파싱"""
+        from app.core.coach_validator import parse_coach_response_with_meta
+
+        raw = (
+            "{\x0b"
+            '"headline": "제어문자 테스트", '
+            '"sentiment": "neutral", '
+            '"key_metrics": [], '
+            '"analysis": {"strengths": [], "weaknesses": [], "risks": []}, '
+            '"coach_note": "정상 파싱"}'
+        )
+
+        response, error, meta = parse_coach_response_with_meta(raw)
+        assert error is None
+        assert response is not None
+        assert response.headline == "제어문자 테스트"
+        assert meta["normalization_applied"] is True
+        assert "sanitize_control_chars" in meta["normalization_reasons"]
+
+    def test_extract_json_from_prose_then_object(self):
+        """설명 문구 뒤 첫 JSON 객체를 salvage"""
+        from app.core.coach_validator import extract_json_from_response
+
+        raw = (
+            "분석 요약입니다. 아래 JSON만 사용하세요.\n"
+            '{"headline": "살베지 테스트", "sentiment": "neutral", "key_metrics": []}\n'
+            "추가 설명은 무시합니다."
+        )
+
+        result = extract_json_from_response(raw)
+        assert result is not None
+        data = json.loads(result)
+        assert data["headline"] == "살베지 테스트"
+
     def test_parse_missing_headline_is_auto_recovered(self):
         """headline 누락 시 자동 복구 후 파싱 성공"""
         from app.core.coach_validator import parse_coach_response_with_meta

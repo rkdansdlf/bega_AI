@@ -211,11 +211,26 @@ async def lifespan(app):
                 status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
                 response_json jsonb,                 -- Completed analysis result
                 error_message text,                  -- Failure reason
+                error_code varchar(64),
+                attempt_count int not null default 0,
+                lease_owner varchar(80),
+                lease_expires_at timestamptz,
+                last_heartbeat_at timestamptz,
                 created_at timestamptz default now(),
                 updated_at timestamptz default now()
             );
             ALTER TABLE coach_analysis_cache
             ALTER COLUMN prompt_version TYPE varchar(32);
+            ALTER TABLE coach_analysis_cache
+            ADD COLUMN IF NOT EXISTS error_code varchar(64);
+            ALTER TABLE coach_analysis_cache
+            ADD COLUMN IF NOT EXISTS attempt_count int NOT NULL DEFAULT 0;
+            ALTER TABLE coach_analysis_cache
+            ADD COLUMN IF NOT EXISTS lease_owner varchar(80);
+            ALTER TABLE coach_analysis_cache
+            ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
+            ALTER TABLE coach_analysis_cache
+            ADD COLUMN IF NOT EXISTS last_heartbeat_at timestamptz;
             CREATE INDEX IF NOT EXISTS idx_coach_cache_created_at ON coach_analysis_cache (created_at);
             CREATE INDEX IF NOT EXISTS idx_coach_cache_team_year ON coach_analysis_cache (team_id, year);
             """)

@@ -57,12 +57,27 @@ create table if not exists coach_analysis_cache (
   status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
   response_json jsonb,                 -- Completed analysis result
   error_message text,                  -- Failure reason
+  error_code varchar(64),
+  attempt_count int not null default 0,
+  lease_owner varchar(80),
+  lease_expires_at timestamptz,
+  last_heartbeat_at timestamptz,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
 
 alter table coach_analysis_cache
   alter column prompt_version type varchar(32);
+alter table coach_analysis_cache
+  add column if not exists error_code varchar(64);
+alter table coach_analysis_cache
+  add column if not exists attempt_count int not null default 0;
+alter table coach_analysis_cache
+  add column if not exists lease_owner varchar(80);
+alter table coach_analysis_cache
+  add column if not exists lease_expires_at timestamptz;
+alter table coach_analysis_cache
+  add column if not exists last_heartbeat_at timestamptz;
 
 -- Index for expiration and lookup
 create index if not exists idx_coach_cache_created_at on coach_analysis_cache (created_at);

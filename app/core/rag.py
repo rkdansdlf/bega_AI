@@ -28,6 +28,8 @@ from .query_transformer import QueryTransformer, multi_query_retrieval
 from .context_formatter import ContextFormatter
 from ..agents.baseball_agent import BaseballStatisticsAgent
 from .wpa_calculator import WPACalculator
+from .retry_utils import llm_retry
+from .exceptions import DBRetrievalError
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +417,33 @@ def _history_context_block(history: Optional[List[Dict[str, str]]]) -> str:
     return "### 이전 대화 맥락\n" + "\n".join(lines)
 
 
+def _build_db_unavailable_context(query: str, entity_filter: Any, year: int) -> str:
+    """DB 연결 불가 시 LLM 일반지식 모드에 전달할 컨텍스트를 생성합니다."""
+    parts = [
+        "### [시스템 안내]",
+        "현재 KBO 통계 데이터베이스에 일시적으로 접속하지 못하고 있습니다.",
+        "아래 질문에 대해 데이터베이스 조회 없이 LLM의 일반 야구 지식을 바탕으로 답변해주세요.",
+        "",
+        "**반드시 지켜야 할 사항:**",
+        "- 답변 시작 부분에 다음 문구를 포함하세요:",
+        "  '⚠️ 현재 KBO 통계 DB에 일시적으로 접속할 수 없어 정확한 수치를 확인하지 못했습니다. "
+        "아래 내용은 일반 야구 지식 기반의 참고 답변입니다.'",
+        "- 구체적인 수치(타율, ERA, 홈런수 등)를 단정적으로 제시하지 마세요.",
+        "- 불확실한 정보는 '대략', '통상적으로' 등의 표현을 사용하세요.",
+        "",
+        "### 사용자 질문 분석",
+    ]
+    if entity_filter.season_year:
+        parts.append(f"- 요청 연도: {entity_filter.season_year}년")
+    if entity_filter.player_name:
+        parts.append(f"- 선수명: {entity_filter.player_name}")
+    if entity_filter.team_id:
+        parts.append(f"- 팀: {entity_filter.team_id}")
+    if entity_filter.stat_type:
+        parts.append(f"- 통계 항목: {entity_filter.stat_type}")
+    return "\n".join(parts)
+
+
 class RAGPipeline:
     """
     검색(Retrieval)과 생성(Generation)을 결합하여 답변을 생성하는 RAG 파이프라인을 관리합니다.
@@ -433,6 +462,7 @@ class RAGPipeline:
         # 야구 통계 전용 에이전트 초기화
         self.baseball_agent = BaseballStatisticsAgent(connection, self._generate)
         self.wpa_calculator = WPACalculator()
+        self._retrieval_error: Optional[str] = None  # set if DB was unreachable during retrieval
 
     async def _process_and_enrich_docs(
         self, docs: List[Dict[str, Any]], year: int
@@ -563,14 +593,19 @@ class RAGPipeline:
         )
         from fastapi.concurrency import run_in_threadpool
 
-        docs = await run_in_threadpool(
-            similarity_search,
-            self.connection,
-            embedding,
-            limit=limit,
-            filters=filters,
-            keyword=keyword,
-        )
+        try:
+            docs = await run_in_threadpool(
+                similarity_search,
+                self.connection,
+                embedding,
+                limit=limit,
+                filters=filters,
+                keyword=keyword,
+            )
+        except DBRetrievalError as exc:
+            logger.error("[RAG] DB retrieval error in retrieve(): %s", exc)
+            self._retrieval_error = str(exc.cause)
+            return []
         return docs
 
     async def retrieve_with_multi_query(
@@ -649,8 +684,9 @@ class RAGPipeline:
                 f"모든 LLM 제공자가 실패했습니다. 주 제공자({provider}): {e}"
             )
 
+    @llm_retry
     async def _generate_with_openrouter(
-        self, messages: Sequence[Dict[str, str]], max_retries: int = 3
+        self, messages: Sequence[Dict[str, str]]
     ) -> str:
         if not self.settings.openrouter_api_key:
             raise RuntimeError(
@@ -669,78 +705,35 @@ class RAGPipeline:
             "max_tokens": self.settings.max_output_tokens,
         }
 
-        last_exception = None
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
 
-        for attempt in range(max_retries):
-            try:
-                # Exponential backoff with jitter
-                if attempt > 0:
-                    base_delay = 2 ** (attempt - 1)  # 1, 2, 4 seconds
-                    jitter = random.uniform(
-                        0.1, 0.5
-                    )  # Add randomness to prevent thundering herd
-                    delay = base_delay + jitter
-                    logger.info(
-                        f"[OpenRouter] Retry attempt {attempt + 1}/{max_retries}, waiting {delay:.2f}s"
-                    )
-                    await asyncio.sleep(delay)
+        response.raise_for_status()
+        data = response.json()
 
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(
-                        f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                        json=payload,
-                        headers=headers,
-                    )
+        choices = data.get("choices", [])
+        if not choices:
+            error_msg = f"OpenRouter 응답에 choices가 없습니다. Keys: {list(data.keys())}"
+            logger.error(f"[OpenRouter] {error_msg}")
+            raise RuntimeError(error_msg)
 
-                response.raise_for_status()
-                data = response.json()
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
 
-                # 디버깅을 위한 응답 로깅 (첫 번째 시도에서만)
-                if attempt == 0:
-                    logger.info(f"[OpenRouter] Response status: {response.status_code}")
-                    logger.debug(
-                        f"[OpenRouter] Response data keys: {list(data.keys())}"
-                    )
+        if not content:
+            error_msg = f"OpenRouter 응답이 비어 있습니다. Message keys: {list(message.keys())}"
+            logger.error(f"[OpenRouter] {error_msg}")
+            raise RuntimeError(error_msg)
 
-                choices = data.get("choices", [])
-                if not choices:
-                    error_msg = f"OpenRouter 응답에 choices가 없습니다. Keys: {list(data.keys())}"
-                    logger.error(f"[OpenRouter] {error_msg}")
-                    raise RuntimeError(error_msg)
+        return content
 
-                message = choices[0].get("message", {})
-                content = message.get("content", "")
-
-                if not content:
-                    error_msg = f"OpenRouter 응답이 비어 있습니다. Message keys: {list(message.keys())}"
-                    logger.error(f"[OpenRouter] {error_msg}")
-                    raise RuntimeError(error_msg)
-
-                logger.info(
-                    f"[OpenRouter] Successfully generated response on attempt {attempt + 1}"
-                )
-                return content
-
-            except (httpx.RequestError, httpx.HTTPStatusError, RuntimeError) as e:
-                last_exception = e
-                logger.warning(
-                    f"[OpenRouter] Attempt {attempt + 1}/{max_retries} failed: {e}"
-                )
-
-                # If it's the last attempt, don't wait
-                if attempt == max_retries - 1:
-                    break
-
-        # All retries failed
-        logger.error(
-            f"[OpenRouter] All {max_retries} attempts failed. Last error: {last_exception}"
-        )
-        raise RuntimeError(
-            f"OpenRouter API 호출이 {max_retries}번 모두 실패했습니다. 마지막 오류: {last_exception}"
-        )
-
+    @llm_retry
     async def _generate_with_gemini(
-        self, messages: Sequence[Dict[str, str]], max_retries: int = 3
+        self, messages: Sequence[Dict[str, str]]
     ) -> str:
         """Google Gemini API를 사용하여 응답을 생성합니다."""
         if not self.settings.gemini_api_key:
@@ -785,68 +778,27 @@ class RAGPipeline:
         url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
         params = {"key": self.settings.gemini_api_key}
 
-        last_exception = None
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, json=payload, params=params)
 
-        for attempt in range(max_retries):
-            try:
-                # Exponential backoff with jitter
-                if attempt > 0:
-                    base_delay = 2 ** (attempt - 1)
-                    jitter = random.uniform(0.1, 0.5)
-                    delay = base_delay + jitter
-                    logger.info(
-                        f"[Gemini] Retry attempt {attempt + 1}/{max_retries}, waiting {delay:.2f}s"
-                    )
-                    await asyncio.sleep(delay)
+        response.raise_for_status()
+        data = response.json()
 
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(url, json=payload, params=params)
+        candidates = data.get("candidates", [])
+        if not candidates:
+            error_msg = f"Gemini 응답에 candidates가 없습니다. Keys: {list(data.keys())}"
+            logger.error(f"[Gemini] {error_msg}")
+            raise RuntimeError(error_msg)
 
-                response.raise_for_status()
-                data = response.json()
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
 
-                # 디버깅을 위한 응답 로깅 (첫 번째 시도에서만)
-                if attempt == 0:
-                    logger.info(f"[Gemini] Response status: {response.status_code}")
-                    logger.debug(f"[Gemini] Response data keys: {list(data.keys())}")
+        if not parts or not parts[0].get("text"):
+            error_msg = f"Gemini 응답이 비어 있습니다. Content: {content}"
+            logger.warning(f"[Gemini] {error_msg}")
+            return "Gemini가 응답을 생성하지 못했습니다. (빈 응답)"
 
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    error_msg = f"Gemini 응답에 candidates가 없습니다. Keys: {list(data.keys())}"
-                    logger.error(f"[Gemini] {error_msg}")
-                    raise RuntimeError(error_msg)
-
-                content = candidates[0].get("content", {})
-                parts = content.get("parts", [])
-
-                if not parts or not parts[0].get("text"):
-                    error_msg = f"Gemini 응답이 비어 있습니다. Content: {content}"
-                    logger.warning(f"[Gemini] {error_msg}")
-                    # 에러를 던지는 대신 구체적인 메시지 반환 또는 다음 단계로 유도
-                    return "Gemini가 응답을 생성하지 못했습니다. (빈 응답)"
-
-                result = parts[0]["text"]
-                logger.info(
-                    f"[Gemini] Successfully generated response on attempt {attempt + 1}"
-                )
-                return result
-
-            except (httpx.RequestError, httpx.HTTPStatusError, RuntimeError) as e:
-                last_exception = e
-                logger.warning(
-                    f"[Gemini] Attempt {attempt + 1}/{max_retries} failed: {e}"
-                )
-
-                if attempt == max_retries - 1:
-                    break
-
-        # All retries failed
-        logger.error(
-            f"[Gemini] All {max_retries} attempts failed. Last error: {last_exception}"
-        )
-        raise RuntimeError(
-            f"Gemini API 호출이 {max_retries}번 모두 실패했습니다. 마지막 오류: {last_exception}"
-        )
+        return parts[0]["text"]
 
     def _is_statistical_query(self, query: str, entity_filter) -> bool:
         """
@@ -1366,6 +1318,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
     ) -> Dict[str, Any]:
         # 1. Enhanced Entity Extraction and Search Strategy
         logger.info(f"[RAG] Processing query: {query}")
+        self._retrieval_error = None  # 요청마다 플래그 초기화
 
         # Extract entities and enhance search strategy
         search_strategy = enhance_search_strategy(query)
@@ -1515,6 +1468,37 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         logger.info(f"[RAG] Final retrieval result: {len(docs)} documents")
 
+        # --- DB 연결 장애 폴백 ---
+        if self._retrieval_error is not None:
+            logger.warning(
+                "[RAG] DB was unavailable during retrieval, using LLM knowledge fallback. cause=%s",
+                self._retrieval_error,
+            )
+            db_down_context = _build_db_unavailable_context(query, entity_filter, year)
+            history_block = _history_context_block(history)
+            if history_block:
+                db_down_context = history_block + "\n\n" + db_down_context
+            prompt = FOLLOWUP_PROMPT.format(question=query, context=db_down_context)
+            db_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            db_messages.extend(_history_for_messages(history))
+            db_messages.append({"role": "user", "content": prompt})
+            answer = await self._generate(db_messages)
+            return {
+                "answer": answer,
+                "citations": [],
+                "intent": intent,
+                "retrieved": [],
+                "strategy": "llm_knowledge_db_unavailable",
+                "entity_filter": {
+                    "season_year": entity_filter.season_year,
+                    "team_id": entity_filter.team_id,
+                    "player_name": entity_filter.player_name,
+                    "stat_type": entity_filter.stat_type,
+                    "position_type": entity_filter.position_type,
+                },
+            }
+        # --- DB 연결 장애 폴백 끝 ---
+
         # 2. 데이터 처리 및 보강
         processed_data = await self._process_and_enrich_docs(docs, year)
 
@@ -1532,8 +1516,16 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             processed_data, intent, query, entity_filter, year
         )
 
-        # 원본 데이터도 포함
-        formatted_context = formatted_context + "\n\n" + raw_context
+        # Zero-hit 오버라이드: 모든 폴백 후에도 문서가 없으면 풍부한 가이드 컨텍스트 사용
+        if not docs:
+            logger.info("[RAG] Zero documents after all fallbacks — using zero-hit guidance context")
+            formatted_context = self.context_formatter.format_zero_hit_guidance(
+                query, entity_filter, year, final_filters
+            )
+
+        # 원본 데이터도 포함 (docs가 있을 때만)
+        if docs:
+            formatted_context = formatted_context + "\n\n" + raw_context
 
         # 대화 기록 컨텍스트 추가
         history_block = _history_context_block(history)
