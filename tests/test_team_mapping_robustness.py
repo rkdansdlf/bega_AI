@@ -82,6 +82,45 @@ class TestTeamMappingRobustness:
         assert "SSG" in params[1]  # [date, variants, variants]
         assert "SK" in params[1]
 
+    def test_game_tool_box_score_uses_inning_column(self, game_tool):
+        mock_cursor = game_tool.connection.cursor.return_value
+        mock_cursor.execute.reset_mock()
+        mock_cursor.fetchall.side_effect = [
+            [
+                {
+                    "game_id": "20250501SSLG0",
+                    "game_date": "2025-05-01",
+                    "home_team": "LG",
+                    "away_team": "SS",
+                    "home_score": 5,
+                    "away_score": 3,
+                    "game_status": "FINAL",
+                    "stadium": "잠실",
+                    "winning_team": "LG",
+                    "home_pitcher": "A",
+                    "away_pitcher": "B",
+                }
+            ],
+            [
+                {"inning": 1, "team_side": "home", "runs": 1},
+                {"inning": 1, "team_side": "away", "runs": 0},
+                {"inning": 2, "team_side": "home", "runs": 0},
+                {"inning": 2, "team_side": "away", "runs": 2},
+            ],
+            [
+                {"team_code": "LG", "total_hits": 8, "total_rbi": 5},
+                {"team_code": "SS", "total_hits": 6, "total_rbi": 3},
+            ],
+        ]
+
+        result = game_tool.get_game_box_score(date="2025-05-01")
+
+        inning_query = mock_cursor.execute.call_args_list[1][0][0]
+        assert "SELECT inning, team_side, runs" in inning_query
+        assert "inning_number" not in inning_query
+        assert result["games"][0]["box_score"]["home_1"] == 1
+        assert result["games"][0]["box_score"]["away_2"] == 2
+
     def test_db_tool_leaderboard_query_params(self, monkeypatch, mock_db_connection):
         monkeypatch.setenv("TEAM_CODE_READ_MODE", "canonical_only")
         monkeypatch.setenv("TEAM_CODE_CANONICAL_WINDOW_START", "2021")
@@ -96,8 +135,8 @@ class TestTeamMappingRobustness:
         call_args = mock_cursor.execute.call_args
         query, params = call_args[0]
 
-        # Verify IN/ANY clause is used (implementation detail: ANY(%s))
-        assert "psb.team_code = ANY(%s)" in query
+        # Verify ANY clause is used regardless of the selected SQL alias.
+        assert "team_code = ANY(%s)" in query
 
         # Verify params contain variants
         # Params order: [year, year, [variants], min_pa, limit]
@@ -203,6 +242,210 @@ class TestTeamMappingRobustness:
         assert result["error"] == "unsupported_team_for_regular_analysis"
         assert result["reason"] == "unsupported_team_for_regular_analysis"
 
+    def test_db_tool_mapping_retry_recovers_with_fresh_connection(
+        self, monkeypatch, mock_db_connection
+    ):
+        rows = [
+            {
+                "team_id": "HT",
+                "team_name": "해태 타이거즈",
+                "franchise_id": 1,
+                "founded_year": 1982,
+                "is_active": False,
+                "current_code": "KIA",
+            }
+        ]
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _fake_fetch(self, connection):
+            if connection is mock_db_connection:
+                raise RuntimeError("primary oci unavailable")
+            return rows
+
+        monkeypatch.setattr(
+            DatabaseQueryTool,
+            "_fetch_team_mapping_rows",
+            _fake_fetch,
+        )
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+
+        tool = DatabaseQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "oci_retry_recovered"
+        assert tool.get_team_code("HT", 2024) == "KIA"
+
+    def test_game_tool_mapping_retry_recovers_with_fresh_connection(
+        self, monkeypatch, mock_db_connection
+    ):
+        rows = [
+            {
+                "team_id": "HT",
+                "team_name": "해태 타이거즈",
+                "franchise_id": 1,
+                "founded_year": 1982,
+                "is_active": False,
+                "current_code": "KIA",
+            }
+        ]
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _fake_fetch(self, connection):
+            if connection is mock_db_connection:
+                raise RuntimeError("primary oci unavailable")
+            return rows
+
+        monkeypatch.setattr(
+            GameQueryTool,
+            "_fetch_team_mapping_rows",
+            _fake_fetch,
+        )
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+
+        tool = GameQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "oci_retry_recovered"
+        assert tool.get_team_name("HT") == "해태 타이거즈"
+
+    def test_game_tool_mapping_uses_last_good_snapshot_on_retry_failure(
+        self, monkeypatch, mock_db_connection
+    ):
+        snapshot_rows = [
+            {
+                "team_id": "SK",
+                "team_name": "SK 와이번스",
+                "franchise_id": 2,
+                "founded_year": 2000,
+                "is_active": False,
+                "current_code": "SSG",
+            }
+        ]
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _always_fail(self, _connection):
+            raise RuntimeError("oci closed")
+
+        monkeypatch.setattr(GameQueryTool, "_fetch_team_mapping_rows", _always_fail)
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr(
+            "app.tools.game_query.load_team_mapping_snapshot",
+            lambda: snapshot_rows,
+        )
+
+        tool = GameQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "last_good_snapshot"
+        assert tool.get_team_code("SK", 2024) == "SSG"
+
+    def test_db_tool_mapping_uses_last_good_snapshot_on_retry_failure(
+        self, monkeypatch, mock_db_connection
+    ):
+        snapshot_rows = [
+            {
+                "team_id": "SK",
+                "team_name": "SK 와이번스",
+                "franchise_id": 2,
+                "founded_year": 2000,
+                "is_active": False,
+                "current_code": "SSG",
+            }
+        ]
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _always_fail(self, _connection):
+            raise RuntimeError("oci closed")
+
+        monkeypatch.setattr(DatabaseQueryTool, "_fetch_team_mapping_rows", _always_fail)
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr(
+            "app.tools.database_query.load_team_mapping_snapshot",
+            lambda: snapshot_rows,
+        )
+
+        tool = DatabaseQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "last_good_snapshot"
+        assert tool.get_team_name("SK") == "SK 와이번스"
+
+    def test_db_tool_mapping_falls_back_to_defaults_without_snapshot(
+        self, monkeypatch, mock_db_connection
+    ):
+        retry_conn = MagicMock()
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    def __enter__(self_inner):
+                        return retry_conn
+
+                    def __exit__(self_inner, exc_type, exc, tb):
+                        return False
+
+                return _Ctx()
+
+        def _always_fail(self, _connection):
+            raise RuntimeError("oci closed")
+
+        monkeypatch.setattr(DatabaseQueryTool, "_fetch_team_mapping_rows", _always_fail)
+        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr(
+            "app.tools.database_query.load_team_mapping_snapshot",
+            lambda: [],
+        )
+
+        tool = DatabaseQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_degraded is True
+        assert tool.mapping_dependency_reason == "defaults"
+        assert tool.get_team_code("KIA", 2024) == "KIA"
+
 
 def test_team_code_resolver_canonical_only(monkeypatch):
     monkeypatch.setenv("TEAM_CODE_READ_MODE", "canonical_only")
@@ -215,3 +458,35 @@ def test_team_code_resolver_canonical_only(monkeypatch):
     outside = resolver.variants("SSG", 2019)
     assert "SSG" in outside
     assert "SK" in outside
+
+
+def test_team_code_resolver_english_aliases():
+    resolver = TeamCodeResolver()
+    assert resolver.resolve_canonical("KT Wiz") == "KT"
+    assert resolver.resolve_canonical("LG Twins") == "LG"
+    assert resolver.resolve_canonical("Hanwha Eagles") == "HH"
+
+
+def test_team_code_resolver_display_name_aliases():
+    resolver = TeamCodeResolver()
+    assert resolver.display_name("kt wiz") == "KT 위즈"
+    assert resolver.display_name("LG Twins") == "LG 트윈스"
+    assert resolver.display_name("Hanwha Eagles") == "한화 이글스"
+
+
+def test_team_code_resolver_sync_preserves_korean_display_name():
+    resolver = TeamCodeResolver()
+
+    resolver.sync_from_team_rows(
+        [
+            {
+                "franchise_id": 1,
+                "team_id": "KT",
+                "team_name": "kt wiz",
+                "current_code": "KT",
+            }
+        ]
+    )
+
+    assert resolver.code_to_name["KT"] == "KT 위즈"
+    assert resolver.display_name("kt wiz") == "KT 위즈"

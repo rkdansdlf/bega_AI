@@ -6,7 +6,6 @@ import os
 OUTPUT_FILE = "AI/data/stress_test_queries.json"
 TOTAL_QUERIES = 1000
 HOT_RATIO = 0.1  # 100 hot queries (will be requested 70% of the time)
-LONG_TAIL_RATIO = 0.9  # 900 long tail queries
 
 # KBO Data Source
 TEAMS = ["KIA", "LG", "두산", "롯데", "삼성", "키움", "한화", "KT", "NC", "SSG"]
@@ -22,7 +21,6 @@ PLAYERS_HOT = [
     "김광현",
     "원태인",
 ]
-PLAYERS_TAIL = [f"선수{i}" for i in range(100)]  # Synthetic long tail players
 STATS = ["타율", "홈런", "타점", "ERA", "다승", "삼진", "OPS", "wRC+", "WAR"]
 YEARS = range(2015, 2026)
 RULES = [

@@ -1,6 +1,4 @@
-"""
-Coach 분석 캐시 키 생성/정규화 유틸.
-"""
+"""Coach 분석 캐시 키 생성/정규화 유틸."""
 
 from __future__ import annotations
 
@@ -66,6 +64,42 @@ def build_question_signature(question_override: Optional[str]) -> str:
     return f"q:{digest[:16]}"
 
 
+def _normalize_signature_part(value: Optional[str], *, fallback: str) -> str:
+    normalized = " ".join(str(value or "").split()).strip().lower()
+    if not normalized:
+        return fallback
+    digest = hashlib.sha256(normalized.encode()).hexdigest()
+    return f"{fallback}:{digest[:12]}"
+
+
+def build_starter_signature(
+    home_pitcher: Optional[str],
+    away_pitcher: Optional[str],
+) -> str:
+    return _normalize_signature_part(
+        f"{home_pitcher or ''}|{away_pitcher or ''}",
+        fallback="starter_pending",
+    )
+
+
+def build_lineup_signature(lineup_players: Optional[Sequence[str]]) -> str:
+    if not lineup_players:
+        return "lineup_pending"
+
+    normalized_players = sorted(
+        {
+            " ".join(str(player or "").split()).strip().lower()
+            for player in lineup_players
+            if str(player or "").strip()
+        }
+    )
+    if not normalized_players:
+        return "lineup_pending"
+
+    digest = hashlib.sha256("|".join(normalized_players).encode()).hexdigest()
+    return f"lineup:{digest[:12]}"
+
+
 def build_coach_cache_key(
     *,
     schema_version: str,
@@ -76,6 +110,13 @@ def build_coach_cache_key(
     game_type: str,
     focus: Optional[Sequence[str]],
     question_override: Optional[str],
+    game_id: Optional[str] = None,
+    league_type_code: Optional[int] = None,
+    stage_label: Optional[str] = None,
+    starter_signature: Optional[str] = None,
+    lineup_signature: Optional[str] = None,
+    request_mode: Optional[str] = None,
+    game_status_bucket: Optional[str] = None,
     question_signature_override: Optional[str] = None,
 ) -> tuple[str, Dict[str, Any]]:
     """
@@ -88,8 +129,18 @@ def build_coach_cache_key(
         "team_code_canonical": str(home_team_code).upper(),
         "away_team_code_canonical": str(away_team_code or "").upper(),
         "year": int(year),
+        "game_id": str(game_id or "").strip(),
         "game_type": str(game_type).upper().strip() or "UNKNOWN",
+        "league_type_code": (
+            int(league_type_code) if league_type_code is not None else None
+        ),
+        "stage_label": str(stage_label or "").upper().strip() or "UNKNOWN",
         "focus_signature": build_focus_signature(normalized_focus),
+        "starter_signature": str(starter_signature or "starter_pending"),
+        "lineup_signature": str(lineup_signature or "lineup_pending"),
+        "request_mode": str(request_mode or "manual_detail").lower().strip(),
+        "game_status_bucket": str(game_status_bucket or "").upper().strip()
+        or "UNKNOWN",
         "question_signature": (
             question_signature_override.strip().lower()
             if question_signature_override

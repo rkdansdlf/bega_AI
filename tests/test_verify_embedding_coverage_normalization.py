@@ -13,6 +13,14 @@ def test_normalize_actual_source_row_id_game_metadata_prefers_game_id() -> None:
     )
 
 
+def test_normalize_actual_source_row_id_game_flow_summary_prefers_game_id() -> None:
+    raw = "game_id=20250501LGHH0#part1"
+    assert (
+        normalize_actual_source_row_id(raw, "game_flow_summary")
+        == "game_id=20250501LGHH0"
+    )
+
+
 def test_normalize_actual_source_row_id_stadium_alias_and_part_suffix() -> None:
     raw = "stadium_id=CHANGWON#part1"
     assert normalize_actual_source_row_id(raw, "stadiums") == "stadium_id=NCPARK"

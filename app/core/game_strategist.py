@@ -3,7 +3,7 @@
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional
 from datetime import date, timedelta, datetime
 import psycopg
 from psycopg.rows import dict_row

@@ -1,17 +1,60 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional
-from app.config import get_settings
+import logging
+
+from ..config import get_settings
+from ..core.ratelimit import rate_limit_vision_dependency
+from ..deps import require_ai_internal_token
 import httpx
 import base64
 import json
 import google.generativeai as genai
 from PIL import Image
 import io
+import tempfile
 
 router = APIRouter(prefix="/vision", tags=["vision"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
+MAX_TICKET_IMAGE_BYTES = 5 * 1024 * 1024
+ALLOWED_TICKET_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+def _normalize_content_type(content_type: Optional[str]) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+async def _read_ticket_image_with_limit(
+    file: UploadFile,
+    max_bytes: int,
+    allowed_content_types: Optional[set[str]] = None,
+) -> tuple[bytes, str]:
+    content_type = _normalize_content_type(file.content_type)
+    if allowed_content_types is not None and content_type not in allowed_content_types:
+        raise HTTPException(
+            status_code=415, detail="지원되지 않는 이미지 파일 타입입니다."
+        )
+
+    with tempfile.SpooledTemporaryFile(max_size=max_bytes, mode="w+b") as spool:
+        total = 0
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=413, detail="이미지 파일 크기가 너무 큽니다."
+                )
+            spool.write(chunk)
+
+        if total == 0:
+            raise HTTPException(status_code=400, detail="빈 파일입니다.")
+
+        spool.seek(0)
+        return spool.read(), content_type or "application/octet-stream"
 
 
 class TicketInfo(BaseModel):
@@ -28,14 +71,27 @@ class TicketInfo(BaseModel):
     reservationNumber: Optional[str] = None
 
 
+class SeatViewClassification(BaseModel):
+    label: Optional[str] = None
+    confidence: Optional[float] = None
+    reason: Optional[str] = None
+
+
 @router.post("/ticket", response_model=TicketInfo)
-async def analyze_ticket_image(file: UploadFile = File(...)):
+async def analyze_ticket_image(
+    file: UploadFile = File(...),
+    _: None = Depends(rate_limit_vision_dependency),
+    __: None = Depends(require_ai_internal_token),
+):
     """
     Analyzes an uploaded ticket image using Gemini Vision (Native or OpenRouter) to extract details.
     """
     try:
-        # Read image content
-        contents = await file.read()
+        contents, content_type = await _read_ticket_image_with_limit(
+            file,
+            MAX_TICKET_IMAGE_BYTES,
+            allowed_content_types=ALLOWED_TICKET_IMAGE_TYPES,
+        )
 
         prompt = """
         Analyze this KBO(Korean Baseball Organization) ticket image and extract the following information in JSON format:
@@ -76,7 +132,6 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
         else:
             # OpenRouter Implementation
             base64_image = base64.b64encode(contents).decode("utf-8")
-            content_type = file.content_type or "image/jpeg"
 
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -120,13 +175,132 @@ async def analyze_ticket_image(file: UploadFile = File(...)):
         data = json.loads(response_text)
         return TicketInfo(**data)
 
+    except HTTPException as exc:
+        logger.warning(
+            "Ticket image request rejected: status=%s detail=%s",
+            exc.status_code,
+            exc.detail,
+        )
+        raise
     except httpx.HTTPStatusError as e:
-        print(f"OpenRouter API error: {e.response.text}")
+        logger.error("OpenRouter API error: %s", e.response.text)
         raise HTTPException(
             status_code=500, detail=f"OpenRouter API error: {e.response.status_code}"
         )
-    except Exception as e:
-        print(f"Error processing ticket image: {e}")
+    except Exception:
+        logger.exception("Error processing ticket image")
+        raise HTTPException(status_code=500, detail="Failed to analyze ticket image")
+
+
+@router.post("/seat-view-classify", response_model=SeatViewClassification)
+async def classify_seat_view_image(
+    file: UploadFile = File(...),
+    _: None = Depends(rate_limit_vision_dependency),
+    __: None = Depends(require_ai_internal_token),
+):
+    """Classify an uploaded baseball-related image for seat-view moderation."""
+    try:
+        contents, content_type = await _read_ticket_image_with_limit(
+            file,
+            MAX_TICKET_IMAGE_BYTES,
+            allowed_content_types=ALLOWED_TICKET_IMAGE_TYPES,
+        )
+
+        prompt = """
+        Analyze this uploaded image for a KBO baseball app.
+        Classify it into exactly one label:
+        - SEAT_VIEW: a real in-stadium field/seat perspective photo from the audience area
+        - TICKET: ticket, reservation, QR/barcode, receipt, or screenshot of ticket info
+        - OTHER: selfie, food, mascot, concourse, unrelated baseball photo, or any non-seat-view image
+        - INAPPROPRIATE: explicit, violent, hateful, unsafe, or clearly policy-violating content
+
+        Return JSON only in this shape:
+        {
+          "label": "SEAT_VIEW|TICKET|OTHER|INAPPROPRIATE",
+          "confidence": 0.0,
+          "reason": "short Korean sentence"
+        }
+
+        Rules:
+        - If the image is blurry, obstructed, or uncertain, prefer OTHER unless it is clearly a ticket.
+        - Only use SEAT_VIEW when the camera viewpoint is plausibly from a spectator seat looking toward the field or stands.
+        - confidence must be between 0 and 1.
+        """
+
+        if settings.llm_provider == "gemini":
+            if not settings.gemini_api_key:
+                raise HTTPException(
+                    status_code=500, detail="Gemini API Key not configured"
+                )
+
+            genai.configure(api_key=settings.gemini_api_key)
+            model = genai.GenerativeModel(settings.vision_model or "gemini-2.0-flash")
+
+            def _load_image(image_bytes: bytes):
+                with Image.open(io.BytesIO(image_bytes)) as pil_image:
+                    return pil_image.copy()
+
+            image = await run_in_threadpool(_load_image, contents)
+            response = await run_in_threadpool(model.generate_content, [prompt, image])
+            response_text = response.text.strip()
+        else:
+            base64_image = base64.b64encode(contents).decode("utf-8")
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.openrouter_api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://kbo-platform.com",
+                        "X-Title": "KBO Platform Seat View Classification",
+                    },
+                    json={
+                        "model": settings.vision_model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:{content_type};base64,{base64_image}"
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                        "max_tokens": 500,
+                    },
+                )
+
+                response.raise_for_status()
+                result = response.json()
+                response_text = result["choices"][0]["message"]["content"].strip()
+
+        if response_text.startswith("```json"):
+            response_text = response_text[7:-3]
+        elif response_text.startswith("```"):
+            response_text = response_text[3:-3]
+
+        data = json.loads(response_text)
+        return SeatViewClassification(**data)
+
+    except HTTPException as exc:
+        logger.warning(
+            "Seat-view classification request rejected: status=%s detail=%s",
+            exc.status_code,
+            exc.detail,
+        )
+        raise
+    except httpx.HTTPStatusError as e:
+        logger.error("OpenRouter API error: %s", e.response.text)
         raise HTTPException(
-            status_code=500, detail=f"Failed to analyze ticket image: {str(e)}"
+            status_code=500, detail=f"OpenRouter API error: {e.response.status_code}"
+        )
+    except Exception:
+        logger.exception("Error classifying seat-view image")
+        raise HTTPException(
+            status_code=500, detail="Failed to classify seat-view image"
         )

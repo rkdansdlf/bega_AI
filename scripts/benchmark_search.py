@@ -166,7 +166,9 @@ def main():
         print("❌ POSTGRES_DB_URL 환경변수가 설정되지 않았습니다.")
         return
 
-    def _search(connection: Any, embedding: Sequence[float], limit: int) -> List[Dict[str, Any]]:
+    def _search(
+        connection: Any, embedding: Sequence[float], limit: int
+    ) -> List[Dict[str, Any]]:
         return postgres_search(
             connection,
             embedding,

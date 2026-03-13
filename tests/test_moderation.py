@@ -14,6 +14,15 @@ from app.routers import moderation
 def client() -> TestClient:
     test_app = FastAPI()
     test_app.include_router(moderation.router)
+    test_app.dependency_overrides[moderation.require_ai_internal_token] = lambda: None
+    with TestClient(test_app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def secured_client() -> TestClient:
+    test_app = FastAPI()
+    test_app.include_router(moderation.router)
     with TestClient(test_app) as test_client:
         yield test_client
 
@@ -31,6 +40,47 @@ def _settings(**overrides):
     }
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def test_moderation_requires_internal_token(
+    secured_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "app.deps.get_settings",
+        lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
+    )
+    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+
+    response = secured_client.post(
+        "/moderation/safety-check",
+        json={"content": "오늘 경기 정말 재밌었어요!"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid internal API token"
+
+
+def test_moderation_accepts_internal_token(
+    secured_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "app.deps.get_settings",
+        lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
+    )
+    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.routers.moderation.get_settings", lambda: _settings())
+
+    response = secured_client.post(
+        "/moderation/safety-check",
+        json={"content": "오늘 경기 정말 재밌었어요!"},
+        headers={"X-Internal-Api-Key": "expected-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["action"] == "ALLOW"
+    assert body["decisionSource"] == "FALLBACK"
+    assert body["riskLevel"] == "LOW"
 
 
 def test_moderation_no_api_key_high_risk_blocks(

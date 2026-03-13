@@ -5,9 +5,8 @@ Query Transformation과 Multi-query Retrieval을 위한 모듈입니다.
 벡터 검색의 정확도를 높이는 기능을 제공합니다.
 """
 
-import asyncio
 import logging
-from typing import List, Dict, Any, Sequence, Optional
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)

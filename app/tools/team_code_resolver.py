@@ -63,34 +63,44 @@ class TeamCodeResolver:
             "KIA": "KIA",
             "기아": "KIA",
             "KIA 타이거즈": "KIA",
+            "KIA TIGERS": "KIA",
             "HT": "KIA",
             "해태": "KIA",
             "LG": "LG",
             "LG 트윈스": "LG",
+            "LG TWINS": "LG",
             "MBC": "LG",
             "SSG": "SSG",
             "SK": "SSG",
             "SSG 랜더스": "SSG",
+            "SSG LANDERS": "SSG",
             "NC": "NC",
             "NC 다이노스": "NC",
+            "NC DINOS": "NC",
             "두산": "DB",
             "두산 베어스": "DB",
+            "DOOSAN BEARS": "DB",
             "DB": "DB",
             "DO": "DB",
             "OB": "DB",
             "KT": "KT",
             "KT 위즈": "KT",
+            "KT WIZ": "KT",
             "롯데": "LT",
             "롯데 자이언츠": "LT",
+            "LOTTE GIANTS": "LT",
             "LT": "LT",
             "삼성": "SS",
             "삼성 라이온즈": "SS",
+            "SAMSUNG LIONS": "SS",
             "SS": "SS",
             "한화": "HH",
             "한화 이글스": "HH",
+            "HANWHA EAGLES": "HH",
             "HH": "HH",
             "키움": "KH",
             "키움 히어로즈": "KH",
+            "KIWOOM HEROES": "KH",
             "넥센": "KH",
             "KH": "KH",
             "KI": "KH",
@@ -152,6 +162,24 @@ class TeamCodeResolver:
     @staticmethod
     def _clean(team_input: str) -> str:
         return team_input.strip().upper()
+
+    @staticmethod
+    def _contains_hangul(value: str) -> bool:
+        return any("\uac00" <= char <= "\ud7a3" for char in value)
+
+    @classmethod
+    def _prefer_display_name(
+        cls, existing_name: str | None, candidate_name: str | None
+    ) -> str | None:
+        if not candidate_name:
+            return existing_name
+        if not existing_name:
+            return candidate_name
+        if cls._contains_hangul(existing_name) and not cls._contains_hangul(
+            candidate_name
+        ):
+            return existing_name
+        return candidate_name
 
     @staticmethod
     def _read_int_env(name: str, default: int) -> int:
@@ -251,7 +279,11 @@ class TeamCodeResolver:
         if not team_code:
             return team_code
         cleaned = self._clean(team_code)
-        return self.code_to_name.get(cleaned, team_code)
+        if cleaned in self.code_to_name:
+            return self.code_to_name[cleaned]
+        canonical = self.resolve_canonical(team_code)
+        canonical_cleaned = self._clean(canonical)
+        return self.code_to_name.get(canonical_cleaned, team_code)
 
     def sync_from_team_rows(self, rows: Iterable[Dict[str, Any]]) -> None:
         """Sync resolver mappings from teams + team_franchises rows."""
@@ -269,7 +301,12 @@ class TeamCodeResolver:
             if canonical not in CANONICAL_CODES:
                 canonical = self.resolve_canonical(preferred["team_id"])
 
-            modern_name = preferred["team_name"]
+            modern_name = (
+                self._prefer_display_name(
+                    self.code_to_name.get(canonical), preferred["team_name"]
+                )
+                or preferred["team_name"]
+            )
             variant_codes: List[str] = [canonical]
             for member in members:
                 team_id = str(member["team_id"]).upper()

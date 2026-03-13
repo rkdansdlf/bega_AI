@@ -1,11 +1,30 @@
 import asyncio
 from datetime import date, datetime
+import sys
+import types
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
 
+try:
+    import sse_starlette.sse  # noqa: F401
+except ModuleNotFoundError:
+    sse_starlette_module = types.ModuleType("sse_starlette")
+    sse_module = types.ModuleType("sse_starlette.sse")
+
+    class _DummyEventSourceResponse:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    sse_module.EventSourceResponse = _DummyEventSourceResponse
+    sse_starlette_module.sse = sse_module
+    sys.modules["sse_starlette"] = sse_starlette_module
+    sys.modules["sse_starlette.sse"] = sse_module
+
 from app.routers.coach import (
+    COACH_INTERNAL_ERROR_CODE,
     AnalyzeRequest,
     _is_valid_analysis_year,
     _resolve_target_year,
@@ -131,3 +150,20 @@ def test_analyze_team_preserves_http_exception_status(monkeypatch):
 
     assert exc.value.status_code == 400
     assert exc.value.detail == "invalid_season_year_for_analysis"
+
+
+def test_analyze_team_masks_internal_exception_with_fixed_error_code(monkeypatch):
+    payload = AnalyzeRequest(home_team_id="SSG", league_context={"season_year": 2024})
+    agent = MagicMock()
+    agent._convert_team_id_to_name.return_value = "SSG"
+
+    monkeypatch.setattr(
+        "app.routers.coach.get_connection_pool",
+        lambda: (_ for _ in ()).throw(RuntimeError("db internal details")),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(analyze_team(payload, agent=agent, _=None))
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail == COACH_INTERNAL_ERROR_CODE
