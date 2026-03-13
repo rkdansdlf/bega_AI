@@ -659,6 +659,106 @@ class ContextFormatter:
             lines.append(stripped)
         return "\n".join(lines)
 
+    def format_zero_hit_guidance(
+        self,
+        query: str,
+        entity_filter: Any,
+        year: int,
+        final_filters: Dict[str, Any],
+    ) -> str:
+        """모든 검색 폴백 후에도 문서가 없을 때 LLM에 전달할 가이드 컨텍스트를 생성합니다.
+
+        추출된 엔티티, 가능한 원인, 대안적 접근을 포함하여 LLM이
+        사용자에게 유용한 안내를 제공할 수 있도록 합니다.
+        """
+        parts = ["### [검색 결과 없음 — 가이드 컨텍스트]"]
+        parts.append(
+            "벡터 DB 검색을 포함한 모든 폴백 전략에서 관련 문서를 찾지 못했습니다."
+        )
+        parts.append("")
+
+        # 추출된 조건 요약
+        parts.append("**질문에서 추출된 검색 조건:**")
+        has_entity = False
+        if entity_filter.season_year:
+            parts.append(f"- 연도: {entity_filter.season_year}년")
+            has_entity = True
+        if entity_filter.player_name:
+            parts.append(f"- 선수명: '{entity_filter.player_name}'")
+            has_entity = True
+        if entity_filter.team_id:
+            parts.append(f"- 팀: {entity_filter.team_id}")
+            has_entity = True
+        if entity_filter.stat_type:
+            parts.append(f"- 통계 항목: {entity_filter.stat_type}")
+            has_entity = True
+        if entity_filter.position_type:
+            parts.append(f"- 포지션: {entity_filter.position_type}")
+            has_entity = True
+        if entity_filter.award_type:
+            parts.append(f"- 수상 유형: {entity_filter.award_type}")
+            has_entity = True
+        if entity_filter.game_date:
+            parts.append(f"- 경기 날짜: {entity_filter.game_date}")
+            has_entity = True
+        if not has_entity:
+            parts.append("- (특정 조건 없음 — 광범위한 질문)")
+
+        parts.append("")
+
+        # 가능한 원인
+        parts.append("**데이터를 찾지 못한 가능한 원인:**")
+        if entity_filter.player_name:
+            parts.append(
+                f"- '{entity_filter.player_name}' 선수명 오타 또는 다른 한자/로마자 표기"
+            )
+            parts.append(
+                f"- {year}년 최소 출전 기준 미달 (타자 100타석, 선발투수 70이닝, 불펜투수 30이닝)"
+            )
+            parts.append("- 해당 연도에 KBO 리그 소속이 아닌 선수 (외국 리그 또는 은퇴)")
+        if entity_filter.season_year and entity_filter.season_year < 2015:
+            parts.append(
+                f"- {entity_filter.season_year}년은 현재 DB 수록 범위(2015년~) 이전일 수 있음"
+            )
+        if entity_filter.season_year and entity_filter.season_year > 2025:
+            parts.append(
+                f"- {entity_filter.season_year}년 데이터는 아직 수집되지 않았을 수 있음"
+            )
+        if entity_filter.award_type:
+            parts.append(
+                f"- 해당 수상 유형({entity_filter.award_type})의 {year}년 기록 미수록"
+            )
+        if entity_filter.game_date:
+            parts.append(f"- {entity_filter.game_date} 경기가 없거나 우천 취소된 경기")
+        parts.append("- 질문의 키워드가 DB에 저장된 용어와 다를 수 있음")
+
+        parts.append("")
+
+        # 대안적 접근
+        parts.append("**대안적 접근 제안 (사용자에게 안내할 내용):**")
+        if entity_filter.player_name:
+            alt_year_prev = year - 1
+            alt_year_next = year + 1
+            parts.append(
+                f"- 선수명을 정확히 확인하거나 다른 연도({alt_year_prev}년, {alt_year_next}년)로 다시 질문"
+            )
+        if entity_filter.team_id:
+            parts.append(
+                "- 팀명 대신 선수 이름으로 검색하거나 연도 범위를 바꿔 질문"
+            )
+        if entity_filter.stat_type:
+            parts.append(
+                "- 통계 항목명을 바꾸거나 상위 순위(TOP 5, TOP 10)로 질문"
+            )
+        parts.append("- 연도를 빼고 '역대' 또는 '최근'으로 질문해보기")
+        parts.append("")
+        parts.append(
+            "위 가능한 원인과 대안 제안 중 적절한 내용을 사용자에게 친근한 말투로 안내해주세요. "
+            "추측성 수치는 절대 제시하지 마세요."
+        )
+
+        return "\n".join(parts)
+
     def _format_player_movement(
         self, processed_data: Dict[str, Any], query: str, entity_filter, year: int
     ) -> str:

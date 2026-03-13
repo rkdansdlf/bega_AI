@@ -600,6 +600,7 @@ async def _stream_response(
                 "style": style,
                 "cached": False,
                 "intent": intent,
+                "strategy": result.get("strategy"),   # RAG 경로 식별자 (rag_v3_enhanced, llm_knowledge_db_unavailable 등)
                 "planner_mode": result.get("planner_mode"),
                 "grounding_mode": result.get("grounding_mode"),
                 "source_tier": result.get("source_tier"),
