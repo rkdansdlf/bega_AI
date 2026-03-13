@@ -6,12 +6,20 @@
 """
 
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 import psycopg
 from psycopg.rows import dict_row
-from datetime import datetime
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
+from app.tools.team_display import resolve_team_display_name
+from app.tools.team_mapping_loader import (
+    fetch_team_mapping_rows,
+    load_team_mappings_with_retry,
+)
 from app.tools.team_resolution_metrics import get_team_resolution_metrics
+from app.tools.team_mapping_snapshot import (
+    load_team_mapping_snapshot,
+    update_team_mapping_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,53 +41,52 @@ class GameQueryTool:
         self.TEAM_CODE_TO_NAME = self.team_resolver.code_to_name
         self.NAME_TO_CODE = self.team_resolver.name_to_canonical
         self.TEAM_VARIANTS = self.team_resolver.team_variants
+        self.mapping_dependency_degraded = False
+        self.mapping_dependency_reason: str | None = None
 
         # DB에서 최신 매핑 로드
         self._load_team_mappings()
 
+    def _fetch_team_mapping_rows(
+        self, connection: psycopg.Connection
+    ) -> List[Dict[str, Any]]:
+        return fetch_team_mapping_rows(connection)
+
+    def _apply_team_mapping_rows(self, rows: List[Dict[str, Any]], source: str) -> None:
+        if not rows:
+            return
+
+        logger.info("[GameQuery] Syncing %d franchise entries from %s", len(rows), source)
+        self.team_resolver.sync_from_team_rows(rows)
+        update_team_mapping_snapshot(rows)
+        logger.info(
+            "[GameQuery] Game Team codes synchronized using %s.",
+            source,
+        )
+
     def _load_team_mappings(self):
         """OCI DB의 teams 테이블과 franchise_id를 활용하여 팀 매핑 정보를 동적으로 로드합니다."""
-        try:
-            cursor = self.connection.cursor(row_factory=dict_row)
-            query = """
-                SELECT
-                    t.team_id,
-                    t.team_name,
-                    t.franchise_id,
-                    t.founded_year,
-                    t.is_active,
-                    tf.current_code
-                FROM teams t
-                JOIN team_franchises tf ON tf.id = t.franchise_id
-                WHERE t.franchise_id IS NOT NULL
-                ORDER BY
-                    t.franchise_id,
-                    CASE WHEN t.team_id = tf.current_code THEN 0 ELSE 1 END,
-                    t.is_active DESC,
-                    t.founded_year DESC,
-                    t.team_id ASC;
-            """
-            cursor.execute(query)
-            rows = cursor.fetchall()
-
-            if rows:
-                logger.info(
-                    f"[GameQuery] Syncing {len(rows)} franchise entries from OCI"
-                )
-                self.team_resolver.sync_from_team_rows(rows)
-
-                logger.info(
-                    "[GameQuery] Game Team codes synchronized using OCI franchise IDs."
-                )
-
-            cursor.close()
-        except Exception as e:
-            logger.warning(
-                f"[GameQuery] Dynamic mapping failed from OCI: {e}. Using defaults."
-            )
+        result = load_team_mappings_with_retry(
+            connection=self.connection,
+            fetch_rows=self._fetch_team_mapping_rows,
+            apply_rows=self._apply_team_mapping_rows,
+            apply_snapshot_rows=self.team_resolver.sync_from_team_rows,
+            load_snapshot=load_team_mapping_snapshot,
+            logger=logger,
+            primary_source="OCI franchise IDs",
+            primary_failure_message="[GameQuery] Dynamic mapping failed from OCI: %s. Retrying with fresh connection.",
+            retry_source="OCI retry connection",
+            retry_failure_message="[GameQuery] Retry loading dynamic mapping from OCI failed: %s",
+            snapshot_warning_message="[GameQuery] Using last-good team mapping snapshot (%d rows).",
+            defaults_warning_message="[GameQuery] Dynamic mapping fallback is using defaults.",
+        )
+        self.mapping_dependency_degraded = result.degraded
+        self.mapping_dependency_reason = result.reason
 
     def get_team_name(self, team_code: str) -> str:
-        return self.team_resolver.display_name(team_code)
+        return str(
+            resolve_team_display_name(team_code, self.team_resolver.display_name)
+        )
 
     def get_team_code(self, team_input: str, season_year: int | None = None) -> str:
         return self.team_resolver.resolve_canonical(team_input, season_year)
@@ -246,10 +253,10 @@ class GameQueryTool:
 
                 # 1. 이닝별 점수 조회
                 inning_query = """
-                    SELECT inning_number, home_score, away_score 
-                    FROM game_inning_scores 
-                    WHERE game_id = %s 
-                    ORDER BY inning_number;
+                    SELECT inning, team_side, runs
+                    FROM game_inning_scores
+                    WHERE game_id = %s
+                    ORDER BY inning, team_side;
                 """
                 cursor.execute(inning_query, (game_id,))
                 innings = cursor.fetchall()
@@ -266,9 +273,13 @@ class GameQueryTool:
 
                 # 이닝 점수 매핑
                 for inning in innings:
-                    idx = inning["inning_number"]
-                    box_score[f"away_{idx}"] = inning["away_score"]
-                    box_score[f"home_{idx}"] = inning["home_score"]
+                    idx = inning["inning"]
+                    side = (inning.get("team_side") or "").strip().lower()
+                    runs = inning.get("runs") or 0
+                    if side == "away":
+                        box_score[f"away_{idx}"] = runs
+                    elif side == "home":
+                        box_score[f"home_{idx}"] = runs
 
                 game_dict["box_score"] = box_score
 
@@ -399,7 +410,14 @@ class GameQueryTool:
         return result
 
     def get_head_to_head(
-        self, team1: str, team2: str, year: int = None, limit: int = 10
+        self,
+        team1: str,
+        team2: str,
+        year: int = None,
+        limit: int = 10,
+        as_of_game_date: str | None = None,
+        exclude_game_id: str | None = None,
+        season_id: int | None = None,
     ) -> Dict[str, Any]:
         """
         두 팀 간의 직접 대결 기록을 조회합니다.
@@ -413,7 +431,15 @@ class GameQueryTool:
         Returns:
             팀 간 대결 기록
         """
-        logger.info(f"[GameQuery] Head to head: {team1} vs {team2}, Year: {year}")
+        logger.info(
+            "[GameQuery] Head to head: %s vs %s, Year: %s, season_id=%s, as_of=%s, exclude=%s",
+            team1,
+            team2,
+            year,
+            season_id,
+            as_of_game_date,
+            exclude_game_id,
+        )
 
         team1_normalized = self._normalize_team_name(team1, year)
         team2_normalized = self._normalize_team_name(team2, year)
@@ -452,6 +478,15 @@ class GameQueryTool:
             if year:
                 where_conditions.append("EXTRACT(YEAR FROM g.game_date) = %s")
                 query_params.append(year)
+            if season_id is not None:
+                where_conditions.append("g.season_id = %s")
+                query_params.append(season_id)
+            if as_of_game_date:
+                where_conditions.append("g.game_date < %s")
+                query_params.append(as_of_game_date)
+            if exclude_game_id:
+                where_conditions.append("g.game_id <> %s")
+                query_params.append(exclude_game_id)
 
             # 상세 경기 기록 조회
             games_query = f"""
@@ -1019,14 +1054,21 @@ class GameQueryTool:
 
             # 리그 타입 코드 매핑
             league_code_map = {"regular_season": 0, "korean_series": 5}
-            league_code = league_code_map.get(league_type, 0)
 
-            query = """
+            scoped_query = """
                 SELECT MAX(g.game_date) as last_game_date
                 FROM game g
                 LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
                 WHERE ks.season_year = %s
                   AND ks.league_type_code = %s
+                  AND (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
+                  AND g.game_status = 'COMPLETED';
+            """
+            all_games_query = """
+                SELECT MAX(g.game_date) as last_game_date
+                FROM game g
+                LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                WHERE ks.season_year = %s
                   AND (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
                   AND g.game_status = 'COMPLETED';
             """
@@ -1038,14 +1080,37 @@ class GameQueryTool:
                 team_variants,
                 self.team_resolver.query_mode,
             )
-            cursor.execute(query, (year, league_code, team_variants, team_variants))
-            row = cursor.fetchone()
+
+            row = None
+            resolved_scope = league_type
+            league_code = league_code_map.get(league_type)
+
+            if league_code is not None:
+                cursor.execute(
+                    scoped_query, (year, league_code, team_variants, team_variants)
+                )
+                row = cursor.fetchone()
+
+            if (not row or not row["last_game_date"]) and league_type != "all":
+                logger.info(
+                    "[GameQuery] No scoped last game for %s in %s (%s). Falling back to any completed game in season.",
+                    team_name,
+                    year,
+                    league_type,
+                )
+                cursor.execute(all_games_query, (year, team_variants, team_variants))
+                row = cursor.fetchone()
+                resolved_scope = "all"
 
             if row and row["last_game_date"]:
                 result["last_game_date"] = row["last_game_date"].strftime("%Y-%m-%d")
                 result["found"] = True
+                result["resolved_league_type"] = resolved_scope
                 logger.info(
-                    f"[GameQuery] Found last game for {team_name}: {result['last_game_date']}"
+                    "[GameQuery] Found last game for %s: %s (scope=%s)",
+                    team_name,
+                    result["last_game_date"],
+                    resolved_scope,
                 )
             else:
                 logger.warning(

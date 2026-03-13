@@ -212,3 +212,30 @@ def test_evaluate_reports_collects_focus_signatures():
     ]
     result = evaluate_reports(reports)
     assert result["metrics"]["observed_focus_signatures"] == ["recent_form+bullpen"]
+
+
+def test_evaluate_reports_generation_mix_failures():
+    reports = [
+        _report(
+            {
+                "cases": 10,
+                "success": 10,
+                "generated_success_count": 10,
+                "failed": 0,
+                "validator_fail_count": 0,
+                "cache_invalid_year_count": 0,
+                "legacy_residual_total": 0,
+                "warning_rate": 0.0,
+                "critical_over_limit_rate": 0.0,
+                "llm_manual_rate": 0.0,
+                "fallback_rate": 1.0,
+                "focus_section_missing_rate": 0.3,
+            }
+        )
+    ]
+
+    result = evaluate_reports(reports)
+
+    assert "llm_manual_rate_fail" in result["failure_codes"]
+    assert "fallback_rate_fail" in result["failure_codes"]
+    assert "focus_section_missing_rate_fail" in result["failure_codes"]

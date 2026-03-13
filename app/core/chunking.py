@@ -1,6 +1,6 @@
 """문장을 일정 길이로 나누는 텍스트 청킹 유틸리티."""
 
-from typing import Iterable, List
+from typing import List
 
 
 def smart_chunks(text: str, max_chars: int = 800, overlap: int = 100) -> List[str]:

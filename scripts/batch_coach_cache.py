@@ -29,6 +29,11 @@ from app.core.coach_validator import (
     parse_coach_response_with_meta,
     validate_coach_response,
 )
+from app.core.coach_grounding import (
+    CoachFactSheet,
+    collect_numeric_tokens,
+    validate_response_against_fact_sheet,
+)
 from app.core.prompts import COACH_PROMPT_V2
 from app.core.coach_cache_key import (
     build_coach_cache_key,
@@ -302,6 +307,45 @@ def format_batch_context(tool_results: Dict[str, Any], year: int) -> str:
     return "\n".join(lines)
 
 
+def collect_batch_allowed_entity_names(tool_results: Dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    team_summary = tool_results.get("team_summary", {})
+    advanced = tool_results.get("advanced_metrics", {})
+    team_name = str(
+        team_summary.get("team_name") or advanced.get("team_name") or ""
+    ).strip()
+    if team_name:
+        names.add(team_name)
+    for bucket in ("top_batters", "top_pitchers"):
+        for item in team_summary.get(bucket, [])[:8]:
+            player_name = str(item.get("player_name") or "").strip()
+            if player_name:
+                names.add(player_name)
+    return names
+
+
+def build_batch_fact_sheet(
+    context: str, tool_results: Dict[str, Any]
+) -> CoachFactSheet:
+    fact_lines = [
+        line.lstrip("- ").strip()
+        for line in context.splitlines()
+        if line.strip().startswith("-")
+    ]
+    numeric_tokens = collect_numeric_tokens(context)
+    return CoachFactSheet(
+        fact_lines=fact_lines,
+        caveat_lines=[],
+        allowed_entity_names=collect_batch_allowed_entity_names(tool_results),
+        allowed_numeric_tokens=numeric_tokens,
+        supported_fact_count=len(fact_lines),
+        starters_confirmed=True,
+        lineup_confirmed=True,
+        series_context_confirmed=True,
+        require_series_context=False,
+    )
+
+
 async def generate_and_cache_team(
     pool,
     team_id: str,
@@ -410,6 +454,7 @@ async def generate_and_cache_team(
         return result
 
     context = format_batch_context(tool_results, year)
+    fact_sheet = build_batch_fact_sheet(context, tool_results)
     question = (
         f"{team_id} {year}시즌 종합 분석"
         if not focus
@@ -456,28 +501,49 @@ async def generate_and_cache_team(
 
     with pool.connection() as conn:
         if parsed_response:
-            payload_json = json.dumps(parsed_response.model_dump(), ensure_ascii=False)
-            conn.execute(
-                """
-                UPDATE coach_analysis_cache
-                SET status = 'COMPLETED', response_json = %s, error_message = NULL, updated_at = now()
-                WHERE cache_key = %s
-                """,
-                (payload_json, cache_key),
+            parsed_payload = parsed_response.model_dump()
+            grounding_validation = validate_response_against_fact_sheet(
+                parsed_payload,
+                fact_sheet,
             )
-            conn.commit()
+            if grounding_validation.reasons:
+                error_msg = ",".join(grounding_validation.reasons)
+                conn.execute(
+                    """
+                    UPDATE coach_analysis_cache
+                    SET status = 'FAILED', error_message = %s, updated_at = now()
+                    WHERE cache_key = %s
+                    """,
+                    (error_msg, cache_key),
+                )
+                conn.commit()
+                result["reason"] = error_msg
+                result["failure_category"] = "grounding_validation_fail"
+                result["validator_hard_fail"] = True
+            else:
+                payload_json = json.dumps(parsed_payload, ensure_ascii=False)
+                conn.execute(
+                    """
+                    UPDATE coach_analysis_cache
+                    SET status = 'COMPLETED', response_json = %s, error_message = NULL, updated_at = now()
+                    WHERE cache_key = %s
+                    """,
+                    (payload_json, cache_key),
+                )
+                conn.commit()
 
-            warnings = validate_coach_response(parsed_response)
-            critical_count = sum(
-                1 for metric in parsed_response.key_metrics if metric.is_critical
-            )
+                warnings = validate_coach_response(parsed_response)
+                warnings.extend(grounding_validation.warnings)
+                critical_count = sum(
+                    1 for metric in parsed_response.key_metrics if metric.is_critical
+                )
 
-            result["status"] = "success"
-            result["headline"] = parsed_response.headline
-            result["json_parse_ok"] = True
-            result["warnings_count"] = len(warnings)
-            result["warnings"] = warnings
-            result["critical_over_limit"] = critical_count > 2
+                result["status"] = "success"
+                result["headline"] = parsed_response.headline
+                result["json_parse_ok"] = True
+                result["warnings_count"] = len(warnings)
+                result["warnings"] = warnings
+                result["critical_over_limit"] = critical_count > 2
         else:
             error_msg = parse_error or "JSON parsing failed"
             conn.execute(

@@ -1,4 +1,3 @@
-import pytest
 from app.core.entity_extractor import standardize_position, extract_position_code
 
 

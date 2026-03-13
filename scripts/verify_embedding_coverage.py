@@ -31,7 +31,7 @@ from scripts.ingest_from_kbo import (
     build_canonical_source_row_id,
     build_select_query,
     build_source_row_id,
-    get_primary_key_columns,
+    resolve_primary_key_columns,
 )
 
 SEASONAL_TABLES: List[str] = [
@@ -41,6 +41,7 @@ SEASONAL_TABLES: List[str] = [
     "player_season_batting",
     "player_season_pitching",
     "game",
+    "game_flow_summary",
     "game_metadata",
     "game_inning_scores",
     "game_lineups",
@@ -61,6 +62,7 @@ STATIC_TABLES: List[str] = [
 LEGACY_SOURCE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "team_history": ("team_code", "season"),
     "game": ("game_id",),
+    "game_flow_summary": ("game_id",),
     "game_inning_scores": ("game_id", "team_side", "inning"),
     "game_lineups": ("game_id", "team_side", "batting_order", "appearance_seq"),
     "game_batting_stats": ("game_id", "team_side", "appearance_seq"),
@@ -214,7 +216,7 @@ def _load_expected_ids(
     target: CoverageTarget,
 ) -> tuple[int, Dict[str, str]]:
     profile = TABLE_PROFILES.get(target.table, {})
-    pk_columns = get_primary_key_columns(source_conn, target.table)
+    pk_columns = resolve_primary_key_columns(source_conn, target.table, profile)
     pk_hint: Sequence[str] = profile.get("pk_hint", [])
     season_year = target.year if target.year != 0 else None
     query, params = build_select_query(
@@ -356,6 +358,16 @@ def _load_actual_ids(
     return int(dest_cur.fetchone()[0])
 
 
+def _status_for_counts(missing_count: int, extra_count: int) -> str:
+    if missing_count > 0 and extra_count > 0:
+        return "MISSING+EXTRA"
+    if missing_count > 0:
+        return "MISSING"
+    if extra_count > 0:
+        return "EXTRA"
+    return "OK"
+
+
 def verify_target(
     source_conn,
     dest_conn,
@@ -367,7 +379,7 @@ def verify_target(
         expected_count, legacy_aliases = _load_expected_ids(
             source_conn, dest_cur, target
         )
-        _load_actual_ids(dest_cur, target, legacy_aliases)
+        actual_count = _load_actual_ids(dest_cur, target, legacy_aliases)
 
         dest_cur.execute("""
             SELECT count(*)
@@ -376,6 +388,7 @@ def verify_target(
             """)
         present_count = int(dest_cur.fetchone()[0])
         missing_count = expected_count - present_count
+        extra_count = actual_count - present_count
 
         dest_cur.execute(
             """
@@ -390,24 +403,43 @@ def verify_target(
         )
         missing_samples = [row[0] for row in dest_cur.fetchall()]
 
+        dest_cur.execute(
+            """
+            SELECT a.id
+            FROM actual_ids a
+            LEFT JOIN expected_ids e ON e.id = a.id
+            WHERE e.id IS NULL
+            ORDER BY a.id
+            LIMIT %s
+            """,
+            (sample_limit,),
+        )
+        extra_samples = [row[0] for row in dest_cur.fetchall()]
+
     dest_conn.commit()
     return {
         "table": target.table,
         "year": target.year,
         "expected_count": expected_count,
+        "actual_count": actual_count,
         "present_count": present_count,
         "missing_count": missing_count,
         "missing_samples": missing_samples,
+        "extra_count": extra_count,
+        "extra_samples": extra_samples,
+        "status": _status_for_counts(missing_count, extra_count),
     }
 
 
 def print_summary(rows: List[Dict[str, Any]]) -> None:
-    print("table | year | expected_count | present_count | missing_count | status")
+    print(
+        "table | year | expected_count | actual_count | present_count | missing_count | extra_count | status"
+    )
     for row in rows:
-        status = "OK" if row["missing_count"] == 0 else "MISSING"
         print(
             f"{row['table']} | {row['year']} | {row['expected_count']} | "
-            f"{row['present_count']} | {row['missing_count']} | {status}"
+            f"{row['actual_count']} | {row['present_count']} | "
+            f"{row['missing_count']} | {row['extra_count']} | {row['status']}"
         )
 
 
@@ -420,9 +452,13 @@ def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
                 "table",
                 "year",
                 "expected_count",
+                "actual_count",
                 "present_count",
                 "missing_count",
                 "missing_samples",
+                "extra_count",
+                "extra_samples",
+                "status",
             ],
         )
         writer.writeheader()
@@ -432,9 +468,13 @@ def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
                     "table": row["table"],
                     "year": row["year"],
                     "expected_count": row["expected_count"],
+                    "actual_count": row["actual_count"],
                     "present_count": row["present_count"],
                     "missing_count": row["missing_count"],
                     "missing_samples": "|".join(row["missing_samples"]),
+                    "extra_count": row["extra_count"],
+                    "extra_samples": "|".join(row["extra_samples"]),
+                    "status": row["status"],
                 }
             )
 
@@ -485,15 +525,21 @@ def main() -> int:
         exit_code = 1
 
     missing_rows = [row for row in rows if row["missing_count"] > 0]
+    extra_rows = [row for row in rows if row["extra_count"] > 0]
     total_expected = sum(row["expected_count"] for row in rows)
+    total_actual = sum(row["actual_count"] for row in rows)
     total_present = sum(row["present_count"] for row in rows)
     total_missing = sum(row["missing_count"] for row in rows)
+    total_extra = sum(row["extra_count"] for row in rows)
     summary = {
         "targets": len(rows),
         "missing_targets": len(missing_rows),
+        "extra_targets": len(extra_rows),
         "total_expected_count": total_expected,
+        "total_actual_count": total_actual,
         "total_present_count": total_present,
         "total_missing_count": total_missing,
+        "total_extra_count": total_extra,
     }
     report["summary"] = summary
 
@@ -514,7 +560,7 @@ def main() -> int:
 
     if "fatal_error" in report:
         return 1
-    if missing_rows:
+    if missing_rows or extra_rows:
         return 1
     if exit_code != 0:
         return exit_code
