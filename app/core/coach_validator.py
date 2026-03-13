@@ -20,6 +20,7 @@ FALLBACK_HEADLINE = "AI 코치 분석 요약"
 MAX_ANALYSIS_TEXT_LENGTH = 180
 MAX_ANALYSIS_LIST_ITEMS = 4
 MAX_ANALYSIS_LIST_ITEM_LENGTH = 140
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def _normalize_short_text(value: Any, *, max_length: int) -> str:
@@ -270,13 +271,24 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
     if not raw_response:
         return None
 
-    text = raw_response.strip()
+    text = _CONTROL_CHAR_PATTERN.sub(" ", raw_response).strip()
 
     # Case 1: ```json 코드 블록
     json_block_pattern = r"```(?:json)?\s*([\s\S]*?)```"
     matches = re.findall(json_block_pattern, text)
     if matches:
         return matches[0].strip()
+
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, end_idx = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return text[idx : idx + end_idx]
 
     # Case 2: { ... } JSON 객체 직접 찾기
     # 가장 바깥쪽 중괄호 매칭
@@ -439,14 +451,19 @@ def parse_coach_response_with_meta(
         meta["error_code"] = classify_parse_error(error)
         return None, error, meta
 
-    try:
-        json_str = extract_json_from_response(raw_response)
+    sanitized_response = _CONTROL_CHAR_PATTERN.sub(" ", raw_response)
+    if sanitized_response != raw_response:
+        meta["normalization_applied"] = True
+        meta["normalization_reasons"].append("sanitize_control_chars")
 
-        if not json_str and raw_response.strip().startswith('"headline"'):
+    try:
+        json_str = extract_json_from_response(sanitized_response)
+
+        if not json_str and sanitized_response.strip().startswith('"headline"'):
             logger.warning(
                 "[CoachValidator] Missing braces detected, attempting to wrap with {}"
             )
-            temp_json = "{" + raw_response.strip()
+            temp_json = "{" + sanitized_response.strip()
             if not temp_json.endswith("}"):
                 temp_json += "}"
             try:
@@ -456,8 +473,8 @@ def parse_coach_response_with_meta(
                     meta["error_code"] = classify_parse_error(error)
                     return None, error, meta
                 normalized_data, reasons = normalize_coach_payload(data)
-                meta["normalization_reasons"] = reasons
-                meta["normalization_applied"] = len(reasons) > 0
+                meta["normalization_reasons"].extend(reasons)
+                meta["normalization_applied"] = bool(meta["normalization_reasons"])
                 return CoachResponse(**normalized_data), None, meta
             except Exception as e:
                 logger.warning(f"Fallback parsing failed: {e}")
@@ -481,8 +498,8 @@ def parse_coach_response_with_meta(
             return None, error, meta
 
         normalized_data, reasons = normalize_coach_payload(data)
-        meta["normalization_reasons"] = reasons
-        meta["normalization_applied"] = len(reasons) > 0
+        meta["normalization_reasons"].extend(reasons)
+        meta["normalization_applied"] = bool(meta["normalization_reasons"])
 
         try:
             return CoachResponse(**normalized_data), None, meta

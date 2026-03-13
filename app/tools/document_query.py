@@ -13,6 +13,17 @@ from psycopg.rows import dict_row
 from ..config import Settings
 from ..core.embeddings import embed_texts
 from ..core.retrieval import similarity_search
+from .query_logging import (
+    ACTION_SEARCH_DOCUMENTS,
+    DOCUMENT_QUERY_COMPONENT,
+    build_retry_warning_message,
+    log_query_empty,
+    log_query_error,
+    log_query_start,
+    log_query_success,
+)
+from .pooled_connection import connection_scope, run_with_fresh_connection_retry
+from .query_result import apply_error, apply_list_results, build_search_result
 
 logger = logging.getLogger(__name__)
 
@@ -54,25 +65,51 @@ CULTURE_HISTORY_KEYWORDS = (
 class DocumentQueryTool:
     """비정형 문서(Markdown 등) 검색 전용 도구."""
 
+    COMPONENT = DOCUMENT_QUERY_COMPONENT
+
     def __init__(self, connection: psycopg.Connection):
         self.connection = connection
         self.settings = Settings()
 
     @contextmanager
     def _connection_scope(self, force_fresh: bool = False):
-        conn = self.connection
-        if (
-            not force_fresh
-            and conn is not None
-            and not bool(getattr(conn, "closed", False))
-        ):
+        with connection_scope(self.connection, force_fresh=force_fresh) as conn:
             yield conn
-            return
 
-        from ..deps import get_connection_pool
+    def _retry_warning_message(self, action: str) -> str:
+        return build_retry_warning_message(self.COMPONENT, action)
 
-        with get_connection_pool().connection() as pooled_conn:
-            yield pooled_conn
+    def _log_query_start(self, action: str, value: str) -> None:
+        log_query_start(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            value=value,
+        )
+
+    def _log_query_success(self, action: str, count: int) -> None:
+        log_query_success(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            count=count,
+        )
+
+    def _log_query_empty(self, action: str, value: str) -> None:
+        log_query_empty(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            value=value,
+        )
+
+    def _log_query_error(self, action: str, error: str) -> None:
+        log_query_error(
+            logger,
+            component=self.COMPONENT,
+            action=action,
+            error=error,
+        )
 
     @staticmethod
     def _matches_any(query_lower: str, keywords: tuple[str, ...]) -> bool:
@@ -333,46 +370,37 @@ class DocumentQueryTool:
 
     def search_documents(self, query: str, limit: int = 10) -> Dict[str, Any]:
         """사용자 질문과 가장 관련성 높은 문서 조각(chunk)을 검색합니다."""
-        logger.info("[DocumentQueryTool] Searching documents for: %s", query)
+        self._log_query_start(ACTION_SEARCH_DOCUMENTS, query)
 
-        result = {
-            "query": query,
-            "documents": [],
-            "found": False,
-            "error": None,
-            "source": "verified_docs",
-            "source_tables": list(DOCUMENT_SOURCE_TABLES),
-        }
+        result = build_search_result(
+            query=query,
+            documents=[],
+            source="verified_docs",
+            source_tables=list(DOCUMENT_SOURCE_TABLES),
+        )
 
         try:
-            try:
-                with self._connection_scope() as conn:
-                    deduped = self._search_documents_once(conn, query, limit)
-            except Exception as exc:
-                if "connection is closed" not in str(exc).lower():
-                    raise
-                logger.warning(
-                    "[DocumentQueryTool] Retrying with a fresh connection: %s",
-                    exc,
-                )
-                with self._connection_scope(force_fresh=True) as conn:
-                    deduped = self._search_documents_once(conn, query, limit)
+            deduped = run_with_fresh_connection_retry(
+                connection=self.connection,
+                operation=lambda conn: self._search_documents_once(conn, query, limit),
+                logger=logger,
+                retry_warning_message=self._retry_warning_message(
+                    ACTION_SEARCH_DOCUMENTS
+                ),
+            )
 
             if deduped:
-                result["documents"] = deduped
-                result["found"] = True
-                logger.info(
-                    "[DocumentQueryTool] Found %d relevant document chunks.",
-                    len(deduped),
+                apply_list_results(
+                    result,
+                    field="documents",
+                    rows=deduped,
                 )
+                self._log_query_success(ACTION_SEARCH_DOCUMENTS, len(deduped))
             else:
-                logger.warning(
-                    "[DocumentQueryTool] No relevant documents found for: %s",
-                    query,
-                )
+                self._log_query_empty(ACTION_SEARCH_DOCUMENTS, query)
 
         except Exception as e:
-            logger.error("[DocumentQueryTool] Document search error: %s", e)
-            result["error"] = f"문서 검색 중 오류 발생: {e}"
+            self._log_query_error(ACTION_SEARCH_DOCUMENTS, str(e))
+            apply_error(result, f"문서 검색 중 오류 발생: {e}")
 
         return result

@@ -40,7 +40,7 @@ from ..core.coach_grounding import (
 )
 from ..core.prompts import COACH_PROMPT_V2
 from ..core.coach_validator import (
-    parse_coach_response,
+    parse_coach_response_with_meta,
     CoachResponse,
 )
 from ..core.coach_cache_key import (
@@ -61,10 +61,14 @@ COACH_CACHE_PROMPT_VERSION = "v11_completed_review_tone"
 COACH_YEAR_MIN = 1982
 MAX_COACH_FOCUS_ITEMS = 6
 MAX_COACH_QUESTION_OVERRIDE_LENGTH = 2000
-PENDING_STALE_SECONDS = 300
-PENDING_WAIT_TIMEOUT_SECONDS = 10
-PENDING_WAIT_POLL_MS = 300
-FAILED_RETRY_AFTER_SECONDS = 3600  # FAILED 항목 1시간 후 자동 재시도 허용
+PENDING_STALE_SECONDS = 90
+PENDING_WAIT_TIMEOUT_SECONDS = 45
+PENDING_WAIT_POLL_MS = 1000
+FAILED_RETRY_AFTER_SECONDS = 30
+COACH_CACHE_HEARTBEAT_INTERVAL_SECONDS = 5
+COACH_CACHE_LEASE_STALE_SECONDS = 90
+COACH_CACHE_MAX_RETRYABLE_ATTEMPTS = 3
+COACH_PENDING_RECHECK_AFTER_SECONDS = 120
 VOLATILE_CACHE_TTL_SECONDS = 300
 COMPLETED_CACHE_TTL_SECONDS = 86400
 COACH_REQUEST_MODE_AUTO = "auto_brief"
@@ -76,13 +80,33 @@ COACH_INTERNAL_ERROR_MESSAGE = (
 COACH_TOOL_FETCH_FAILED_CODE = "coach_tool_fetch_failed"
 COACH_DATA_INSUFFICIENT_CODE = "coach_data_insufficient"
 COACH_VALIDATION_FAILED_CODE = "coach_response_validation_failed"
+COACH_EMPTY_RESPONSE_ERROR_CODE = "empty_response"
+COACH_NO_JSON_FOUND_ERROR_CODE = "no_json_found"
+COACH_JSON_DECODE_ERROR_CODE = "json_decode_error"
+COACH_OCI_MAPPING_DEGRADED_ERROR_CODE = "oci_mapping_degraded"
+COACH_UNSUPPORTED_ENTITY_ERROR_CODE = "unsupported_entity_name"
+COACH_UNSUPPORTED_CLAIM_ERROR_CODE = "grounding_validation_failed"
+COACH_NON_RETRYABLE_ERROR_CODE = "non_retryable_internal_error"
 COACH_CACHE_ERROR_MESSAGES: Dict[str, str] = {
     COACH_INTERNAL_ERROR_CODE: "분석 시스템 내부 오류로 캐시를 생성하지 못했습니다.",
     COACH_TOOL_FETCH_FAILED_CODE: "분석에 필요한 팀 데이터를 조회하지 못했습니다.",
     COACH_DATA_INSUFFICIENT_CODE: "분석에 필요한 데이터가 충분하지 않습니다.",
     COACH_VALIDATION_FAILED_CODE: "분석 응답 검증에 실패해 결과를 저장하지 못했습니다.",
+    COACH_EMPTY_RESPONSE_ERROR_CODE: "LLM 응답이 비어 자동 복구 대기 중입니다.",
+    COACH_NO_JSON_FOUND_ERROR_CODE: "LLM 응답에서 JSON을 추출하지 못해 자동 복구 대기 중입니다.",
+    COACH_JSON_DECODE_ERROR_CODE: "LLM 응답 JSON 파싱에 실패해 자동 복구 대기 중입니다.",
+    COACH_OCI_MAPPING_DEGRADED_ERROR_CODE: "팀 매핑 조회가 일시적으로 불안정했습니다. 잠시 후 재시도해주세요.",
+    COACH_UNSUPPORTED_ENTITY_ERROR_CODE: "근거에 없는 엔티티가 감지되어 결과를 잠갔습니다.",
+    COACH_UNSUPPORTED_CLAIM_ERROR_CODE: "근거 검증에 실패해 결과를 잠갔습니다.",
+    COACH_NON_RETRYABLE_ERROR_CODE: "자동 복구가 불가능한 내부 오류가 발생했습니다.",
 }
 ALLOWED_COACH_CACHE_ERROR_CODES = set(COACH_CACHE_ERROR_MESSAGES.keys())
+RETRYABLE_CACHE_ERROR_CODES = {
+    COACH_EMPTY_RESPONSE_ERROR_CODE,
+    COACH_NO_JSON_FOUND_ERROR_CODE,
+    COACH_JSON_DECODE_ERROR_CODE,
+    COACH_OCI_MAPPING_DEGRADED_ERROR_CODE,
+}
 FOCUS_SECTION_HEADERS: Dict[str, str] = {
     "recent_form": "## 최근 전력",
     "bullpen": "## 불펜 상태",
@@ -129,6 +153,7 @@ COACH_GROUNDING_REASON_MESSAGES: Dict[str, str] = {
     "unconfirmed_lineup_claim": "라인업 미발표 경기에서 확정 표현이 감지되어 보수 요약으로 전환했습니다.",
     "unconfirmed_series_claim": "시리즈 맥락 부족 상태에서 확정 표현이 감지되어 보수 요약으로 전환했습니다.",
     "llm_parse_failed": "LLM 응답 형식이 불안정해 보수 요약으로 전환했습니다.",
+    COACH_OCI_MAPPING_DEGRADED_ERROR_CODE: "팀 매핑 조회가 일시적으로 불안정해 재연결 또는 마지막 정상 스냅샷으로 이어갔습니다.",
 }
 COACH_EVIDENCE_ROOT_CAUSE_ORDER = (
     "missing_game_context",
@@ -289,11 +314,14 @@ def _append_team_fact_lines(
             + _safe_int_value(recent.get("losses"))
             + _safe_int_value(recent.get("draws"))
         )
+        draws_text = (
+            f" {_safe_int_value(recent.get('draws'))}무" if recent.get("draws") else ""
+        )
         fact = _build_fact_line(
             f"{team_name} 최근 흐름",
             (
                 f"{recent.get('wins', 0)}승 {recent.get('losses', 0)}패"
-                f"{f' {recent.get('draws', 0)}무' if recent.get('draws') else ''}, "
+                f"{draws_text}, "
                 f"득실 {'+' if _safe_int_value(recent.get('run_diff')) >= 0 else ''}{_safe_int_value(recent.get('run_diff'))}, "
                 f"샘플 {recent_games}경기"
             ),
@@ -681,6 +709,10 @@ def _build_meta_payload_defaults(
     grounding_warnings: Optional[List[str]] = None,
     grounding_reasons: Optional[List[str]] = None,
     supported_fact_count: int = 0,
+    cache_error_code: Optional[str] = None,
+    retryable_failure: bool = False,
+    dependency_degraded: bool = False,
+    attempt_count: int = 0,
 ) -> Dict[str, Any]:
     safe_generation_mode = (
         generation_mode
@@ -700,6 +732,10 @@ def _build_meta_payload_defaults(
             list(grounding_reasons or [])
         ),
         "supported_fact_count": max(0, int(supported_fact_count)),
+        "cache_error_code": str(cache_error_code or "").strip() or None,
+        "retryable_failure": bool(retryable_failure),
+        "dependency_degraded": bool(dependency_degraded),
+        "attempt_count": _normalize_attempt_count(attempt_count),
     }
 
 
@@ -716,6 +752,10 @@ def _wrap_cached_payload(
             "grounding_warnings": list(meta.get("grounding_warnings") or []),
             "grounding_reasons": list(meta.get("grounding_reasons") or []),
             "supported_fact_count": int(meta.get("supported_fact_count") or 0),
+            "cache_error_code": meta.get("cache_error_code"),
+            "retryable_failure": bool(meta.get("retryable_failure")),
+            "dependency_degraded": bool(meta.get("dependency_degraded")),
+            "attempt_count": _normalize_attempt_count(meta.get("attempt_count")),
         },
     }
 
@@ -738,6 +778,10 @@ def _extract_cached_payload(
         grounding_warnings=list(meta.get("grounding_warnings") or []),
         grounding_reasons=list(meta.get("grounding_reasons") or []),
         supported_fact_count=int(meta.get("supported_fact_count") or 0),
+        cache_error_code=meta.get("cache_error_code"),
+        retryable_failure=bool(meta.get("retryable_failure")),
+        dependency_degraded=bool(meta.get("dependency_degraded")),
+        attempt_count=int(meta.get("attempt_count") or 0),
     )
     return normalized, meta_defaults
 
@@ -796,11 +840,96 @@ def _calc_row_age_seconds(updated_at: Any) -> float:
     return max(0.0, (now_ref - updated_at).total_seconds())
 
 
+def _normalize_attempt_count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_retryable_cache_error_code(code: Any) -> bool:
+    return str(code or "").strip().lower() in RETRYABLE_CACHE_ERROR_CODES
+
+
+def _cache_error_code_from_exception(exc: Exception) -> str:
+    text = str(exc or "").lower()
+    if "empty response" in text or "empty_choices" in text:
+        return COACH_EMPTY_RESPONSE_ERROR_CODE
+    if "no json found" in text:
+        return COACH_NO_JSON_FOUND_ERROR_CODE
+    if "json decode error" in text or "invalid control character" in text:
+        return COACH_JSON_DECODE_ERROR_CODE
+    if (
+        "failed to load mappings from oci" in text
+        or "server closed the connection unexpectedly" in text
+        or "oci" in text
+        and "mapping" in text
+    ):
+        return COACH_OCI_MAPPING_DEGRADED_ERROR_CODE
+    if "unsupported_entity_name" in text:
+        return COACH_UNSUPPORTED_ENTITY_ERROR_CODE
+    if "grounding_validation_failed" in text:
+        return COACH_UNSUPPORTED_CLAIM_ERROR_CODE
+    return COACH_INTERNAL_ERROR_CODE
+
+
+def _cache_error_code_from_parse_meta(parse_meta: Dict[str, Any]) -> str:
+    code = str(parse_meta.get("error_code") or "").strip().lower()
+    if code in {
+        COACH_EMPTY_RESPONSE_ERROR_CODE,
+        COACH_NO_JSON_FOUND_ERROR_CODE,
+        COACH_JSON_DECODE_ERROR_CODE,
+    }:
+        return code
+    return COACH_INTERNAL_ERROR_CODE
+
+
+def _calc_pending_reference_age_seconds(
+    updated_at: Any,
+    last_heartbeat_at: Any,
+    lease_expires_at: Any,
+) -> float:
+    age_candidates = [
+        _calc_row_age_seconds(updated_at),
+        _calc_row_age_seconds(last_heartbeat_at),
+    ]
+    lease_age = _calc_row_age_seconds(lease_expires_at)
+    if lease_age != float("inf"):
+        age_candidates.append(lease_age)
+    return min(age_candidates) if age_candidates else float("inf")
+
+
+def _is_pending_cache_stale(
+    *,
+    updated_at: Any,
+    last_heartbeat_at: Any,
+    lease_expires_at: Any,
+    pending_stale_seconds: int,
+) -> bool:
+    if isinstance(lease_expires_at, datetime):
+        now_ref = (
+            datetime.now(lease_expires_at.tzinfo)
+            if lease_expires_at.tzinfo is not None
+            else datetime.now()
+        )
+        if now_ref > lease_expires_at:
+            return True
+
+    age_seconds = _calc_pending_reference_age_seconds(
+        updated_at, last_heartbeat_at, lease_expires_at
+    )
+    return age_seconds > pending_stale_seconds
+
+
 def _determine_cache_gate(
     *,
     status: Optional[str],
     has_cached_json: bool,
     updated_at: Any,
+    error_code: Any = None,
+    attempt_count: Any = 0,
+    last_heartbeat_at: Any = None,
+    lease_expires_at: Any = None,
     pending_stale_seconds: int = PENDING_STALE_SECONDS,
     completed_ttl_seconds: Optional[int] = None,
 ) -> str:
@@ -811,14 +940,29 @@ def _determine_cache_gate(
                 return "MISS_GENERATE"
         return "HIT"
     if status == "PENDING":
-        age_seconds = _calc_row_age_seconds(updated_at)
-        if age_seconds > pending_stale_seconds:
+        if _is_pending_cache_stale(
+            updated_at=updated_at,
+            last_heartbeat_at=last_heartbeat_at,
+            lease_expires_at=lease_expires_at,
+            pending_stale_seconds=pending_stale_seconds,
+        ):
             return "PENDING_STALE_TAKEOVER"
         return "PENDING_WAIT"
     if status == "FAILED":
         age_seconds = _calc_row_age_seconds(updated_at)
-        if age_seconds > FAILED_RETRY_AFTER_SECONDS:
-            return "MISS_GENERATE"  # 1시간 경과 시 재생성 허용
+        attempts = _normalize_attempt_count(attempt_count)
+        if _is_retryable_cache_error_code(error_code) and (
+            attempts >= COACH_CACHE_MAX_RETRYABLE_ATTEMPTS
+        ):
+            return "FAILED_LOCKED"
+        if (
+            _is_retryable_cache_error_code(error_code)
+            and attempts < COACH_CACHE_MAX_RETRYABLE_ATTEMPTS
+            and age_seconds > FAILED_RETRY_AFTER_SECONDS
+        ):
+            return "MISS_GENERATE"
+        if _is_retryable_cache_error_code(error_code):
+            return "FAILED_RETRY_WAIT"
         return "FAILED_LOCKED"
     return "MISS_GENERATE"
 
@@ -842,7 +986,8 @@ async def _wait_for_cache_terminal_state(
             with pool.connection() as conn:
                 row = conn.execute(
                     """
-                    SELECT status, response_json, error_message
+                    SELECT status, response_json, error_message, error_code, attempt_count, updated_at,
+                           lease_expires_at, last_heartbeat_at
                     FROM coach_analysis_cache
                     WHERE cache_key = %s
                     """,
@@ -850,7 +995,16 @@ async def _wait_for_cache_terminal_state(
                 ).fetchone()
             if not row:
                 continue
-            status, cached_json, error_message = row
+            (
+                status,
+                cached_json,
+                error_message,
+                error_code,
+                attempt_count,
+                updated_at,
+                lease_expires_at,
+                last_heartbeat_at,
+            ) = row
             if status == "COMPLETED" and cached_json:
                 return {
                     "status": "COMPLETED",
@@ -860,11 +1014,290 @@ async def _wait_for_cache_terminal_state(
                 return {
                     "status": "FAILED",
                     "error_message": error_message,
+                    "error_code": error_code,
+                    "attempt_count": _normalize_attempt_count(attempt_count),
+                    "updated_at": updated_at,
+                }
+            if status == "PENDING" and _is_pending_cache_stale(
+                updated_at=updated_at,
+                last_heartbeat_at=last_heartbeat_at,
+                lease_expires_at=lease_expires_at,
+                pending_stale_seconds=COACH_CACHE_LEASE_STALE_SECONDS,
+            ):
+                return {
+                    "status": "PENDING_STALE_TAKEOVER",
                 }
         except Exception as exc:
             logger.warning("[Coach] Cache wait poll failed for %s: %s", cache_key, exc)
             return None
     return None
+
+
+def _build_cache_lease_owner() -> str:
+    return f"coach-{uuid.uuid4().hex}"
+
+
+def _dependency_degraded_from_tool_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and bool(payload.get("_dependency_degraded"))
+
+
+def _collect_dependency_degraded(tool_results: Dict[str, Any]) -> bool:
+    return any(
+        _dependency_degraded_from_tool_payload(tool_results.get(key))
+        for key in ("home", "away", "matchup")
+    )
+
+
+def _collect_dependency_degraded_reasons(tool_results: Dict[str, Any]) -> List[str]:
+    reasons: List[str] = []
+    for key in ("home", "away", "matchup"):
+        payload = tool_results.get(key)
+        if isinstance(payload, dict):
+            reason = str(payload.get("_dependency_degraded_reason") or "").strip()
+            if reason:
+                reasons.append(reason)
+    return list(dict.fromkeys(reasons))
+
+
+async def _heartbeat_cache_lease(
+    *,
+    pool: ConnectionPool,
+    cache_key: str,
+    lease_owner: str,
+) -> None:
+    while True:
+        await asyncio.sleep(COACH_CACHE_HEARTBEAT_INTERVAL_SECONDS)
+        try:
+            with pool.connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE coach_analysis_cache
+                    SET updated_at = now(),
+                        last_heartbeat_at = now(),
+                        lease_expires_at = now() + make_interval(secs => %s)
+                    WHERE cache_key = %s
+                      AND status = 'PENDING'
+                      AND lease_owner = %s
+                    """,
+                    (
+                        COACH_CACHE_LEASE_STALE_SECONDS,
+                        cache_key,
+                        lease_owner,
+                    ),
+                )
+                conn.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[Coach] Cache heartbeat update failed for %s: %s", cache_key, exc
+            )
+
+
+async def _cancel_heartbeat_task(task: Optional[asyncio.Task]) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+def _claim_cache_generation(
+    *,
+    pool: ConnectionPool,
+    cache_key: str,
+    team_id: str,
+    year: int,
+    prompt_version: str,
+    model_name: str,
+    lease_owner: str,
+    completed_ttl_seconds: Optional[int],
+) -> tuple[str, Any, Optional[str], Optional[str], int]:
+    with pool.connection() as conn:
+        with conn.transaction():
+            inserted = conn.execute(
+                """
+                INSERT INTO coach_analysis_cache (
+                    cache_key, team_id, year, prompt_version, model_name, status,
+                    error_message, error_code, attempt_count,
+                    lease_owner, lease_expires_at, last_heartbeat_at, updated_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, 'PENDING',
+                    NULL, NULL, 1,
+                    %s, now() + make_interval(secs => %s), now(), now()
+                )
+                ON CONFLICT (cache_key) DO NOTHING
+                RETURNING cache_key
+                """,
+                (
+                    cache_key,
+                    team_id,
+                    year,
+                    prompt_version,
+                    model_name,
+                    lease_owner,
+                    COACH_CACHE_LEASE_STALE_SECONDS,
+                ),
+            ).fetchone()
+            row = conn.execute(
+                """
+                SELECT status, response_json, error_message, error_code, attempt_count,
+                       updated_at, lease_expires_at, last_heartbeat_at
+                FROM coach_analysis_cache
+                WHERE cache_key = %s
+                FOR UPDATE
+                """,
+                (cache_key,),
+            ).fetchone()
+
+            if inserted:
+                return "MISS_GENERATE", None, None, None, 1
+
+            if not row:
+                return "MISS_GENERATE", None, None, None, 1
+
+            (
+                status,
+                cached_json,
+                error_message,
+                error_code,
+                attempt_count,
+                updated_at,
+                lease_expires_at,
+                last_heartbeat_at,
+            ) = row
+
+            cache_state = _determine_cache_gate(
+                status=status,
+                has_cached_json=bool(cached_json),
+                updated_at=updated_at,
+                error_code=error_code,
+                attempt_count=attempt_count,
+                last_heartbeat_at=last_heartbeat_at,
+                lease_expires_at=lease_expires_at,
+                completed_ttl_seconds=completed_ttl_seconds,
+            )
+
+            if cache_state == "HIT":
+                return cache_state, cached_json, error_message, error_code, _normalize_attempt_count(attempt_count)
+
+            if cache_state in {"MISS_GENERATE", "PENDING_STALE_TAKEOVER"}:
+                next_attempt = max(1, _normalize_attempt_count(attempt_count) + 1)
+                conn.execute(
+                    """
+                    UPDATE coach_analysis_cache
+                    SET status = 'PENDING',
+                        team_id = %s,
+                        year = %s,
+                        prompt_version = %s,
+                        model_name = %s,
+                        error_message = NULL,
+                        error_code = NULL,
+                        attempt_count = %s,
+                        lease_owner = %s,
+                        lease_expires_at = now() + make_interval(secs => %s),
+                        last_heartbeat_at = now(),
+                        updated_at = now()
+                    WHERE cache_key = %s
+                    """,
+                    (
+                        team_id,
+                        year,
+                        prompt_version,
+                        model_name,
+                        next_attempt,
+                        lease_owner,
+                        COACH_CACHE_LEASE_STALE_SECONDS,
+                        cache_key,
+                    ),
+                )
+                return cache_state, None, None, None, next_attempt
+
+            return (
+                cache_state,
+                None,
+                error_message,
+                str(error_code or ""),
+                _normalize_attempt_count(attempt_count),
+            )
+
+
+def _store_completed_cache(
+    *,
+    pool: ConnectionPool,
+    cache_key: str,
+    lease_owner: str,
+    response_payload: Dict[str, Any],
+    meta_defaults: Dict[str, Any],
+) -> bool:
+    with pool.connection() as conn:
+        result = conn.execute(
+            """
+            UPDATE coach_analysis_cache
+            SET status = 'COMPLETED',
+                response_json = %s,
+                error_message = NULL,
+                error_code = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                last_heartbeat_at = NULL,
+                updated_at = now()
+            WHERE cache_key = %s
+              AND status = 'PENDING'
+              AND lease_owner = %s
+            """,
+            (
+                json.dumps(
+                    _wrap_cached_payload(response_payload, meta_defaults),
+                    ensure_ascii=False,
+                ),
+                cache_key,
+                lease_owner,
+            ),
+        )
+        conn.commit()
+    return bool(result.rowcount)
+
+
+def _store_failed_cache(
+    *,
+    pool: ConnectionPool,
+    cache_key: str,
+    lease_owner: str,
+    error_code: str,
+    error_message: Optional[str] = None,
+) -> bool:
+    normalized_error_code = _sanitize_cache_error_code(error_code)
+    stored_error_message = (
+        str(error_message or "").strip() or normalized_error_code
+    )
+    with pool.connection() as conn:
+        result = conn.execute(
+            """
+            UPDATE coach_analysis_cache
+            SET status = 'FAILED',
+                response_json = NULL,
+                error_message = %s,
+                error_code = %s,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                last_heartbeat_at = NULL,
+                updated_at = now()
+            WHERE cache_key = %s
+              AND status = 'PENDING'
+              AND lease_owner = %s
+            """,
+            (
+                stored_error_message,
+                normalized_error_code,
+                cache_key,
+                lease_owner,
+            ),
+        )
+        conn.commit()
+    return bool(result.rowcount)
 
 
 def _normalize_cached_response(cached_data: dict) -> dict:
@@ -2461,6 +2894,11 @@ async def _execute_coach_tools_parallel(
             if "matchup" in focus and away_team_id:
                 # 상대 전적은 홈팀 기준 한번만 조회해도 됨
                 pass
+            if getattr(db_query, "mapping_dependency_degraded", False):
+                results["_dependency_degraded"] = True
+                results["_dependency_degraded_reason"] = (
+                    getattr(db_query, "mapping_dependency_reason", None) or "defaults"
+                )
         return results
 
     def get_matchup_stats_sync(team1: str, team2: str):
@@ -2468,7 +2906,7 @@ async def _execute_coach_tools_parallel(
             from app.tools.game_query import GameQueryTool
 
             game_query = GameQueryTool(conn)
-            return game_query.get_head_to_head(
+            result = game_query.get_head_to_head(
                 team1,
                 team2,
                 year,
@@ -2476,6 +2914,15 @@ async def _execute_coach_tools_parallel(
                 exclude_game_id=exclude_game_id,
                 season_id=matchup_season_id,
             )
+            if isinstance(result, dict) and getattr(
+                game_query, "mapping_dependency_degraded", False
+            ):
+                result["_dependency_degraded"] = True
+                result["_dependency_degraded_reason"] = (
+                    getattr(game_query, "mapping_dependency_reason", None)
+                    or "defaults"
+                )
+            return result
 
     # 병렬 실행 태스크 준비
     tasks = []
@@ -2991,19 +3438,6 @@ async def analyze_team(
             COACH_CACHE_SCHEMA_VERSION,
         )
         evidence_assessment = assess_game_evidence(game_evidence)
-        pending_meta_defaults = _build_meta_payload_defaults(
-            generation_mode="evidence_fallback",
-            data_quality=_determine_data_quality(game_evidence),
-            used_evidence=game_evidence.used_evidence,
-            game_status_bucket=game_evidence.game_status_bucket,
-            grounding_warnings=_merge_grounding_warnings(
-                [],
-                evidence_assessment.root_causes,
-            ),
-            grounding_reasons=evidence_assessment.root_causes,
-            supported_fact_count=0,
-        )
-
         async def event_generator():
             try:
                 total_start = perf_counter()
@@ -3019,88 +3453,40 @@ async def analyze_team(
                 cached_data = None
                 cache_state = "MISS_GENERATE"
                 cache_error_message = None
+                cache_error_code = None
+                cache_attempt_count = 0
+                cache_lease_owner = _build_cache_lease_owner()
+                heartbeat_task: Optional[asyncio.Task] = None
 
-                with pool.connection() as conn:
-                    with conn.transaction():
-                        inserted = conn.execute(
-                            """
-                            INSERT INTO coach_analysis_cache (
-                                cache_key, team_id, year, prompt_version, model_name, status, error_message, updated_at
-                            ) VALUES (%s, %s, %s, %s, %s, 'PENDING', NULL, now())
-                            ON CONFLICT (cache_key) DO NOTHING
-                            RETURNING cache_key
-                            """,
-                            (
-                                cache_key,
-                                home_team_canonical,
-                                year,
-                                COACH_CACHE_PROMPT_VERSION,
-                                coach_model_name,
-                            ),
-                        ).fetchone()
-                        row = conn.execute(
-                            """
-                            SELECT status, response_json, error_message, updated_at
-                            FROM coach_analysis_cache
-                            WHERE cache_key = %s
-                            FOR UPDATE
-                            """,
-                            (cache_key,),
-                        ).fetchone()
-
-                        if inserted:
-                            cache_state = "MISS_GENERATE"
-                        elif row:
-                            status, cached_json, error_message, updated_at = row
-                            cache_state = _determine_cache_gate(
-                                status=status,
-                                has_cached_json=bool(cached_json),
-                                updated_at=updated_at,
-                                completed_ttl_seconds=_cache_ttl_seconds_for_status_bucket(
-                                    game_evidence.game_status_bucket
-                                ),
-                            )
-
-                            if cache_state == "HIT":
-                                cached_data = cached_json
-                            elif cache_state in {
-                                "MISS_GENERATE",
-                                "PENDING_STALE_TAKEOVER",
-                            }:
-                                conn.execute(
-                                    """
-                                    UPDATE coach_analysis_cache
-                                    SET status = 'PENDING',
-                                        team_id = %s,
-                                        year = %s,
-                                        prompt_version = %s,
-                                        model_name = %s,
-                                        error_message = NULL,
-                                        updated_at = now()
-                                    WHERE cache_key = %s
-                                    """,
-                                    (
-                                        home_team_canonical,
-                                        year,
-                                        COACH_CACHE_PROMPT_VERSION,
-                                        coach_model_name,
-                                        cache_key,
-                                    ),
-                                )
-                            elif cache_state == "FAILED_LOCKED":
-                                cache_error_message = error_message
-                        else:
-                            # Defensive fallback: row should exist after INSERT/SELECT, but keep service available.
-                            cache_state = "MISS_GENERATE"
+                (
+                    cache_state,
+                    cached_data,
+                    cache_error_message,
+                    cache_error_code,
+                    cache_attempt_count,
+                ) = _claim_cache_generation(
+                    pool=pool,
+                    cache_key=cache_key,
+                    team_id=home_team_canonical,
+                    year=year,
+                    prompt_version=COACH_CACHE_PROMPT_VERSION,
+                    model_name=coach_model_name,
+                    lease_owner=cache_lease_owner,
+                    completed_ttl_seconds=_cache_ttl_seconds_for_status_bucket(
+                        game_evidence.game_status_bucket
+                    ),
+                )
 
                 logger.info(
-                    "[Coach] Cache %s for %s focus_signature=%s question_signature=%s request_mode=%s cache_key_version=%s",
+                    "[Coach] Cache %s for %s focus_signature=%s question_signature=%s request_mode=%s cache_key_version=%s attempt_count=%s error_code=%s",
                     cache_state,
                     cache_key,
                     focus_signature,
                     question_signature,
                     request_mode,
                     COACH_CACHE_SCHEMA_VERSION,
+                    cache_attempt_count,
+                    cache_error_code,
                 )
 
                 if cached_data:
@@ -3209,63 +3595,165 @@ async def analyze_team(
                             yield {"event": "done", "data": "[DONE]"}
                             return
 
-                        if wait_result and wait_result.get("status") == "FAILED":
-                            cache_state = "FAILED_LOCKED"
-                            cache_error_message = (
-                                wait_result.get("error_message")
-                                or "analysis_generation_failed"
+                        if wait_result and wait_result.get("status") in {
+                            "FAILED",
+                            "PENDING_STALE_TAKEOVER",
+                        }:
+                            (
+                                cache_state,
+                                cached_data,
+                                cache_error_message,
+                                cache_error_code,
+                                cache_attempt_count,
+                            ) = _claim_cache_generation(
+                                pool=pool,
+                                cache_key=cache_key,
+                                team_id=home_team_canonical,
+                                year=year,
+                                prompt_version=COACH_CACHE_PROMPT_VERSION,
+                                model_name=coach_model_name,
+                                lease_owner=cache_lease_owner,
+                                completed_ttl_seconds=_cache_ttl_seconds_for_status_bucket(
+                                    game_evidence.game_status_bucket
+                                ),
                             )
-                        else:
-                            waiting_payload = _cache_status_response(
-                                headline=f"{home_name} 분석이 진행 중입니다",
-                                coach_note="잠시 후 다시 시도해주세요.",
-                                detail="## 캐시 준비 중\n\n동일 경기 분석 요청이 이미 진행 중입니다.",
-                            )
-                            yield {
-                                "event": "status",
-                                "data": json.dumps(
-                                    {
-                                        "message": "기존 분석 작업을 기다리는 중입니다..."
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            }
-                            yield {
-                                "event": "message",
-                                "data": json.dumps(
-                                    {
-                                        "delta": json.dumps(
-                                            waiting_payload, ensure_ascii=False
-                                        )
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            }
-                            yield {
-                                "event": "meta",
-                                "data": json.dumps(
-                                    {
-                                        "validation_status": "fallback",
-                                        "fast_path": True,
-                                        "cached": False,
-                                        "request_mode": request_mode,
-                                        "resolved_focus": resolved_focus,
-                                        "focus_signature": focus_signature,
-                                        "question_signature": question_signature,
-                                        "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
-                                        "cache_state": "PENDING_WAIT",
-                                        "in_progress": True,
-                                        **pending_meta_defaults,
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            }
-                            yield {"event": "done", "data": "[DONE]"}
-                            return
+                            if cached_data:
+                                cached_data, cached_meta = _extract_cached_payload(
+                                    cached_data
+                                )
+                                missing_focus_sections = _find_missing_focus_sections(
+                                    cached_data, resolved_focus
+                                )
+                                yield {
+                                    "event": "status",
+                                    "data": json.dumps(
+                                        {"message": "재생성된 분석 데이터를 불러옵니다..."},
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                                json_str = json.dumps(
+                                    cached_data, ensure_ascii=False, indent=2
+                                )
+                                yield {
+                                    "event": "message",
+                                    "data": json.dumps(
+                                        {"delta": json_str}, ensure_ascii=False
+                                    ),
+                                }
+                                yield {
+                                    "event": "meta",
+                                    "data": json.dumps(
+                                        {
+                                            "validation_status": "success",
+                                            "structured_response": cached_data,
+                                            "fast_path": True,
+                                            "cached": True,
+                                            "request_mode": request_mode,
+                                            "resolved_focus": resolved_focus,
+                                            "focus_signature": focus_signature,
+                                            "question_signature": question_signature,
+                                            "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                                            "cache_state": cache_state,
+                                            "in_progress": False,
+                                            "focus_section_missing": bool(
+                                                missing_focus_sections
+                                            ),
+                                            "missing_focus_sections": missing_focus_sections,
+                                            **cached_meta,
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                                yield {"event": "done", "data": "[DONE]"}
+                                return
+
+                    if cache_state in {"PENDING_WAIT", "FAILED_RETRY_WAIT"}:
+                        retryable_failure = (
+                            cache_state == "FAILED_RETRY_WAIT"
+                            or _is_retryable_cache_error_code(cache_error_code)
+                        )
+                        waiting_payload = _cache_status_response(
+                            headline=(
+                                f"{home_name} 분석이 진행 중입니다"
+                                if cache_state == "PENDING_WAIT"
+                                else f"{home_name} 분석 복구를 준비 중입니다"
+                            ),
+                            coach_note=(
+                                "잠시 후 다시 시도해주세요."
+                                if cache_state == "PENDING_WAIT"
+                                else "일시 오류를 자동 복구하는 중입니다. 잠시 후 다시 시도해주세요."
+                            ),
+                            detail=(
+                                "## 캐시 준비 중\n\n동일 경기 분석 요청이 이미 진행 중입니다."
+                                if cache_state == "PENDING_WAIT"
+                                else (
+                                    "## 자동 복구 대기 중\n\n"
+                                    "일시 오류가 감지되어 다음 재생성 윈도우를 기다리고 있습니다.\n\n"
+                                    f"- 오류 코드: {_sanitize_cache_error_code(cache_error_code)}\n"
+                                    f"- 재시도 가능: {'예' if retryable_failure else '아니오'}"
+                                )
+                            ),
+                        )
+                        waiting_meta_defaults = _build_meta_payload_defaults(
+                            generation_mode="evidence_fallback",
+                            data_quality=_determine_data_quality(game_evidence),
+                            used_evidence=game_evidence.used_evidence,
+                            game_status_bucket=game_evidence.game_status_bucket,
+                            grounding_warnings=_merge_grounding_warnings(
+                                [],
+                                evidence_assessment.root_causes,
+                            ),
+                            grounding_reasons=evidence_assessment.root_causes,
+                            supported_fact_count=0,
+                            cache_error_code=cache_error_code,
+                            retryable_failure=retryable_failure,
+                            attempt_count=cache_attempt_count,
+                        )
+                        yield {
+                            "event": "status",
+                            "data": json.dumps(
+                                {
+                                    "message": (
+                                        "기존 분석 작업을 기다리는 중입니다..."
+                                        if cache_state == "PENDING_WAIT"
+                                        else "일시 오류 복구 윈도우를 기다리는 중입니다..."
+                                    )
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {
+                            "event": "message",
+                            "data": json.dumps(
+                                {"delta": json.dumps(waiting_payload, ensure_ascii=False)},
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {
+                            "event": "meta",
+                            "data": json.dumps(
+                                {
+                                    "validation_status": "fallback",
+                                    "fast_path": True,
+                                    "cached": False,
+                                    "request_mode": request_mode,
+                                    "resolved_focus": resolved_focus,
+                                    "focus_signature": focus_signature,
+                                    "question_signature": question_signature,
+                                    "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                                    "cache_state": cache_state,
+                                    "in_progress": True,
+                                    **waiting_meta_defaults,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {"event": "done", "data": "[DONE]"}
+                        return
 
                     if cache_state == "FAILED_LOCKED":
                         failed_error_code = _sanitize_cache_error_code(
-                            cache_error_message
+                            cache_error_code or cache_error_message
                         )
                         failed_payload = _cache_status_response(
                             headline=f"{home_name} 분석 캐시 갱신이 필요합니다",
@@ -3295,6 +3783,21 @@ async def analyze_team(
                                 ensure_ascii=False,
                             ),
                         }
+                        failed_meta_defaults = _build_meta_payload_defaults(
+                            generation_mode="evidence_fallback",
+                            data_quality=_determine_data_quality(game_evidence),
+                            used_evidence=game_evidence.used_evidence,
+                            game_status_bucket=game_evidence.game_status_bucket,
+                            grounding_warnings=_merge_grounding_warnings(
+                                [],
+                                evidence_assessment.root_causes,
+                            ),
+                            grounding_reasons=evidence_assessment.root_causes,
+                            supported_fact_count=0,
+                            cache_error_code=failed_error_code,
+                            retryable_failure=False,
+                            attempt_count=cache_attempt_count,
+                        )
                         yield {
                             "event": "meta",
                             "data": json.dumps(
@@ -3309,13 +3812,21 @@ async def analyze_team(
                                     "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                     "cache_state": "FAILED_LOCKED",
                                     "in_progress": False,
-                                    **pending_meta_defaults,
+                                    **failed_meta_defaults,
                                 },
                                 ensure_ascii=False,
                             ),
                         }
                         yield {"event": "done", "data": "[DONE]"}
                         return
+
+                heartbeat_task = asyncio.create_task(
+                    _heartbeat_cache_lease(
+                        pool=pool,
+                        cache_key=cache_key,
+                        lease_owner=cache_lease_owner,
+                    )
+                )
 
                 # 도구 실행
                 yield {
@@ -3387,6 +3898,10 @@ async def analyze_team(
                 has_home_data = bool(home_data.get("summary", {}).get("found")) or bool(
                     home_data.get("advanced", {}).get("found")
                 )
+                dependency_degraded = _collect_dependency_degraded(tool_results)
+                dependency_degraded_reasons = _collect_dependency_degraded_reasons(
+                    tool_results
+                )
                 data_quality = _determine_data_quality(game_evidence, tool_results)
                 fact_sheet = _build_coach_fact_sheet(
                     game_evidence,
@@ -3402,6 +3917,13 @@ async def analyze_team(
                     grounding_warnings.append(
                         "포스트시즌 상대 전적은 동일 시리즈 기준으로 다시 계산했습니다."
                     )
+                if dependency_degraded:
+                    grounding_reasons.append(COACH_OCI_MAPPING_DEGRADED_ERROR_CODE)
+                    if dependency_degraded_reasons:
+                        grounding_warnings.append(
+                            "매핑 조회는 복구 경로로 이어졌습니다: "
+                            + ", ".join(dependency_degraded_reasons)
+                        )
                 llm_focus = list(resolved_focus)
                 if not is_auto_brief:
                     supported_focuses = _resolve_supported_focuses(
@@ -3458,22 +3980,16 @@ async def analyze_team(
                         grounding_warnings=grounding_warnings,
                         grounding_reasons=grounding_reasons,
                         supported_fact_count=fact_sheet.supported_fact_count,
+                        dependency_degraded=dependency_degraded,
+                        attempt_count=cache_attempt_count,
                     )
-
-                    with pool.connection() as conn:
-                        conn.execute(
-                            "UPDATE coach_analysis_cache SET status = 'COMPLETED', response_json = %s, error_message = NULL, updated_at = now() WHERE cache_key = %s",
-                            (
-                                json.dumps(
-                                    _wrap_cached_payload(
-                                        response_payload, meta_defaults
-                                    ),
-                                    ensure_ascii=False,
-                                ),
-                                cache_key,
-                            ),
-                        )
-                        conn.commit()
+                    _store_completed_cache(
+                        pool=pool,
+                        cache_key=cache_key,
+                        lease_owner=cache_lease_owner,
+                        response_payload=response_payload,
+                        meta_defaults=meta_defaults,
+                    )
 
                     missing_focus_sections = _find_missing_focus_sections(
                         response_payload, response_focus_targets
@@ -3499,7 +4015,7 @@ async def analyze_team(
                                 "focus_signature": focus_signature,
                                 "question_signature": question_signature,
                                 "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
-                                "cache_state": cache_state,
+                                "cache_state": "COMPLETED",
                                 "in_progress": False,
                                 "focus_section_missing": bool(missing_focus_sections),
                                 "missing_focus_sections": missing_focus_sections,
@@ -3593,7 +4109,9 @@ async def analyze_team(
                     attempt_grounding_reasons = list(grounding_reasons)
                     attempt_grounding_warnings = list(grounding_warnings)
                     failure_reasons: List[str] = []
-                    parsed_response, parse_error = parse_coach_response(full_response)
+                    parsed_response, parse_error, parse_meta = (
+                        parse_coach_response_with_meta(full_response)
+                    )
 
                     if not parsed_response:
                         logger.warning(
@@ -3602,6 +4120,9 @@ async def analyze_team(
                             cache_key,
                             parse_error,
                         )
+                        parse_error_code = _cache_error_code_from_parse_meta(parse_meta)
+                        if parse_error_code != COACH_INTERNAL_ERROR_CODE:
+                            failure_reasons.append(parse_error_code)
                         failure_reasons.append("llm_parse_failed")
                     else:
                         candidate_payload = parsed_response.model_dump()
@@ -3690,19 +4211,16 @@ async def analyze_team(
                     grounding_warnings=runtime_grounding_warnings,
                     grounding_reasons=runtime_grounding_reasons,
                     supported_fact_count=fact_sheet.supported_fact_count,
+                    dependency_degraded=dependency_degraded,
+                    attempt_count=cache_attempt_count,
                 )
-                with pool.connection() as conn:
-                    conn.execute(
-                        "UPDATE coach_analysis_cache SET status = 'COMPLETED', response_json = %s, error_message = NULL, updated_at = now() WHERE cache_key = %s",
-                        (
-                            json.dumps(
-                                _wrap_cached_payload(response_payload, meta_defaults),
-                                ensure_ascii=False,
-                            ),
-                            cache_key,
-                        ),
-                    )
-                    conn.commit()
+                _store_completed_cache(
+                    pool=pool,
+                    cache_key=cache_key,
+                    lease_owner=cache_lease_owner,
+                    response_payload=response_payload,
+                    meta_defaults=meta_defaults,
+                )
 
                 meta_payload = {
                     "verified": True,
@@ -3713,7 +4231,7 @@ async def analyze_team(
                     "focus_signature": focus_signature,
                     "question_signature": question_signature,
                     "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
-                    "cache_state": cache_state,
+                    "cache_state": "COMPLETED",
                     "in_progress": False,
                     "focus_section_missing": bool(missing_focus_sections),
                     "missing_focus_sections": missing_focus_sections,
@@ -3732,19 +4250,35 @@ async def analyze_team(
 
                 yield {"event": "done", "data": "[DONE]"}
             except Exception as e:
-                logger.error(f"[Coach Streaming Error] {e}")
-                masked_error_code = COACH_INTERNAL_ERROR_CODE
-                # Cache fail logic
+                logger.exception("[Coach Streaming Error] cache_key=%s", cache_key)
+                masked_error_code = _cache_error_code_from_exception(e)
+                retryable_failure = _is_retryable_cache_error_code(masked_error_code)
                 try:
                     fallback_pool = get_connection_pool()
-                    with fallback_pool.connection() as conn:
-                        conn.execute(
-                            "UPDATE coach_analysis_cache SET status = 'FAILED', error_message = %s, updated_at = now() WHERE cache_key = %s",
-                            (masked_error_code, cache_key),
-                        )
-                        conn.commit()
+                    _store_failed_cache(
+                        pool=fallback_pool,
+                        cache_key=cache_key,
+                        lease_owner=cache_lease_owner,
+                        error_code=masked_error_code,
+                        error_message=str(e),
+                    )
                 except:  # noqa: BLE001
                     pass
+                failure_meta_defaults = _build_meta_payload_defaults(
+                    generation_mode="evidence_fallback",
+                    data_quality=_determine_data_quality(game_evidence),
+                    used_evidence=game_evidence.used_evidence,
+                    game_status_bucket=game_evidence.game_status_bucket,
+                    grounding_warnings=_merge_grounding_warnings(
+                        [],
+                        evidence_assessment.root_causes,
+                    ),
+                    grounding_reasons=evidence_assessment.root_causes,
+                    supported_fact_count=0,
+                    cache_error_code=masked_error_code,
+                    retryable_failure=retryable_failure,
+                    attempt_count=cache_attempt_count,
+                )
 
                 yield {
                     "event": "meta",
@@ -3758,11 +4292,15 @@ async def analyze_team(
                             "focus_signature": focus_signature,
                             "question_signature": question_signature,
                             "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
-                            "cache_state": cache_state,
+                            "cache_state": (
+                                "FAILED_RETRY_WAIT"
+                                if retryable_failure
+                                else "FAILED_LOCKED"
+                            ),
                             "in_progress": False,
                             "focus_section_missing": False,
                             "missing_focus_sections": [],
-                            **pending_meta_defaults,
+                            **failure_meta_defaults,
                         },
                         ensure_ascii=False,
                     ),
@@ -3775,6 +4313,8 @@ async def analyze_team(
                     ),
                 }
                 yield {"event": "done", "data": "[DONE]"}
+            finally:
+                await _cancel_heartbeat_task(heartbeat_task)
 
         return EventSourceResponse(
             event_generator(),

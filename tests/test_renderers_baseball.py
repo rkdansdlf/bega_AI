@@ -270,3 +270,24 @@ def test_render_game_flow_summary_draw_has_no_decisive_half() -> None:
 
     assert "무승부" in rendered
     assert meta["decisive_half"] is None
+
+
+def test_render_game_flow_summary_resolves_team_codes_without_name_fields() -> None:
+    row = {
+        "game_id": "20250505SKHH0",
+        "game_date": "2025-05-05",
+        "home_team": "SK",
+        "away_team": "HH",
+        "home_score": 4,
+        "away_score": 2,
+        "winning_team": "SK",
+        "inning_lines_json": [
+            {"inning": 1, "home_runs": 1, "away_runs": 0, "is_extra": False},
+            {"inning": 8, "home_runs": 3, "away_runs": 2, "is_extra": False},
+        ],
+    }
+
+    rendered = render_game_flow_summary(row, today_str="2025-05-05")
+
+    assert "SK 와이번스" in rendered
+    assert "한화 이글스" in rendered

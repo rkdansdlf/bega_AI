@@ -14,6 +14,9 @@ from typing import Any, Dict, List, Optional, Sequence
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.errors import UndefinedTable
+from psycopg import OperationalError as PsycopgOperationalError
+from psycopg import InterfaceError as PsycopgInterfaceError
+from .exceptions import DBRetrievalError
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +251,9 @@ def similarity_search(
             rows = cur.fetchall()
     except UndefinedTable:
         return []
+    except (PsycopgOperationalError, PsycopgInterfaceError, TimeoutError) as exc:
+        logger.error("[Search] DB unreachable during similarity_search: %s", exc)
+        raise DBRetrievalError("pgvector query failed — DB unreachable", cause=exc) from exc
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
     logger.info(
