@@ -39,6 +39,7 @@ class Settings(BaseSettings):
         extra="ignore",
         env_file=".env",
         env_file_encoding="utf-8",
+        populate_by_name=True,
     )
 
     # --- 기본 애플리케이션 설정 ---
