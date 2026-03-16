@@ -9,8 +9,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# Install runtime system dependencies needed by the app.
+# Install runtime system dependencies needed by the app, including security updates.
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
     libpq5 \
     libjpeg62-turbo \
