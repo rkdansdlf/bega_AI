@@ -39,6 +39,7 @@ class Settings(BaseSettings):
         extra="ignore",
         env_file=".env",
         env_file_encoding="utf-8",
+        populate_by_name=True,
     )
 
     # --- 기본 애플리케이션 설정 ---
@@ -139,8 +140,11 @@ class Settings(BaseSettings):
 
     # 내부 AI 호출 인증 토큰(헤더 또는 Bearer 토큰 지원)
     # - 운영 기본 정책은 BFF(/api/ai/*) 경유이며, 외부 direct AI 공개는 금지합니다.
-    # - direct AI 호출을 허용하는 내부 환경에서는 AI_INTERNAL_TOKEN이 필수입니다.
-    # - AI_INTERNAL_TOKEN 미설정 상태의 direct AI 호출은 503(Service Unavailable)로 차단됩니다.
+    # - direct AI 호출을 허용하는 내부 환경에서는 AI_INTERNAL_TOKEN이 원칙적으로 필수입니다.
+    # - 운영/CI 기준에서 AI_INTERNAL_TOKEN 미설정 상태의 direct AI 호출은
+    #   503(Service Unavailable, AI_INTERNAL_AUTH_MISCONFIGURED)로 차단됩니다.
+    # - 로컬 환경 전용 폴백이 활성화되면 미설정 상태에서도 내부 토큰을 기본값으로 채워
+    #   토큰 누락 요청은 401(Invalid internal API token)으로 응답할 수 있습니다.
     ai_internal_token: Optional[str] = Field(
         None,
         validation_alias="AI_INTERNAL_TOKEN",

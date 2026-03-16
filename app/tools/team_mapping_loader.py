@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, List
 from psycopg import Connection as PgConnection
 from psycopg.rows import dict_row
 
-
 TEAM_MAPPING_ROWS_QUERY = """
     SELECT
         t.team_id,

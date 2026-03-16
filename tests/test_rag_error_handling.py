@@ -12,10 +12,10 @@ from app.core.exceptions import DBRetrievalError
 from app.core.retrieval import similarity_search
 from app.core.context_formatter import ContextFormatter
 
-
 # ---------------------------------------------------------------------------
 # 헬퍼 픽스처
 # ---------------------------------------------------------------------------
+
 
 def _make_entity_filter(
     player_name=None,
@@ -65,6 +65,7 @@ def _make_dummy_conn(error_cls=None):
 # Group A: similarity_search() 예외 분류
 # ---------------------------------------------------------------------------
 
+
 class TestSimilaritySearchExceptions:
 
     def test_operational_error_raises_db_retrieval_error(self):
@@ -96,6 +97,7 @@ class TestSimilaritySearchExceptions:
 # Group B: RAGPipeline.retrieve() 플래그 설정
 # ---------------------------------------------------------------------------
 
+
 class TestRetrieveFlag:
 
     def _make_pipeline(self):
@@ -120,7 +122,9 @@ class TestRetrieveFlag:
             ):
                 with patch(
                     "app.core.rag.similarity_search",
-                    side_effect=DBRetrievalError("mock", cause=psycopg.OperationalError("err")),
+                    side_effect=DBRetrievalError(
+                        "mock", cause=psycopg.OperationalError("err")
+                    ),
                 ):
                     result = await pipeline.retrieve("테스트 쿼리")
             return result
@@ -156,6 +160,7 @@ class TestRetrieveFlag:
 # ---------------------------------------------------------------------------
 # Group C: RAGPipeline.run() DB-down 경로
 # ---------------------------------------------------------------------------
+
 
 class TestRunDbDownPath:
 
@@ -220,7 +225,9 @@ class TestRunDbDownPath:
                     "app.core.rag.similarity_search",
                     return_value=[],
                 ):
-                    with patch.object(pipeline, "_process_and_enrich_docs", spy_process):
+                    with patch.object(
+                        pipeline, "_process_and_enrich_docs", spy_process
+                    ):
                         with patch.object(
                             pipeline,
                             "_generate",
@@ -237,6 +244,7 @@ class TestRunDbDownPath:
 # ---------------------------------------------------------------------------
 # Group D: ContextFormatter.format_zero_hit_guidance()
 # ---------------------------------------------------------------------------
+
 
 class TestFormatZeroHitGuidance:
 
@@ -281,6 +289,7 @@ class TestFormatZeroHitGuidance:
 # ---------------------------------------------------------------------------
 # Group E: run()의 zero-hit 컨텍스트 경로
 # ---------------------------------------------------------------------------
+
 
 class TestRunZeroHitContext:
 
