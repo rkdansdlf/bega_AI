@@ -25,13 +25,12 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.core.coach_cache_key import (
-    build_coach_cache_key,
-    build_focus_signature,
-    build_lineup_signature,
-    build_starter_signature,
-    normalize_focus,
+from app.core.coach_cache_contract import (
+    COACH_CACHE_PROMPT_VERSION,
+    COACH_CACHE_SCHEMA_VERSION,
+    build_coach_cache_identity,
 )
+from app.core.coach_cache_key import build_focus_signature, normalize_focus
 from app.deps import get_connection_pool
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
@@ -40,8 +39,6 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-CACHE_SCHEMA_VERSION = "v5"
-PROMPT_VERSION = "v11_completed_review_tone"
 LOCAL_TOKEN_ENV_FILES = (".env.prod", ".env")
 LEAGUE_TYPE_TO_CODES = {
     "REGULAR": (0,),
@@ -82,6 +79,8 @@ RETRYABLE_FAILURE_PREFIXES = (
     "coach_internal_error",
     "target_wall_timeout",
     "failed_locked",
+    "missing_cache_row",
+    "db_unavailable",
     "missing_done_event_timeout",
     "empty_response_stream",
     "missing_done_event",
@@ -93,10 +92,12 @@ TARGET_TIMEOUT_BUFFER_SECONDS = 15.0
 COACH_YEAR_MIN = 1982
 POSTSEASON_LEAGUE_TYPES = {"POST", "ANY"}
 PENDING_RECHECK_SECONDS = 120.0
+PENDING_STALE_SECONDS = 90.0
 RETRYABLE_CACHE_ERROR_CODES = {
     "empty_response",
     "no_json_found",
     "json_decode_error",
+    "stream_cancelled",
     "oci_mapping_degraded",
 }
 LEAGUE_CODE_TO_STAGE = {
@@ -264,6 +265,14 @@ class MatchupTarget:
     question_override: Optional[str]
 
 
+@dataclass
+class CacheLookupResult:
+    cache_key: str
+    row: Optional[tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]]
+    unavailable: bool = False
+    error_message: Optional[str] = None
+
+
 def _build_analyze_payload(target: MatchupTarget) -> Dict[str, Any]:
     league_context: Dict[str, Any] = {
         "season": target.season_id,
@@ -285,10 +294,67 @@ def _build_analyze_payload(target: MatchupTarget) -> Dict[str, Any]:
         "focus": target.request_focus,
         "request_mode": target.request_mode,
         "game_id": target.game_id,
+        "starter_signature": target.starter_signature,
+        "lineup_signature": target.lineup_signature,
+        "expected_cache_key": target.cache_key,
     }
     if target.question_override:
         payload["question_override"] = target.question_override
     return payload
+
+
+def _coerce_lookup_result(
+    cache_key: str,
+    value: Any,
+) -> CacheLookupResult:
+    if isinstance(value, CacheLookupResult):
+        return value
+    if value is None:
+        return CacheLookupResult(cache_key=cache_key, row=None)
+    return CacheLookupResult(cache_key=cache_key, row=value)
+
+
+def _resolved_cache_key_from_meta(
+    meta: Dict[str, Any] | None,
+    expected_cache_key: str,
+) -> str:
+    if not isinstance(meta, dict):
+        return expected_cache_key
+    for key in ("resolved_cache_key", "cache_key"):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            return value
+    return expected_cache_key
+
+
+def _annotate_cache_resolution(
+    *,
+    target: MatchupTarget,
+    result: Dict[str, Any],
+    meta_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized = dict(result)
+    meta = dict(meta_payload if meta_payload is not None else normalized.get("meta") or {})
+    expected_cache_key = target.cache_key
+    resolved_cache_key = _resolved_cache_key_from_meta(meta, expected_cache_key)
+    cache_key_mismatch = resolved_cache_key != expected_cache_key
+    meta["expected_cache_key"] = expected_cache_key
+    meta["resolved_cache_key"] = resolved_cache_key
+    meta["cache_key"] = resolved_cache_key
+    meta["cache_key_mismatch"] = cache_key_mismatch
+    meta.setdefault("prompt_version", COACH_CACHE_PROMPT_VERSION)
+    meta.setdefault("starter_signature", target.starter_signature)
+    meta.setdefault("lineup_signature", target.lineup_signature)
+    normalized["meta"] = meta
+    return normalized
+
+
+def _lookup_cache_key_for_target(
+    target: MatchupTarget,
+    previous_result: Optional[Dict[str, Any]] = None,
+) -> str:
+    meta = dict((previous_result or {}).get("meta") or {})
+    return _resolved_cache_key_from_meta(meta, target.cache_key)
 
 
 def parse_years(raw: str) -> List[int]:
@@ -456,7 +522,7 @@ def _sort_targets(
 
 def _fetch_cache_state(
     cache_key: str,
-) -> Optional[tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]]:
+) -> CacheLookupResult:
     try:
         with get_connection_pool().connection() as conn:
             row = conn.execute(
@@ -469,65 +535,136 @@ def _fetch_cache_state(
                 (cache_key,),
             ).fetchone()
         if row is None:
-            return None
+            return CacheLookupResult(cache_key=cache_key, row=None)
         status = str(row[0] or "")
         response_json = row[1]
         error_message = row[2]
         error_code = row[3]
         attempt_count = int(row[4] or 0)
-        return (
-            status,
-            response_json,
-            error_message,
-            error_code,
-            attempt_count,
-            row[5],
-            row[6],
-            row[7],
+        return CacheLookupResult(
+            cache_key=cache_key,
+            row=(
+                status,
+                response_json,
+                error_message,
+                error_code,
+                attempt_count,
+                row[5],
+                row[6],
+                row[7],
+            ),
         )
-    except Exception:
-        return None
+    except Exception as exc:
+        return CacheLookupResult(
+            cache_key=cache_key,
+            row=None,
+            unavailable=True,
+            error_message=str(exc) or exc.__class__.__name__,
+        )
 
 
 def _fetch_cache_rows(
     cache_keys: List[str],
-) -> Dict[str, tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]]:
+) -> Dict[str, CacheLookupResult]:
     if not cache_keys:
         return {}
 
-    with get_connection_pool().connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT cache_key, status, response_json, error_message, error_code,
-                   attempt_count, updated_at, lease_expires_at, last_heartbeat_at
-            FROM coach_analysis_cache
-            WHERE cache_key = ANY(%s)
-            """,
-            (cache_keys,),
-        ).fetchall()
+    try:
+        with get_connection_pool().connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT cache_key, status, response_json, error_message, error_code,
+                       attempt_count, updated_at, lease_expires_at, last_heartbeat_at
+                FROM coach_analysis_cache
+                WHERE cache_key = ANY(%s)
+                """,
+                (cache_keys,),
+            ).fetchall()
+    except Exception as exc:
+        error_message = str(exc) or exc.__class__.__name__
+        return {
+            cache_key: CacheLookupResult(
+                cache_key=cache_key,
+                row=None,
+                unavailable=True,
+                error_message=error_message,
+            )
+            for cache_key in cache_keys
+        }
 
-    return {
-        str(row[0]): (
-            str(row[1] or ""),
-            row[2],
-            row[3],
-            row[4],
-            int(row[5] or 0),
-            row[6],
-            row[7],
-            row[8],
+    row_by_cache_key = {
+        str(row[0]): CacheLookupResult(
+            cache_key=str(row[0]),
+            row=(
+                str(row[1] or ""),
+                row[2],
+                row[3],
+                row[4],
+                int(row[5] or 0),
+                row[6],
+                row[7],
+                row[8],
+            ),
         )
         for row in rows
     }
+    for cache_key in cache_keys:
+        row_by_cache_key.setdefault(
+            cache_key,
+            CacheLookupResult(cache_key=cache_key, row=None),
+        )
+    return row_by_cache_key
+
+
+def _calc_row_age_seconds(updated_at: Any) -> float:
+    if not isinstance(updated_at, datetime):
+        return float("inf")
+    now_ref = (
+        datetime.now(updated_at.tzinfo)
+        if updated_at.tzinfo is not None
+        else datetime.now()
+    )
+    return max(0.0, (now_ref - updated_at).total_seconds())
+
+
+def _is_pending_row_stale(
+    updated_at: Any,
+    lease_expires_at: Any,
+    last_heartbeat_at: Any,
+) -> bool:
+    if isinstance(lease_expires_at, datetime):
+        now_ref = (
+            datetime.now(lease_expires_at.tzinfo)
+            if lease_expires_at.tzinfo is not None
+            else datetime.now()
+        )
+        if now_ref > lease_expires_at:
+            return True
+
+    finite_ages = [
+        age
+        for age in (
+            _calc_row_age_seconds(updated_at),
+            _calc_row_age_seconds(last_heartbeat_at),
+            _calc_row_age_seconds(lease_expires_at),
+        )
+        if age != float("inf")
+    ]
+    if not finite_ages:
+        return False
+    return min(finite_ages) > PENDING_STALE_SECONDS
 
 
 def _normalize_cache_state_label(
-    row: Optional[tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]],
+    row: Any,
 ) -> str:
-    if row is None:
+    lookup = _coerce_lookup_result("", row)
+    if lookup.unavailable:
+        return "UNAVAILABLE"
+    if lookup.row is None:
         return "MISSING"
 
-    status = str(row[0] or "").strip().upper()
+    status = str(lookup.row[0] or "").strip().upper()
     if status == "COMPLETED":
         return "COMPLETED"
     if status == "FAILED":
@@ -579,6 +716,8 @@ def _is_retryable_failed_row(
     error_message: Any,
     attempt_count: Any,
 ) -> bool:
+    if str(error_code or "").strip().lower() == "stream_cancelled":
+        return True
     if _is_retryable_cache_error_code(error_code):
         return int(attempt_count or 0) < 3
     return _is_retryable_failure_reason(str(error_message or ""))
@@ -586,12 +725,27 @@ def _is_retryable_failed_row(
 
 def _build_cache_verification_result(
     target: MatchupTarget,
-    row: Optional[tuple[str, Any, Optional[str], Optional[str], int, Any, Any, Any]],
+    row: Any,
 ) -> Dict[str, Any]:
     result = _build_result_shell(target)
-    if row is None:
+    lookup = _coerce_lookup_result(target.cache_key, row)
+    if lookup.unavailable:
+        result["reason"] = "db_unavailable"
+        result["meta"] = {
+            "db_unavailable": True,
+            "failure_class": "retryable_failed",
+            "retryable_failure": True,
+            "db_error_message": lookup.error_message,
+        }
+        return _annotate_cache_resolution(target=target, result=result)
+
+    if lookup.row is None:
         result["reason"] = "missing_cache_row"
-        return result
+        result["meta"] = {
+            "cache_row_missing": True,
+            "failure_class": "missing_cache_row",
+        }
+        return _annotate_cache_resolution(target=target, result=result)
 
     (
         cache_state,
@@ -602,7 +756,7 @@ def _build_cache_verification_result(
         _updated_at,
         _lease_expires_at,
         _last_heartbeat_at,
-    ) = row
+    ) = lookup.row
     normalized_state = str(cache_state or "").strip().upper()
 
     if normalized_state == "COMPLETED":
@@ -612,7 +766,11 @@ def _build_cache_verification_result(
         meta.setdefault("cache_state", normalized_state)
         result["meta"] = meta
         result["status"], result["reason"] = _classify_meta_result(meta)
-        return result
+        return _annotate_cache_resolution(
+            target=target,
+            result=result,
+            meta_payload=result["meta"],
+        )
 
     if normalized_state in {"PENDING", "PENDING_WAIT"}:
         result["status"] = "in_progress"
@@ -624,7 +782,7 @@ def _build_cache_verification_result(
             "recheck_after_seconds": PENDING_RECHECK_SECONDS,
             "attempt_count": int(attempt_count or 0),
         }
-        return result
+        return _annotate_cache_resolution(target=target, result=result)
 
     if normalized_state == "FAILED_LOCKED":
         result["reason"] = "failed_locked"
@@ -634,7 +792,7 @@ def _build_cache_verification_result(
             "cache_error_code": error_code,
             "attempt_count": int(attempt_count or 0),
         }
-        return result
+        return _annotate_cache_resolution(target=target, result=result)
 
     if normalized_state == "FAILED":
         retryable_failure = _is_retryable_failed_row(
@@ -656,7 +814,7 @@ def _build_cache_verification_result(
                 "retryable_failed" if retryable_failure else "locked_terminal"
             ),
         }
-        return result
+        return _annotate_cache_resolution(target=target, result=result)
 
     result["reason"] = (
         f"unexpected_cache_state:{normalized_state.lower()}"
@@ -664,18 +822,39 @@ def _build_cache_verification_result(
         else "unexpected_cache_state"
     )
     result["meta"] = {"cache_state": normalized_state}
-    return result
+    return _annotate_cache_resolution(target=target, result=result)
 
 
 def _build_terminal_cache_result_if_available(
     target: MatchupTarget,
+    previous_result: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    row = _fetch_cache_state(target.cache_key)
-    if row is None:
+    row = _coerce_lookup_result(
+        _lookup_cache_key_for_target(target, previous_result),
+        _fetch_cache_state(_lookup_cache_key_for_target(target, previous_result)),
+    )
+    if row.unavailable or row.row is None:
         return None
 
-    cache_state = str(row[0] or "").strip().upper()
+    cache_state = str(row.row[0] or "").strip().upper()
     if cache_state in {"COMPLETED", "FAILED", "FAILED_LOCKED"}:
+        return _build_cache_verification_result(target, row)
+    return None
+
+
+def _build_in_progress_cache_result_if_available(
+    target: MatchupTarget,
+    previous_result: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    row = _coerce_lookup_result(
+        _lookup_cache_key_for_target(target, previous_result),
+        _fetch_cache_state(_lookup_cache_key_for_target(target, previous_result)),
+    )
+    if row.unavailable or row.row is None:
+        return None
+
+    cache_state = str(row.row[0] or "").strip().upper()
+    if cache_state in {"PENDING", "PENDING_WAIT"}:
         return _build_cache_verification_result(target, row)
     return None
 
@@ -689,12 +868,22 @@ def _is_retryable_failure_reason(reason: str | None) -> bool:
 
 def collect_cache_verification_results(
     targets: List[MatchupTarget],
+    previous_results: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    row_by_cache_key = _fetch_cache_rows([target.cache_key for target in targets])
-    return [
-        _build_cache_verification_result(target, row_by_cache_key.get(target.cache_key))
+    lookup_keys = [
+        _lookup_cache_key_for_target(
+            target,
+            (previous_results or {}).get(target.cache_key),
+        )
         for target in targets
     ]
+    row_by_cache_key = _fetch_cache_rows(lookup_keys)
+    results: List[Dict[str, Any]] = []
+    for target, lookup_key in zip(targets, lookup_keys):
+        results.append(
+            _build_cache_verification_result(target, row_by_cache_key.get(lookup_key))
+        )
+    return results
 
 
 async def _wait_cache_completion(
@@ -703,10 +892,12 @@ async def _wait_cache_completion(
     attempts = max(1, int(DONE_WAIT_SECONDS / DONE_WAIT_INTERVAL_SECONDS))
     for _ in range(attempts):
         row = _fetch_cache_state(cache_key)
-        if row is None:
+        if row.unavailable:
+            return "DB_UNAVAILABLE", None, row.error_message, False
+        if row.row is None:
             return None, None, None, False
 
-        status, response_json, error_message, error_code, *_ = row
+        status, response_json, error_message, error_code, *_ = row.row
         if status in {"COMPLETED", "FAILED"}:
             return status, response_json, str(error_code or error_message or ""), True
         if status in {"PENDING", "PENDING_WAIT", "FAILED_LOCKED"}:
@@ -822,16 +1013,10 @@ def load_targets(
         if status_bucket_filter != "ANY" and game_status_bucket != status_bucket_filter:
             continue
         game_lineups = lineup_by_game.get(str(game_id), {})
-        lineup_signature = build_lineup_signature(
-            [
-                *game_lineups.get(home_canonical, []),
-                *game_lineups.get(away_canonical, []),
-            ]
-        )
-        starter_signature = build_starter_signature(
-            _normalize_name_token(home_pitcher),
-            _normalize_name_token(away_pitcher),
-        )
+        lineup_players = [
+            *game_lineups.get(home_canonical, []),
+            *game_lineups.get(away_canonical, []),
+        ]
         series_game_no: Optional[int] = None
         if normalized_league_code in {2, 3, 4, 5}:
             matchup_key = (
@@ -847,9 +1032,8 @@ def load_targets(
             continue
         seen.add(dedupe_key)
 
-        cache_key, _payload = build_coach_cache_key(
-            schema_version=CACHE_SCHEMA_VERSION,
-            prompt_version=PROMPT_VERSION,
+        cache_key, _payload, starter_signature, lineup_signature = (
+            build_coach_cache_identity(
             home_team_code=home_canonical,
             away_team_code=away_canonical,
             year=int(season_year),
@@ -859,10 +1043,12 @@ def load_targets(
             game_id=str(game_id),
             league_type_code=normalized_league_code,
             stage_label=stage_label,
-            starter_signature=starter_signature,
-            lineup_signature=lineup_signature,
             request_mode=request_mode,
             game_status_bucket=game_status_bucket,
+            home_pitcher=_normalize_name_token(home_pitcher),
+            away_pitcher=_normalize_name_token(away_pitcher),
+            lineup_players=lineup_players,
+            )
         )
         deduped.append(
             MatchupTarget(
@@ -897,17 +1083,54 @@ def load_targets(
     return sliced
 
 
-def force_rebuild_delete(cache_keys: List[str]) -> int:
+def force_rebuild_delete(cache_keys: List[str]) -> Dict[str, int]:
+    stats = {
+        "deleted_cache_rows": 0,
+        "unsafe_force_rebuild_blocked_count": 0,
+        "stale_pending_takeover_count": 0,
+        "missing_cache_row_count": 0,
+    }
     if not cache_keys:
-        return 0
+        return stats
+
     pool = get_connection_pool()
     with pool.connection() as conn:
-        result = conn.execute(
-            "DELETE FROM coach_analysis_cache WHERE cache_key = ANY(%s)",
+        rows = conn.execute(
+            """
+            SELECT cache_key, status, updated_at, lease_expires_at, last_heartbeat_at
+            FROM coach_analysis_cache
+            WHERE cache_key = ANY(%s)
+            FOR UPDATE
+            """,
             (cache_keys,),
-        )
+        ).fetchall()
+
+        found_keys = {str(row[0]) for row in rows}
+        deletable_keys: List[str] = []
+        for cache_key, status, updated_at, lease_expires_at, last_heartbeat_at in rows:
+            normalized_state = str(status or "").strip().upper()
+            if normalized_state == "PENDING":
+                if _is_pending_row_stale(
+                    updated_at=updated_at,
+                    lease_expires_at=lease_expires_at,
+                    last_heartbeat_at=last_heartbeat_at,
+                ):
+                    stats["stale_pending_takeover_count"] += 1
+                else:
+                    stats["unsafe_force_rebuild_blocked_count"] += 1
+                continue
+            deletable_keys.append(str(cache_key))
+
+        if deletable_keys:
+            result = conn.execute(
+                "DELETE FROM coach_analysis_cache WHERE cache_key = ANY(%s)",
+                (deletable_keys,),
+            )
+            stats["deleted_cache_rows"] = int(result.rowcount or 0)
+
+        stats["missing_cache_row_count"] = max(0, len(cache_keys) - len(found_keys))
         conn.commit()
-    return result.rowcount or 0
+    return stats
 
 
 def _build_result_shell(target: MatchupTarget) -> Dict[str, Any]:
@@ -922,6 +1145,15 @@ def _build_result_shell(target: MatchupTarget) -> Dict[str, Any]:
         "reason": None,
         "meta": {},
     }
+
+
+def _cache_resolution_log_suffix(item: Dict[str, Any]) -> str:
+    meta = dict(item.get("meta") or {})
+    expected_cache_key = str(meta.get("expected_cache_key") or item.get("cache_key") or "").strip()
+    resolved_cache_key = str(meta.get("resolved_cache_key") or expected_cache_key).strip()
+    if not expected_cache_key and not resolved_cache_key:
+        return ""
+    return f" expected_cache_key={expected_cache_key} resolved_cache_key={resolved_cache_key}"
 
 
 async def call_analyze(
@@ -979,7 +1211,11 @@ async def call_analyze(
                     try:
                         parsed = json.loads(data_str)
                         if isinstance(parsed, dict):
-                            meta_payload = parsed
+                            meta_payload = _annotate_cache_resolution(
+                                target=target,
+                                result={"meta": parsed},
+                                meta_payload=parsed,
+                            )["meta"]
                     except json.JSONDecodeError:
                         pass
                 elif current_event == "error":
@@ -997,50 +1233,77 @@ async def call_analyze(
 
     except Exception as exc:
         result["reason"] = str(exc) or exc.__class__.__name__
-        return result
+        return _annotate_cache_resolution(target=target, result=result)
 
     if not saw_done:
+        resolved_cache_key = _resolved_cache_key_from_meta(meta_payload, target.cache_key)
         status, response_json, cache_error, was_terminal = await _wait_cache_completion(
-            target.cache_key
+            resolved_cache_key
         )
         if was_terminal:
             if status == "COMPLETED" and response_json:
                 result["status"] = "generated"
                 result["reason"] = "generated_without_done_event"
-                result["meta"] = {"cache_state": "COMPLETED", "in_progress": False}
-                return result
+                result["meta"] = {
+                    "cache_state": "COMPLETED",
+                    "in_progress": False,
+                }
+                return _annotate_cache_resolution(
+                    target=target,
+                    result=result,
+                    meta_payload=result["meta"],
+                )
             if status == "FAILED":
                 result["status"] = "failed"
                 result["reason"] = str(cache_error or "failed_without_done_event")
-                return result
+                return _annotate_cache_resolution(target=target, result=result)
 
         if status == "TIMEOUT":
             result["status"] = "failed"
             result["reason"] = "missing_done_event_timeout"
-            return result
+            return _annotate_cache_resolution(target=target, result=result)
+
+        if status == "DB_UNAVAILABLE":
+            result["status"] = "failed"
+            result["reason"] = "db_unavailable"
+            result["meta"] = {
+                "db_unavailable": True,
+                "retryable_failure": True,
+                "failure_class": "retryable_failed",
+                "db_error_message": cache_error,
+            }
+            return _annotate_cache_resolution(
+                target=target,
+                result=result,
+                meta_payload=result["meta"],
+            )
 
         if status == "FAILED_LOCKED":
             result["status"] = "failed"
             result["reason"] = "failed_locked_without_done_event"
-            return result
+            return _annotate_cache_resolution(target=target, result=result)
 
         if saw_error_event and error_message:
             result["reason"] = error_message
-            return result
+            return _annotate_cache_resolution(target=target, result=result)
         if not saw_any_event:
             result["reason"] = "empty_response_stream"
         elif not saw_message_event and not saw_meta_event:
             result["reason"] = "missing_done_event_no_payload"
         else:
             result["reason"] = "missing_done_event"
-        return result
+        return _annotate_cache_resolution(target=target, result=result)
     if error_message:
         result["reason"] = error_message
-        return result
+        return _annotate_cache_resolution(target=target, result=result)
 
     result["meta"] = meta_payload
     result["status"], result["reason"] = _classify_meta_result(meta_payload)
-    return result
+    return _annotate_cache_resolution(
+        target=target,
+        result=result,
+        meta_payload=meta_payload,
+    )
 
 
 async def call_analyze_with_deadline(
@@ -1066,10 +1329,22 @@ async def call_analyze_with_deadline(
             recovered_meta.setdefault("timeout_seconds", round(timeout_seconds, 3))
             recovered["meta"] = recovered_meta
             return recovered
+        pending = _build_in_progress_cache_result_if_available(target)
+        if pending is not None:
+            pending_meta = dict(pending.get("meta") or {})
+            pending_meta.setdefault("timeout_seconds", round(timeout_seconds, 3))
+            pending_meta["recovered_from"] = "target_wall_timeout"
+            pending_meta["timed_out_while_pending"] = True
+            pending["meta"] = pending_meta
+            return pending
         result = _build_result_shell(target)
         result["reason"] = "target_wall_timeout"
         result["meta"] = {"timeout_seconds": round(timeout_seconds, 3)}
-        return result
+        return _annotate_cache_resolution(
+            target=target,
+            result=result,
+            meta_payload=result["meta"],
+        )
 
 
 async def call_analyze_with_retries(
@@ -1100,7 +1375,7 @@ async def call_analyze_with_retries(
         if item.get("status") != "failed":
             return item
 
-        recovered = _build_terminal_cache_result_if_available(target)
+        recovered = _build_terminal_cache_result_if_available(target, item)
         if recovered is not None:
             recovered_meta = dict(recovered.get("meta") or {})
             recovered_meta["attempt"] = attempt
@@ -1111,9 +1386,11 @@ async def call_analyze_with_retries(
         if attempt >= attempts_allowed or not _is_retryable_failure_reason(reason):
             return item
 
-        if reason.startswith("failed_locked"):
-            deleted = force_rebuild_delete([target.cache_key])
-            item["meta"]["retry_deleted_cache_rows"] = deleted
+        if reason.startswith(("failed_locked", "missing_cache_row")):
+            rebuild_stats = force_rebuild_delete(
+                [_lookup_cache_key_for_target(target, item)]
+            )
+            item["meta"].update(rebuild_stats)
 
         await asyncio.sleep(backoff_seconds * attempt)
 
@@ -1179,6 +1456,7 @@ def summarize_matchup_results(
     focus: List[str],
 ) -> Dict[str, Any]:
     status_counts = _normalize_status_counts(results)
+    resolved_count = status_counts["generated"] + status_counts["skipped"]
     total = (
         status_counts["generated"]
         + status_counts["skipped"]
@@ -1195,29 +1473,42 @@ def summarize_matchup_results(
     locked_terminal_count = 0
     pending_wait_count = 0
     pending_wait_recovered_count = 0
+    missing_cache_row_count = 0
+    missing_cache_row_recovered_count = 0
+    pending_to_missing_count = 0
+    db_unavailable_count = 0
+    pending_to_db_unavailable_count = 0
+    cache_key_mismatch_count = 0
+    cache_key_mismatch_recovered_count = 0
+    unsafe_force_rebuild_blocked_count = 0
     seen_cache_keys: set[str] = set()
     target_teams: set[str] = set()
     failure_reasons: list[str] = []
 
     for item in results:
         warnings = item.get("warnings_count")
-        if isinstance(warnings, (int, float)):
+        if item.get("status") in {"generated", "skipped"} and isinstance(
+            warnings, (int, float)
+        ):
             warnings_total += int(warnings)
-        if item.get("critical_over_limit"):
+        if item.get("status") in {"generated", "skipped"} and item.get(
+            "critical_over_limit"
+        ):
             critical_over_limit_count += 1
 
         meta = item.get("meta") or {}
         failure_class = str(meta.get("failure_class") or "")
         generation_mode = str(meta.get("generation_mode") or "")
-        if generation_mode == "llm_manual":
-            llm_manual_count += 1
-        elif generation_mode == "evidence_fallback":
-            evidence_fallback_count += 1
-        elif generation_mode == "deterministic_auto":
-            deterministic_auto_count += 1
+        if item.get("status") in {"generated", "skipped"}:
+            if generation_mode == "llm_manual":
+                llm_manual_count += 1
+            elif generation_mode == "evidence_fallback":
+                evidence_fallback_count += 1
+            elif generation_mode == "deterministic_auto":
+                deterministic_auto_count += 1
 
-        if bool(meta.get("focus_section_missing")):
-            focus_section_missing_count += 1
+            if bool(meta.get("focus_section_missing")):
+                focus_section_missing_count += 1
         if item.get("status") == "in_progress":
             pending_wait_count += 1
         if failure_class == "retryable_failed":
@@ -1226,6 +1517,25 @@ def summarize_matchup_results(
             locked_terminal_count += 1
         if meta.get("recovered_from") == "pending_wait":
             pending_wait_recovered_count += 1
+        if bool(meta.get("cache_row_missing")) or str(item.get("reason") or "").startswith(
+            "missing_cache_row"
+        ):
+            missing_cache_row_count += 1
+        if bool(meta.get("recovered_from_missing_row")):
+            missing_cache_row_recovered_count += 1
+        if bool(meta.get("pending_to_missing")):
+            pending_to_missing_count += 1
+        if bool(meta.get("db_unavailable")) or str(item.get("reason") or "") == "db_unavailable":
+            db_unavailable_count += 1
+        if bool(meta.get("pending_to_db_unavailable")):
+            pending_to_db_unavailable_count += 1
+        if bool(meta.get("cache_key_mismatch")):
+            cache_key_mismatch_count += 1
+            if item.get("status") in {"generated", "skipped"}:
+                cache_key_mismatch_recovered_count += 1
+        unsafe_force_rebuild_blocked_count += int(
+            meta.get("unsafe_force_rebuild_blocked_count") or 0
+        )
 
         cache_key = item.get("cache_key")
         if isinstance(cache_key, str):
@@ -1299,27 +1609,27 @@ def summarize_matchup_results(
         ),
         "json_parse_success_rate": 0.0,
         "warning_rate": (
-            round(warnings_total / status_counts["generated"], 4)
-            if status_counts["generated"]
+            round(warnings_total / resolved_count, 4)
+            if resolved_count
             else 0.0
         ),
         "llm_manual_count": llm_manual_count,
         "evidence_fallback_count": evidence_fallback_count,
         "deterministic_auto_count": deterministic_auto_count,
         "llm_manual_rate": (
-            round(llm_manual_count / status_counts["generated"], 4)
-            if status_counts["generated"]
+            round(llm_manual_count / resolved_count, 4)
+            if resolved_count
             else 0.0
         ),
         "fallback_rate": (
-            round(evidence_fallback_count / status_counts["generated"], 4)
-            if status_counts["generated"]
+            round(evidence_fallback_count / resolved_count, 4)
+            if resolved_count
             else 0.0
         ),
         "focus_section_missing_count": focus_section_missing_count,
         "focus_section_missing_rate": (
-            round(focus_section_missing_count / status_counts["generated"], 4)
-            if status_counts["generated"]
+            round(focus_section_missing_count / resolved_count, 4)
+            if resolved_count
             else 0.0
         ),
         "pending_wait_count": pending_wait_count,
@@ -1329,14 +1639,22 @@ def summarize_matchup_results(
             if pending_wait_count
             else 0.0
         ),
+        "missing_cache_row_count": missing_cache_row_count,
+        "missing_cache_row_recovered_count": missing_cache_row_recovered_count,
+        "pending_to_missing_count": pending_to_missing_count,
+        "db_unavailable_count": db_unavailable_count,
+        "pending_to_db_unavailable_count": pending_to_db_unavailable_count,
+        "cache_key_mismatch_count": cache_key_mismatch_count,
+        "cache_key_mismatch_recovered_count": cache_key_mismatch_recovered_count,
+        "unsafe_force_rebuild_blocked_count": unsafe_force_rebuild_blocked_count,
         "retryable_failed_count": retryable_failed_count,
         "retryable_failed_rate": (
             round(retryable_failed_count / total, 4) if total else 0.0
         ),
         "locked_terminal_count": locked_terminal_count,
         "critical_over_limit_rate": (
-            round(critical_over_limit_count / status_counts["generated"], 4)
-            if status_counts["generated"]
+            round(critical_over_limit_count / resolved_count, 4)
+            if resolved_count
             else 0.0
         ),
         "cache_invalid_year_count": cache_invalid_year_count,
@@ -1357,6 +1675,17 @@ def _is_retryable_failure_result(item: Dict[str, Any]) -> bool:
     return _is_retryable_failure_reason(str(item.get("reason") or ""))
 
 
+def _collect_retryable_replay_targets(
+    targets: List[MatchupTarget],
+    result_by_cache_key: Dict[str, Dict[str, Any]],
+) -> List[MatchupTarget]:
+    return [
+        target
+        for target in targets
+        if _is_retryable_failure_result(result_by_cache_key.get(target.cache_key) or {})
+    ]
+
+
 def _normalize_recovered_pending_result(item: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(item)
     meta = dict(normalized.get("meta") or {})
@@ -1365,6 +1694,18 @@ def _normalize_recovered_pending_result(item: Dict[str, Any]) -> Dict[str, Any]:
         return normalized
 
     meta["recovered_from"] = "pending_wait"
+    if normalized.get("status") == "failed" and str(normalized.get("reason") or "") == "missing_cache_row":
+        normalized["reason"] = "missing_cache_row_after_pending"
+        meta["failure_class"] = "retryable_failed"
+        meta["retryable_failure"] = True
+        meta["cache_row_missing"] = True
+        meta["pending_to_missing"] = True
+    if normalized.get("status") == "failed" and str(normalized.get("reason") or "") == "db_unavailable":
+        normalized["reason"] = "db_unavailable_after_pending"
+        meta["failure_class"] = "retryable_failed"
+        meta["retryable_failure"] = True
+        meta["db_unavailable"] = True
+        meta["pending_to_db_unavailable"] = True
     normalized["meta"] = meta
     if normalized.get("status") == "skipped" and normalized.get("reason") == "cache_hit":
         generation_mode = str(meta.get("generation_mode") or "")
@@ -1420,8 +1761,14 @@ async def async_main(args: argparse.Namespace) -> int:
         raise ValueError("force-rebuild cannot be combined with verify-cache-only")
 
     if args.force_rebuild:
-        deleted = force_rebuild_delete([target.cache_key for target in targets])
-        print(f"Force rebuild enabled. deleted_cache_rows={deleted}")
+        rebuild_stats = force_rebuild_delete([target.cache_key for target in targets])
+        print(
+            "Force rebuild enabled. "
+            f"deleted_cache_rows={rebuild_stats['deleted_cache_rows']} "
+            f"blocked_active_pending={rebuild_stats['unsafe_force_rebuild_blocked_count']} "
+            f"stale_pending_takeover_candidates={rebuild_stats['stale_pending_takeover_count']} "
+            f"missing_cache_rows={rebuild_stats['missing_cache_row_count']}"
+        )
 
     start_time = datetime.now()
     results: List[Dict[str, Any]]
@@ -1430,7 +1777,7 @@ async def async_main(args: argparse.Namespace) -> int:
         for idx, (target, item) in enumerate(zip(targets, results), start=1):
             print(
                 f"[{idx}/{len(targets)}] {target.season_year} {target.home_team_id} vs {target.away_team_id} "
-                f"-> {item['status']} ({item.get('reason')})"
+                f"-> {item['status']} ({item.get('reason')}){_cache_resolution_log_suffix(item)}"
             )
     else:
         timeout = httpx.Timeout(args.timeout, connect=min(10.0, args.timeout))
@@ -1457,7 +1804,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 results.append(item)
                 print(
                     f"[{idx}/{len(targets)}] {target.season_year} {target.home_team_id} vs {target.away_team_id} "
-                    f"-> {item['status']} ({item.get('reason')})"
+                    f"-> {item['status']} ({item.get('reason')}){_cache_resolution_log_suffix(item)}"
                 )
                 if idx < len(targets):
                     await asyncio.sleep(max(0.0, args.delay_seconds))
@@ -1472,20 +1819,17 @@ async def async_main(args: argparse.Namespace) -> int:
                     if (result_by_cache_key.get(target.cache_key) or {}).get("status")
                     == "in_progress"
                 ]
-                retryable_failed_targets = [
-                    target
-                    for target in targets
-                    if _is_retryable_failure_result(
-                        result_by_cache_key.get(target.cache_key) or {}
-                    )
-                ]
+                retryable_failed_targets = _collect_retryable_replay_targets(
+                    targets, result_by_cache_key
+                )
                 if not pending_targets and not retryable_failed_targets:
                     break
 
                 if pending_targets:
                     await asyncio.sleep(max(0.0, args.pending_recheck_seconds))
                     rechecked_results = collect_cache_verification_results(
-                        pending_targets
+                        pending_targets,
+                        previous_results=result_by_cache_key,
                     )
                     for item in rechecked_results:
                         recovered_item = _normalize_recovered_pending_result(item)
@@ -1496,15 +1840,12 @@ async def async_main(args: argparse.Namespace) -> int:
                         print(
                             f"[recovery:{recovery_pass}] {recovered_item['cache_key']} "
                             f"-> {recovered_item['status']} ({recovered_item.get('reason')})"
+                            f"{_cache_resolution_log_suffix(recovered_item)}"
                         )
 
-                replay_targets = [
-                    target
-                    for target in retryable_failed_targets
-                    if _is_retryable_failure_result(
-                        result_by_cache_key.get(target.cache_key) or {}
-                    )
-                ]
+                replay_targets = _collect_retryable_replay_targets(
+                    targets, result_by_cache_key
+                )
                 for target in replay_targets:
                     item = await call_analyze_with_retries(
                         client=client,
@@ -1520,7 +1861,7 @@ async def async_main(args: argparse.Namespace) -> int:
                     result_by_cache_key[target.cache_key] = item
                     print(
                         f"[retry:{recovery_pass}] {target.season_year} {target.home_team_id} vs {target.away_team_id} "
-                        f"-> {item['status']} ({item.get('reason')})"
+                        f"-> {item['status']} ({item.get('reason')}){_cache_resolution_log_suffix(item)}"
                     )
                     await asyncio.sleep(max(0.0, args.delay_seconds))
             results = [
@@ -1571,7 +1912,13 @@ async def async_main(args: argparse.Namespace) -> int:
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"Quality report written: {report_path}")
-    return 0 if summary["failed"] == 0 and summary["in_progress"] == 0 else 1
+    return (
+        0
+        if summary["failed"] == 0
+        and summary["in_progress"] == 0
+        and summary["cache_key_mismatch_count"] == 0
+        else 1
+    )
 
 
 def parse_args() -> argparse.Namespace:

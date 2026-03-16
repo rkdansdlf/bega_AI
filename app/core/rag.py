@@ -463,6 +463,7 @@ class RAGPipeline:
         self.baseball_agent = BaseballStatisticsAgent(connection, self._generate)
         self.wpa_calculator = WPACalculator()
         self._retrieval_error: Optional[str] = None  # set if DB was unreachable during retrieval
+        self._db_lock = asyncio.Lock()  # psycopg3 sync connection은 thread-safe하지 않으므로 DB 쿼리 직렬화
 
     async def _process_and_enrich_docs(
         self, docs: List[Dict[str, Any]], year: int
@@ -594,14 +595,17 @@ class RAGPipeline:
         from fastapi.concurrency import run_in_threadpool
 
         try:
-            docs = await run_in_threadpool(
-                similarity_search,
-                self.connection,
-                embedding,
-                limit=limit,
-                filters=filters,
-                keyword=keyword,
-            )
+            # psycopg3 sync connection은 thread-safe하지 않으므로 Lock으로 직렬화
+            # HyDE LLM 호출과 임베딩 생성은 Lock 바깥이므로 asyncio.gather 시 병렬 실행됨
+            async with self._db_lock:
+                docs = await run_in_threadpool(
+                    similarity_search,
+                    self.connection,
+                    embedding,
+                    limit=limit,
+                    filters=filters,
+                    keyword=keyword,
+                )
         except DBRetrievalError as exc:
             logger.error("[RAG] DB retrieval error in retrieve(): %s", exc)
             self._retrieval_error = str(exc.cause)
@@ -1397,18 +1401,23 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
             # For ranking queries, use multi-query retrieval for better coverage
             if not entity_filter.position_type:
-                # Search both pitchers and batters with multi-query
+                # 투수와 타자 멀티쿼리를 병렬 실행 (HyDE+임베딩은 동시, DB는 _db_lock이 직렬화)
                 pitcher_filters = dict(final_filters)
                 pitcher_filters["source_table"] = "player_season_pitching"
-                docs_pitchers = await self.retrieve_with_multi_query(
-                    query, entity_filter, filters=pitcher_filters
-                )
-
                 batter_filters = dict(final_filters)
                 batter_filters["source_table"] = "player_season_batting"
-                docs_batters = await self.retrieve_with_multi_query(
-                    query, entity_filter, filters=batter_filters
+
+                _results = await asyncio.gather(
+                    self.retrieve_with_multi_query(query, entity_filter, filters=pitcher_filters),
+                    self.retrieve_with_multi_query(query, entity_filter, filters=batter_filters),
+                    return_exceptions=True,
                 )
+                docs_pitchers = _results[0] if not isinstance(_results[0], BaseException) else []
+                docs_batters  = _results[1] if not isinstance(_results[1], BaseException) else []
+                if isinstance(_results[0], BaseException):
+                    logger.warning("[RAG] Pitcher multi-query failed: %s", _results[0])
+                if isinstance(_results[1], BaseException):
+                    logger.warning("[RAG] Batter multi-query failed: %s", _results[1])
 
                 docs = docs_pitchers + docs_batters
                 logger.info(
@@ -1469,7 +1478,8 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         logger.info(f"[RAG] Final retrieval result: {len(docs)} documents")
 
         # --- DB 연결 장애 폴백 ---
-        if self._retrieval_error is not None:
+        # docs가 있으면 일부 검색이 성공한 것이므로 에러가 있어도 폴백하지 않음
+        if self._retrieval_error is not None and not docs:
             logger.warning(
                 "[RAG] DB was unavailable during retrieval, using LLM knowledge fallback. cause=%s",
                 self._retrieval_error,

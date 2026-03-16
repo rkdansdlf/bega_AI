@@ -1,8 +1,10 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from scripts import batch_coach_matchup_cache as batch_module
 from scripts.batch_coach_matchup_cache import (
     _classify_meta_result,
+    _collect_retryable_replay_targets,
     _extract_error_message,
     _filter_targets_by_cache_state,
     _league_codes_for_type,
@@ -23,6 +25,7 @@ from scripts.batch_coach_matchup_cache import (
     parse_cache_state_filter,
     parse_status_bucket_filter,
     parse_target_order,
+    summarize_matchup_results,
 )
 
 
@@ -168,6 +171,9 @@ def test_build_analyze_payload_includes_postseason_stage_context() -> None:
     assert payload["league_context"]["round"] == "KS"
     assert payload["league_context"]["series_game_no"] == 5
     assert payload["league_context"]["game_no"] == 5
+    assert payload["starter_signature"] == "s"
+    assert payload["lineup_signature"] == "l"
+    assert payload["expected_cache_key"] == "post"
 
 
 def test_normalize_cache_state_label_maps_missing_and_pending_rows() -> None:
@@ -424,6 +430,104 @@ def test_collect_cache_verification_results_marks_missing_rows_failed(
     assert len(results) == 1
     assert results[0]["status"] == "failed"
     assert results[0]["reason"] == "missing_cache_row"
+    assert results[0]["meta"]["cache_row_missing"] is True
+
+
+def test_collect_cache_verification_results_uses_resolved_cache_key_from_previous_result(
+    monkeypatch,
+) -> None:
+    target = MatchupTarget(
+        cache_key="expected-key",
+        game_id="20250708SSNC0",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-07-08",
+        game_type="REGULAR",
+        home_team_id="SS",
+        away_team_id="NC",
+        league_type_code=0,
+        stage_label="REGULAR",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="starter:same",
+        lineup_signature="lineup:same",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    monkeypatch.setattr(
+        batch_module,
+        "_fetch_cache_rows",
+        lambda keys: {
+            "resolved-key": batch_module.CacheLookupResult(
+                cache_key="resolved-key",
+                row=(
+                    "COMPLETED",
+                    {"_meta": {"validation_status": "success", "cache_key": "resolved-key"}},
+                    None,
+                    None,
+                    1,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        },
+    )
+
+    results = collect_cache_verification_results(
+        [target],
+        previous_results={
+            "expected-key": {
+                "cache_key": "expected-key",
+                "meta": {"resolved_cache_key": "resolved-key"},
+            }
+        },
+    )
+
+    assert results[0]["status"] == "skipped"
+    assert results[0]["reason"] == "cache_hit"
+    assert results[0]["meta"]["resolved_cache_key"] == "resolved-key"
+    assert results[0]["meta"]["expected_cache_key"] == "expected-key"
+    assert results[0]["meta"]["cache_key_mismatch"] is True
+
+
+def test_build_cache_verification_result_marks_db_unavailable_retryable() -> None:
+    target = MatchupTarget(
+        cache_key="db-down",
+        game_id="20250708OBLT0",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-07-08",
+        game_type="REGULAR",
+        home_team_id="OB",
+        away_team_id="LT",
+        league_type_code=0,
+        stage_label="REGULAR",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    result = _build_cache_verification_result(
+        target,
+        batch_module.CacheLookupResult(
+            cache_key="db-down",
+            row=None,
+            unavailable=True,
+            error_message="server closed the connection unexpectedly",
+        ),
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "db_unavailable"
+    assert result["meta"]["retryable_failure"] is True
+    assert result["meta"]["db_unavailable"] is True
 
 
 def test_build_terminal_cache_result_if_available_uses_completed_row(
@@ -513,6 +617,138 @@ def test_normalize_recovered_pending_result_keeps_in_progress_unrecovered() -> N
     assert "recovered_from" not in item["meta"]
 
 
+def test_normalize_recovered_pending_result_promotes_missing_row_to_retryable() -> None:
+    item = _normalize_recovered_pending_result(
+        {
+            "status": "failed",
+            "reason": "missing_cache_row",
+            "meta": {},
+            "cache_key": "k3",
+        }
+    )
+
+    assert item["status"] == "failed"
+    assert item["reason"] == "missing_cache_row_after_pending"
+    assert item["meta"]["recovered_from"] == "pending_wait"
+    assert item["meta"]["failure_class"] == "retryable_failed"
+    assert item["meta"]["retryable_failure"] is True
+    assert item["meta"]["pending_to_missing"] is True
+
+
+def test_normalize_recovered_pending_result_promotes_db_unavailable_to_retryable() -> None:
+    item = _normalize_recovered_pending_result(
+        {
+            "status": "failed",
+            "reason": "db_unavailable",
+            "meta": {},
+            "cache_key": "kdb",
+        }
+    )
+
+    assert item["reason"] == "db_unavailable_after_pending"
+    assert item["meta"]["retryable_failure"] is True
+    assert item["meta"]["pending_to_db_unavailable"] is True
+
+
+def test_summarize_matchup_results_uses_resolved_count_for_quality_rates(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        batch_module,
+        "collect_matchup_integrity_metrics",
+        lambda years, aliases: (0, 0),
+    )
+
+    summary = summarize_matchup_results(
+        results=[
+            {
+                "cache_key": "g1",
+                "status": "generated",
+                "reason": "generated",
+                "home_team_id": "LG",
+                "away_team_id": "KIA",
+                "meta": {"generation_mode": "llm_manual", "focus_section_missing": True},
+            },
+            {
+                "cache_key": "g2",
+                "status": "generated",
+                "reason": "generated_fallback",
+                "home_team_id": "KT",
+                "away_team_id": "LT",
+                "meta": {
+                    "generation_mode": "evidence_fallback",
+                    "focus_section_missing": True,
+                },
+            },
+            {
+                "cache_key": "g3",
+                "status": "skipped",
+                "reason": "cache_hit",
+                "home_team_id": "SS",
+                "away_team_id": "DB",
+                "meta": {
+                    "generation_mode": "evidence_fallback",
+                    "focus_section_missing": True,
+                },
+            },
+            {
+                "cache_key": "g4",
+                "status": "skipped",
+                "reason": "cache_hit",
+                "home_team_id": "HH",
+                "away_team_id": "NC",
+                "meta": {"generation_mode": "llm_manual", "focus_section_missing": False},
+            },
+        ],
+        years=[2025],
+        league_type="REGULAR",
+        focus=["matchup", "recent_form"],
+    )
+
+    assert summary["success"] == 2
+    assert summary["skipped"] == 2
+    assert summary["llm_manual_count"] == 2
+    assert summary["evidence_fallback_count"] == 2
+    assert summary["llm_manual_rate"] == 0.5
+    assert summary["fallback_rate"] == 0.5
+    assert summary["focus_section_missing_count"] == 3
+    assert summary["focus_section_missing_rate"] == 0.75
+
+
+def test_collect_retryable_replay_targets_includes_pending_to_missing() -> None:
+    target = MatchupTarget(
+        cache_key="k3",
+        game_id="20250310SSHH0",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+    item = _normalize_recovered_pending_result(
+        {
+            "status": "failed",
+            "reason": "missing_cache_row",
+            "meta": {},
+            "cache_key": "k3",
+        }
+    )
+
+    replay_targets = _collect_retryable_replay_targets([target], {"k3": item})
+
+    assert [candidate.cache_key for candidate in replay_targets] == ["k3"]
+
+
 def test_call_analyze_with_deadline_returns_failed_on_wall_timeout(
     monkeypatch,
 ) -> None:
@@ -556,6 +792,69 @@ def test_call_analyze_with_deadline_returns_failed_on_wall_timeout(
     assert result["meta"]["timeout_seconds"] == 0.01
 
 
+def test_call_analyze_with_deadline_returns_in_progress_when_pending_row_exists(
+    monkeypatch,
+) -> None:
+    target = MatchupTarget(
+        cache_key="timeout-pending",
+        game_id="20250310SSHH1",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    async def _stuck_call(**kwargs):
+        await asyncio.sleep(0.05)
+        return {"status": "generated", "reason": "generated", "meta": {}}
+
+    monkeypatch.setattr(batch_module, "call_analyze", _stuck_call)
+    monkeypatch.setattr(
+        batch_module, "_build_terminal_cache_result_if_available", lambda target: None
+    )
+    monkeypatch.setattr(
+        batch_module,
+        "_build_in_progress_cache_result_if_available",
+        lambda target: {
+            "cache_key": target.cache_key,
+            "game_id": target.game_id,
+            "home_team_id": target.home_team_id,
+            "away_team_id": target.away_team_id,
+            "year": target.season_year,
+            "game_type": target.game_type,
+            "status": "in_progress",
+            "reason": "pending_wait",
+            "meta": {"cache_state": "PENDING", "in_progress": True},
+        },
+    )
+
+    result = asyncio.run(
+        call_analyze_with_deadline(
+            client=None,
+            base_url="http://127.0.0.1:18080/api/ai",
+            target=target,
+            timeout_seconds=0.01,
+        )
+    )
+
+    assert result["status"] == "in_progress"
+    assert result["reason"] == "pending_wait"
+    assert result["meta"]["timeout_seconds"] == 0.01
+    assert result["meta"]["timed_out_while_pending"] is True
+    assert result["meta"]["recovered_from"] == "target_wall_timeout"
+
+
 def test_call_analyze_with_retries_succeeds_after_retry(monkeypatch) -> None:
     target = MatchupTarget(
         cache_key="retry-success",
@@ -589,7 +888,9 @@ def test_call_analyze_with_retries_succeeds_after_retry(monkeypatch) -> None:
 
     monkeypatch.setattr(batch_module, "call_analyze_with_deadline", _fake_call)
     monkeypatch.setattr(
-        batch_module, "_build_terminal_cache_result_if_available", lambda target: None
+        batch_module,
+        "_build_terminal_cache_result_if_available",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(batch_module.asyncio, "sleep", _fast_sleep)
 
@@ -644,9 +945,20 @@ def test_call_analyze_with_retries_clears_locked_cache_before_retry(
 
     monkeypatch.setattr(batch_module, "call_analyze_with_deadline", _fake_call)
     monkeypatch.setattr(
-        batch_module, "_build_terminal_cache_result_if_available", lambda target: None
+        batch_module,
+        "_build_terminal_cache_result_if_available",
+        lambda *args, **kwargs: None,
     )
-    monkeypatch.setattr(batch_module, "force_rebuild_delete", lambda keys: 1)
+    monkeypatch.setattr(
+        batch_module,
+        "force_rebuild_delete",
+        lambda keys: {
+            "deleted_cache_rows": 1,
+            "unsafe_force_rebuild_blocked_count": 0,
+            "stale_pending_takeover_count": 0,
+            "missing_cache_row_count": 0,
+        },
+    )
     monkeypatch.setattr(batch_module.asyncio, "sleep", _fast_sleep)
 
     result = asyncio.run(
@@ -663,3 +975,106 @@ def test_call_analyze_with_retries_clears_locked_cache_before_retry(
     assert calls["count"] == 2
     assert result["status"] == "generated"
     assert result["meta"]["attempt"] == 2
+
+
+def test_build_cache_verification_result_keeps_stream_cancelled_retryable() -> None:
+    target = MatchupTarget(
+        cache_key="retry-stream-cancelled",
+        game_id="20250310SSHH2",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    item = _build_cache_verification_result(
+        target,
+        (
+            "FAILED",
+            None,
+            "client_stream_cancelled",
+            "stream_cancelled",
+            7,
+            datetime.now(timezone.utc),
+            None,
+            None,
+        ),
+    )
+
+    assert item["status"] == "failed"
+    assert item["meta"]["retryable_failure"] is True
+    assert item["meta"]["failure_class"] == "retryable_failed"
+
+
+def test_force_rebuild_delete_blocks_active_pending_but_deletes_terminal(
+    monkeypatch,
+) -> None:
+    fresh_time = datetime.now(timezone.utc) - timedelta(seconds=5)
+
+    class _FakeResult:
+        def __init__(self, rows=None, rowcount=0):
+            self._rows = rows or []
+            self.rowcount = rowcount
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakeConn:
+        def __init__(self):
+            self.deleted_keys = None
+
+        def execute(self, sql, params):
+            if "SELECT cache_key, status" in sql:
+                return _FakeResult(
+                    rows=[
+                        ("pending-key", "PENDING", fresh_time, fresh_time + timedelta(seconds=90), fresh_time),
+                        ("completed-key", "COMPLETED", fresh_time, None, None),
+                    ]
+                )
+            if sql.startswith("DELETE FROM coach_analysis_cache"):
+                self.deleted_keys = params[0]
+                return _FakeResult(rowcount=1)
+            raise AssertionError(sql)
+
+        def commit(self):
+            return None
+
+    class _Ctx:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __enter__(self):
+            return self._conn
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakePool:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def connection(self):
+            return _Ctx(self._conn)
+
+    conn = _FakeConn()
+    monkeypatch.setattr(batch_module, "get_connection_pool", lambda: _FakePool(conn))
+
+    stats = batch_module.force_rebuild_delete(
+        ["pending-key", "completed-key", "missing-key"]
+    )
+
+    assert stats["deleted_cache_rows"] == 1
+    assert stats["unsafe_force_rebuild_blocked_count"] == 1
+    assert stats["missing_cache_row_count"] == 1
+    assert conn.deleted_keys == ["completed-key"]

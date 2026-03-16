@@ -574,63 +574,31 @@ def extract_game_date(query: str) -> Optional[str]:
     return None
 
 
+# 외국인 선수명 목록 (2024-2025 시즌 주요 선수들)
+# 모듈 로드 시 1회만 정렬하여 매 호출마다 sorted() 비용을 제거
+_FOREIGN_PLAYERS: frozenset = frozenset({
+    # 타자
+    "디아즈", "무니에", "소크라테스", "로사리오", "나바로",
+    "페렐", "말라도나비치", "오리엘리", "수아레즈", "알카트라즈",
+    "리베르", "라모스", "하스", "맥가리", "바나거즈",
+    "루이즈", "무라타", "우싱", "오캬마", "이치히라", "페르난데스",
+    # 투수
+    "폰세", "플라허티", "하이데이", "드뤼", "윌커슨",
+    "켈리", "반헤켄", "라우덴밀크", "울리시스", "멘데스",
+    "가르시아", "반레", "도미", "바비", "키쇼",
+    "이구치", "미야자키", "코야마", "리처드", "캐슬", "에스피노",
+})
+# 긴 이름부터 매칭해야 부분 매칭 오류를 방지할 수 있으므로 길이 내림차순 정렬
+_FOREIGN_PLAYERS_SORTED: list = sorted(_FOREIGN_PLAYERS, key=len, reverse=True)
+
+
 def extract_player_name(query: str) -> Optional[str]:
     """
     질문에서 선수명을 추출합니다.
     한국어 이름과 외국인 선수명을 모두 인식합니다.
     """
-    # 외국인 선수명 목록 (2024-2025 시즌 주요 선수들)
-    foreign_players = {
-        # 타자
-        "디아즈",
-        "무니에",
-        "소크라테스",
-        "로사리오",
-        "나바로",
-        "페렐",
-        "말라도나비치",
-        "오리엘리",
-        "수아레즈",
-        "알카트라즈",
-        "리베르",
-        "라모스",
-        "하스",
-        "맥가리",
-        "바나거즈",
-        "루이즈",
-        "무라타",
-        "우싱",
-        "오캬마",
-        "이치히라",
-        "페르난데스",
-        # 투수
-        "폰세",
-        "플라허티",
-        "하이데이",
-        "드뤼",
-        "윌커슨",
-        "켈리",
-        "반헤켄",
-        "라우덴밀크",
-        "울리시스",
-        "멘데스",
-        "가르시아",
-        "반레",
-        "도미",
-        "바비",
-        "키쇼",
-        "이구치",
-        "미야자키",
-        "코야마",
-        "리처드",
-        "캐슬",
-        "에스피노",
-    }
-
-    # 1. 외국인 선수명 우선 검색 (조사 제거 전에 긴 이름부터 매칭)
-    # 긴 이름부터 검색하여 부분 매칭 문제 방지
-    foreign_players_sorted = sorted(foreign_players, key=len, reverse=True)
-    for player in foreign_players_sorted:
+    # 1. 외국인 선수명 우선 검색 (긴 이름부터 매칭하여 부분 매칭 문제 방지)
+    for player in _FOREIGN_PLAYERS_SORTED:
         if player in query:
             return player
 
@@ -654,7 +622,7 @@ def extract_player_name(query: str) -> Optional[str]:
     for particle in korean_particles:
         query_normalized = query_normalized.replace(particle, "")
 
-    for player in foreign_players_sorted:
+    for player in _FOREIGN_PLAYERS_SORTED:
         if player in query_normalized:
             return player
 

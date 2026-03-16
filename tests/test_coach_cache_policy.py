@@ -63,6 +63,19 @@ def test_retryable_failed_cache_locks_after_attempt_limit():
     assert _should_generate_from_gate(gate) is False
 
 
+def test_stream_cancelled_failed_cache_reopens_even_after_attempt_limit():
+    aged_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+    gate = _determine_cache_gate(
+        status="FAILED",
+        has_cached_json=False,
+        updated_at=aged_time,
+        error_code="stream_cancelled",
+        attempt_count=3,
+    )
+    assert gate == "MISS_GENERATE"
+    assert _should_generate_from_gate(gate) is True
+
+
 def test_pending_fresh_waits_without_generation():
     fresh_time = datetime.now(timezone.utc) - timedelta(seconds=120)
     gate = _determine_cache_gate(
@@ -118,6 +131,7 @@ def test_gate_to_generation_matrix():
         "PENDING_WAIT": False,
         "FAILED_LOCKED": False,
         "PENDING_STALE_TAKEOVER": True,
+        "ROW_RECREATED": True,
         "MISS_GENERATE": True,
     }
     for gate, expected in matrix.items():

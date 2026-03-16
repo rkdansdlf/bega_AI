@@ -43,21 +43,18 @@ from ..core.coach_validator import (
     parse_coach_response_with_meta,
     CoachResponse,
 )
-from ..core.coach_cache_key import (
-    build_coach_cache_key,
-    build_lineup_signature,
-    build_starter_signature,
-    normalize_focus,
+from ..core.coach_cache_contract import (
+    COACH_CACHE_PROMPT_VERSION,
+    COACH_CACHE_SCHEMA_VERSION,
+    build_coach_cache_identity,
 )
+from ..core.coach_cache_key import normalize_focus
 from ..core.ratelimit import rate_limit_coach_dependency
 from ..tools.database_query import DatabaseQueryTool
 from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
 logger = logging.getLogger(__name__)
 
-# 빈 응답 시 재시도 횟수
-COACH_CACHE_SCHEMA_VERSION = "v5"
-COACH_CACHE_PROMPT_VERSION = "v11_completed_review_tone"
 COACH_YEAR_MIN = 1982
 MAX_COACH_FOCUS_ITEMS = 6
 MAX_COACH_QUESTION_OVERRIDE_LENGTH = 2000
@@ -83,6 +80,7 @@ COACH_VALIDATION_FAILED_CODE = "coach_response_validation_failed"
 COACH_EMPTY_RESPONSE_ERROR_CODE = "empty_response"
 COACH_NO_JSON_FOUND_ERROR_CODE = "no_json_found"
 COACH_JSON_DECODE_ERROR_CODE = "json_decode_error"
+COACH_STREAM_CANCELLED_ERROR_CODE = "stream_cancelled"
 COACH_OCI_MAPPING_DEGRADED_ERROR_CODE = "oci_mapping_degraded"
 COACH_UNSUPPORTED_ENTITY_ERROR_CODE = "unsupported_entity_name"
 COACH_UNSUPPORTED_CLAIM_ERROR_CODE = "grounding_validation_failed"
@@ -95,6 +93,7 @@ COACH_CACHE_ERROR_MESSAGES: Dict[str, str] = {
     COACH_EMPTY_RESPONSE_ERROR_CODE: "LLM 응답이 비어 자동 복구 대기 중입니다.",
     COACH_NO_JSON_FOUND_ERROR_CODE: "LLM 응답에서 JSON을 추출하지 못해 자동 복구 대기 중입니다.",
     COACH_JSON_DECODE_ERROR_CODE: "LLM 응답 JSON 파싱에 실패해 자동 복구 대기 중입니다.",
+    COACH_STREAM_CANCELLED_ERROR_CODE: "분석 스트림이 중단되어 자동 복구 대기 중입니다.",
     COACH_OCI_MAPPING_DEGRADED_ERROR_CODE: "팀 매핑 조회가 일시적으로 불안정했습니다. 잠시 후 재시도해주세요.",
     COACH_UNSUPPORTED_ENTITY_ERROR_CODE: "근거에 없는 엔티티가 감지되어 결과를 잠갔습니다.",
     COACH_UNSUPPORTED_CLAIM_ERROR_CODE: "근거 검증에 실패해 결과를 잠갔습니다.",
@@ -105,6 +104,7 @@ RETRYABLE_CACHE_ERROR_CODES = {
     COACH_EMPTY_RESPONSE_ERROR_CODE,
     COACH_NO_JSON_FOUND_ERROR_CODE,
     COACH_JSON_DECODE_ERROR_CODE,
+    COACH_STREAM_CANCELLED_ERROR_CODE,
     COACH_OCI_MAPPING_DEGRADED_ERROR_CODE,
 }
 FOCUS_SECTION_HEADERS: Dict[str, str] = {
@@ -296,6 +296,125 @@ def _extract_tool_player_stats(item: Dict[str, Any]) -> str:
     return ", ".join(stats[:3])
 
 
+def _player_form_signals(team_data: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    signals = team_data.get("player_form_signals", {}) if team_data else {}
+    values = signals.get(key, []) if isinstance(signals, dict) else []
+    return [item for item in values if isinstance(item, dict)]
+
+
+def _best_form_signal(team_data: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
+    signals = sorted(
+        _player_form_signals(team_data, key),
+        key=lambda item: float(item.get("form_score") or -1.0),
+        reverse=True,
+    )
+    return signals[0] if signals else None
+
+
+def _team_form_score(team_data: Dict[str, Any]) -> Optional[float]:
+    scores: List[float] = []
+    for key in ("batters", "pitchers"):
+        signal = _best_form_signal(team_data, key)
+        score = signal.get("form_score") if signal else None
+        if score is None:
+            continue
+        try:
+            scores.append(float(score))
+        except (TypeError, ValueError):
+            continue
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
+def _form_status_label(value: Optional[str]) -> str:
+    mapping = {
+        "hot": "상승",
+        "steady": "보합",
+        "cold": "하락",
+        "insufficient": "표본 부족",
+    }
+    return mapping.get(str(value or ""), "보합")
+
+
+def _format_form_signal_fact(signal: Dict[str, Any]) -> str:
+    player_name = _normalize_name_token(signal.get("player_name")) or "선수 미상"
+    form_score = signal.get("form_score")
+    score_text = (
+        f"{float(form_score):.1f}"
+        if isinstance(form_score, (int, float))
+        else str(form_score or "데이터 부족")
+    )
+    season_metrics = signal.get("season_metrics", {}) or {}
+    recent_metrics = signal.get("recent_metrics", {}) or {}
+    clutch_metrics = signal.get("clutch_metrics", {}) or {}
+    if "wrc_plus" in season_metrics:
+        return (
+            f"폼 {_form_status_label(signal.get('form_status'))}, 점수 {score_text}, "
+            f"시즌 wRC+ {season_metrics.get('wrc_plus', '데이터 부족')}, "
+            f"OPS+ {season_metrics.get('ops_plus', '데이터 부족')}, "
+            f"최근 OPS {recent_metrics.get('ops', '데이터 부족')}, "
+            f"최근 WPA/PA {clutch_metrics.get('recent_wpa_per_pa', '데이터 부족')}"
+        )
+    return (
+        f"폼 {_form_status_label(signal.get('form_status'))}, 점수 {score_text}, "
+        f"시즌 ERA+ {season_metrics.get('era_plus', '데이터 부족')}, "
+        f"FIP+ {season_metrics.get('fip_plus', '데이터 부족')}, "
+        f"최근 ERA {recent_metrics.get('era', '데이터 부족')}, "
+        f"WPA 허용/BF {clutch_metrics.get('recent_wpa_allowed_per_bf', '데이터 부족')}"
+    )
+
+
+def _clutch_moments(tool_results: Dict[str, Any]) -> List[Dict[str, Any]]:
+    clutch = tool_results.get("clutch_moments", {}) or {}
+    moments = clutch.get("moments", []) if isinstance(clutch, dict) else []
+    return [item for item in moments if isinstance(item, dict)]
+
+
+def _format_clutch_fact(moment: Dict[str, Any]) -> str:
+    player_name = _normalize_name_token(moment.get("batter_name")) or "타자 미상"
+    return (
+        f"{moment.get('inning_label', '이닝 미상')}, "
+        f"{moment.get('outs', 0)}사, "
+        f"주자 {moment.get('bases_before', '-')}, "
+        f"{player_name}, WPA {moment.get('wpa_delta_pct', '데이터 부족')}%p, "
+        f"{moment.get('description', '설명 없음')}"
+    )
+
+
+SUMMARY_CLUTCH_KEYWORDS = (
+    "결승",
+    "끝내기",
+    "역전",
+    "동점",
+    "쐐기",
+    "세이브",
+    "홀드",
+)
+
+
+def _summary_item_is_clutch_like(item: Optional[str]) -> bool:
+    normalized = _clean_summary_text(item)
+    if not normalized:
+        return False
+    return any(keyword in normalized for keyword in SUMMARY_CLUTCH_KEYWORDS)
+
+
+def _primary_review_summary_item(evidence: GameEvidence) -> Optional[str]:
+    prioritized: Optional[str] = None
+    fallback: Optional[str] = None
+    for raw_item in evidence.summary_items:
+        item = _clean_summary_text(raw_item)
+        if not item:
+            continue
+        if fallback is None:
+            fallback = item
+        if _summary_item_is_clutch_like(item):
+            prioritized = item
+            break
+    return prioritized or fallback
+
+
 def _append_team_fact_lines(
     fact_lines: List[str],
     numeric_tokens: Set[str],
@@ -367,6 +486,21 @@ def _append_team_fact_lines(
             continue
         stats_text = _extract_tool_player_stats(player)
         fact = _build_fact_line(f"{team_name} 주요 투수 {player_name}", stats_text)
+        if fact:
+            fact_lines.append(fact)
+            extend_numeric_tokens([fact], numeric_tokens)
+
+    for signal_key, label in (("batters", "폼 타자"), ("pitchers", "폼 투수")):
+        signal = _best_form_signal(team_data, signal_key)
+        if not signal:
+            continue
+        player_name = _normalize_name_token(signal.get("player_name"))
+        if not player_name:
+            continue
+        fact = _build_fact_line(
+            f"{team_name} {label} {player_name}",
+            _format_form_signal_fact(signal),
+        )
         if fact:
             fact_lines.append(fact)
             extend_numeric_tokens([fact], numeric_tokens)
@@ -470,6 +604,16 @@ def _build_coach_fact_sheet(
         if fact:
             fact_lines.append(fact)
             extend_numeric_tokens([fact], numeric_tokens)
+
+    clutch_moments = _clutch_moments(tool_results)
+    if clutch_moments:
+        for moment in clutch_moments[:3]:
+            fact = _build_fact_line("클러치 모먼트", _format_clutch_fact(moment))
+            if fact:
+                fact_lines.append(fact)
+                extend_numeric_tokens([fact], numeric_tokens)
+    elif _is_completed_review(evidence):
+        caveat_lines.append("WPA 기반 승부처 데이터가 부족합니다.")
 
     fact_lines = list(dict.fromkeys(line for line in fact_lines if line))
     caveat_lines.extend(
@@ -705,6 +849,13 @@ def _build_meta_payload_defaults(
     generation_mode: str,
     data_quality: str,
     used_evidence: List[str],
+    cache_key: Optional[str] = None,
+    resolved_cache_key: Optional[str] = None,
+    expected_cache_key: Optional[str] = None,
+    prompt_version: Optional[str] = None,
+    starter_signature: Optional[str] = None,
+    lineup_signature: Optional[str] = None,
+    cache_key_mismatch: bool = False,
     game_status_bucket: Optional[str] = None,
     grounding_warnings: Optional[List[str]] = None,
     grounding_reasons: Optional[List[str]] = None,
@@ -713,6 +864,10 @@ def _build_meta_payload_defaults(
     retryable_failure: bool = False,
     dependency_degraded: bool = False,
     attempt_count: int = 0,
+    cache_row_missing: bool = False,
+    recovered_from_missing_row: bool = False,
+    cache_finalize_conflict: bool = False,
+    lease_lost: bool = False,
 ) -> Dict[str, Any]:
     safe_generation_mode = (
         generation_mode
@@ -725,6 +880,15 @@ def _build_meta_payload_defaults(
     return {
         "generation_mode": safe_generation_mode,
         "data_quality": safe_data_quality,
+        "cache_key": str(cache_key or resolved_cache_key or "").strip() or None,
+        "resolved_cache_key": (
+            str(resolved_cache_key or cache_key or "").strip() or None
+        ),
+        "expected_cache_key": str(expected_cache_key or "").strip() or None,
+        "prompt_version": str(prompt_version or "").strip() or None,
+        "starter_signature": str(starter_signature or "").strip() or None,
+        "lineup_signature": str(lineup_signature or "").strip() or None,
+        "cache_key_mismatch": bool(cache_key_mismatch),
         "game_status_bucket": _normalize_game_status_bucket(game_status_bucket),
         "used_evidence": list(used_evidence),
         "grounding_warnings": list(grounding_warnings or []),
@@ -736,6 +900,10 @@ def _build_meta_payload_defaults(
         "retryable_failure": bool(retryable_failure),
         "dependency_degraded": bool(dependency_degraded),
         "attempt_count": _normalize_attempt_count(attempt_count),
+        "cache_row_missing": bool(cache_row_missing),
+        "recovered_from_missing_row": bool(recovered_from_missing_row),
+        "cache_finalize_conflict": bool(cache_finalize_conflict),
+        "lease_lost": bool(lease_lost),
     }
 
 
@@ -747,6 +915,13 @@ def _wrap_cached_payload(
         "_meta": {
             "generation_mode": meta.get("generation_mode"),
             "data_quality": meta.get("data_quality"),
+            "cache_key": meta.get("cache_key"),
+            "resolved_cache_key": meta.get("resolved_cache_key"),
+            "expected_cache_key": meta.get("expected_cache_key"),
+            "prompt_version": meta.get("prompt_version"),
+            "starter_signature": meta.get("starter_signature"),
+            "lineup_signature": meta.get("lineup_signature"),
+            "cache_key_mismatch": bool(meta.get("cache_key_mismatch")),
             "game_status_bucket": meta.get("game_status_bucket"),
             "used_evidence": list(meta.get("used_evidence") or []),
             "grounding_warnings": list(meta.get("grounding_warnings") or []),
@@ -756,6 +931,10 @@ def _wrap_cached_payload(
             "retryable_failure": bool(meta.get("retryable_failure")),
             "dependency_degraded": bool(meta.get("dependency_degraded")),
             "attempt_count": _normalize_attempt_count(meta.get("attempt_count")),
+            "cache_row_missing": bool(meta.get("cache_row_missing")),
+            "recovered_from_missing_row": bool(meta.get("recovered_from_missing_row")),
+            "cache_finalize_conflict": bool(meta.get("cache_finalize_conflict")),
+            "lease_lost": bool(meta.get("lease_lost")),
         },
     }
 
@@ -774,6 +953,13 @@ def _extract_cached_payload(
         generation_mode=str(meta.get("generation_mode") or "evidence_fallback"),
         data_quality=str(meta.get("data_quality") or "partial"),
         used_evidence=list(meta.get("used_evidence") or []),
+        cache_key=meta.get("cache_key"),
+        resolved_cache_key=meta.get("resolved_cache_key"),
+        expected_cache_key=meta.get("expected_cache_key"),
+        prompt_version=meta.get("prompt_version"),
+        starter_signature=meta.get("starter_signature"),
+        lineup_signature=meta.get("lineup_signature"),
+        cache_key_mismatch=bool(meta.get("cache_key_mismatch")),
         game_status_bucket=str(meta.get("game_status_bucket") or "UNKNOWN"),
         grounding_warnings=list(meta.get("grounding_warnings") or []),
         grounding_reasons=list(meta.get("grounding_reasons") or []),
@@ -782,8 +968,23 @@ def _extract_cached_payload(
         retryable_failure=bool(meta.get("retryable_failure")),
         dependency_degraded=bool(meta.get("dependency_degraded")),
         attempt_count=int(meta.get("attempt_count") or 0),
+        cache_row_missing=bool(meta.get("cache_row_missing")),
+        recovered_from_missing_row=bool(meta.get("recovered_from_missing_row")),
+        cache_finalize_conflict=bool(meta.get("cache_finalize_conflict")),
+        lease_lost=bool(meta.get("lease_lost")),
     )
     return normalized, meta_defaults
+
+
+def _merge_cache_contract_meta(
+    meta_payload: Dict[str, Any],
+    contract_meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    merged = dict(meta_payload)
+    for key, value in contract_meta.items():
+        if merged.get(key) in (None, "", []):
+            merged[key] = value
+    return merged
 
 
 def _cache_status_response(
@@ -951,6 +1152,10 @@ def _determine_cache_gate(
     if status == "FAILED":
         age_seconds = _calc_row_age_seconds(updated_at)
         attempts = _normalize_attempt_count(attempt_count)
+        if str(error_code or "").strip().lower() == COACH_STREAM_CANCELLED_ERROR_CODE:
+            if age_seconds > FAILED_RETRY_AFTER_SECONDS:
+                return "MISS_GENERATE"
+            return "FAILED_RETRY_WAIT"
         if _is_retryable_cache_error_code(error_code) and (
             attempts >= COACH_CACHE_MAX_RETRYABLE_ATTEMPTS
         ):
@@ -968,7 +1173,7 @@ def _determine_cache_gate(
 
 
 def _should_generate_from_gate(gate: str) -> bool:
-    return gate in {"MISS_GENERATE", "PENDING_STALE_TAKEOVER"}
+    return gate in {"MISS_GENERATE", "PENDING_STALE_TAKEOVER", "ROW_RECREATED"}
 
 
 async def _wait_for_cache_terminal_state(
@@ -994,7 +1199,7 @@ async def _wait_for_cache_terminal_state(
                     (cache_key,),
                 ).fetchone()
             if not row:
-                continue
+                return {"status": "MISSING_ROW"}
             (
                 status,
                 cached_json,
@@ -1059,17 +1264,57 @@ def _collect_dependency_degraded_reasons(tool_results: Dict[str, Any]) -> List[s
     return list(dict.fromkeys(reasons))
 
 
+def _insert_pending_cache_row(
+    conn: Any,
+    *,
+    cache_key: str,
+    team_id: str,
+    year: int,
+    prompt_version: str,
+    model_name: str,
+    lease_owner: str,
+    attempt_count: int,
+) -> bool:
+    inserted = conn.execute(
+        """
+        INSERT INTO coach_analysis_cache (
+            cache_key, team_id, year, prompt_version, model_name, status,
+            error_message, error_code, attempt_count,
+            lease_owner, lease_expires_at, last_heartbeat_at, updated_at
+        ) VALUES (
+            %s, %s, %s, %s, %s, 'PENDING',
+            NULL, NULL, %s,
+            %s, now() + make_interval(secs => %s), now(), now()
+        )
+        ON CONFLICT (cache_key) DO NOTHING
+        RETURNING cache_key
+        """,
+        (
+            cache_key,
+            team_id,
+            year,
+            prompt_version,
+            model_name,
+            max(1, _normalize_attempt_count(attempt_count)),
+            lease_owner,
+            COACH_CACHE_LEASE_STALE_SECONDS,
+        ),
+    ).fetchone()
+    return bool(inserted)
+
+
 async def _heartbeat_cache_lease(
     *,
     pool: ConnectionPool,
     cache_key: str,
     lease_owner: str,
+    lease_lost_event: Optional[asyncio.Event] = None,
 ) -> None:
     while True:
         await asyncio.sleep(COACH_CACHE_HEARTBEAT_INTERVAL_SECONDS)
         try:
             with pool.connection() as conn:
-                conn.execute(
+                result = conn.execute(
                     """
                     UPDATE coach_analysis_cache
                     SET updated_at = now(),
@@ -1086,6 +1331,15 @@ async def _heartbeat_cache_lease(
                     ),
                 )
                 conn.commit()
+                if not result.rowcount:
+                    if lease_lost_event is not None:
+                        lease_lost_event.set()
+                    logger.warning(
+                        "[Coach] Cache lease lost for %s owner=%s",
+                        cache_key,
+                        lease_owner,
+                    )
+                    return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1117,30 +1371,16 @@ def _claim_cache_generation(
 ) -> tuple[str, Any, Optional[str], Optional[str], int]:
     with pool.connection() as conn:
         with conn.transaction():
-            inserted = conn.execute(
-                """
-                INSERT INTO coach_analysis_cache (
-                    cache_key, team_id, year, prompt_version, model_name, status,
-                    error_message, error_code, attempt_count,
-                    lease_owner, lease_expires_at, last_heartbeat_at, updated_at
-                ) VALUES (
-                    %s, %s, %s, %s, %s, 'PENDING',
-                    NULL, NULL, 1,
-                    %s, now() + make_interval(secs => %s), now(), now()
-                )
-                ON CONFLICT (cache_key) DO NOTHING
-                RETURNING cache_key
-                """,
-                (
-                    cache_key,
-                    team_id,
-                    year,
-                    prompt_version,
-                    model_name,
-                    lease_owner,
-                    COACH_CACHE_LEASE_STALE_SECONDS,
-                ),
-            ).fetchone()
+            inserted = _insert_pending_cache_row(
+                conn,
+                cache_key=cache_key,
+                team_id=team_id,
+                year=year,
+                prompt_version=prompt_version,
+                model_name=model_name,
+                lease_owner=lease_owner,
+                attempt_count=1,
+            )
             row = conn.execute(
                 """
                 SELECT status, response_json, error_message, error_code, attempt_count,
@@ -1156,7 +1396,31 @@ def _claim_cache_generation(
                 return "MISS_GENERATE", None, None, None, 1
 
             if not row:
-                return "MISS_GENERATE", None, None, None, 1
+                recreated = _insert_pending_cache_row(
+                    conn,
+                    cache_key=cache_key,
+                    team_id=team_id,
+                    year=year,
+                    prompt_version=prompt_version,
+                    model_name=model_name,
+                    lease_owner=lease_owner,
+                    attempt_count=1,
+                )
+                if recreated:
+                    return "ROW_RECREATED", None, None, None, 1
+
+                row = conn.execute(
+                    """
+                    SELECT status, response_json, error_message, error_code, attempt_count,
+                           updated_at, lease_expires_at, last_heartbeat_at
+                    FROM coach_analysis_cache
+                    WHERE cache_key = %s
+                    FOR UPDATE
+                    """,
+                    (cache_key,),
+                ).fetchone()
+                if not row:
+                    return "MISS_GENERATE", None, None, None, 1
 
             (
                 status,
@@ -1229,9 +1493,17 @@ def _store_completed_cache(
     pool: ConnectionPool,
     cache_key: str,
     lease_owner: str,
+    team_id: str,
+    year: int,
+    prompt_version: str,
+    model_name: str,
     response_payload: Dict[str, Any],
     meta_defaults: Dict[str, Any],
-) -> bool:
+) -> Dict[str, Any]:
+    wrapped_payload = json.dumps(
+        _wrap_cached_payload(response_payload, meta_defaults),
+        ensure_ascii=False,
+    )
     with pool.connection() as conn:
         result = conn.execute(
             """
@@ -1249,16 +1521,66 @@ def _store_completed_cache(
               AND lease_owner = %s
             """,
             (
-                json.dumps(
-                    _wrap_cached_payload(response_payload, meta_defaults),
-                    ensure_ascii=False,
-                ),
+                wrapped_payload,
                 cache_key,
                 lease_owner,
             ),
         )
+        if result.rowcount:
+            conn.commit()
+            return {"outcome": "updated"}
+
+        row = conn.execute(
+            """
+            SELECT status, response_json, lease_owner
+            FROM coach_analysis_cache
+            WHERE cache_key = %s
+            """,
+            (cache_key,),
+        ).fetchone()
+        if not row:
+            inserted = conn.execute(
+                """
+                INSERT INTO coach_analysis_cache (
+                    cache_key, team_id, year, prompt_version, model_name, status,
+                    response_json, error_message, error_code, attempt_count,
+                    lease_owner, lease_expires_at, last_heartbeat_at, updated_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, 'COMPLETED',
+                    %s, NULL, NULL, %s,
+                    NULL, NULL, NULL, now()
+                )
+                ON CONFLICT (cache_key) DO NOTHING
+                RETURNING cache_key
+                """,
+                (
+                    cache_key,
+                    team_id,
+                    year,
+                    prompt_version,
+                    model_name,
+                    wrapped_payload,
+                    max(1, _normalize_attempt_count(meta_defaults.get("attempt_count"))),
+                ),
+            ).fetchone()
+            if inserted:
+                conn.commit()
+                return {"outcome": "inserted_missing_row"}
+            row = conn.execute(
+                """
+                SELECT status, response_json, lease_owner
+                FROM coach_analysis_cache
+                WHERE cache_key = %s
+                """,
+                (cache_key,),
+            ).fetchone()
         conn.commit()
-    return bool(result.rowcount)
+    return {
+        "outcome": "finalize_conflict",
+        "status": row[0] if row else None,
+        "response_json": row[1] if row else None,
+        "lease_owner": row[2] if row else None,
+    }
 
 
 def _store_failed_cache(
@@ -1266,9 +1588,14 @@ def _store_failed_cache(
     pool: ConnectionPool,
     cache_key: str,
     lease_owner: str,
+    team_id: str,
+    year: int,
+    prompt_version: str,
+    model_name: str,
+    attempt_count: int,
     error_code: str,
     error_message: Optional[str] = None,
-) -> bool:
+) -> Dict[str, Any]:
     normalized_error_code = _sanitize_cache_error_code(error_code)
     stored_error_message = (
         str(error_message or "").strip() or normalized_error_code
@@ -1296,8 +1623,62 @@ def _store_failed_cache(
                 lease_owner,
             ),
         )
+        if result.rowcount:
+            conn.commit()
+            return {"outcome": "updated"}
+
+        row = conn.execute(
+            """
+            SELECT status, response_json, lease_owner
+            FROM coach_analysis_cache
+            WHERE cache_key = %s
+            """,
+            (cache_key,),
+        ).fetchone()
+        if not row:
+            inserted = conn.execute(
+                """
+                INSERT INTO coach_analysis_cache (
+                    cache_key, team_id, year, prompt_version, model_name, status,
+                    response_json, error_message, error_code, attempt_count,
+                    lease_owner, lease_expires_at, last_heartbeat_at, updated_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, 'FAILED',
+                    NULL, %s, %s, %s,
+                    NULL, NULL, NULL, now()
+                )
+                ON CONFLICT (cache_key) DO NOTHING
+                RETURNING cache_key
+                """,
+                (
+                    cache_key,
+                    team_id,
+                    year,
+                    prompt_version,
+                    model_name,
+                    stored_error_message,
+                    normalized_error_code,
+                    max(1, _normalize_attempt_count(attempt_count)),
+                ),
+            ).fetchone()
+            if inserted:
+                conn.commit()
+                return {"outcome": "inserted_missing_row"}
+            row = conn.execute(
+                """
+                SELECT status, response_json, lease_owner
+                FROM coach_analysis_cache
+                WHERE cache_key = %s
+                """,
+                (cache_key,),
+            ).fetchone()
         conn.commit()
-    return bool(result.rowcount)
+    return {
+        "outcome": "finalize_conflict",
+        "status": row[0] if row else None,
+        "response_json": row[1] if row else None,
+        "lease_owner": row[2] if row else None,
+    }
 
 
 def _normalize_cached_response(cached_data: dict) -> dict:
@@ -2038,6 +2419,8 @@ def _focus_has_support(
     away_summary = away_data.get("summary", {}) or {}
     home_adv = _advanced_metrics(home_data)
     away_adv = _advanced_metrics(away_data)
+    home_form = home_data.get("player_form_signals", {}) or {}
+    away_form = away_data.get("player_form_signals", {}) or {}
 
     if focus == "recent_form":
         return _has_recent_form_support(home_data) or _has_recent_form_support(
@@ -2066,6 +2449,8 @@ def _focus_has_support(
             )
             or bool(home_summary.get("top_batters"))
             or bool(away_summary.get("top_batters"))
+            or bool(home_form.get("batters"))
+            or bool(away_form.get("batters"))
         )
     return False
 
@@ -2147,6 +2532,8 @@ def _build_deterministic_metrics(
     tool_results: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     metrics: List[Dict[str, Any]] = []
+    review_mode = _is_completed_review(evidence)
+    review_summary_item = _primary_review_summary_item(evidence) if review_mode else None
     home_data = tool_results.get("home", {})
     away_data = tool_results.get("away", {})
     home_recent = _recent_summary(home_data)
@@ -2195,6 +2582,74 @@ def _build_deterministic_metrics(
                 "is_critical": False,
             }
         )
+
+    if review_mode:
+        clutch_moments = _clutch_moments(tool_results)
+        if clutch_moments:
+            top_moment = clutch_moments[0]
+            metrics.append(
+                {
+                    "label": "최대 WPA 변동",
+                    "value": (
+                        f"{top_moment.get('inning_label', '이닝 미상')} "
+                        f"{_normalize_name_token(top_moment.get('batter_name')) or '타자 미상'} "
+                        f"{top_moment.get('wpa_delta_pct', '데이터 부족')}%p"
+                    ),
+                    "status": "warning",
+                    "trend": "neutral",
+                    "is_critical": True,
+                }
+            )
+        elif review_summary_item:
+            metrics.append(
+                {
+                    "label": (
+                        "승부처 요약"
+                        if _summary_item_is_clutch_like(review_summary_item)
+                        else "경기 요약"
+                    ),
+                    "value": review_summary_item,
+                    "status": "warning",
+                    "trend": "neutral",
+                    "is_critical": _summary_item_is_clutch_like(review_summary_item),
+                }
+            )
+    else:
+        home_form_score = _team_form_score(home_data)
+        away_form_score = _team_form_score(away_data)
+        if home_form_score is not None or away_form_score is not None:
+            home_signal = _best_form_signal(home_data, "batters") or _best_form_signal(
+                home_data, "pitchers"
+            )
+            away_signal = _best_form_signal(away_data, "batters") or _best_form_signal(
+                away_data, "pitchers"
+            )
+            away_score_text = (
+                f"{away_form_score:.1f}"
+                if away_form_score is not None
+                else "데이터 부족"
+            )
+            home_score_text = (
+                f"{home_form_score:.1f}"
+                if home_form_score is not None
+                else "데이터 부족"
+            )
+            metrics.append(
+                {
+                    "label": "폼 진단",
+                    "value": (
+                        f"{evidence.away_team_name} {_form_status_label((away_signal or {}).get('form_status'))} "
+                        f"{away_score_text} / "
+                        f"{evidence.home_team_name} {_form_status_label((home_signal or {}).get('form_status'))} "
+                        f"{home_score_text}"
+                    ),
+                    "status": _metric_status_from_delta(
+                        ((home_form_score or 0.0) - (away_form_score or 0.0)) / 100.0
+                    ),
+                    "trend": "neutral",
+                    "is_critical": False,
+                }
+            )
 
     away_ops = away_adv.get("metrics", {}).get("batting", {}).get("ops")
     home_ops = home_adv.get("metrics", {}).get("batting", {}).get("ops")
@@ -2264,6 +2719,13 @@ def _build_deterministic_analysis(
     home_run_diff = int(home_recent_summary.get("run_diff", 0) or 0)
     away_run_diff = int(away_recent_summary.get("run_diff", 0) or 0)
     edge_scores = {home_name: 0, away_name: 0}
+    clutch_moments = _clutch_moments(tool_results)
+    review_summary_item = _primary_review_summary_item(evidence) if review_mode else None
+    review_summary_is_clutch = _summary_item_is_clutch_like(review_summary_item)
+    home_batter_form = _best_form_signal(home_data, "batters")
+    away_batter_form = _best_form_signal(away_data, "batters")
+    home_pitcher_form = _best_form_signal(home_data, "pitchers")
+    away_pitcher_form = _best_form_signal(away_data, "pitchers")
 
     home_ops = float(home_adv.get("metrics", {}).get("batting", {}).get("ops") or 0.0)
     away_ops = float(away_adv.get("metrics", {}).get("batting", {}).get("ops") or 0.0)
@@ -2289,6 +2751,73 @@ def _build_deterministic_analysis(
             )
             why_it_matters.append(
                 f"{away_name}가 장타 생산성에서 앞서 있어 초반 득점 루트를 더 쉽게 만들 수 있습니다."
+            )
+
+    for team_name, batter_form, opponent_name in (
+        (home_name, home_batter_form, away_name),
+        (away_name, away_batter_form, home_name),
+    ):
+        if not batter_form:
+            continue
+        status = str(batter_form.get("form_status") or "")
+        player_name = batter_form.get("player_name") or "핵심 타자"
+        score = batter_form.get("form_score")
+        score_text = (
+            f"{float(score):.1f}" if isinstance(score, (int, float)) else "데이터 부족"
+        )
+        if status == "hot":
+            edge_scores[team_name] += 1
+            strengths.append(
+                f"{team_name}는 {player_name}의 폼 점수 {score_text}로 타선 중심축이 살아 있습니다."
+            )
+            why_it_matters.append(
+                f"{player_name}의 최근 장타/WPA 흐름이 유지되면 {team_name}가 선취점과 빅이닝 연결 확률을 키울 수 있습니다."
+            )
+        elif status == "cold":
+            weaknesses.append(
+                f"{team_name}는 {player_name}의 폼 점수 {score_text}로 중심 타선 파괴력이 평소보다 낮습니다."
+            )
+            risks.append(
+                {
+                    "area": "batting",
+                    "level": 1,
+                    "description": f"{team_name} 핵심 타자 {player_name}의 최근 클러치 생산성이 둔화됐습니다.",
+                }
+            )
+            if not review_mode:
+                watch_points.append(
+                    f"{team_name}는 {player_name} 앞뒤 타순에서 출루를 얼마나 이어 주는지가 공격 변동성을 줄일 포인트입니다."
+                )
+
+    for team_name, pitcher_form in (
+        (home_name, home_pitcher_form),
+        (away_name, away_pitcher_form),
+    ):
+        if not pitcher_form:
+            continue
+        status = str(pitcher_form.get("form_status") or "")
+        player_name = pitcher_form.get("player_name") or "핵심 투수"
+        score = pitcher_form.get("form_score")
+        score_text = (
+            f"{float(score):.1f}" if isinstance(score, (int, float)) else "데이터 부족"
+        )
+        if status == "hot":
+            edge_scores[team_name] += 1
+            strengths.append(
+                f"{team_name}는 {player_name}의 폼 점수 {score_text}로 선발·핵심 투수 컨디션이 안정적입니다."
+            )
+        elif status == "cold":
+            weaknesses.append(
+                f"{team_name}는 {player_name}의 폼 점수 {score_text}로 최근 투수 운영 부담이 커졌습니다."
+            )
+            risks.append(
+                {
+                    "area": "starter"
+                    if pitcher_form.get("role") == "starter"
+                    else "bullpen",
+                    "level": 0,
+                    "description": f"{team_name} {player_name}의 최근 실점/WPA 허용 흐름이 좋지 않습니다.",
+                }
             )
 
     home_recent = _short_recent_form_text(home_name, home_data)
@@ -2402,6 +2931,53 @@ def _build_deterministic_analysis(
             "선발 정보가 완전히 확정되지 않아 초반 매치업 해석은 보수적으로 봐야 합니다."
         )
 
+    if clutch_moments:
+        top_moment = clutch_moments[0]
+        top_player = _normalize_name_token(top_moment.get("batter_name")) or "타자 미상"
+        swing_factors.insert(
+            0,
+            (
+                f"{top_moment.get('inning_label', '이닝 미상')} {top_player} 타석의 WPA {top_moment.get('wpa_delta_pct', '데이터 부족')}%p 변동이 실제 승부처였습니다."
+                if review_mode
+                else f"{top_moment.get('inning_label', '이닝 미상')} 전후의 하이레버리지 타석이 흐름을 크게 흔들 변수입니다."
+            ),
+        )
+        why_it_matters.append(
+            f"가장 큰 WPA 변동 구간은 {top_moment.get('description', '핵심 장면')}로, 한 번의 선택이 기대 승률을 크게 흔들었다는 뜻입니다."
+        )
+        watch_points.append(
+            (
+                f"{top_moment.get('inning_label', '이닝 미상')} {top_player} 타석 직전 배터리 선택과 작전 흐름을 다시 볼 필요가 있습니다."
+                if review_mode
+                else f"{top_moment.get('inning_label', '이닝 미상')} 전후에 어떤 타순이 올라오는지가 체감 승부처가 됩니다."
+            )
+        )
+    elif review_mode:
+        if review_summary_item:
+            swing_factors.insert(
+                0,
+                (
+                    f"경기 요약 기준 '{review_summary_item}' 장면이 실제 승부처로 기록됐습니다."
+                    if review_summary_is_clutch
+                    else f"경기 요약 기준 '{review_summary_item}' 장면이 결과 흐름을 설명하는 대표 장면으로 남았습니다."
+                ),
+            )
+            why_it_matters.append(
+                (
+                    f"경기 요약에 '{review_summary_item}'가 남았다는 점은 결과를 가른 흐름을 복기할 때 해당 장면을 먼저 봐야 한다는 뜻입니다."
+                )
+            )
+            watch_points.append(
+                f"'{review_summary_item}' 직전의 주자 상황과 투수 교체 선택이 어떻게 이어졌는지 다시 볼 필요가 있습니다."
+            )
+            uncertainty.append(
+                "WPA 수치가 없어 변동 폭은 특정할 수 없지만, 경기 요약 기준 핵심 장면은 확인됩니다."
+            )
+        else:
+            uncertainty.append(
+                "완료 경기지만 WPA 기반 세부 승부처 데이터가 없어 장면 복기는 보수적으로 봐야 합니다."
+            )
+
     if home_recent_games < 2 and away_recent_games < 2:
         uncertainty.append(
             "최근 경기 표본이 작아 흐름 평가는 정규시즌 베이스라인 비중이 더 큽니다."
@@ -2458,7 +3034,7 @@ def _build_deterministic_analysis(
             if margin >= 2:
                 verdict = (
                     f"{edge_team}가 기초 지표 우위를 실제 결과로 연결했고, "
-                    f"{risks[0]['description'] if risks else '후반 불펜과 초반 선발 운영이'} 결과를 가른 핵심 구간으로 남았습니다."
+                    f"{swing_factors[0] if swing_factors else risks[0]['description'] if risks else '후반 불펜과 초반 선발 운영이'} 결과를 가른 핵심 구간으로 남았습니다."
                 )
             else:
                 verdict = (
@@ -2496,11 +3072,25 @@ def _build_deterministic_headline(
     tool_results: Dict[str, Any],
 ) -> str:
     review_mode = _is_completed_review(evidence)
+    clutch_moments = _clutch_moments(tool_results)
+    review_summary_item = _primary_review_summary_item(evidence) if review_mode else None
     if evidence.stage_label != "REGULAR" and evidence.series_state:
         return (
             f"{evidence.away_team_name} {evidence.series_state.away_team_wins}승 vs "
             f"{evidence.home_team_name} {evidence.series_state.home_team_wins}승, "
             f"{evidence.round_display} {evidence.series_state.game_no}차전"
+        )[:60]
+    if review_mode and clutch_moments:
+        top_moment = clutch_moments[0]
+        batter_name = _normalize_name_token(top_moment.get("batter_name")) or "승부처"
+        return (
+            f"{batter_name}의 {top_moment.get('inning_label', '핵심 장면')}, "
+            f"{evidence.away_team_name}-{evidence.home_team_name} 경기 리뷰"
+        )[:60]
+    if review_mode and review_summary_item:
+        return (
+            f"{review_summary_item}, "
+            f"{evidence.away_team_name}-{evidence.home_team_name} 경기 리뷰"
         )[:60]
     if evidence.home_pitcher or evidence.away_pitcher:
         return (
@@ -2608,6 +3198,18 @@ def _collect_allowed_entity_names(
                 normalized = _normalize_name_token(item.get("player_name"))
                 if normalized:
                     names.add(normalized)
+        form_signals = tool_results.get(team_key, {}).get("player_form_signals", {})
+        for bucket in ("batters", "pitchers"):
+            for item in form_signals.get(bucket, [])[:4]:
+                normalized = _normalize_name_token(item.get("player_name"))
+                if normalized:
+                    names.add(normalized)
+    clutch_moments = _clutch_moments(tool_results)
+    for item in clutch_moments[:6]:
+        for key in ("batter_name", "pitcher_name"):
+            normalized = _normalize_name_token(item.get(key))
+            if normalized:
+                names.add(normalized)
     for item in evidence.summary_items:
         for token in _collect_grounding_candidates(str(item or "")):
             if token in COMMON_ENTITY_STOPWORDS or token in ENGLISH_ENTITY_STOPWORDS:
@@ -2870,12 +3472,14 @@ async def _execute_coach_tools_parallel(
     as_of_game_date: Optional[str] = None,
     exclude_game_id: Optional[str] = None,
     matchup_season_id: Optional[int] = None,
+    game_id: Optional[str] = None,
+    include_clutch: bool = False,
 ) -> Dict[str, Any]:
     """
     Coach에 필요한 도구들을 병렬로 실행합니다.
     홈팀과 원정팀 데이터를 모두 조회합니다.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def get_team_data(team_code: str):
         """특정 팀의 모든 데이터 조회"""
@@ -2884,6 +3488,12 @@ async def _execute_coach_tools_parallel(
             db_query = DatabaseQueryTool(conn)
             results["summary"] = db_query.get_team_summary(team_code, year)
             results["advanced"] = db_query.get_team_advanced_metrics(team_code, year)
+            results["player_form_signals"] = db_query.get_team_player_form_signals(
+                team_code,
+                year,
+                as_of_game_date=as_of_game_date,
+                exclude_game_id=exclude_game_id,
+            )
             if "recent_form" in focus or not focus:
                 results["recent"] = db_query.get_team_recent_form(
                     team_code,
@@ -2900,6 +3510,11 @@ async def _execute_coach_tools_parallel(
                     getattr(db_query, "mapping_dependency_reason", None) or "defaults"
                 )
         return results
+
+    def get_clutch_moments_sync(target_game_id: str):
+        with pool.connection() as conn:
+            db_query = DatabaseQueryTool(conn)
+            return db_query.get_clutch_moments(target_game_id, limit=3)
 
     def get_matchup_stats_sync(team1: str, team2: str):
         with pool.connection() as conn:
@@ -2941,10 +3556,18 @@ async def _execute_coach_tools_parallel(
                 None, get_matchup_stats_sync, home_team_id, away_team_id
             )
         )
+    if include_clutch and game_id:
+        tasks.append(loop.run_in_executor(None, get_clutch_moments_sync, game_id))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    tool_results = {"home": {}, "away": {}, "matchup": {}, "error": None}
+    tool_results = {
+        "home": {},
+        "away": {},
+        "matchup": {},
+        "clutch_moments": {},
+        "error": None,
+    }
 
     # 홈팀 결과 처리
     if isinstance(results[0], Exception):
@@ -2966,12 +3589,29 @@ async def _execute_coach_tools_parallel(
                 tool_results["matchup"] = {"error": COACH_TOOL_FETCH_FAILED_CODE}
             elif len(tasks) > 2:
                 tool_results["matchup"] = results[2]
+        clutch_index = 3 if "matchup" in focus else 2
+        if include_clutch and game_id:
+            if len(tasks) > clutch_index and isinstance(results[clutch_index], Exception):
+                tool_results["clutch_moments"] = {
+                    "error": COACH_TOOL_FETCH_FAILED_CODE
+                }
+            elif len(tasks) > clutch_index:
+                tool_results["clutch_moments"] = results[clutch_index]
+    elif include_clutch and game_id:
+        clutch_index = 1
+        if len(tasks) > clutch_index and isinstance(results[clutch_index], Exception):
+            tool_results["clutch_moments"] = {"error": COACH_TOOL_FETCH_FAILED_CODE}
+        elif len(tasks) > clutch_index:
+            tool_results["clutch_moments"] = results[clutch_index]
 
     # 레거시 구조 호환성 유지 (단일 팀 분석 요청 시)
     if not away_team_id:
         tool_results["team_summary"] = tool_results["home"].get("summary", {})
         tool_results["advanced_metrics"] = tool_results["home"].get("advanced", {})
         tool_results["recent_form"] = tool_results["home"].get("recent", {})
+        tool_results["player_form_signals"] = tool_results["home"].get(
+            "player_form_signals", {}
+        )
 
     return tool_results
 
@@ -3123,6 +3763,21 @@ def _format_team_stats(team_data: Dict[str, Any], team_role: str = "Home") -> st
                 f"- {p['player_name']}: ERA {_safe_float(p.get('era')):.2f}, {p.get('wins')}승"
             )
 
+    form_signals = team_data.get("player_form_signals", {})
+    if form_signals and form_signals.get("found"):
+        parts.append("**핵심 폼 진단**:")
+        for signal in (form_signals.get("batters", [])[:1] + form_signals.get("pitchers", [])[:1]):
+            player_name = signal.get("player_name", "선수 미상")
+            form_score = signal.get("form_score")
+            score_text = (
+                f"{float(form_score):.1f}"
+                if isinstance(form_score, (int, float))
+                else "데이터 부족"
+            )
+            parts.append(
+                f"- {player_name}: {_form_status_label(signal.get('form_status'))} ({score_text})"
+            )
+
     # 최근 폼 — DB schema: summary={wins,losses,draws,run_diff}, games=[{result:"Win"/"Loss"/"Draw", score:"5:3", run_diff, date, opponent}]
     recent = team_data.get("recent", {})
     if recent and recent.get("found"):
@@ -3216,6 +3871,13 @@ def _format_coach_context(
             parts.append(f"| {game_date} | {score} | {result_val} |")
         parts.append("")
 
+    clutch_moments = _clutch_moments(tool_results)
+    if clutch_moments:
+        parts.append("### 🎯 클러치/WPA")
+        for moment in clutch_moments[:3]:
+            parts.append(f"- {_format_clutch_fact(moment)}")
+        parts.append("")
+
     return "\n".join(parts)
 
 
@@ -3230,6 +3892,9 @@ class AnalyzeRequest(BaseModel):
         COACH_REQUEST_MODE_MANUAL
     )
     question_override: Optional[str] = None
+    starter_signature: Optional[str] = None
+    lineup_signature: Optional[str] = None
+    expected_cache_key: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -3272,6 +3937,16 @@ class AnalyzeRequest(BaseModel):
 
             if not values.get("home_team_id") and values.get("team_id"):
                 values["home_team_id"] = values["team_id"]
+
+            for signature_key in (
+                "starter_signature",
+                "lineup_signature",
+                "expected_cache_key",
+            ):
+                signature_value = values.get(signature_key)
+                if isinstance(signature_value, str):
+                    trimmed = signature_value.strip()
+                    values[signature_key] = trimmed or None
         return values
 
 
@@ -3389,36 +4064,48 @@ async def analyze_team(
         game_type = str(
             effective_league_context.get("league_type") or "UNKNOWN"
         ).upper()
-        lineup_signature = build_lineup_signature(
-            [*game_evidence.home_lineup, *game_evidence.away_lineup]
+        expected_cache_key = (
+            str(payload.expected_cache_key or "").strip() or None
         )
-        starter_signature = build_starter_signature(
-            game_evidence.home_pitcher,
-            game_evidence.away_pitcher,
+        cache_key, cache_key_payload, starter_signature, lineup_signature = (
+            build_coach_cache_identity(
+                home_team_code=home_team_canonical,
+                away_team_code=away_team_canonical,
+                year=year,
+                game_type=game_type,
+                focus=resolved_focus,
+                question_override=effective_question_override,
+                game_id=game_evidence.game_id,
+                league_type_code=game_evidence.league_type_code,
+                stage_label=game_evidence.stage_label,
+                request_mode=request_mode,
+                game_status_bucket=game_evidence.game_status_bucket,
+                question_signature_override=question_signature_override,
+                requested_starter_signature=payload.starter_signature,
+                requested_lineup_signature=payload.lineup_signature,
+                home_pitcher=game_evidence.home_pitcher,
+                away_pitcher=game_evidence.away_pitcher,
+                lineup_players=[*game_evidence.home_lineup, *game_evidence.away_lineup],
+            )
         )
-        cache_key, cache_key_payload = build_coach_cache_key(
-            schema_version=COACH_CACHE_SCHEMA_VERSION,
-            prompt_version=COACH_CACHE_PROMPT_VERSION,
-            home_team_code=home_team_canonical,
-            away_team_code=away_team_canonical,
-            year=year,
-            game_type=game_type,
-            focus=resolved_focus,
-            question_override=effective_question_override,
-            game_id=game_evidence.game_id,
-            league_type_code=game_evidence.league_type_code,
-            stage_label=game_evidence.stage_label,
-            starter_signature=starter_signature,
-            lineup_signature=lineup_signature,
-            request_mode=request_mode,
-            game_status_bucket=game_evidence.game_status_bucket,
-            question_signature_override=question_signature_override,
-        )
+        cache_key_mismatch = bool(expected_cache_key and expected_cache_key != cache_key)
+        cache_contract_meta = {
+            "cache_key": cache_key,
+            "resolved_cache_key": cache_key,
+            "expected_cache_key": expected_cache_key,
+            "prompt_version": COACH_CACHE_PROMPT_VERSION,
+            "starter_signature": starter_signature,
+            "lineup_signature": lineup_signature,
+            "cache_key_mismatch": cache_key_mismatch,
+        }
         focus_signature = str(cache_key_payload["focus_signature"])
         question_signature = str(cache_key_payload["question_signature"])
 
         logger.info(
-            "[Coach Router] request_mode=%s Analyzing %s vs %s (year=%d game_id=%s stage=%s status=%s): %s... (CacheKey: %s) input_season=%s resolved_year=%d resolve_source=%s input_focus=%s resolved_focus=%s focus_signature=%s question_signature=%s cache_key_version=%s",
+            "[Coach Router] request_mode=%s Analyzing %s vs %s (year=%d game_id=%s stage=%s status=%s): %s... "
+            "(CacheKey: %s) expected_cache_key=%s prompt_version=%s starter_signature=%s lineup_signature=%s "
+            "input_season=%s resolved_year=%d resolve_source=%s input_focus=%s resolved_focus=%s "
+            "focus_signature=%s question_signature=%s cache_key_version=%s",
             request_mode,
             home_name,
             away_name or "Single",
@@ -3428,6 +4115,10 @@ async def analyze_team(
             game_evidence.game_status_bucket,
             query[:100],
             cache_key,
+            expected_cache_key,
+            COACH_CACHE_PROMPT_VERSION,
+            starter_signature,
+            lineup_signature,
             effective_league_context.get("season"),
             year,
             resolve_source,
@@ -3437,6 +4128,17 @@ async def analyze_team(
             question_signature,
             COACH_CACHE_SCHEMA_VERSION,
         )
+        if cache_key_mismatch:
+            logger.warning(
+                "[Coach] Cache key mismatch detected game_id=%s expected_cache_key=%s resolved_cache_key=%s prompt_version=%s "
+                "starter_signature=%s lineup_signature=%s",
+                game_evidence.game_id,
+                expected_cache_key,
+                cache_key,
+                COACH_CACHE_PROMPT_VERSION,
+                starter_signature,
+                lineup_signature,
+            )
         evidence_assessment = assess_game_evidence(game_evidence)
         async def event_generator():
             try:
@@ -3457,6 +4159,22 @@ async def analyze_team(
                 cache_attempt_count = 0
                 cache_lease_owner = _build_cache_lease_owner()
                 heartbeat_task: Optional[asyncio.Task] = None
+                lease_lost_event = asyncio.Event()
+
+                def _build_stream_meta(
+                    extra_payload: Optional[Dict[str, Any]] = None,
+                ) -> Dict[str, Any]:
+                    payload_data = {
+                        "request_mode": request_mode,
+                        "resolved_focus": resolved_focus,
+                        "focus_signature": focus_signature,
+                        "question_signature": question_signature,
+                        "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
+                        **cache_contract_meta,
+                    }
+                    if extra_payload:
+                        payload_data.update(extra_payload)
+                    return payload_data
 
                 (
                     cache_state,
@@ -3478,12 +4196,19 @@ async def analyze_team(
                 )
 
                 logger.info(
-                    "[Coach] Cache %s for %s focus_signature=%s question_signature=%s request_mode=%s cache_key_version=%s attempt_count=%s error_code=%s",
+                    "[Coach] Cache gate=%s game_id=%s resolved_cache_key=%s expected_cache_key=%s prompt_version=%s "
+                    "starter_signature=%s lineup_signature=%s request_mode=%s focus_signature=%s "
+                    "question_signature=%s cache_key_version=%s attempt_count=%s error_code=%s",
                     cache_state,
+                    game_evidence.game_id,
                     cache_key,
+                    expected_cache_key,
+                    COACH_CACHE_PROMPT_VERSION,
+                    starter_signature,
+                    lineup_signature,
+                    request_mode,
                     focus_signature,
                     question_signature,
-                    request_mode,
                     COACH_CACHE_SCHEMA_VERSION,
                     cache_attempt_count,
                     cache_error_code,
@@ -3491,6 +4216,10 @@ async def analyze_team(
 
                 if cached_data:
                     cached_data, cached_meta = _extract_cached_payload(cached_data)
+                    cached_meta = _merge_cache_contract_meta(
+                        cached_meta,
+                        cache_contract_meta,
+                    )
                     missing_focus_sections = _find_missing_focus_sections(
                         cached_data, resolved_focus
                     )
@@ -3509,28 +4238,26 @@ async def analyze_team(
                     yield {
                         "event": "meta",
                         "data": json.dumps(
-                            {
+                            _build_stream_meta(
+                                {
                                 "validation_status": "success",
                                 "structured_response": cached_data,
                                 "fast_path": True,
                                 "cached": True,
-                                "request_mode": request_mode,
-                                "resolved_focus": resolved_focus,
-                                "focus_signature": focus_signature,
-                                "question_signature": question_signature,
-                                "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                 "cache_state": cache_state,
                                 "in_progress": False,
                                 "focus_section_missing": bool(missing_focus_sections),
                                 "missing_focus_sections": missing_focus_sections,
                                 **cached_meta,
-                            },
+                                }
+                            ),
                             ensure_ascii=False,
                         ),
                     }
                     yield {"event": "done", "data": "[DONE]"}
                     return
 
+                wait_result: Optional[Dict[str, Any]] = None
                 if not _should_generate_from_gate(cache_state):
                     if cache_state == "PENDING_WAIT":
                         wait_result = await _wait_for_cache_terminal_state(
@@ -3546,6 +4273,10 @@ async def analyze_team(
                         ):
                             cached_wait_data, cached_wait_meta = (
                                 _extract_cached_payload(wait_result["response_json"])
+                            )
+                            cached_wait_meta = _merge_cache_contract_meta(
+                                cached_wait_meta,
+                                cache_contract_meta,
                             )
                             missing_focus_sections = _find_missing_focus_sections(
                                 cached_wait_data, resolved_focus
@@ -3571,16 +4302,12 @@ async def analyze_team(
                             yield {
                                 "event": "meta",
                                 "data": json.dumps(
-                                    {
+                                    _build_stream_meta(
+                                        {
                                         "validation_status": "success",
                                         "structured_response": cached_wait_data,
                                         "fast_path": True,
                                         "cached": True,
-                                        "request_mode": request_mode,
-                                        "resolved_focus": resolved_focus,
-                                        "focus_signature": focus_signature,
-                                        "question_signature": question_signature,
-                                        "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                         "cache_state": "PENDING_WAIT",
                                         "in_progress": False,
                                         "focus_section_missing": bool(
@@ -3588,7 +4315,8 @@ async def analyze_team(
                                         ),
                                         "missing_focus_sections": missing_focus_sections,
                                         **cached_wait_meta,
-                                    },
+                                        }
+                                    ),
                                     ensure_ascii=False,
                                 ),
                             }
@@ -3598,6 +4326,7 @@ async def analyze_team(
                         if wait_result and wait_result.get("status") in {
                             "FAILED",
                             "PENDING_STALE_TAKEOVER",
+                            "MISSING_ROW",
                         }:
                             (
                                 cache_state,
@@ -3621,6 +4350,14 @@ async def analyze_team(
                                 cached_data, cached_meta = _extract_cached_payload(
                                     cached_data
                                 )
+                                cached_meta = _merge_cache_contract_meta(
+                                    cached_meta,
+                                    {
+                                        **cache_contract_meta,
+                                        "cache_row_missing": True,
+                                        "recovered_from_missing_row": True,
+                                    },
+                                )
                                 missing_focus_sections = _find_missing_focus_sections(
                                     cached_data, resolved_focus
                                 )
@@ -3643,16 +4380,12 @@ async def analyze_team(
                                 yield {
                                     "event": "meta",
                                     "data": json.dumps(
-                                        {
+                                        _build_stream_meta(
+                                            {
                                             "validation_status": "success",
                                             "structured_response": cached_data,
                                             "fast_path": True,
                                             "cached": True,
-                                            "request_mode": request_mode,
-                                            "resolved_focus": resolved_focus,
-                                            "focus_signature": focus_signature,
-                                            "question_signature": question_signature,
-                                            "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                             "cache_state": cache_state,
                                             "in_progress": False,
                                             "focus_section_missing": bool(
@@ -3660,12 +4393,15 @@ async def analyze_team(
                                             ),
                                             "missing_focus_sections": missing_focus_sections,
                                             **cached_meta,
-                                        },
+                                            }
+                                        ),
                                         ensure_ascii=False,
                                     ),
                                 }
                                 yield {"event": "done", "data": "[DONE]"}
                                 return
+                            if wait_result.get("status") == "MISSING_ROW":
+                                cache_error_code = cache_error_code or None
 
                     if cache_state in {"PENDING_WAIT", "FAILED_RETRY_WAIT"}:
                         retryable_failure = (
@@ -3698,6 +4434,7 @@ async def analyze_team(
                             generation_mode="evidence_fallback",
                             data_quality=_determine_data_quality(game_evidence),
                             used_evidence=game_evidence.used_evidence,
+                            **cache_contract_meta,
                             game_status_bucket=game_evidence.game_status_bucket,
                             grounding_warnings=_merge_grounding_warnings(
                                 [],
@@ -3708,6 +4445,9 @@ async def analyze_team(
                             cache_error_code=cache_error_code,
                             retryable_failure=retryable_failure,
                             attempt_count=cache_attempt_count,
+                            cache_row_missing=bool(
+                                wait_result and wait_result.get("status") == "MISSING_ROW"
+                            ),
                         )
                         yield {
                             "event": "status",
@@ -3732,19 +4472,16 @@ async def analyze_team(
                         yield {
                             "event": "meta",
                             "data": json.dumps(
-                                {
+                                _build_stream_meta(
+                                    {
                                     "validation_status": "fallback",
                                     "fast_path": True,
                                     "cached": False,
-                                    "request_mode": request_mode,
-                                    "resolved_focus": resolved_focus,
-                                    "focus_signature": focus_signature,
-                                    "question_signature": question_signature,
-                                    "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                     "cache_state": cache_state,
                                     "in_progress": True,
                                     **waiting_meta_defaults,
-                                },
+                                    }
+                                ),
                                 ensure_ascii=False,
                             ),
                         }
@@ -3787,6 +4524,7 @@ async def analyze_team(
                             generation_mode="evidence_fallback",
                             data_quality=_determine_data_quality(game_evidence),
                             used_evidence=game_evidence.used_evidence,
+                            **cache_contract_meta,
                             game_status_bucket=game_evidence.game_status_bucket,
                             grounding_warnings=_merge_grounding_warnings(
                                 [],
@@ -3801,19 +4539,16 @@ async def analyze_team(
                         yield {
                             "event": "meta",
                             "data": json.dumps(
-                                {
+                                _build_stream_meta(
+                                    {
                                     "validation_status": "fallback",
                                     "fast_path": True,
                                     "cached": False,
-                                    "request_mode": request_mode,
-                                    "resolved_focus": resolved_focus,
-                                    "focus_signature": focus_signature,
-                                    "question_signature": question_signature,
-                                    "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                     "cache_state": "FAILED_LOCKED",
                                     "in_progress": False,
                                     **failed_meta_defaults,
-                                },
+                                    }
+                                ),
                                 ensure_ascii=False,
                             ),
                         }
@@ -3825,6 +4560,7 @@ async def analyze_team(
                         pool=pool,
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
+                        lease_lost_event=lease_lost_event,
                     )
                 )
 
@@ -3849,6 +4585,8 @@ async def analyze_team(
                         if game_evidence.stage_label not in {"REGULAR", "UNKNOWN"}
                         else None
                     ),
+                    game_id=game_evidence.game_id,
+                    include_clutch=_is_completed_review(game_evidence),
                 )
                 matchup_scope_sanitized = False
                 if tool_results.get("matchup"):
@@ -3882,6 +4620,10 @@ async def analyze_team(
                     used_evidence.append("team_summary")
                 if tool_results.get("home", {}).get("advanced", {}).get("found"):
                     used_evidence.append("team_advanced_metrics")
+                if tool_results.get("home", {}).get("player_form_signals", {}).get(
+                    "found"
+                ):
+                    used_evidence.append("team_player_form_signals")
                 if tool_results.get("home", {}).get("recent", {}).get("found"):
                     used_evidence.append("team_recent_form")
                 if tool_results.get("matchup", {}).get("found"):
@@ -3890,8 +4632,14 @@ async def analyze_team(
                     used_evidence.append("opponent_team_summary")
                 if tool_results.get("away", {}).get("advanced", {}).get("found"):
                     used_evidence.append("opponent_team_advanced_metrics")
+                if tool_results.get("away", {}).get("player_form_signals", {}).get(
+                    "found"
+                ):
+                    used_evidence.append("opponent_player_form_signals")
                 if tool_results.get("away", {}).get("recent", {}).get("found"):
                     used_evidence.append("opponent_recent_form")
+                if tool_results.get("clutch_moments", {}).get("found"):
+                    used_evidence.append("game_clutch_moments")
                 used_evidence = list(dict.fromkeys(used_evidence))
 
                 home_data = tool_results.get("home", {})
@@ -3958,6 +4706,63 @@ async def analyze_team(
                     and effective_question_override is None
                 )
 
+                if lease_lost_event.is_set():
+                    waiting_payload = _cache_status_response(
+                        headline=f"{home_name} 분석이 진행 중입니다",
+                        coach_note="분석 소유권이 변경되어 현재 요청은 결과 저장을 중단했습니다. 잠시 후 다시 시도해주세요.",
+                        detail=(
+                            "## 캐시 준비 중\n\n"
+                            "진행 중이던 분석 소유권이 다른 작업으로 넘어가 현재 요청은 결과 저장을 중단했습니다."
+                        ),
+                    )
+                    waiting_meta_defaults = _build_meta_payload_defaults(
+                        generation_mode="evidence_fallback",
+                        data_quality=data_quality,
+                        used_evidence=used_evidence,
+                        **cache_contract_meta,
+                        game_status_bucket=game_evidence.game_status_bucket,
+                        grounding_warnings=grounding_warnings,
+                        grounding_reasons=grounding_reasons,
+                        supported_fact_count=fact_sheet.supported_fact_count,
+                        cache_error_code=cache_error_code,
+                        retryable_failure=True,
+                        dependency_degraded=dependency_degraded,
+                        attempt_count=cache_attempt_count,
+                        lease_lost=True,
+                    )
+                    yield {
+                        "event": "status",
+                        "data": json.dumps(
+                            {"message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {
+                        "event": "message",
+                        "data": json.dumps(
+                            {"delta": json.dumps(waiting_payload, ensure_ascii=False)},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {
+                        "event": "meta",
+                        "data": json.dumps(
+                            _build_stream_meta(
+                                {
+                                "validation_status": "fallback",
+                                "fast_path": True,
+                                "cached": False,
+                                "cache_state": "PENDING_WAIT",
+                                "in_progress": True,
+                                **waiting_meta_defaults,
+                                }
+                            ),
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {"event": "done", "data": "[DONE]"}
+                    return
+
                 if (
                     is_auto_brief
                     or not has_home_data
@@ -3976,20 +4781,88 @@ async def analyze_team(
                         generation_mode=generation_mode,
                         data_quality=data_quality,
                         used_evidence=used_evidence,
+                        **cache_contract_meta,
                         game_status_bucket=game_evidence.game_status_bucket,
                         grounding_warnings=grounding_warnings,
                         grounding_reasons=grounding_reasons,
                         supported_fact_count=fact_sheet.supported_fact_count,
                         dependency_degraded=dependency_degraded,
                         attempt_count=cache_attempt_count,
+                        cache_row_missing=cache_state == "ROW_RECREATED",
+                        recovered_from_missing_row=cache_state == "ROW_RECREATED",
+                        lease_lost=lease_lost_event.is_set(),
                     )
-                    _store_completed_cache(
+                    finalize_result = _store_completed_cache(
                         pool=pool,
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
+                        team_id=home_team_canonical,
+                        year=year,
+                        prompt_version=COACH_CACHE_PROMPT_VERSION,
+                        model_name=coach_model_name,
                         response_payload=response_payload,
                         meta_defaults=meta_defaults,
                     )
+                    finalize_outcome = str(finalize_result.get("outcome") or "")
+                    if finalize_outcome == "inserted_missing_row":
+                        meta_defaults["cache_row_missing"] = True
+                        meta_defaults["recovered_from_missing_row"] = True
+                    elif finalize_outcome == "finalize_conflict":
+                        waiting_payload = _cache_status_response(
+                            headline=f"{home_name} 분석이 진행 중입니다",
+                            coach_note="다른 작업이 캐시 반영을 이어받아 현재 요청은 결과 저장을 중단했습니다. 잠시 후 다시 시도해주세요.",
+                            detail=(
+                                "## 캐시 준비 중\n\n"
+                                "분석 결과 저장 시 충돌이 발생해 현재 요청은 캐시 반영을 중단했습니다."
+                            ),
+                        )
+                        waiting_meta_defaults = _build_meta_payload_defaults(
+                            generation_mode=generation_mode,
+                            data_quality=data_quality,
+                            used_evidence=used_evidence,
+                            **cache_contract_meta,
+                            game_status_bucket=game_evidence.game_status_bucket,
+                            grounding_warnings=grounding_warnings,
+                            grounding_reasons=grounding_reasons,
+                            supported_fact_count=fact_sheet.supported_fact_count,
+                            dependency_degraded=dependency_degraded,
+                            attempt_count=cache_attempt_count,
+                            cache_finalize_conflict=True,
+                            lease_lost=lease_lost_event.is_set(),
+                        )
+                        yield {
+                            "event": "status",
+                            "data": json.dumps(
+                                {"message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."},
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {
+                            "event": "message",
+                            "data": json.dumps(
+                                {"delta": json.dumps(waiting_payload, ensure_ascii=False)},
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {
+                            "event": "meta",
+                            "data": json.dumps(
+                                _build_stream_meta(
+                                    {
+                                    "validation_status": "fallback",
+                                    "verified": True,
+                                    "fast_path": True,
+                                    "cached": False,
+                                    "cache_state": "PENDING_WAIT",
+                                    "in_progress": True,
+                                    **waiting_meta_defaults,
+                                    }
+                                ),
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {"event": "done", "data": "[DONE]"}
+                        return
 
                     missing_focus_sections = _find_missing_focus_sections(
                         response_payload, response_focus_targets
@@ -4003,25 +4876,22 @@ async def analyze_team(
                     yield {
                         "event": "meta",
                         "data": json.dumps(
-                            {
+                            _build_stream_meta(
+                                {
                                 "validation_status": (
                                     "success" if is_auto_brief else "fallback"
                                 ),
                                 "verified": True,
                                 "fast_path": True,
                                 "cached": False,
-                                "request_mode": request_mode,
-                                "resolved_focus": resolved_focus,
-                                "focus_signature": focus_signature,
-                                "question_signature": question_signature,
-                                "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                                 "cache_state": "COMPLETED",
                                 "in_progress": False,
                                 "focus_section_missing": bool(missing_focus_sections),
                                 "missing_focus_sections": missing_focus_sections,
                                 "structured_response": response_payload,
                                 **meta_defaults,
-                            },
+                                }
+                            ),
                             ensure_ascii=False,
                         ),
                     }
@@ -4207,37 +5077,102 @@ async def analyze_team(
                     generation_mode=generation_mode,
                     data_quality=data_quality,
                     used_evidence=used_evidence,
+                    **cache_contract_meta,
                     game_status_bucket=game_evidence.game_status_bucket,
                     grounding_warnings=runtime_grounding_warnings,
                     grounding_reasons=runtime_grounding_reasons,
                     supported_fact_count=fact_sheet.supported_fact_count,
                     dependency_degraded=dependency_degraded,
                     attempt_count=cache_attempt_count,
+                    cache_row_missing=cache_state == "ROW_RECREATED",
+                    recovered_from_missing_row=cache_state == "ROW_RECREATED",
+                    lease_lost=lease_lost_event.is_set(),
                 )
-                _store_completed_cache(
+                finalize_result = _store_completed_cache(
                     pool=pool,
                     cache_key=cache_key,
                     lease_owner=cache_lease_owner,
+                    team_id=home_team_canonical,
+                    year=year,
+                    prompt_version=COACH_CACHE_PROMPT_VERSION,
+                    model_name=coach_model_name,
                     response_payload=response_payload,
                     meta_defaults=meta_defaults,
                 )
+                finalize_outcome = str(finalize_result.get("outcome") or "")
+                if finalize_outcome == "inserted_missing_row":
+                    meta_defaults["cache_row_missing"] = True
+                    meta_defaults["recovered_from_missing_row"] = True
+                elif finalize_outcome == "finalize_conflict":
+                    waiting_payload = _cache_status_response(
+                        headline=f"{home_name} 분석이 진행 중입니다",
+                        coach_note="다른 작업이 캐시 반영을 이어받아 현재 요청은 결과 저장을 중단했습니다. 잠시 후 다시 시도해주세요.",
+                        detail=(
+                            "## 캐시 준비 중\n\n"
+                            "분석 결과 저장 시 충돌이 발생해 현재 요청은 캐시 반영을 중단했습니다."
+                        ),
+                    )
+                    waiting_meta_defaults = _build_meta_payload_defaults(
+                        generation_mode=generation_mode,
+                        data_quality=data_quality,
+                        used_evidence=used_evidence,
+                        **cache_contract_meta,
+                        game_status_bucket=game_evidence.game_status_bucket,
+                        grounding_warnings=runtime_grounding_warnings,
+                        grounding_reasons=runtime_grounding_reasons,
+                        supported_fact_count=fact_sheet.supported_fact_count,
+                        dependency_degraded=dependency_degraded,
+                        attempt_count=cache_attempt_count,
+                        cache_finalize_conflict=True,
+                        lease_lost=lease_lost_event.is_set(),
+                    )
+                    yield {
+                        "event": "status",
+                        "data": json.dumps(
+                            {"message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {
+                        "event": "message",
+                        "data": json.dumps(
+                            {"delta": json.dumps(waiting_payload, ensure_ascii=False)},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {
+                        "event": "meta",
+                        "data": json.dumps(
+                            _build_stream_meta(
+                                {
+                                "validation_status": "fallback",
+                                "verified": True,
+                                "fast_path": True,
+                                "cached": False,
+                                "cache_state": "PENDING_WAIT",
+                                "in_progress": True,
+                                **waiting_meta_defaults,
+                                }
+                            ),
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {"event": "done", "data": "[DONE]"}
+                    return
 
-                meta_payload = {
+                meta_payload = _build_stream_meta(
+                    {
                     "verified": True,
                     "fast_path": True,
                     "validation_status": validation_status,
-                    "request_mode": request_mode,
-                    "resolved_focus": resolved_focus,
-                    "focus_signature": focus_signature,
-                    "question_signature": question_signature,
-                    "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                     "cache_state": "COMPLETED",
                     "in_progress": False,
                     "focus_section_missing": bool(missing_focus_sections),
                     "missing_focus_sections": missing_focus_sections,
                     "structured_response": response_payload,
                     **meta_defaults,
-                }
+                    }
+                )
 
                 yield {
                     "event": "message",
@@ -4249,25 +5184,79 @@ async def analyze_team(
                 }
 
                 yield {"event": "done", "data": "[DONE]"}
+            except asyncio.CancelledError:
+                logger.warning(
+                    "[Coach Streaming Cancelled] game_id=%s resolved_cache_key=%s expected_cache_key=%s prompt_version=%s "
+                    "starter_signature=%s lineup_signature=%s attempt_count=%s gate=cancelled",
+                    game_evidence.game_id,
+                    cache_key,
+                    expected_cache_key,
+                    COACH_CACHE_PROMPT_VERSION,
+                    starter_signature,
+                    lineup_signature,
+                    cache_attempt_count,
+                )
+                try:
+                    cancelled_store_result = _store_failed_cache(
+                        pool=get_connection_pool(),
+                        cache_key=cache_key,
+                        lease_owner=cache_lease_owner,
+                        team_id=home_team_canonical,
+                        year=year,
+                        prompt_version=COACH_CACHE_PROMPT_VERSION,
+                        model_name=coach_model_name,
+                        attempt_count=cache_attempt_count,
+                        error_code=COACH_STREAM_CANCELLED_ERROR_CODE,
+                        error_message="client_stream_cancelled",
+                    )
+                    if str(cancelled_store_result.get("outcome") or "") == "inserted_missing_row":
+                        logger.info(
+                            "[Coach] Cancelled stream restored missing cache row for %s",
+                            cache_key,
+                        )
+                except Exception as cancel_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Coach] Failed to persist cancelled stream state for %s: %s",
+                        cache_key,
+                        cancel_exc,
+                    )
+                raise
             except Exception as e:
-                logger.exception("[Coach Streaming Error] cache_key=%s", cache_key)
+                logger.exception(
+                    "[Coach Streaming Error] game_id=%s resolved_cache_key=%s expected_cache_key=%s prompt_version=%s "
+                    "starter_signature=%s lineup_signature=%s attempt_count=%s gate=exception",
+                    game_evidence.game_id,
+                    cache_key,
+                    expected_cache_key,
+                    COACH_CACHE_PROMPT_VERSION,
+                    starter_signature,
+                    lineup_signature,
+                    cache_attempt_count,
+                )
                 masked_error_code = _cache_error_code_from_exception(e)
                 retryable_failure = _is_retryable_cache_error_code(masked_error_code)
                 try:
                     fallback_pool = get_connection_pool()
-                    _store_failed_cache(
+                    failed_store_result = _store_failed_cache(
                         pool=fallback_pool,
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
+                        team_id=home_team_canonical,
+                        year=year,
+                        prompt_version=COACH_CACHE_PROMPT_VERSION,
+                        model_name=coach_model_name,
+                        attempt_count=cache_attempt_count,
                         error_code=masked_error_code,
                         error_message=str(e),
                     )
                 except:  # noqa: BLE001
+                    failed_store_result = {"outcome": "finalize_conflict"}
                     pass
                 failure_meta_defaults = _build_meta_payload_defaults(
                     generation_mode="evidence_fallback",
                     data_quality=_determine_data_quality(game_evidence),
                     used_evidence=game_evidence.used_evidence,
+                    **cache_contract_meta,
                     game_status_bucket=game_evidence.game_status_bucket,
                     grounding_warnings=_merge_grounding_warnings(
                         [],
@@ -4278,20 +5267,29 @@ async def analyze_team(
                     cache_error_code=masked_error_code,
                     retryable_failure=retryable_failure,
                     attempt_count=cache_attempt_count,
+                    cache_row_missing=(
+                        str(failed_store_result.get("outcome") or "")
+                        == "inserted_missing_row"
+                    ),
+                    recovered_from_missing_row=(
+                        str(failed_store_result.get("outcome") or "")
+                        == "inserted_missing_row"
+                    ),
+                    cache_finalize_conflict=(
+                        str(failed_store_result.get("outcome") or "")
+                        == "finalize_conflict"
+                    ),
+                    lease_lost=lease_lost_event.is_set(),
                 )
 
                 yield {
                     "event": "meta",
                     "data": json.dumps(
-                        {
+                        _build_stream_meta(
+                            {
                             "validation_status": "fallback",
                             "fast_path": True,
                             "cached": False,
-                            "request_mode": request_mode,
-                            "resolved_focus": resolved_focus,
-                            "focus_signature": focus_signature,
-                            "question_signature": question_signature,
-                            "cache_key_version": COACH_CACHE_SCHEMA_VERSION,
                             "cache_state": (
                                 "FAILED_RETRY_WAIT"
                                 if retryable_failure
@@ -4301,7 +5299,8 @@ async def analyze_team(
                             "focus_section_missing": False,
                             "missing_focus_sections": [],
                             **failure_meta_defaults,
-                        },
+                            }
+                        ),
                         ensure_ascii=False,
                     ),
                 }
