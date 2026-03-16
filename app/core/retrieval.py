@@ -268,7 +268,9 @@ def similarity_search(
         return []
     except (PsycopgOperationalError, PsycopgInterfaceError, TimeoutError) as exc:
         logger.error("[Search] DB unreachable during similarity_search: %s", exc)
-        raise DBRetrievalError("pgvector query failed — DB unreachable", cause=exc) from exc
+        raise DBRetrievalError(
+            "pgvector query failed — DB unreachable", cause=exc
+        ) from exc
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
     logger.info(

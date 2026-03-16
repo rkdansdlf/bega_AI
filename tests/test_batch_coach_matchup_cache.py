@@ -178,9 +178,20 @@ def test_build_analyze_payload_includes_postseason_stage_context() -> None:
 
 def test_normalize_cache_state_label_maps_missing_and_pending_rows() -> None:
     assert _normalize_cache_state_label(None) == "MISSING"
-    assert _normalize_cache_state_label(("completed", {}, None, None, 0, None, None, None)) == "COMPLETED"
-    assert _normalize_cache_state_label(("failed", None, "x", None, 0, None, None, None)) == "FAILED"
-    assert _normalize_cache_state_label(("failed_locked", None, "x", None, 0, None, None, None)) == "PENDING"
+    assert (
+        _normalize_cache_state_label(("completed", {}, None, None, 0, None, None, None))
+        == "COMPLETED"
+    )
+    assert (
+        _normalize_cache_state_label(("failed", None, "x", None, 0, None, None, None))
+        == "FAILED"
+    )
+    assert (
+        _normalize_cache_state_label(
+            ("failed_locked", None, "x", None, 0, None, None, None)
+        )
+        == "PENDING"
+    )
 
 
 def test_filter_targets_by_cache_state_returns_only_unresolved(monkeypatch) -> None:
@@ -397,7 +408,9 @@ def test_build_cache_verification_result_marks_pending_wait_row() -> None:
 
     assert result["status"] == "in_progress"
     assert result["reason"] == "pending_wait"
-    assert result["meta"]["recheck_after_seconds"] == batch_module.PENDING_RECHECK_SECONDS
+    assert (
+        result["meta"]["recheck_after_seconds"] == batch_module.PENDING_RECHECK_SECONDS
+    )
 
 
 def test_collect_cache_verification_results_marks_missing_rows_failed(
@@ -464,7 +477,12 @@ def test_collect_cache_verification_results_uses_resolved_cache_key_from_previou
                 cache_key="resolved-key",
                 row=(
                     "COMPLETED",
-                    {"_meta": {"validation_status": "success", "cache_key": "resolved-key"}},
+                    {
+                        "_meta": {
+                            "validation_status": "success",
+                            "cache_key": "resolved-key",
+                        }
+                    },
                     None,
                     None,
                     1,
@@ -635,7 +653,9 @@ def test_normalize_recovered_pending_result_promotes_missing_row_to_retryable() 
     assert item["meta"]["pending_to_missing"] is True
 
 
-def test_normalize_recovered_pending_result_promotes_db_unavailable_to_retryable() -> None:
+def test_normalize_recovered_pending_result_promotes_db_unavailable_to_retryable() -> (
+    None
+):
     item = _normalize_recovered_pending_result(
         {
             "status": "failed",
@@ -667,7 +687,10 @@ def test_summarize_matchup_results_uses_resolved_count_for_quality_rates(
                 "reason": "generated",
                 "home_team_id": "LG",
                 "away_team_id": "KIA",
-                "meta": {"generation_mode": "llm_manual", "focus_section_missing": True},
+                "meta": {
+                    "generation_mode": "llm_manual",
+                    "focus_section_missing": True,
+                },
             },
             {
                 "cache_key": "g2",
@@ -697,7 +720,10 @@ def test_summarize_matchup_results_uses_resolved_count_for_quality_rates(
                 "reason": "cache_hit",
                 "home_team_id": "HH",
                 "away_team_id": "NC",
-                "meta": {"generation_mode": "llm_manual", "focus_section_missing": False},
+                "meta": {
+                    "generation_mode": "llm_manual",
+                    "focus_section_missing": False,
+                },
             },
         ],
         years=[2025],
@@ -1038,7 +1064,13 @@ def test_force_rebuild_delete_blocks_active_pending_but_deletes_terminal(
             if "SELECT cache_key, status" in sql:
                 return _FakeResult(
                     rows=[
-                        ("pending-key", "PENDING", fresh_time, fresh_time + timedelta(seconds=90), fresh_time),
+                        (
+                            "pending-key",
+                            "PENDING",
+                            fresh_time,
+                            fresh_time + timedelta(seconds=90),
+                            fresh_time,
+                        ),
                         ("completed-key", "COMPLETED", fresh_time, None, None),
                     ]
                 )

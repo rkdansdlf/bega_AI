@@ -1208,9 +1208,7 @@ class TestCoachFastPath:
                             "form_status": "steady",
                             "season_metrics": {"era_plus": 122.5, "fip_plus": 117.3},
                             "recent_metrics": {"era": 3.11},
-                            "clutch_metrics": {
-                                "recent_wpa_allowed_per_bf": -0.0034
-                            },
+                            "clutch_metrics": {"recent_wpa_allowed_per_bf": -0.0034},
                         }
                     ],
                 },
@@ -1253,9 +1251,7 @@ class TestCoachFastPath:
                             "form_status": "steady",
                             "season_metrics": {"era_plus": 128.2, "fip_plus": 121.4},
                             "recent_metrics": {"era": 4.72},
-                            "clutch_metrics": {
-                                "recent_wpa_allowed_per_bf": 0.0041
-                            },
+                            "clutch_metrics": {"recent_wpa_allowed_per_bf": 0.0041},
                         }
                     ],
                 },
