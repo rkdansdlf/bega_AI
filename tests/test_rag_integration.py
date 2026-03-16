@@ -202,7 +202,7 @@ def test_db_down_strategy_in_sse_meta(integration_client):
 # ---------------------------------------------------------------------------
 
 def test_db_down_citations_empty(integration_client):
-    """DB-down 경로일 때 SSE meta에서 citations(data_sources)는 빈 배열이어야 한다."""
+    """DB-down 경로일 때 data_sources(citations)는 빈 배열이어야 한다."""
     client, agent, pipeline = integration_client
 
     with patch("app.core.rag.async_embed_query", new_callable=AsyncMock, return_value=_FAKE_EMBEDDING):
@@ -211,14 +211,16 @@ def test_db_down_citations_empty(integration_client):
             side_effect=DBRetrievalError("mock db error", cause=psycopg.OperationalError("conn failed")),
         ):
             with patch.object(pipeline, "_generate", new_callable=AsyncMock, return_value="⚠️ 답변"):
-                with client.stream("POST", "/ai/chat/stream", json=_CHAT_PAYLOAD, headers=_AI_HEADERS) as r:
-                    assert r.status_code == 200
-                    events = _collect_sse_events(r)
+                response = client.post(
+                    "/ai/chat/completion",
+                    json=_CHAT_PAYLOAD,
+                    headers=_AI_HEADERS,
+                )
 
-    meta = _find_meta_event(events)
-    assert meta is not None
+    assert response.status_code == 200
+    body = response.json()
     # DB-down 경로는 data_sources(citations)가 없어야 함
-    data_sources = meta.get("data_sources", [])
+    data_sources = body.get("data_sources", [])
     assert data_sources == [], f"DB-down 경로에서 data_sources는 []이어야 하지만 실제: {data_sources}"
 
 

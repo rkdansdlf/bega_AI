@@ -11,6 +11,7 @@ import time
 import threading
 from psycopg import Connection as PgConnection
 from psycopg.rows import dict_row
+from app.core import kbo_metrics
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 from app.tools.team_mapping_loader import (
     fetch_team_mapping_rows,
@@ -23,6 +24,245 @@ from app.tools.team_mapping_snapshot import (
 )
 
 logger = logging.getLogger(__name__)
+
+_LEAGUE_CONTEXT = kbo_metrics.LeagueContext()
+FORM_SEASON_WEIGHT = 0.60
+FORM_RECENT_WEIGHT = 0.25
+FORM_CLUTCH_WEIGHT = 0.15
+FORM_MIN_RECENT_BATTER_PA = 15
+FORM_BATTER_RECENT_GAMES = 7
+FORM_STARTER_RECENT_GAMES = 3
+FORM_RELIEVER_RECENT_GAMES = 5
+
+
+def _clamp_score(value: Optional[float], lower: float = 0.0, upper: float = 100.0) -> float:
+    if value is None:
+        return lower
+    return max(lower, min(upper, float(value)))
+
+
+def _average_scores(values: List[Optional[float]]) -> Optional[float]:
+    valid = [float(value) for value in values if value is not None]
+    if not valid:
+        return None
+    return sum(valid) / len(valid)
+
+
+def _plus_metric_score(value: Optional[float], *, baseline: float = 100.0, scale: float = 0.7) -> Optional[float]:
+    if value is None:
+        return None
+    return _clamp_score(50.0 + (float(value) - baseline) * scale)
+
+
+def _inverse_metric_score(value: Optional[float], *, baseline: float, scale: float) -> Optional[float]:
+    if value is None:
+        return None
+    return _clamp_score(50.0 + (baseline - float(value)) * scale)
+
+
+def _delta_metric_score(delta: Optional[float], *, scale: float) -> Optional[float]:
+    if delta is None:
+        return None
+    return _clamp_score(50.0 + float(delta) * scale)
+
+
+def _round_metric(value: Optional[float], digits: int = 3) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_signed_metric(value: Optional[float], digits: int = 3) -> str:
+    rounded = _round_metric(value, digits)
+    if rounded is None:
+        return "데이터 부족"
+    sign = "+" if rounded > 0 else ""
+    return f"{sign}{rounded:.{digits}f}"
+
+
+def _classify_form_score(score: Optional[float]) -> str:
+    if score is None:
+        return "insufficient"
+    if score >= 62.0:
+        return "hot"
+    if score <= 45.0:
+        return "cold"
+    return "steady"
+
+
+def _combine_form_score(
+    season_score: Optional[float],
+    recent_score: Optional[float],
+    clutch_score: Optional[float],
+) -> Optional[float]:
+    if season_score is None:
+        return None
+
+    total = season_score * FORM_SEASON_WEIGHT
+    weight = FORM_SEASON_WEIGHT
+    if recent_score is not None:
+        total += recent_score * FORM_RECENT_WEIGHT
+        weight += FORM_RECENT_WEIGHT
+    if clutch_score is not None:
+        total += clutch_score * FORM_CLUTCH_WEIGHT
+        weight += FORM_CLUTCH_WEIGHT
+    if weight <= 0:
+        return None
+    return total / weight
+
+
+def _compute_batter_form_score(
+    *,
+    wrc_plus: Optional[float],
+    ops_plus: Optional[float],
+    season_ops: Optional[float],
+    season_iso: Optional[float],
+    recent_ops: Optional[float],
+    recent_iso: Optional[float],
+    recent_pa: int,
+    season_wpa_per_pa: Optional[float],
+    recent_wpa_per_pa: Optional[float],
+) -> Dict[str, Optional[float]]:
+    season_score = _average_scores(
+        [
+            _plus_metric_score(wrc_plus, scale=0.75),
+            _plus_metric_score(ops_plus, scale=0.65),
+        ]
+    )
+
+    recent_score = None
+    if recent_pa >= FORM_MIN_RECENT_BATTER_PA:
+        recent_score = _average_scores(
+            [
+                _delta_metric_score(
+                    None
+                    if recent_ops is None or season_ops is None
+                    else recent_ops - season_ops,
+                    scale=220.0,
+                ),
+                _delta_metric_score(
+                    None
+                    if recent_iso is None or season_iso is None
+                    else recent_iso - season_iso,
+                    scale=320.0,
+                ),
+            ]
+        )
+
+    clutch_score = _average_scores(
+        [
+            _delta_metric_score(season_wpa_per_pa, scale=2500.0),
+            _delta_metric_score(
+                None
+                if recent_wpa_per_pa is None or season_wpa_per_pa is None
+                else recent_wpa_per_pa - season_wpa_per_pa,
+                scale=3200.0,
+            ),
+        ]
+    )
+
+    form_score = _combine_form_score(season_score, recent_score, clutch_score)
+    return {
+        "season_score": _round_metric(season_score, 1),
+        "recent_score": _round_metric(recent_score, 1),
+        "clutch_score": _round_metric(clutch_score, 1),
+        "form_score": _round_metric(form_score, 1),
+    }
+
+
+def _compute_pitcher_form_score(
+    *,
+    era_plus: Optional[float],
+    fip_plus: Optional[float],
+    whip: Optional[float],
+    kbb: Optional[float],
+    season_era: Optional[float],
+    season_whip: Optional[float],
+    recent_era: Optional[float],
+    recent_whip: Optional[float],
+    recent_kbb: Optional[float],
+    season_wpa_allowed_per_bf: Optional[float],
+    recent_wpa_allowed_per_bf: Optional[float],
+) -> Dict[str, Optional[float]]:
+    season_score = _average_scores(
+        [
+            _plus_metric_score(era_plus, scale=0.7),
+            _plus_metric_score(fip_plus, scale=0.55),
+            _inverse_metric_score(whip, baseline=1.30, scale=45.0),
+            _delta_metric_score(
+                None if kbb is None else kbb - 2.5,
+                scale=12.0,
+            ),
+        ]
+    )
+
+    recent_score = _average_scores(
+        [
+            _delta_metric_score(
+                None
+                if recent_era is None or season_era is None
+                else season_era - recent_era,
+                scale=12.0,
+            ),
+            _delta_metric_score(
+                None
+                if recent_whip is None or season_whip is None
+                else season_whip - recent_whip,
+                scale=40.0,
+            ),
+            _delta_metric_score(
+                None
+                if recent_kbb is None or kbb is None
+                else recent_kbb - kbb,
+                scale=8.0,
+            ),
+        ]
+    )
+
+    clutch_score = _average_scores(
+        [
+            _delta_metric_score(
+                None
+                if season_wpa_allowed_per_bf is None
+                else -season_wpa_allowed_per_bf,
+                scale=2800.0,
+            ),
+            _delta_metric_score(
+                None
+                if recent_wpa_allowed_per_bf is None
+                or season_wpa_allowed_per_bf is None
+                else -(recent_wpa_allowed_per_bf - season_wpa_allowed_per_bf),
+                scale=3200.0,
+            ),
+        ]
+    )
+
+    form_score = _combine_form_score(season_score, recent_score, clutch_score)
+    return {
+        "season_score": _round_metric(season_score, 1),
+        "recent_score": _round_metric(recent_score, 1),
+        "clutch_score": _round_metric(clutch_score, 1),
+        "form_score": _round_metric(form_score, 1),
+    }
+
+
+def _normalize_inning_half(value: Any) -> str:
+    normalized = str(value or "").strip().upper()
+    if normalized in {"TOP", "T", "초"}:
+        return "TOP"
+    if normalized in {"BOTTOM", "BOT", "B", "말"}:
+        return "BOTTOM"
+    return normalized or "UNKNOWN"
+
+
+def _inning_label(inning: Any, inning_half: Any) -> str:
+    inning_value = int(inning or 0)
+    half = _normalize_inning_half(inning_half)
+    suffix = "초" if half == "TOP" else "말" if half == "BOTTOM" else ""
+    return f"{inning_value}회{suffix}" if inning_value else "이닝 미상"
 
 
 # ============================================================
@@ -2510,6 +2750,934 @@ class DatabaseQueryTool:
             result["error"] = str(e)
 
         self._record_team_query_result("get_team_recent_form", team_name, year, result)
+        return result
+
+    def _fetch_player_wpa_window(
+        self,
+        cursor,
+        *,
+        player_id: int,
+        year: int,
+        role: str,
+        recent_games: int,
+        as_of_game_date: Optional[str] = None,
+        exclude_game_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        player_column = "batter_id" if role == "batter" else "pitcher_id"
+        where_clauses = [
+            f"ge.{player_column} = %s",
+            "ks.season_year = %s",
+            "ge.wpa IS NOT NULL",
+            "g.home_score IS NOT NULL",
+        ]
+        params: List[Any] = [player_id, year]
+        if as_of_game_date:
+            where_clauses.append("g.game_date < %s")
+            params.append(as_of_game_date)
+        if exclude_game_id:
+            where_clauses.append("g.game_id <> %s")
+            params.append(exclude_game_id)
+        where_sql = " AND ".join(where_clauses)
+
+        total_query = f"""
+            SELECT
+                COUNT(*) as events,
+                COALESCE(SUM(ge.wpa), 0.0) as total_wpa,
+                COALESCE(SUM(CASE WHEN ABS(ge.wpa) >= 0.05 THEN 1 ELSE 0 END), 0) as high_leverage_events
+            FROM game_events ge
+            JOIN game g ON ge.game_id = g.game_id
+            JOIN kbo_seasons ks ON g.season_id = ks.season_id
+            WHERE {where_sql}
+        """
+        cursor.execute(total_query, tuple(params))
+        total_row = cursor.fetchone() or {}
+
+        recent_query = f"""
+            WITH player_game_wpa AS (
+                SELECT
+                    g.game_id,
+                    MAX(g.game_date) as game_date,
+                    SUM(ge.wpa) as total_wpa,
+                    COUNT(*) as events
+                FROM game_events ge
+                JOIN game g ON ge.game_id = g.game_id
+                JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                WHERE {where_sql}
+                GROUP BY g.game_id
+            )
+            SELECT
+                COUNT(*) as games,
+                COALESCE(SUM(total_wpa), 0.0) as total_wpa,
+                COALESCE(SUM(events), 0) as events
+            FROM (
+                SELECT *
+                FROM player_game_wpa
+                ORDER BY game_date DESC, game_id DESC
+                LIMIT %s
+            ) recent
+        """
+        cursor.execute(recent_query, tuple(params + [recent_games]))
+        recent_row = cursor.fetchone() or {}
+
+        total_events = self.safe_int(total_row.get("events"))
+        recent_events = self.safe_int(recent_row.get("events"))
+        total_wpa = self.safe_float(total_row.get("total_wpa"))
+        recent_wpa = self.safe_float(recent_row.get("total_wpa"))
+
+        return {
+            "season_wpa": _round_metric(total_wpa, 3),
+            "season_events": total_events,
+            "season_wpa_per_event": _round_metric(
+                (total_wpa / total_events) if total_events > 0 else None,
+                4,
+            ),
+            "recent_wpa": _round_metric(recent_wpa, 3),
+            "recent_games": self.safe_int(recent_row.get("games")),
+            "recent_events": recent_events,
+            "recent_wpa_per_event": _round_metric(
+                (recent_wpa / recent_events) if recent_events > 0 else None,
+                4,
+            ),
+            "high_leverage_events": self.safe_int(
+                total_row.get("high_leverage_events")
+            ),
+        }
+
+    def _fetch_recent_batter_window(
+        self,
+        cursor,
+        *,
+        player_id: int,
+        year: int,
+        recent_games: int,
+        as_of_game_date: Optional[str] = None,
+        exclude_game_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        where_clauses = [
+            "gbs.player_id = %s",
+            "ks.season_year = %s",
+            "g.home_score IS NOT NULL",
+        ]
+        params: List[Any] = [player_id, year]
+        if as_of_game_date:
+            where_clauses.append("g.game_date < %s")
+            params.append(as_of_game_date)
+        if exclude_game_id:
+            where_clauses.append("g.game_id <> %s")
+            params.append(exclude_game_id)
+        where_sql = " AND ".join(where_clauses)
+
+        query = f"""
+            SELECT
+                COUNT(*) as games,
+                COALESCE(SUM(plate_appearances), 0) as plate_appearances,
+                COALESCE(SUM(at_bats), 0) as at_bats,
+                COALESCE(SUM(hits), 0) as hits,
+                COALESCE(SUM(doubles), 0) as doubles,
+                COALESCE(SUM(triples), 0) as triples,
+                COALESCE(SUM(home_runs), 0) as home_runs,
+                COALESCE(SUM(walks), 0) as walks,
+                COALESCE(SUM(intentional_walks), 0) as intentional_walks,
+                COALESCE(SUM(hbp), 0) as hbp,
+                COALESCE(SUM(sacrifice_flies), 0) as sacrifice_flies
+            FROM (
+                SELECT
+                    g.game_id,
+                    g.game_date,
+                    gbs.plate_appearances,
+                    gbs.at_bats,
+                    gbs.hits,
+                    gbs.doubles,
+                    gbs.triples,
+                    gbs.home_runs,
+                    gbs.walks,
+                    gbs.intentional_walks,
+                    gbs.hbp,
+                    gbs.sacrifice_flies
+                FROM game_batting_stats gbs
+                JOIN game g ON gbs.game_id = g.game_id
+                JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                WHERE {where_sql}
+                ORDER BY g.game_date DESC, g.game_id DESC, gbs.appearance_seq ASC
+                LIMIT %s
+            ) recent
+        """
+        cursor.execute(query, tuple(params + [recent_games]))
+        row = cursor.fetchone() or {}
+
+        hits = self.safe_int(row.get("hits"))
+        at_bats = self.safe_int(row.get("at_bats"))
+        doubles = self.safe_int(row.get("doubles"))
+        triples = self.safe_int(row.get("triples"))
+        home_runs = self.safe_int(row.get("home_runs"))
+        walks = self.safe_int(row.get("walks"))
+        intentional_walks = self.safe_int(row.get("intentional_walks"))
+        hbp = self.safe_int(row.get("hbp"))
+        sacrifice_flies = self.safe_int(row.get("sacrifice_flies"))
+        return {
+            "games": self.safe_int(row.get("games")),
+            "plate_appearances": self.safe_int(row.get("plate_appearances")),
+            "ops": _round_metric(
+                kbo_metrics.ops(
+                    hits,
+                    walks,
+                    hbp,
+                    at_bats,
+                    sacrifice_flies,
+                    doubles,
+                    triples,
+                    home_runs,
+                ),
+                3,
+            ),
+            "iso": _round_metric(
+                kbo_metrics.iso(hits, doubles, triples, home_runs, at_bats),
+                3,
+            ),
+        }
+
+    def _fetch_recent_pitcher_window(
+        self,
+        cursor,
+        *,
+        player_id: int,
+        year: int,
+        is_starter: bool,
+        recent_games: int,
+        as_of_game_date: Optional[str] = None,
+        exclude_game_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        where_clauses = [
+            "gps.player_id = %s",
+            "ks.season_year = %s",
+            "g.home_score IS NOT NULL",
+            "COALESCE(gps.is_starting, FALSE) = %s",
+        ]
+        params: List[Any] = [player_id, year, is_starter]
+        if as_of_game_date:
+            where_clauses.append("g.game_date < %s")
+            params.append(as_of_game_date)
+        if exclude_game_id:
+            where_clauses.append("g.game_id <> %s")
+            params.append(exclude_game_id)
+        where_sql = " AND ".join(where_clauses)
+
+        query = f"""
+            SELECT
+                COUNT(*) as games,
+                COALESCE(SUM(innings_pitched), 0.0) as innings_pitched,
+                COALESCE(SUM(earned_runs), 0) as earned_runs,
+                COALESCE(SUM(hits_allowed), 0) as hits_allowed,
+                COALESCE(SUM(walks_allowed), 0) as walks_allowed,
+                COALESCE(SUM(strikeouts), 0) as strikeouts
+            FROM (
+                SELECT
+                    g.game_id,
+                    g.game_date,
+                    gps.innings_pitched,
+                    gps.earned_runs,
+                    gps.hits_allowed,
+                    gps.walks_allowed,
+                    gps.strikeouts
+                FROM game_pitching_stats gps
+                JOIN game g ON gps.game_id = g.game_id
+                JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                WHERE {where_sql}
+                ORDER BY g.game_date DESC, g.game_id DESC, gps.appearance_seq ASC
+                LIMIT %s
+            ) recent
+        """
+        cursor.execute(query, tuple(params + [recent_games]))
+        row = cursor.fetchone() or {}
+        innings_pitched = self.safe_float(row.get("innings_pitched"))
+        earned_runs = self.safe_int(row.get("earned_runs"))
+        hits_allowed = self.safe_int(row.get("hits_allowed"))
+        walks_allowed = self.safe_int(row.get("walks_allowed"))
+        strikeouts = self.safe_int(row.get("strikeouts"))
+
+        era = None
+        whip = None
+        if innings_pitched > 0:
+            era = (earned_runs * 9.0) / innings_pitched
+            whip = (hits_allowed + walks_allowed) / innings_pitched
+        if walks_allowed > 0:
+            kbb = strikeouts / walks_allowed
+        elif strikeouts > 0:
+            kbb = float(strikeouts)
+        else:
+            kbb = None
+
+        return {
+            "games": self.safe_int(row.get("games")),
+            "innings_pitched": _round_metric(innings_pitched, 1),
+            "era": _round_metric(era, 2),
+            "whip": _round_metric(whip, 2),
+            "kbb": _round_metric(kbb, 2),
+        }
+
+    @staticmethod
+    def _build_batter_form_summary(
+        player_name: str,
+        form_status: str,
+        wrc_plus: Optional[float],
+        ops_plus: Optional[float],
+        recent_ops: Optional[float],
+        recent_iso: Optional[float],
+        recent_pa: int,
+        recent_wpa_per_pa: Optional[float],
+    ) -> str:
+        if recent_pa < FORM_MIN_RECENT_BATTER_PA:
+            return (
+                f"{player_name}는 최근 표본이 {recent_pa}PA라 시즌 wRC+/OPS+ 중심 해석이 더 안전합니다."
+            )
+
+        status_label = {
+            "hot": "상승세",
+            "steady": "보합세",
+            "cold": "하락세",
+            "insufficient": "데이터 부족",
+        }.get(form_status, "보합세")
+        return (
+            f"{player_name}는 {status_label}입니다. "
+            f"시즌 wRC+ {_round_metric(wrc_plus, 1) or 0:.1f}, OPS+ {_round_metric(ops_plus, 1) or 0:.1f}, "
+            f"최근 OPS {_round_metric(recent_ops, 3) or 0:.3f}, ISO {_round_metric(recent_iso, 3) or 0:.3f}, "
+            f"최근 WPA/PA {_format_signed_metric(recent_wpa_per_pa, 4)}가 겹칩니다."
+        )
+
+    @staticmethod
+    def _build_pitcher_form_summary(
+        player_name: str,
+        form_status: str,
+        era_plus: Optional[float],
+        fip_plus: Optional[float],
+        recent_era: Optional[float],
+        recent_whip: Optional[float],
+        recent_wpa_allowed_per_bf: Optional[float],
+        recent_games: int,
+    ) -> str:
+        if recent_games <= 0:
+            return (
+                f"{player_name}는 최근 등판 표본이 부족해 시즌 ERA+/FIP+ 베이스라인 중심 해석이 더 안전합니다."
+            )
+
+        status_label = {
+            "hot": "상승세",
+            "steady": "보합세",
+            "cold": "하락세",
+            "insufficient": "데이터 부족",
+        }.get(form_status, "보합세")
+        return (
+            f"{player_name}는 {status_label}입니다. "
+            f"시즌 ERA+ {_round_metric(era_plus, 1) or 0:.1f}, FIP+ {_round_metric(fip_plus, 1) or 0:.1f}, "
+            f"최근 ERA {_round_metric(recent_era, 2) or 0:.2f}, WHIP {_round_metric(recent_whip, 2) or 0:.2f}, "
+            f"WPA 허용/BF {_format_signed_metric(recent_wpa_allowed_per_bf, 4)} 흐름이 연결됩니다."
+        )
+
+    def get_team_player_form_signals(
+        self,
+        team_name: str,
+        year: int,
+        as_of_game_date: Optional[str] = None,
+        exclude_game_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        logger.info(
+            "[DatabaseQuery] Querying player form signals for %s in %s as_of=%s exclude=%s",
+            team_name,
+            year,
+            as_of_game_date,
+            exclude_game_id,
+        )
+
+        cache_key = (
+            f"team_player_form_signals:{team_name}:{year}:"
+            f"{as_of_game_date or 'latest'}:{exclude_game_id or 'none'}"
+        )
+        cached_result = _coach_cache.get(cache_key)
+        if cached_result is not None:
+            self._record_team_query_result(
+                "get_team_player_form_signals", team_name, year, cached_result
+            )
+            return cached_result
+
+        result = {
+            "team_name": team_name,
+            "year": year,
+            "batters": [],
+            "pitchers": [],
+            "found": False,
+            "error": None,
+        }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            self._record_team_query_result(
+                "get_team_player_form_signals", team_name, year, result
+            )
+            return result
+
+        team_code = self.get_team_code(team_name, year)
+        team_variants = self.get_team_variants(team_name, year)
+        result["team_name"] = self.get_team_name(team_code)
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor.execute(
+                """
+                SELECT
+                    (SELECT ROUND(AVG(ops)::numeric, 3)
+                     FROM player_season_batting
+                     WHERE season = %s AND league = 'REGULAR' AND plate_appearances >= 50) as league_ops,
+                    (SELECT ROUND((SUM(earned_runs) * 9.0 / NULLIF(SUM(innings_pitched), 0))::numeric, 2)
+                     FROM player_season_pitching
+                     WHERE season = %s AND league = 'REGULAR' AND innings_pitched >= 10) as league_era,
+                    (SELECT ROUND(AVG(fip)::numeric, 2)
+                     FROM player_season_pitching
+                     WHERE season = %s AND league = 'REGULAR' AND innings_pitched >= 10 AND fip IS NOT NULL) as league_fip
+                """,
+                (year, year, year),
+            )
+            league_row = cursor.fetchone() or {}
+            league_ops = self.safe_float(league_row.get("league_ops"), 0.0)
+            league_era = self.safe_float(league_row.get("league_era"), 0.0)
+            league_fip = self.safe_float(league_row.get("league_fip"), 0.0)
+
+            cursor.execute(
+                """
+                SELECT
+                    psb.player_id,
+                    pb.name as player_name,
+                    psb.ops,
+                    psb.iso,
+                    psb.avg,
+                    psb.obp,
+                    psb.slg,
+                    psb.plate_appearances,
+                    psb.at_bats,
+                    psb.hits,
+                    psb.doubles,
+                    psb.triples,
+                    psb.home_runs,
+                    psb.walks,
+                    psb.intentional_walks,
+                    psb.hbp,
+                    psb.sacrifice_flies,
+                    psb.rbi
+                FROM player_season_batting psb
+                JOIN player_basic pb ON psb.player_id = pb.player_id
+                WHERE psb.team_code = ANY(%s)
+                  AND psb.season = %s
+                  AND psb.league = 'REGULAR'
+                  AND psb.plate_appearances >= 50
+                ORDER BY psb.ops DESC, psb.plate_appearances DESC
+                LIMIT 4
+                """,
+                (team_variants, year),
+            )
+            batter_rows = cursor.fetchall() or []
+            for row in batter_rows:
+                season_ops = self.safe_float(row.get("ops"))
+                season_iso = self.safe_float(row.get("iso"))
+                plate_appearances = self.safe_int(row.get("plate_appearances"))
+                ops_plus = (
+                    (season_ops / league_ops) * 100.0
+                    if league_ops > 0 and season_ops > 0
+                    else None
+                )
+                woba_value = kbo_metrics.woba(
+                    self.safe_int(row.get("walks")),
+                    self.safe_int(row.get("intentional_walks")),
+                    self.safe_int(row.get("hbp")),
+                    self.safe_int(row.get("hits")),
+                    self.safe_int(row.get("doubles")),
+                    self.safe_int(row.get("triples")),
+                    self.safe_int(row.get("home_runs")),
+                    self.safe_int(row.get("at_bats")),
+                    self.safe_int(row.get("sacrifice_flies")),
+                    _LEAGUE_CONTEXT,
+                )
+                wrc_plus = (
+                    kbo_metrics.wrc_plus(woba_value, plate_appearances, _LEAGUE_CONTEXT)
+                    if woba_value is not None and plate_appearances > 0
+                    else None
+                )
+                recent_window = self._fetch_recent_batter_window(
+                    cursor,
+                    player_id=self.safe_int(row.get("player_id")),
+                    year=year,
+                    recent_games=FORM_BATTER_RECENT_GAMES,
+                    as_of_game_date=as_of_game_date,
+                    exclude_game_id=exclude_game_id,
+                )
+                wpa_window = self._fetch_player_wpa_window(
+                    cursor,
+                    player_id=self.safe_int(row.get("player_id")),
+                    year=year,
+                    role="batter",
+                    recent_games=FORM_BATTER_RECENT_GAMES,
+                    as_of_game_date=as_of_game_date,
+                    exclude_game_id=exclude_game_id,
+                )
+                score_pack = _compute_batter_form_score(
+                    wrc_plus=wrc_plus,
+                    ops_plus=ops_plus,
+                    season_ops=season_ops,
+                    season_iso=season_iso,
+                    recent_ops=recent_window.get("ops"),
+                    recent_iso=recent_window.get("iso"),
+                    recent_pa=self.safe_int(recent_window.get("plate_appearances")),
+                    season_wpa_per_pa=wpa_window.get("season_wpa_per_event"),
+                    recent_wpa_per_pa=wpa_window.get("recent_wpa_per_event"),
+                )
+                form_status = _classify_form_score(score_pack.get("form_score"))
+                result["batters"].append(
+                    {
+                        "player_name": row.get("player_name"),
+                        "season_metrics": {
+                            "ops": _round_metric(season_ops, 3),
+                            "iso": _round_metric(season_iso, 3),
+                            "plate_appearances": plate_appearances,
+                            "ops_plus": _round_metric(ops_plus, 1),
+                            "wrc_plus": _round_metric(wrc_plus, 1),
+                        },
+                        "recent_metrics": recent_window,
+                        "clutch_metrics": {
+                            "season_wpa": wpa_window.get("season_wpa"),
+                            "season_wpa_per_pa": wpa_window.get("season_wpa_per_event"),
+                            "recent_wpa": wpa_window.get("recent_wpa"),
+                            "recent_wpa_per_pa": wpa_window.get("recent_wpa_per_event"),
+                            "high_leverage_events": wpa_window.get(
+                                "high_leverage_events"
+                            ),
+                        },
+                        **score_pack,
+                        "form_status": form_status,
+                        "summary": self._build_batter_form_summary(
+                            str(row.get("player_name") or ""),
+                            form_status,
+                            wrc_plus,
+                            ops_plus,
+                            recent_window.get("ops"),
+                            recent_window.get("iso"),
+                            self.safe_int(recent_window.get("plate_appearances")),
+                            wpa_window.get("recent_wpa_per_event"),
+                        ),
+                    }
+                )
+
+            cursor.execute(
+                """
+                SELECT
+                    psp.player_id,
+                    pb.name as player_name,
+                    psp.era,
+                    psp.whip,
+                    psp.fip,
+                    psp.kbb,
+                    psp.games_started,
+                    psp.saves,
+                    psp.holds,
+                    psp.innings_pitched
+                FROM player_season_pitching psp
+                JOIN player_basic pb ON psp.player_id = pb.player_id
+                WHERE psp.team_code = ANY(%s)
+                  AND psp.season = %s
+                  AND psp.league = 'REGULAR'
+                  AND psp.innings_pitched >= 20
+                ORDER BY
+                    CASE
+                        WHEN psp.games_started >= 10 THEN 0
+                        WHEN psp.saves >= 5 OR psp.holds >= 10 THEN 1
+                        ELSE 2
+                    END ASC,
+                    psp.innings_pitched DESC,
+                    psp.era ASC
+                LIMIT 4
+                """,
+                (team_variants, year),
+            )
+            pitcher_rows = cursor.fetchall() or []
+            for row in pitcher_rows:
+                player_id = self.safe_int(row.get("player_id"))
+                season_era = self.safe_float(row.get("era"))
+                season_whip = self.safe_float(row.get("whip"))
+                season_fip = self.safe_float(row.get("fip"))
+                season_kbb = self.safe_float(row.get("kbb"))
+                games_started = self.safe_int(row.get("games_started"))
+                is_starter = games_started >= 10
+                recent_games = (
+                    FORM_STARTER_RECENT_GAMES
+                    if is_starter
+                    else FORM_RELIEVER_RECENT_GAMES
+                )
+                recent_window = self._fetch_recent_pitcher_window(
+                    cursor,
+                    player_id=player_id,
+                    year=year,
+                    is_starter=is_starter,
+                    recent_games=recent_games,
+                    as_of_game_date=as_of_game_date,
+                    exclude_game_id=exclude_game_id,
+                )
+                wpa_window = self._fetch_player_wpa_window(
+                    cursor,
+                    player_id=player_id,
+                    year=year,
+                    role="pitcher",
+                    recent_games=recent_games,
+                    as_of_game_date=as_of_game_date,
+                    exclude_game_id=exclude_game_id,
+                )
+                era_plus = (
+                    (league_era / season_era) * 100.0
+                    if league_era > 0 and season_era > 0
+                    else None
+                )
+                fip_plus = (
+                    (league_fip / season_fip) * 100.0
+                    if league_fip > 0 and season_fip > 0
+                    else None
+                )
+                score_pack = _compute_pitcher_form_score(
+                    era_plus=era_plus,
+                    fip_plus=fip_plus,
+                    whip=season_whip,
+                    kbb=season_kbb,
+                    season_era=season_era,
+                    season_whip=season_whip,
+                    recent_era=recent_window.get("era"),
+                    recent_whip=recent_window.get("whip"),
+                    recent_kbb=recent_window.get("kbb"),
+                    season_wpa_allowed_per_bf=wpa_window.get("season_wpa_per_event"),
+                    recent_wpa_allowed_per_bf=wpa_window.get("recent_wpa_per_event"),
+                )
+                form_status = _classify_form_score(score_pack.get("form_score"))
+                result["pitchers"].append(
+                    {
+                        "player_name": row.get("player_name"),
+                        "role": "starter" if is_starter else "reliever",
+                        "season_metrics": {
+                            "era": _round_metric(season_era, 2),
+                            "whip": _round_metric(season_whip, 2),
+                            "fip": _round_metric(season_fip, 2),
+                            "kbb": _round_metric(season_kbb, 2),
+                            "era_plus": _round_metric(era_plus, 1),
+                            "fip_plus": _round_metric(fip_plus, 1),
+                        },
+                        "recent_metrics": recent_window,
+                        "clutch_metrics": {
+                            "season_wpa_allowed": wpa_window.get("season_wpa"),
+                            "season_wpa_allowed_per_bf": wpa_window.get(
+                                "season_wpa_per_event"
+                            ),
+                            "recent_wpa_allowed": wpa_window.get("recent_wpa"),
+                            "recent_wpa_allowed_per_bf": wpa_window.get(
+                                "recent_wpa_per_event"
+                            ),
+                            "high_leverage_events": wpa_window.get(
+                                "high_leverage_events"
+                            ),
+                        },
+                        **score_pack,
+                        "form_status": form_status,
+                        "summary": self._build_pitcher_form_summary(
+                            str(row.get("player_name") or ""),
+                            form_status,
+                            era_plus,
+                            fip_plus,
+                            recent_window.get("era"),
+                            recent_window.get("whip"),
+                            wpa_window.get("recent_wpa_per_event"),
+                            self.safe_int(recent_window.get("games")),
+                        ),
+                    }
+                )
+
+            result["found"] = bool(result["batters"] or result["pitchers"])
+            if result["found"]:
+                _coach_cache.set(cache_key, result)
+        except Exception as e:
+            logger.error("[DatabaseQuery] Error querying player form signals: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        self._record_team_query_result(
+            "get_team_player_form_signals", team_name, year, result
+        )
+        return result
+
+    def get_clutch_moments(self, game_id: str, limit: int = 3) -> Dict[str, Any]:
+        logger.info("[DatabaseQuery] Querying clutch moments for %s", game_id)
+
+        cache_key = f"clutch_moments:{game_id}:{limit}"
+        cached_result = _coach_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+
+        result = {
+            "game_id": game_id,
+            "moments": [],
+            "found": False,
+            "error": None,
+        }
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor.execute(
+                """
+                SELECT
+                    ge.event_seq,
+                    ge.inning,
+                    ge.inning_half,
+                    ge.outs,
+                    ge.bases_before,
+                    ge.description,
+                    ge.wpa,
+                    ge.win_expectancy_before,
+                    ge.win_expectancy_after,
+                    ge.home_score,
+                    ge.away_score,
+                    ge.batter_name,
+                    ge.pitcher_name,
+                    g.home_team,
+                    g.away_team
+                FROM game_events ge
+                JOIN game g ON ge.game_id = g.game_id
+                WHERE ge.game_id = %s
+                  AND ge.wpa IS NOT NULL
+                ORDER BY ABS(ge.wpa) DESC, ge.event_seq ASC
+                LIMIT %s
+                """,
+                (game_id, limit),
+            )
+            rows = cursor.fetchall() or []
+            for row in rows:
+                inning_half = _normalize_inning_half(row.get("inning_half"))
+                batting_team_code = (
+                    row.get("away_team")
+                    if inning_half == "TOP"
+                    else row.get("home_team")
+                )
+                result["moments"].append(
+                    {
+                        "event_seq": self.safe_int(row.get("event_seq")),
+                        "inning": self.safe_int(row.get("inning")),
+                        "inning_half": inning_half,
+                        "inning_label": _inning_label(
+                            row.get("inning"), row.get("inning_half")
+                        ),
+                        "outs": self.safe_int(row.get("outs")),
+                        "bases_before": row.get("bases_before") or "-",
+                        "description": str(row.get("description") or "").strip(),
+                        "wpa": _round_metric(self.safe_float(row.get("wpa")), 4),
+                        "wpa_delta_pct": _round_metric(
+                            self.safe_float(row.get("wpa")) * 100.0,
+                            1,
+                        ),
+                        "win_expectancy_before": _round_metric(
+                            self.safe_float(row.get("win_expectancy_before")), 4
+                        ),
+                        "win_expectancy_after": _round_metric(
+                            self.safe_float(row.get("win_expectancy_after")), 4
+                        ),
+                        "score": (
+                            f"{self.safe_int(row.get('away_score'))}:"
+                            f"{self.safe_int(row.get('home_score'))}"
+                        ),
+                        "batter_name": row.get("batter_name"),
+                        "pitcher_name": row.get("pitcher_name"),
+                        "batting_team_code": batting_team_code,
+                    }
+                )
+            result["found"] = bool(result["moments"])
+            if result["found"]:
+                _coach_cache.set(cache_key, result)
+        except Exception as e:
+            logger.error("[DatabaseQuery] Error querying clutch moments: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return result
+
+    def get_player_wpa_stats(
+        self,
+        player_name: str,
+        year: int,
+        recent_games: int = FORM_BATTER_RECENT_GAMES,
+    ) -> Dict[str, Any]:
+        logger.info("[DatabaseQuery] Querying WPA stats for %s in %s", player_name, year)
+
+        cache_key = f"player_wpa_stats:{player_name}:{year}:{recent_games}"
+        cached_result = _coach_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+
+        result = {
+            "player_name": player_name,
+            "year": year,
+            "found": False,
+            "batting": None,
+            "pitching": None,
+            "error": None,
+        }
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor.execute(
+                """
+                SELECT player_id, name
+                FROM player_basic
+                WHERE LOWER(name) = LOWER(%s) OR LOWER(name) LIKE LOWER(%s)
+                ORDER BY CASE WHEN LOWER(name) = LOWER(%s) THEN 0 ELSE 1 END, player_id ASC
+                LIMIT 1
+                """,
+                (player_name, f"%{player_name}%", player_name),
+            )
+            player_row = cursor.fetchone()
+            if not player_row:
+                result["error"] = f"선수 '{player_name}'을 찾을 수 없습니다."
+                return result
+
+            resolved_name = str(player_row.get("name") or player_name)
+            player_id = self.safe_int(player_row.get("player_id"))
+            result["player_name"] = resolved_name
+
+            batting_stats = self._fetch_player_wpa_window(
+                cursor,
+                player_id=player_id,
+                year=year,
+                role="batter",
+                recent_games=recent_games,
+            )
+            pitching_stats = self._fetch_player_wpa_window(
+                cursor,
+                player_id=player_id,
+                year=year,
+                role="pitcher",
+                recent_games=recent_games,
+            )
+            if batting_stats.get("season_events", 0) > 0:
+                result["batting"] = {
+                    "season_wpa": batting_stats.get("season_wpa"),
+                    "season_wpa_per_pa": batting_stats.get("season_wpa_per_event"),
+                    "recent_wpa": batting_stats.get("recent_wpa"),
+                    "recent_wpa_per_pa": batting_stats.get("recent_wpa_per_event"),
+                    "recent_games": batting_stats.get("recent_games"),
+                    "high_leverage_events": batting_stats.get("high_leverage_events"),
+                }
+            if pitching_stats.get("season_events", 0) > 0:
+                result["pitching"] = {
+                    "season_wpa_allowed": pitching_stats.get("season_wpa"),
+                    "season_wpa_allowed_per_bf": pitching_stats.get(
+                        "season_wpa_per_event"
+                    ),
+                    "recent_wpa_allowed": pitching_stats.get("recent_wpa"),
+                    "recent_wpa_allowed_per_bf": pitching_stats.get(
+                        "recent_wpa_per_event"
+                    ),
+                    "recent_games": pitching_stats.get("recent_games"),
+                    "high_leverage_events": pitching_stats.get(
+                        "high_leverage_events"
+                    ),
+                }
+            result["found"] = bool(result["batting"] or result["pitching"])
+            if result["found"]:
+                _coach_cache.set(cache_key, result)
+        except Exception as e:
+            logger.error("[DatabaseQuery] Error querying player WPA stats: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return result
+
+    def get_player_wpa_leaders(
+        self, year: int, limit: int = 10, team_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        logger.info(
+            "[DatabaseQuery] Querying WPA leaders for %s team_filter=%s",
+            year,
+            team_name,
+        )
+
+        cache_key = f"player_wpa_leaders:{year}:{limit}:{team_name or 'all'}"
+        cached_result = _coach_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+
+        result = {
+            "year": year,
+            "team_filter": team_name,
+            "leaders": [],
+            "found": False,
+            "error": None,
+        }
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            where_clauses = [
+                "ks.season_year = %s",
+                "ge.batter_id IS NOT NULL",
+                "ge.wpa IS NOT NULL",
+                "g.home_score IS NOT NULL",
+            ]
+            params: List[Any] = [year]
+            if team_name:
+                team_variants = self.get_team_variants(team_name, year)
+                where_clauses.append("psb.team_code = ANY(%s)")
+                params.append(team_variants)
+            where_sql = " AND ".join(where_clauses)
+            query = f"""
+                SELECT
+                    pb.name as player_name,
+                    psb.team_code,
+                    COALESCE(SUM(ge.wpa), 0.0) as total_wpa,
+                    COUNT(*) as plate_appearances
+                FROM game_events ge
+                JOIN game g ON ge.game_id = g.game_id
+                JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                JOIN player_basic pb ON ge.batter_id = pb.player_id
+                LEFT JOIN player_season_batting psb
+                    ON ge.batter_id = psb.player_id
+                   AND psb.season = ks.season_year
+                   AND psb.league = 'REGULAR'
+                WHERE {where_sql}
+                GROUP BY pb.name, psb.team_code
+                ORDER BY total_wpa DESC, plate_appearances DESC
+                LIMIT %s
+            """
+            cursor.execute(query, tuple(params + [limit]))
+            rows = cursor.fetchall() or []
+            for index, row in enumerate(rows, start=1):
+                total_wpa = self.safe_float(row.get("total_wpa"))
+                plate_appearances = self.safe_int(row.get("plate_appearances"))
+                result["leaders"].append(
+                    {
+                        "rank": index,
+                        "player_name": row.get("player_name"),
+                        "team_name": self.get_team_name(row.get("team_code") or ""),
+                        "wpa": _round_metric(total_wpa, 3),
+                        "wpa_per_pa": _round_metric(
+                            (total_wpa / plate_appearances)
+                            if plate_appearances > 0
+                            else None,
+                            4,
+                        ),
+                        "plate_appearances": plate_appearances,
+                    }
+                )
+            result["found"] = bool(result["leaders"])
+            if result["found"]:
+                _coach_cache.set(cache_key, result)
+        except Exception as e:
+            logger.error("[DatabaseQuery] Error querying WPA leaders: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
         return result
 
     def get_team_monthly_trend(self, team_name: str, year: int) -> Dict[str, Any]:

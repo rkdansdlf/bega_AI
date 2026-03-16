@@ -5,6 +5,7 @@ Query Transformation과 Multi-query Retrieval을 위한 모듈입니다.
 벡터 검색의 정확도를 높이는 기능을 제공합니다.
 """
 
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -269,32 +270,42 @@ async def multi_query_retrieval(
         f"[MultiQuery] Starting retrieval with {len(query_variations)} variations"
     )
 
-    # 병렬로 모든 쿼리 변형에 대해 검색 수행
-    tasks = []
-    for variation in query_variations:
-        task = retrieve_func(
+    # 모든 쿼리 변형에 대한 코루틴 생성 (아직 실행 안 됨)
+    coroutines = [
+        retrieve_func(
             variation.query,
             filters=filters,
             limit=limit_per_query,
             entity_filter=entity_filter,
         )
-        tasks.append((variation, task))
+        for variation in query_variations
+    ]
 
-    # 모든 검색 작업을 병렬 실행
+    # asyncio.gather로 진정한 병렬 실행:
+    # - HyDE LLM 호출과 임베딩 생성은 동시에 실행됨 (HTTP 요청, thread-safe)
+    # - DB similarity_search는 RAGPipeline._db_lock이 직렬화를 보장함
+    raw_results = await asyncio.gather(*coroutines, return_exceptions=True)
+
     all_results = []
-    for variation, task in tasks:
-        try:
-            docs = await task
-            # 각 문서에 가중치 정보 추가
-            for doc in docs:
-                doc["_query_weight"] = variation.weight
-                doc["_query_type"] = variation.variation_type
-                doc["_source_query"] = variation.query
-            all_results.extend(docs)
-        except Exception as e:
+    success_count = 0
+    for variation, result in zip(query_variations, raw_results):
+        if isinstance(result, BaseException):
             logger.warning(
-                f"[MultiQuery] Failed to retrieve for '{variation.query}': {e}"
+                f"[MultiQuery] Failed to retrieve for '{variation.query}': {result}"
             )
+            continue
+        success_count += 1
+        for doc in result:
+            doc["_query_weight"] = variation.weight
+            doc["_query_type"] = variation.variation_type
+            doc["_source_query"] = variation.query
+        all_results.extend(result)
+
+    if success_count == 0 and query_variations:
+        logger.error(
+            "[MultiQuery] All %d variations failed. Returning empty results.",
+            len(query_variations),
+        )
 
     # 중복 제거 및 점수 결합
     unique_docs = {}
