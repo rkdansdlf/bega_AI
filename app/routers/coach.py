@@ -1445,7 +1445,13 @@ def _claim_cache_generation(
             )
 
             if cache_state == "HIT":
-                return cache_state, cached_json, error_message, error_code, _normalize_attempt_count(attempt_count)
+                return (
+                    cache_state,
+                    cached_json,
+                    error_message,
+                    error_code,
+                    _normalize_attempt_count(attempt_count),
+                )
 
             if cache_state in {"MISS_GENERATE", "PENDING_STALE_TAKEOVER"}:
                 next_attempt = max(1, _normalize_attempt_count(attempt_count) + 1)
@@ -1560,7 +1566,9 @@ def _store_completed_cache(
                     prompt_version,
                     model_name,
                     wrapped_payload,
-                    max(1, _normalize_attempt_count(meta_defaults.get("attempt_count"))),
+                    max(
+                        1, _normalize_attempt_count(meta_defaults.get("attempt_count"))
+                    ),
                 ),
             ).fetchone()
             if inserted:
@@ -1597,9 +1605,7 @@ def _store_failed_cache(
     error_message: Optional[str] = None,
 ) -> Dict[str, Any]:
     normalized_error_code = _sanitize_cache_error_code(error_code)
-    stored_error_message = (
-        str(error_message or "").strip() or normalized_error_code
-    )
+    stored_error_message = str(error_message or "").strip() or normalized_error_code
     with pool.connection() as conn:
         result = conn.execute(
             """
@@ -2533,7 +2539,9 @@ def _build_deterministic_metrics(
 ) -> List[Dict[str, Any]]:
     metrics: List[Dict[str, Any]] = []
     review_mode = _is_completed_review(evidence)
-    review_summary_item = _primary_review_summary_item(evidence) if review_mode else None
+    review_summary_item = (
+        _primary_review_summary_item(evidence) if review_mode else None
+    )
     home_data = tool_results.get("home", {})
     away_data = tool_results.get("away", {})
     home_recent = _recent_summary(home_data)
@@ -2720,7 +2728,9 @@ def _build_deterministic_analysis(
     away_run_diff = int(away_recent_summary.get("run_diff", 0) or 0)
     edge_scores = {home_name: 0, away_name: 0}
     clutch_moments = _clutch_moments(tool_results)
-    review_summary_item = _primary_review_summary_item(evidence) if review_mode else None
+    review_summary_item = (
+        _primary_review_summary_item(evidence) if review_mode else None
+    )
     review_summary_is_clutch = _summary_item_is_clutch_like(review_summary_item)
     home_batter_form = _best_form_signal(home_data, "batters")
     away_batter_form = _best_form_signal(away_data, "batters")
@@ -2812,9 +2822,11 @@ def _build_deterministic_analysis(
             )
             risks.append(
                 {
-                    "area": "starter"
-                    if pitcher_form.get("role") == "starter"
-                    else "bullpen",
+                    "area": (
+                        "starter"
+                        if pitcher_form.get("role") == "starter"
+                        else "bullpen"
+                    ),
                     "level": 0,
                     "description": f"{team_name} {player_name}의 최근 실점/WPA 허용 흐름이 좋지 않습니다.",
                 }
@@ -3073,7 +3085,9 @@ def _build_deterministic_headline(
 ) -> str:
     review_mode = _is_completed_review(evidence)
     clutch_moments = _clutch_moments(tool_results)
-    review_summary_item = _primary_review_summary_item(evidence) if review_mode else None
+    review_summary_item = (
+        _primary_review_summary_item(evidence) if review_mode else None
+    )
     if evidence.stage_label != "REGULAR" and evidence.series_state:
         return (
             f"{evidence.away_team_name} {evidence.series_state.away_team_wins}승 vs "
@@ -3534,8 +3548,7 @@ async def _execute_coach_tools_parallel(
             ):
                 result["_dependency_degraded"] = True
                 result["_dependency_degraded_reason"] = (
-                    getattr(game_query, "mapping_dependency_reason", None)
-                    or "defaults"
+                    getattr(game_query, "mapping_dependency_reason", None) or "defaults"
                 )
             return result
 
@@ -3591,10 +3604,10 @@ async def _execute_coach_tools_parallel(
                 tool_results["matchup"] = results[2]
         clutch_index = 3 if "matchup" in focus else 2
         if include_clutch and game_id:
-            if len(tasks) > clutch_index and isinstance(results[clutch_index], Exception):
-                tool_results["clutch_moments"] = {
-                    "error": COACH_TOOL_FETCH_FAILED_CODE
-                }
+            if len(tasks) > clutch_index and isinstance(
+                results[clutch_index], Exception
+            ):
+                tool_results["clutch_moments"] = {"error": COACH_TOOL_FETCH_FAILED_CODE}
             elif len(tasks) > clutch_index:
                 tool_results["clutch_moments"] = results[clutch_index]
     elif include_clutch and game_id:
@@ -3766,7 +3779,9 @@ def _format_team_stats(team_data: Dict[str, Any], team_role: str = "Home") -> st
     form_signals = team_data.get("player_form_signals", {})
     if form_signals and form_signals.get("found"):
         parts.append("**핵심 폼 진단**:")
-        for signal in (form_signals.get("batters", [])[:1] + form_signals.get("pitchers", [])[:1]):
+        for signal in (
+            form_signals.get("batters", [])[:1] + form_signals.get("pitchers", [])[:1]
+        ):
             player_name = signal.get("player_name", "선수 미상")
             form_score = signal.get("form_score")
             score_text = (
@@ -4064,9 +4079,7 @@ async def analyze_team(
         game_type = str(
             effective_league_context.get("league_type") or "UNKNOWN"
         ).upper()
-        expected_cache_key = (
-            str(payload.expected_cache_key or "").strip() or None
-        )
+        expected_cache_key = str(payload.expected_cache_key or "").strip() or None
         cache_key, cache_key_payload, starter_signature, lineup_signature = (
             build_coach_cache_identity(
                 home_team_code=home_team_canonical,
@@ -4088,7 +4101,9 @@ async def analyze_team(
                 lineup_players=[*game_evidence.home_lineup, *game_evidence.away_lineup],
             )
         )
-        cache_key_mismatch = bool(expected_cache_key and expected_cache_key != cache_key)
+        cache_key_mismatch = bool(
+            expected_cache_key and expected_cache_key != cache_key
+        )
         cache_contract_meta = {
             "cache_key": cache_key,
             "resolved_cache_key": cache_key,
@@ -4140,6 +4155,7 @@ async def analyze_team(
                 lineup_signature,
             )
         evidence_assessment = assess_game_evidence(game_evidence)
+
         async def event_generator():
             try:
                 total_start = perf_counter()
@@ -4240,15 +4256,17 @@ async def analyze_team(
                         "data": json.dumps(
                             _build_stream_meta(
                                 {
-                                "validation_status": "success",
-                                "structured_response": cached_data,
-                                "fast_path": True,
-                                "cached": True,
-                                "cache_state": cache_state,
-                                "in_progress": False,
-                                "focus_section_missing": bool(missing_focus_sections),
-                                "missing_focus_sections": missing_focus_sections,
-                                **cached_meta,
+                                    "validation_status": "success",
+                                    "structured_response": cached_data,
+                                    "fast_path": True,
+                                    "cached": True,
+                                    "cache_state": cache_state,
+                                    "in_progress": False,
+                                    "focus_section_missing": bool(
+                                        missing_focus_sections
+                                    ),
+                                    "missing_focus_sections": missing_focus_sections,
+                                    **cached_meta,
                                 }
                             ),
                             ensure_ascii=False,
@@ -4304,17 +4322,17 @@ async def analyze_team(
                                 "data": json.dumps(
                                     _build_stream_meta(
                                         {
-                                        "validation_status": "success",
-                                        "structured_response": cached_wait_data,
-                                        "fast_path": True,
-                                        "cached": True,
-                                        "cache_state": "PENDING_WAIT",
-                                        "in_progress": False,
-                                        "focus_section_missing": bool(
-                                            missing_focus_sections
-                                        ),
-                                        "missing_focus_sections": missing_focus_sections,
-                                        **cached_wait_meta,
+                                            "validation_status": "success",
+                                            "structured_response": cached_wait_data,
+                                            "fast_path": True,
+                                            "cached": True,
+                                            "cache_state": "PENDING_WAIT",
+                                            "in_progress": False,
+                                            "focus_section_missing": bool(
+                                                missing_focus_sections
+                                            ),
+                                            "missing_focus_sections": missing_focus_sections,
+                                            **cached_wait_meta,
                                         }
                                     ),
                                     ensure_ascii=False,
@@ -4364,7 +4382,9 @@ async def analyze_team(
                                 yield {
                                     "event": "status",
                                     "data": json.dumps(
-                                        {"message": "재생성된 분석 데이터를 불러옵니다..."},
+                                        {
+                                            "message": "재생성된 분석 데이터를 불러옵니다..."
+                                        },
                                         ensure_ascii=False,
                                     ),
                                 }
@@ -4382,17 +4402,17 @@ async def analyze_team(
                                     "data": json.dumps(
                                         _build_stream_meta(
                                             {
-                                            "validation_status": "success",
-                                            "structured_response": cached_data,
-                                            "fast_path": True,
-                                            "cached": True,
-                                            "cache_state": cache_state,
-                                            "in_progress": False,
-                                            "focus_section_missing": bool(
-                                                missing_focus_sections
-                                            ),
-                                            "missing_focus_sections": missing_focus_sections,
-                                            **cached_meta,
+                                                "validation_status": "success",
+                                                "structured_response": cached_data,
+                                                "fast_path": True,
+                                                "cached": True,
+                                                "cache_state": cache_state,
+                                                "in_progress": False,
+                                                "focus_section_missing": bool(
+                                                    missing_focus_sections
+                                                ),
+                                                "missing_focus_sections": missing_focus_sections,
+                                                **cached_meta,
                                             }
                                         ),
                                         ensure_ascii=False,
@@ -4446,7 +4466,8 @@ async def analyze_team(
                             retryable_failure=retryable_failure,
                             attempt_count=cache_attempt_count,
                             cache_row_missing=bool(
-                                wait_result and wait_result.get("status") == "MISSING_ROW"
+                                wait_result
+                                and wait_result.get("status") == "MISSING_ROW"
                             ),
                         )
                         yield {
@@ -4465,7 +4486,11 @@ async def analyze_team(
                         yield {
                             "event": "message",
                             "data": json.dumps(
-                                {"delta": json.dumps(waiting_payload, ensure_ascii=False)},
+                                {
+                                    "delta": json.dumps(
+                                        waiting_payload, ensure_ascii=False
+                                    )
+                                },
                                 ensure_ascii=False,
                             ),
                         }
@@ -4474,12 +4499,12 @@ async def analyze_team(
                             "data": json.dumps(
                                 _build_stream_meta(
                                     {
-                                    "validation_status": "fallback",
-                                    "fast_path": True,
-                                    "cached": False,
-                                    "cache_state": cache_state,
-                                    "in_progress": True,
-                                    **waiting_meta_defaults,
+                                        "validation_status": "fallback",
+                                        "fast_path": True,
+                                        "cached": False,
+                                        "cache_state": cache_state,
+                                        "in_progress": True,
+                                        **waiting_meta_defaults,
                                     }
                                 ),
                                 ensure_ascii=False,
@@ -4541,12 +4566,12 @@ async def analyze_team(
                             "data": json.dumps(
                                 _build_stream_meta(
                                     {
-                                    "validation_status": "fallback",
-                                    "fast_path": True,
-                                    "cached": False,
-                                    "cache_state": "FAILED_LOCKED",
-                                    "in_progress": False,
-                                    **failed_meta_defaults,
+                                        "validation_status": "fallback",
+                                        "fast_path": True,
+                                        "cached": False,
+                                        "cache_state": "FAILED_LOCKED",
+                                        "in_progress": False,
+                                        **failed_meta_defaults,
                                     }
                                 ),
                                 ensure_ascii=False,
@@ -4620,8 +4645,10 @@ async def analyze_team(
                     used_evidence.append("team_summary")
                 if tool_results.get("home", {}).get("advanced", {}).get("found"):
                     used_evidence.append("team_advanced_metrics")
-                if tool_results.get("home", {}).get("player_form_signals", {}).get(
-                    "found"
+                if (
+                    tool_results.get("home", {})
+                    .get("player_form_signals", {})
+                    .get("found")
                 ):
                     used_evidence.append("team_player_form_signals")
                 if tool_results.get("home", {}).get("recent", {}).get("found"):
@@ -4632,8 +4659,10 @@ async def analyze_team(
                     used_evidence.append("opponent_team_summary")
                 if tool_results.get("away", {}).get("advanced", {}).get("found"):
                     used_evidence.append("opponent_team_advanced_metrics")
-                if tool_results.get("away", {}).get("player_form_signals", {}).get(
-                    "found"
+                if (
+                    tool_results.get("away", {})
+                    .get("player_form_signals", {})
+                    .get("found")
                 ):
                     used_evidence.append("opponent_player_form_signals")
                 if tool_results.get("away", {}).get("recent", {}).get("found"):
@@ -4733,7 +4762,9 @@ async def analyze_team(
                     yield {
                         "event": "status",
                         "data": json.dumps(
-                            {"message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."},
+                            {
+                                "message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."
+                            },
                             ensure_ascii=False,
                         ),
                     }
@@ -4749,12 +4780,12 @@ async def analyze_team(
                         "data": json.dumps(
                             _build_stream_meta(
                                 {
-                                "validation_status": "fallback",
-                                "fast_path": True,
-                                "cached": False,
-                                "cache_state": "PENDING_WAIT",
-                                "in_progress": True,
-                                **waiting_meta_defaults,
+                                    "validation_status": "fallback",
+                                    "fast_path": True,
+                                    "cached": False,
+                                    "cache_state": "PENDING_WAIT",
+                                    "in_progress": True,
+                                    **waiting_meta_defaults,
                                 }
                             ),
                             ensure_ascii=False,
@@ -4833,14 +4864,20 @@ async def analyze_team(
                         yield {
                             "event": "status",
                             "data": json.dumps(
-                                {"message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."},
+                                {
+                                    "message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."
+                                },
                                 ensure_ascii=False,
                             ),
                         }
                         yield {
                             "event": "message",
                             "data": json.dumps(
-                                {"delta": json.dumps(waiting_payload, ensure_ascii=False)},
+                                {
+                                    "delta": json.dumps(
+                                        waiting_payload, ensure_ascii=False
+                                    )
+                                },
                                 ensure_ascii=False,
                             ),
                         }
@@ -4849,13 +4886,13 @@ async def analyze_team(
                             "data": json.dumps(
                                 _build_stream_meta(
                                     {
-                                    "validation_status": "fallback",
-                                    "verified": True,
-                                    "fast_path": True,
-                                    "cached": False,
-                                    "cache_state": "PENDING_WAIT",
-                                    "in_progress": True,
-                                    **waiting_meta_defaults,
+                                        "validation_status": "fallback",
+                                        "verified": True,
+                                        "fast_path": True,
+                                        "cached": False,
+                                        "cache_state": "PENDING_WAIT",
+                                        "in_progress": True,
+                                        **waiting_meta_defaults,
                                     }
                                 ),
                                 ensure_ascii=False,
@@ -4878,18 +4915,20 @@ async def analyze_team(
                         "data": json.dumps(
                             _build_stream_meta(
                                 {
-                                "validation_status": (
-                                    "success" if is_auto_brief else "fallback"
-                                ),
-                                "verified": True,
-                                "fast_path": True,
-                                "cached": False,
-                                "cache_state": "COMPLETED",
-                                "in_progress": False,
-                                "focus_section_missing": bool(missing_focus_sections),
-                                "missing_focus_sections": missing_focus_sections,
-                                "structured_response": response_payload,
-                                **meta_defaults,
+                                    "validation_status": (
+                                        "success" if is_auto_brief else "fallback"
+                                    ),
+                                    "verified": True,
+                                    "fast_path": True,
+                                    "cached": False,
+                                    "cache_state": "COMPLETED",
+                                    "in_progress": False,
+                                    "focus_section_missing": bool(
+                                        missing_focus_sections
+                                    ),
+                                    "missing_focus_sections": missing_focus_sections,
+                                    "structured_response": response_payload,
+                                    **meta_defaults,
                                 }
                             ),
                             ensure_ascii=False,
@@ -5129,7 +5168,9 @@ async def analyze_team(
                     yield {
                         "event": "status",
                         "data": json.dumps(
-                            {"message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."},
+                            {
+                                "message": "기존 분석 작업 상태를 다시 확인하는 중입니다..."
+                            },
                             ensure_ascii=False,
                         ),
                     }
@@ -5145,13 +5186,13 @@ async def analyze_team(
                         "data": json.dumps(
                             _build_stream_meta(
                                 {
-                                "validation_status": "fallback",
-                                "verified": True,
-                                "fast_path": True,
-                                "cached": False,
-                                "cache_state": "PENDING_WAIT",
-                                "in_progress": True,
-                                **waiting_meta_defaults,
+                                    "validation_status": "fallback",
+                                    "verified": True,
+                                    "fast_path": True,
+                                    "cached": False,
+                                    "cache_state": "PENDING_WAIT",
+                                    "in_progress": True,
+                                    **waiting_meta_defaults,
                                 }
                             ),
                             ensure_ascii=False,
@@ -5162,15 +5203,15 @@ async def analyze_team(
 
                 meta_payload = _build_stream_meta(
                     {
-                    "verified": True,
-                    "fast_path": True,
-                    "validation_status": validation_status,
-                    "cache_state": "COMPLETED",
-                    "in_progress": False,
-                    "focus_section_missing": bool(missing_focus_sections),
-                    "missing_focus_sections": missing_focus_sections,
-                    "structured_response": response_payload,
-                    **meta_defaults,
+                        "verified": True,
+                        "fast_path": True,
+                        "validation_status": validation_status,
+                        "cache_state": "COMPLETED",
+                        "in_progress": False,
+                        "focus_section_missing": bool(missing_focus_sections),
+                        "missing_focus_sections": missing_focus_sections,
+                        "structured_response": response_payload,
+                        **meta_defaults,
                     }
                 )
 
@@ -5209,7 +5250,10 @@ async def analyze_team(
                         error_code=COACH_STREAM_CANCELLED_ERROR_CODE,
                         error_message="client_stream_cancelled",
                     )
-                    if str(cancelled_store_result.get("outcome") or "") == "inserted_missing_row":
+                    if (
+                        str(cancelled_store_result.get("outcome") or "")
+                        == "inserted_missing_row"
+                    ):
                         logger.info(
                             "[Coach] Cancelled stream restored missing cache row for %s",
                             cache_key,
@@ -5287,18 +5331,18 @@ async def analyze_team(
                     "data": json.dumps(
                         _build_stream_meta(
                             {
-                            "validation_status": "fallback",
-                            "fast_path": True,
-                            "cached": False,
-                            "cache_state": (
-                                "FAILED_RETRY_WAIT"
-                                if retryable_failure
-                                else "FAILED_LOCKED"
-                            ),
-                            "in_progress": False,
-                            "focus_section_missing": False,
-                            "missing_focus_sections": [],
-                            **failure_meta_defaults,
+                                "validation_status": "fallback",
+                                "fast_path": True,
+                                "cached": False,
+                                "cache_state": (
+                                    "FAILED_RETRY_WAIT"
+                                    if retryable_failure
+                                    else "FAILED_LOCKED"
+                                ),
+                                "in_progress": False,
+                                "focus_section_missing": False,
+                                "missing_focus_sections": [],
+                                **failure_meta_defaults,
                             }
                         ),
                         ensure_ascii=False,

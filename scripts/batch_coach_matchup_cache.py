@@ -334,7 +334,9 @@ def _annotate_cache_resolution(
     meta_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized = dict(result)
-    meta = dict(meta_payload if meta_payload is not None else normalized.get("meta") or {})
+    meta = dict(
+        meta_payload if meta_payload is not None else normalized.get("meta") or {}
+    )
     expected_cache_key = target.cache_key
     resolved_cache_key = _resolved_cache_key_from_meta(meta, expected_cache_key)
     cache_key_mismatch = resolved_cache_key != expected_cache_key
@@ -1034,20 +1036,20 @@ def load_targets(
 
         cache_key, _payload, starter_signature, lineup_signature = (
             build_coach_cache_identity(
-            home_team_code=home_canonical,
-            away_team_code=away_canonical,
-            year=int(season_year),
-            game_type=game_type,
-            focus=request_focus,
-            question_override=question_override,
-            game_id=str(game_id),
-            league_type_code=normalized_league_code,
-            stage_label=stage_label,
-            request_mode=request_mode,
-            game_status_bucket=game_status_bucket,
-            home_pitcher=_normalize_name_token(home_pitcher),
-            away_pitcher=_normalize_name_token(away_pitcher),
-            lineup_players=lineup_players,
+                home_team_code=home_canonical,
+                away_team_code=away_canonical,
+                year=int(season_year),
+                game_type=game_type,
+                focus=request_focus,
+                question_override=question_override,
+                game_id=str(game_id),
+                league_type_code=normalized_league_code,
+                stage_label=stage_label,
+                request_mode=request_mode,
+                game_status_bucket=game_status_bucket,
+                home_pitcher=_normalize_name_token(home_pitcher),
+                away_pitcher=_normalize_name_token(away_pitcher),
+                lineup_players=lineup_players,
             )
         )
         deduped.append(
@@ -1149,8 +1151,12 @@ def _build_result_shell(target: MatchupTarget) -> Dict[str, Any]:
 
 def _cache_resolution_log_suffix(item: Dict[str, Any]) -> str:
     meta = dict(item.get("meta") or {})
-    expected_cache_key = str(meta.get("expected_cache_key") or item.get("cache_key") or "").strip()
-    resolved_cache_key = str(meta.get("resolved_cache_key") or expected_cache_key).strip()
+    expected_cache_key = str(
+        meta.get("expected_cache_key") or item.get("cache_key") or ""
+    ).strip()
+    resolved_cache_key = str(
+        meta.get("resolved_cache_key") or expected_cache_key
+    ).strip()
     if not expected_cache_key and not resolved_cache_key:
         return ""
     return f" expected_cache_key={expected_cache_key} resolved_cache_key={resolved_cache_key}"
@@ -1236,7 +1242,9 @@ async def call_analyze(
         return _annotate_cache_resolution(target=target, result=result)
 
     if not saw_done:
-        resolved_cache_key = _resolved_cache_key_from_meta(meta_payload, target.cache_key)
+        resolved_cache_key = _resolved_cache_key_from_meta(
+            meta_payload, target.cache_key
+        )
         status, response_json, cache_error, was_terminal = await _wait_cache_completion(
             resolved_cache_key
         )
@@ -1517,15 +1525,18 @@ def summarize_matchup_results(
             locked_terminal_count += 1
         if meta.get("recovered_from") == "pending_wait":
             pending_wait_recovered_count += 1
-        if bool(meta.get("cache_row_missing")) or str(item.get("reason") or "").startswith(
-            "missing_cache_row"
-        ):
+        if bool(meta.get("cache_row_missing")) or str(
+            item.get("reason") or ""
+        ).startswith("missing_cache_row"):
             missing_cache_row_count += 1
         if bool(meta.get("recovered_from_missing_row")):
             missing_cache_row_recovered_count += 1
         if bool(meta.get("pending_to_missing")):
             pending_to_missing_count += 1
-        if bool(meta.get("db_unavailable")) or str(item.get("reason") or "") == "db_unavailable":
+        if (
+            bool(meta.get("db_unavailable"))
+            or str(item.get("reason") or "") == "db_unavailable"
+        ):
             db_unavailable_count += 1
         if bool(meta.get("pending_to_db_unavailable")):
             pending_to_db_unavailable_count += 1
@@ -1609,17 +1620,13 @@ def summarize_matchup_results(
         ),
         "json_parse_success_rate": 0.0,
         "warning_rate": (
-            round(warnings_total / resolved_count, 4)
-            if resolved_count
-            else 0.0
+            round(warnings_total / resolved_count, 4) if resolved_count else 0.0
         ),
         "llm_manual_count": llm_manual_count,
         "evidence_fallback_count": evidence_fallback_count,
         "deterministic_auto_count": deterministic_auto_count,
         "llm_manual_rate": (
-            round(llm_manual_count / resolved_count, 4)
-            if resolved_count
-            else 0.0
+            round(llm_manual_count / resolved_count, 4) if resolved_count else 0.0
         ),
         "fallback_rate": (
             round(evidence_fallback_count / resolved_count, 4)
@@ -1694,20 +1701,29 @@ def _normalize_recovered_pending_result(item: Dict[str, Any]) -> Dict[str, Any]:
         return normalized
 
     meta["recovered_from"] = "pending_wait"
-    if normalized.get("status") == "failed" and str(normalized.get("reason") or "") == "missing_cache_row":
+    if (
+        normalized.get("status") == "failed"
+        and str(normalized.get("reason") or "") == "missing_cache_row"
+    ):
         normalized["reason"] = "missing_cache_row_after_pending"
         meta["failure_class"] = "retryable_failed"
         meta["retryable_failure"] = True
         meta["cache_row_missing"] = True
         meta["pending_to_missing"] = True
-    if normalized.get("status") == "failed" and str(normalized.get("reason") or "") == "db_unavailable":
+    if (
+        normalized.get("status") == "failed"
+        and str(normalized.get("reason") or "") == "db_unavailable"
+    ):
         normalized["reason"] = "db_unavailable_after_pending"
         meta["failure_class"] = "retryable_failed"
         meta["retryable_failure"] = True
         meta["db_unavailable"] = True
         meta["pending_to_db_unavailable"] = True
     normalized["meta"] = meta
-    if normalized.get("status") == "skipped" and normalized.get("reason") == "cache_hit":
+    if (
+        normalized.get("status") == "skipped"
+        and normalized.get("reason") == "cache_hit"
+    ):
         generation_mode = str(meta.get("generation_mode") or "")
         normalized["status"] = "generated"
         if generation_mode == "llm_manual":
@@ -1836,7 +1852,9 @@ async def async_main(args: argparse.Namespace) -> int:
                         recovered_meta = dict(recovered_item.get("meta") or {})
                         recovered_meta["recovery_pass"] = recovery_pass
                         recovered_item["meta"] = recovered_meta
-                        result_by_cache_key[recovered_item["cache_key"]] = recovered_item
+                        result_by_cache_key[recovered_item["cache_key"]] = (
+                            recovered_item
+                        )
                         print(
                             f"[recovery:{recovery_pass}] {recovered_item['cache_key']} "
                             f"-> {recovered_item['status']} ({recovered_item.get('reason')})"

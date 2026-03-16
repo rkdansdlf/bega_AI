@@ -462,8 +462,12 @@ class RAGPipeline:
         # 야구 통계 전용 에이전트 초기화
         self.baseball_agent = BaseballStatisticsAgent(connection, self._generate)
         self.wpa_calculator = WPACalculator()
-        self._retrieval_error: Optional[str] = None  # set if DB was unreachable during retrieval
-        self._db_lock = asyncio.Lock()  # psycopg3 sync connection은 thread-safe하지 않으므로 DB 쿼리 직렬화
+        self._retrieval_error: Optional[str] = (
+            None  # set if DB was unreachable during retrieval
+        )
+        self._db_lock = (
+            asyncio.Lock()
+        )  # psycopg3 sync connection은 thread-safe하지 않으므로 DB 쿼리 직렬화
 
     async def _process_and_enrich_docs(
         self, docs: List[Dict[str, Any]], year: int
@@ -721,7 +725,9 @@ class RAGPipeline:
 
         choices = data.get("choices", [])
         if not choices:
-            error_msg = f"OpenRouter 응답에 choices가 없습니다. Keys: {list(data.keys())}"
+            error_msg = (
+                f"OpenRouter 응답에 choices가 없습니다. Keys: {list(data.keys())}"
+            )
             logger.error(f"[OpenRouter] {error_msg}")
             raise RuntimeError(error_msg)
 
@@ -729,16 +735,16 @@ class RAGPipeline:
         content = message.get("content", "")
 
         if not content:
-            error_msg = f"OpenRouter 응답이 비어 있습니다. Message keys: {list(message.keys())}"
+            error_msg = (
+                f"OpenRouter 응답이 비어 있습니다. Message keys: {list(message.keys())}"
+            )
             logger.error(f"[OpenRouter] {error_msg}")
             raise RuntimeError(error_msg)
 
         return content
 
     @llm_retry
-    async def _generate_with_gemini(
-        self, messages: Sequence[Dict[str, str]]
-    ) -> str:
+    async def _generate_with_gemini(self, messages: Sequence[Dict[str, str]]) -> str:
         """Google Gemini API를 사용하여 응답을 생성합니다."""
         if not self.settings.gemini_api_key:
             raise RuntimeError("Gemini를 사용하려면 GEMINI_API_KEY가 필요합니다.")
@@ -790,7 +796,9 @@ class RAGPipeline:
 
         candidates = data.get("candidates", [])
         if not candidates:
-            error_msg = f"Gemini 응답에 candidates가 없습니다. Keys: {list(data.keys())}"
+            error_msg = (
+                f"Gemini 응답에 candidates가 없습니다. Keys: {list(data.keys())}"
+            )
             logger.error(f"[Gemini] {error_msg}")
             raise RuntimeError(error_msg)
 
@@ -1408,12 +1416,20 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 batter_filters["source_table"] = "player_season_batting"
 
                 _results = await asyncio.gather(
-                    self.retrieve_with_multi_query(query, entity_filter, filters=pitcher_filters),
-                    self.retrieve_with_multi_query(query, entity_filter, filters=batter_filters),
+                    self.retrieve_with_multi_query(
+                        query, entity_filter, filters=pitcher_filters
+                    ),
+                    self.retrieve_with_multi_query(
+                        query, entity_filter, filters=batter_filters
+                    ),
                     return_exceptions=True,
                 )
-                docs_pitchers = _results[0] if not isinstance(_results[0], BaseException) else []
-                docs_batters  = _results[1] if not isinstance(_results[1], BaseException) else []
+                docs_pitchers = (
+                    _results[0] if not isinstance(_results[0], BaseException) else []
+                )
+                docs_batters = (
+                    _results[1] if not isinstance(_results[1], BaseException) else []
+                )
                 if isinstance(_results[0], BaseException):
                     logger.warning("[RAG] Pitcher multi-query failed: %s", _results[0])
                 if isinstance(_results[1], BaseException):
@@ -1528,7 +1544,9 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         # Zero-hit 오버라이드: 모든 폴백 후에도 문서가 없으면 풍부한 가이드 컨텍스트 사용
         if not docs:
-            logger.info("[RAG] Zero documents after all fallbacks — using zero-hit guidance context")
+            logger.info(
+                "[RAG] Zero documents after all fallbacks — using zero-hit guidance context"
+            )
             formatted_context = self.context_formatter.format_zero_hit_guidance(
                 query, entity_filter, year, final_filters
             )

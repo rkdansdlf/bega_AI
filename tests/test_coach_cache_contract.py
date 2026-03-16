@@ -32,7 +32,9 @@ def test_build_coach_cache_identity_uses_shared_contract_versions() -> None:
     assert payload["lineup_signature"] == lineup_signature
 
 
-def test_build_coach_cache_identity_prefers_requested_signatures_only_when_both_exist() -> None:
+def test_build_coach_cache_identity_prefers_requested_signatures_only_when_both_exist() -> (
+    None
+):
     provided_key, provided_payload, provided_starter, provided_lineup = (
         build_coach_cache_identity(
             home_team_code="KT",

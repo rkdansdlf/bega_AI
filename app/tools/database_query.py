@@ -35,7 +35,9 @@ FORM_STARTER_RECENT_GAMES = 3
 FORM_RELIEVER_RECENT_GAMES = 5
 
 
-def _clamp_score(value: Optional[float], lower: float = 0.0, upper: float = 100.0) -> float:
+def _clamp_score(
+    value: Optional[float], lower: float = 0.0, upper: float = 100.0
+) -> float:
     if value is None:
         return lower
     return max(lower, min(upper, float(value)))
@@ -48,13 +50,17 @@ def _average_scores(values: List[Optional[float]]) -> Optional[float]:
     return sum(valid) / len(valid)
 
 
-def _plus_metric_score(value: Optional[float], *, baseline: float = 100.0, scale: float = 0.7) -> Optional[float]:
+def _plus_metric_score(
+    value: Optional[float], *, baseline: float = 100.0, scale: float = 0.7
+) -> Optional[float]:
     if value is None:
         return None
     return _clamp_score(50.0 + (float(value) - baseline) * scale)
 
 
-def _inverse_metric_score(value: Optional[float], *, baseline: float, scale: float) -> Optional[float]:
+def _inverse_metric_score(
+    value: Optional[float], *, baseline: float, scale: float
+) -> Optional[float]:
     if value is None:
         return None
     return _clamp_score(50.0 + (baseline - float(value)) * scale)
@@ -138,15 +144,19 @@ def _compute_batter_form_score(
         recent_score = _average_scores(
             [
                 _delta_metric_score(
-                    None
-                    if recent_ops is None or season_ops is None
-                    else recent_ops - season_ops,
+                    (
+                        None
+                        if recent_ops is None or season_ops is None
+                        else recent_ops - season_ops
+                    ),
                     scale=220.0,
                 ),
                 _delta_metric_score(
-                    None
-                    if recent_iso is None or season_iso is None
-                    else recent_iso - season_iso,
+                    (
+                        None
+                        if recent_iso is None or season_iso is None
+                        else recent_iso - season_iso
+                    ),
                     scale=320.0,
                 ),
             ]
@@ -156,9 +166,11 @@ def _compute_batter_form_score(
         [
             _delta_metric_score(season_wpa_per_pa, scale=2500.0),
             _delta_metric_score(
-                None
-                if recent_wpa_per_pa is None or season_wpa_per_pa is None
-                else recent_wpa_per_pa - season_wpa_per_pa,
+                (
+                    None
+                    if recent_wpa_per_pa is None or season_wpa_per_pa is None
+                    else recent_wpa_per_pa - season_wpa_per_pa
+                ),
                 scale=3200.0,
             ),
         ]
@@ -202,21 +214,23 @@ def _compute_pitcher_form_score(
     recent_score = _average_scores(
         [
             _delta_metric_score(
-                None
-                if recent_era is None or season_era is None
-                else season_era - recent_era,
+                (
+                    None
+                    if recent_era is None or season_era is None
+                    else season_era - recent_era
+                ),
                 scale=12.0,
             ),
             _delta_metric_score(
-                None
-                if recent_whip is None or season_whip is None
-                else season_whip - recent_whip,
+                (
+                    None
+                    if recent_whip is None or season_whip is None
+                    else season_whip - recent_whip
+                ),
                 scale=40.0,
             ),
             _delta_metric_score(
-                None
-                if recent_kbb is None or kbb is None
-                else recent_kbb - kbb,
+                None if recent_kbb is None or kbb is None else recent_kbb - kbb,
                 scale=8.0,
             ),
         ]
@@ -225,16 +239,20 @@ def _compute_pitcher_form_score(
     clutch_score = _average_scores(
         [
             _delta_metric_score(
-                None
-                if season_wpa_allowed_per_bf is None
-                else -season_wpa_allowed_per_bf,
+                (
+                    None
+                    if season_wpa_allowed_per_bf is None
+                    else -season_wpa_allowed_per_bf
+                ),
                 scale=2800.0,
             ),
             _delta_metric_score(
-                None
-                if recent_wpa_allowed_per_bf is None
-                or season_wpa_allowed_per_bf is None
-                else -(recent_wpa_allowed_per_bf - season_wpa_allowed_per_bf),
+                (
+                    None
+                    if recent_wpa_allowed_per_bf is None
+                    or season_wpa_allowed_per_bf is None
+                    else -(recent_wpa_allowed_per_bf - season_wpa_allowed_per_bf)
+                ),
                 scale=3200.0,
             ),
         ]
@@ -397,7 +415,9 @@ class DatabaseQueryTool:
             "포": "포수",
         }
 
-    def _fetch_team_mapping_rows(self, connection: PgConnection) -> List[Dict[str, Any]]:
+    def _fetch_team_mapping_rows(
+        self, connection: PgConnection
+    ) -> List[Dict[str, Any]]:
         return fetch_team_mapping_rows(connection)
 
     def _apply_team_mapping_rows(self, rows: List[Dict[str, Any]], source: str) -> None:
@@ -3027,9 +3047,7 @@ class DatabaseQueryTool:
         recent_wpa_per_pa: Optional[float],
     ) -> str:
         if recent_pa < FORM_MIN_RECENT_BATTER_PA:
-            return (
-                f"{player_name}는 최근 표본이 {recent_pa}PA라 시즌 wRC+/OPS+ 중심 해석이 더 안전합니다."
-            )
+            return f"{player_name}는 최근 표본이 {recent_pa}PA라 시즌 wRC+/OPS+ 중심 해석이 더 안전합니다."
 
         status_label = {
             "hot": "상승세",
@@ -3056,9 +3074,7 @@ class DatabaseQueryTool:
         recent_games: int,
     ) -> str:
         if recent_games <= 0:
-            return (
-                f"{player_name}는 최근 등판 표본이 부족해 시즌 ERA+/FIP+ 베이스라인 중심 해석이 더 안전합니다."
-            )
+            return f"{player_name}는 최근 등판 표본이 부족해 시즌 ERA+/FIP+ 베이스라인 중심 해석이 더 안전합니다."
 
         status_label = {
             "hot": "상승세",
@@ -3507,7 +3523,9 @@ class DatabaseQueryTool:
         year: int,
         recent_games: int = FORM_BATTER_RECENT_GAMES,
     ) -> Dict[str, Any]:
-        logger.info("[DatabaseQuery] Querying WPA stats for %s in %s", player_name, year)
+        logger.info(
+            "[DatabaseQuery] Querying WPA stats for %s in %s", player_name, year
+        )
 
         cache_key = f"player_wpa_stats:{player_name}:{year}:{recent_games}"
         cached_result = _coach_cache.get(cache_key)
@@ -3577,9 +3595,7 @@ class DatabaseQueryTool:
                         "recent_wpa_per_event"
                     ),
                     "recent_games": pitching_stats.get("recent_games"),
-                    "high_leverage_events": pitching_stats.get(
-                        "high_leverage_events"
-                    ),
+                    "high_leverage_events": pitching_stats.get("high_leverage_events"),
                 }
             result["found"] = bool(result["batting"] or result["pitching"])
             if result["found"]:
@@ -3660,9 +3676,11 @@ class DatabaseQueryTool:
                         "team_name": self.get_team_name(row.get("team_code") or ""),
                         "wpa": _round_metric(total_wpa, 3),
                         "wpa_per_pa": _round_metric(
-                            (total_wpa / plate_appearances)
-                            if plate_appearances > 0
-                            else None,
+                            (
+                                (total_wpa / plate_appearances)
+                                if plate_appearances > 0
+                                else None
+                            ),
                             4,
                         ),
                         "plate_appearances": plate_appearances,

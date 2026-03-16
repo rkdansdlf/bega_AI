@@ -56,7 +56,9 @@ class GameQueryTool:
         if not rows:
             return
 
-        logger.info("[GameQuery] Syncing %d franchise entries from %s", len(rows), source)
+        logger.info(
+            "[GameQuery] Syncing %d franchise entries from %s", len(rows), source
+        )
         self.team_resolver.sync_from_team_rows(rows)
         update_team_mapping_snapshot(rows)
         logger.info(
