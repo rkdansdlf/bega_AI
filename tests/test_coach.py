@@ -361,9 +361,15 @@ class TestCoachValidator:
             home_team_id="HH",
             request_mode="manual_detail",
             question_override="  오늘 경기 핵심을 정리해줘  ",
+            starter_signature="  starter:abc  ",
+            lineup_signature="  lineup:def  ",
+            expected_cache_key="  cache123  ",
         )
 
         assert payload.question_override == "오늘 경기 핵심을 정리해줘"
+        assert payload.starter_signature == "starter:abc"
+        assert payload.lineup_signature == "lineup:def"
+        assert payload.expected_cache_key == "cache123"
 
     def test_analyze_request_auto_mode_rejects_question_override(self):
         """auto_brief 모드에서 question_override는 검증 예외가 발생한다."""
@@ -398,11 +404,15 @@ class TestCoachErrorMaskingHelpers:
     def test_sanitize_cache_error_code_allows_known_codes(self):
         from app.routers.coach import (
             COACH_DATA_INSUFFICIENT_CODE,
+            COACH_STREAM_CANCELLED_ERROR_CODE,
             _sanitize_cache_error_code,
         )
 
         assert _sanitize_cache_error_code(COACH_DATA_INSUFFICIENT_CODE) == (
             COACH_DATA_INSUFFICIENT_CODE
+        )
+        assert _sanitize_cache_error_code(COACH_STREAM_CANCELLED_ERROR_CODE) == (
+            COACH_STREAM_CANCELLED_ERROR_CODE
         )
 
     def test_sanitize_cache_error_code_falls_back_for_unknown(self):
@@ -716,6 +726,136 @@ class TestCoachFastPath:
         assert "## 결과 진단" in markdown
         assert "## 다시 볼 장면" in markdown
 
+    def test_completed_deterministic_response_includes_clutch_signal(self):
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence(
+            game_status="COMPLETED",
+            game_status_bucket="COMPLETED",
+        )
+        tool_results = {
+            "home": {"recent": {"found": False}, "advanced": {}, "summary": {}},
+            "away": {"recent": {"found": False}, "advanced": {}, "summary": {}},
+            "matchup": {},
+            "clutch_moments": {
+                "found": True,
+                "moments": [
+                    {
+                        "inning_label": "8회말",
+                        "outs": 1,
+                        "bases_before": "1,2루",
+                        "description": "홍창기 결승 2루타",
+                        "wpa_delta_pct": 18.4,
+                        "batter_name": "홍창기",
+                    }
+                ],
+            },
+        }
+
+        payload = _build_deterministic_coach_response(evidence, tool_results)
+
+        assert any(
+            metric["label"] == "최대 WPA 변동" for metric in payload["key_metrics"]
+        )
+        assert any("WPA" in item for item in payload["analysis"]["swing_factors"])
+        assert "8회말" in payload["coach_note"]
+
+    def test_completed_deterministic_response_uses_summary_fallback_without_wpa(self):
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence(
+            game_status="COMPLETED",
+            game_status_bucket="COMPLETED",
+            summary_items=["결승타 김도영", "오스틴 3안타"],
+        )
+        tool_results = {
+            "home": {"recent": {"found": False}, "advanced": {}, "summary": {}},
+            "away": {"recent": {"found": False}, "advanced": {}, "summary": {}},
+            "matchup": {},
+            "clutch_moments": {"found": False, "moments": []},
+        }
+
+        payload = _build_deterministic_coach_response(evidence, tool_results)
+
+        assert payload["headline"].startswith("결승타 김도영")
+        assert any(
+            metric["label"] == "승부처 요약" and "결승타 김도영" in metric["value"]
+            for metric in payload["key_metrics"]
+        )
+        assert any(
+            "결승타 김도영" in item for item in payload["analysis"]["swing_factors"]
+        )
+        assert any(
+            "WPA 수치가 없어" in item for item in payload["analysis"]["uncertainty"]
+        )
+        assert "결승타 김도영" in payload["coach_note"]
+        assert not any(
+            metric["label"] == "최대 WPA 변동" for metric in payload["key_metrics"]
+        )
+
+    def test_preview_deterministic_response_includes_form_signal_metric(self):
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence()
+        tool_results = {
+            "home": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.771}}},
+                "recent": {"found": False},
+                "player_form_signals": {
+                    "found": True,
+                    "batters": [
+                        {
+                            "player_name": "홍창기",
+                            "form_score": 68.4,
+                            "form_status": "hot",
+                        }
+                    ],
+                    "pitchers": [
+                        {
+                            "player_name": "임찬규",
+                            "form_score": 61.2,
+                            "form_status": "steady",
+                            "role": "starter",
+                        }
+                    ],
+                },
+            },
+            "away": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.742}}},
+                "recent": {"found": False},
+                "player_form_signals": {
+                    "found": True,
+                    "batters": [
+                        {
+                            "player_name": "강백호",
+                            "form_score": 44.1,
+                            "form_status": "cold",
+                        }
+                    ],
+                    "pitchers": [
+                        {
+                            "player_name": "쿠에바스",
+                            "form_score": 49.7,
+                            "form_status": "steady",
+                            "role": "starter",
+                        }
+                    ],
+                },
+            },
+            "matchup": {},
+        }
+
+        payload = _build_deterministic_coach_response(evidence, tool_results)
+        form_metric = next(
+            metric for metric in payload["key_metrics"] if metric["label"] == "폼 진단"
+        )
+
+        assert "상승" in form_metric["value"]
+        assert "하락" in form_metric["value"]
+        assert any("폼 점수" in item for item in payload["analysis"]["strengths"])
+
     def test_focus_section_requirements(self):
         """선택 focus별 섹션 요구사항 생성 테스트"""
         from app.routers.coach import _build_focus_section_requirements
@@ -900,6 +1040,9 @@ class TestCoachFastPath:
             def get_team_advanced_metrics(self, *_args, **_kwargs):
                 return {"found": False}
 
+            def get_team_player_form_signals(self, *_args, **_kwargs):
+                return {"found": False, "batters": [], "pitchers": []}
+
             def get_team_recent_form(self, *_args, **_kwargs):
                 return {"found": False}
 
@@ -1046,6 +1189,29 @@ class TestCoachFastPath:
                     "found": True,
                     "summary": {"wins": 6, "losses": 4, "draws": 0, "run_diff": 8},
                 },
+                "player_form_signals": {
+                    "found": True,
+                    "batters": [
+                        {
+                            "player_name": "홍창기",
+                            "form_score": 68.4,
+                            "form_status": "hot",
+                            "season_metrics": {"wrc_plus": 141.2, "ops_plus": 132.4},
+                            "recent_metrics": {"ops": 1.022},
+                            "clutch_metrics": {"recent_wpa_per_pa": 0.0081},
+                        }
+                    ],
+                    "pitchers": [
+                        {
+                            "player_name": "임찬규",
+                            "form_score": 59.2,
+                            "form_status": "steady",
+                            "season_metrics": {"era_plus": 122.5, "fip_plus": 117.3},
+                            "recent_metrics": {"era": 3.11},
+                            "clutch_metrics": {"recent_wpa_allowed_per_bf": -0.0034},
+                        }
+                    ],
+                },
             },
             "away": {
                 "summary": {
@@ -1066,8 +1232,45 @@ class TestCoachFastPath:
                     "found": True,
                     "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -5},
                 },
+                "player_form_signals": {
+                    "found": True,
+                    "batters": [
+                        {
+                            "player_name": "강백호",
+                            "form_score": 44.1,
+                            "form_status": "cold",
+                            "season_metrics": {"wrc_plus": 109.4, "ops_plus": 111.2},
+                            "recent_metrics": {"ops": 0.641},
+                            "clutch_metrics": {"recent_wpa_per_pa": -0.0042},
+                        }
+                    ],
+                    "pitchers": [
+                        {
+                            "player_name": "쿠에바스",
+                            "form_score": 47.7,
+                            "form_status": "steady",
+                            "season_metrics": {"era_plus": 128.2, "fip_plus": 121.4},
+                            "recent_metrics": {"era": 4.72},
+                            "clutch_metrics": {"recent_wpa_allowed_per_bf": 0.0041},
+                        }
+                    ],
+                },
             },
             "matchup": {"summary": {"team1_wins": 5, "team2_wins": 3, "draws": 0}},
+            "clutch_moments": {
+                "found": True,
+                "moments": [
+                    {
+                        "inning_label": "8회말",
+                        "outs": 1,
+                        "bases_before": "1,2루",
+                        "description": "홍창기 결승 2루타",
+                        "wpa_delta_pct": 18.4,
+                        "batter_name": "홍창기",
+                        "pitcher_name": "박영현",
+                    }
+                ],
+            },
         }
 
         allowed_names = _collect_allowed_entity_names(evidence, tool_results)
@@ -1084,6 +1287,8 @@ class TestCoachFastPath:
         assert any("선발 정보" in item for item in fact_sheet.caveat_lines)
         assert any("라인업" in item for item in fact_sheet.caveat_lines)
         assert "강백호" in fact_sheet.allowed_entity_names
+        assert any("폼 타자" in line for line in fact_sheet.fact_lines)
+        assert any("클러치 모먼트" in line for line in fact_sheet.fact_lines)
         assert "0.754" in fact_sheet.allowed_numeric_tokens
         assert (
             "31%" in fact_sheet.allowed_numeric_tokens
