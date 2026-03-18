@@ -276,7 +276,9 @@ class CoachResponse(BaseModel):
     @classmethod
     def truncate_coach_note(cls, v: str) -> str:
         """coach_note 길이 제한"""
-        return _truncate_text(v, max_length=MAX_COACH_NOTE_LENGTH, collapse_whitespace=True)
+        return _truncate_text(
+            v, max_length=MAX_COACH_NOTE_LENGTH, collapse_whitespace=True
+        )
 
     @field_validator("key_metrics", mode="before")
     @classmethod

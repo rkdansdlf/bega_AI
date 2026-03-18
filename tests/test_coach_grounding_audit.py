@@ -487,7 +487,11 @@ def test_render_markdown_report_includes_series_diagnostics():
             "targets": ["g1"],
             "results": [
                 {
-                    "diagnosis": {"game_id": "g1", "away_team_id": "HH", "home_team_id": "LG"},
+                    "diagnosis": {
+                        "game_id": "g1",
+                        "away_team_id": "HH",
+                        "home_team_id": "LG",
+                    },
                     "hard_failures": [],
                     "soft_warnings": [],
                     "series_game_no_mismatch": True,
