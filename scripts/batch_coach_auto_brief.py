@@ -209,9 +209,7 @@ async def async_main(args: argparse.Namespace) -> int:
                             f"-> {recovered['status']} ({recovered.get('reason')})"
                         )
 
-                replay = _collect_retryable_replay_targets(
-                    targets, result_by_cache_key
-                )
+                replay = _collect_retryable_replay_targets(targets, result_by_cache_key)
                 for target in replay:
                     item = await call_analyze_with_retries(
                         client=client,

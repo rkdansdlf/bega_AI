@@ -939,12 +939,16 @@ class TestCoachFastPath:
         evidence = _build_game_evidence()
         tool_results = {
             "home": {
-                "recent": {"summary": {"wins": 3, "losses": 2, "draws": 0, "run_diff": 5}},
+                "recent": {
+                    "summary": {"wins": 3, "losses": 2, "draws": 0, "run_diff": 5}
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.790}}},
                 "summary": {},
             },
             "away": {
-                "recent": {"summary": {"wins": 2, "losses": 3, "draws": 0, "run_diff": -3}},
+                "recent": {
+                    "summary": {"wins": 2, "losses": 3, "draws": 0, "run_diff": -3}
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.720}}},
                 "summary": {},
             },
@@ -966,12 +970,16 @@ class TestCoachFastPath:
         )
         tool_results = {
             "home": {
-                "recent": {"summary": {"wins": 4, "losses": 1, "draws": 0, "run_diff": 7}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 1, "draws": 0, "run_diff": 7}
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.801}}},
                 "summary": {},
             },
             "away": {
-                "recent": {"summary": {"wins": 2, "losses": 3, "draws": 0, "run_diff": -2}},
+                "recent": {
+                    "summary": {"wins": 2, "losses": 3, "draws": 0, "run_diff": -2}
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.734}}},
                 "summary": {},
             },
@@ -994,7 +1002,9 @@ class TestCoachFastPath:
         )
         tool_results = {
             "home": {
-                "recent": {"summary": {"wins": 4, "losses": 1, "draws": 0, "run_diff": 8}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 1, "draws": 0, "run_diff": 8}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.812}},
                     "fatigue_index": {"bullpen_share": 41.0},
@@ -1002,7 +1012,9 @@ class TestCoachFastPath:
                 "summary": {},
             },
             "away": {
-                "recent": {"summary": {"wins": 1, "losses": 4, "draws": 0, "run_diff": -6}},
+                "recent": {
+                    "summary": {"wins": 1, "losses": 4, "draws": 0, "run_diff": -6}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.701}},
                     "fatigue_index": {"bullpen_share": 49.8},

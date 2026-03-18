@@ -495,7 +495,9 @@ def diagnose_games(
                         series_state.series_state_partial if series_state else False
                     ),
                     "series_state_hint_mismatch": bool(
-                        series_state.series_state_hint_mismatch if series_state else False
+                        series_state.series_state_hint_mismatch
+                        if series_state
+                        else False
                     ),
                     "expected_data_quality": assessment.expected_data_quality,
                     "root_causes": list(assessment.root_causes),

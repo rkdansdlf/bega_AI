@@ -666,7 +666,9 @@ def _build_coach_fact_sheet(
     matchup_summary = matchup.get("summary", {}) or {}
     if matchup_summary:
         if _matchup_is_partial(matchup):
-            caveat_lines.append("시리즈 맞대결 전적은 DB 이력 부족으로 축약 표시합니다.")
+            caveat_lines.append(
+                "시리즈 맞대결 전적은 DB 이력 부족으로 축약 표시합니다."
+            )
         else:
             fact = _build_fact_line(
                 "맞대결 전적",
@@ -832,7 +834,9 @@ def _truncate_text_naturally(
         if text[idx - 1] in ".!?。！？\n":
             return text[:idx].rstrip()
 
-    last_break = max(text.rfind(" ", 0, max_length - 2), text.rfind("\n", 0, max_length - 2))
+    last_break = max(
+        text.rfind(" ", 0, max_length - 2), text.rfind("\n", 0, max_length - 2)
+    )
     if last_break >= floor:
         return text[:last_break].rstrip() + "..."
     return text[: max_length - 3].rstrip() + "..."
@@ -960,9 +964,9 @@ def _determine_data_quality(
         return "insufficient"
     if assessment.expected_data_quality == "partial":
         return "partial"
-    if _is_completed_review(evidence) and not tool_results.get("clutch_moments", {}).get(
-        "found"
-    ):
+    if _is_completed_review(evidence) and not tool_results.get(
+        "clutch_moments", {}
+    ).get("found"):
         return "partial"
     if evidence.game_id and baseline_count >= 2:
         return "grounded"
@@ -2084,7 +2088,14 @@ def _fetch_series_state(
     away_team_wins = 0
     home_team_code = str(evidence.home_team_code or "").strip().upper()
     away_team_code = str(evidence.away_team_code or "").strip().upper()
-    for _, _, db_home_team_code, db_away_team_code, home_score, away_score in previous_games[:confirmed_previous_games]:
+    for (
+        _,
+        _,
+        db_home_team_code,
+        db_away_team_code,
+        home_score,
+        away_score,
+    ) in previous_games[:confirmed_previous_games]:
         if home_score is None or away_score is None or home_score == away_score:
             continue
         winner_code = (
@@ -3243,7 +3254,9 @@ def _build_deterministic_analysis(
         edge_team = home_name if home_score > away_score else away_name
         trailing_team = away_name if edge_team == home_name else home_name
         margin = abs(home_score - away_score)
-        lead_swing_factor = _ensure_sentence(swing_factors[0] if swing_factors else None)
+        lead_swing_factor = _ensure_sentence(
+            swing_factors[0] if swing_factors else None
+        )
         lead_risk = _ensure_sentence(risks[0]["description"] if risks else None)
         if review_mode:
             summary = f"{edge_team}가 확인된 지표 우위를 실제 결과로 더 잘 연결했고, {trailing_team}은 기회를 살리는 구간에서 차이가 났습니다."
@@ -3284,9 +3297,7 @@ def _build_deterministic_analysis(
                 if lead_swing_factor:
                     verdict = f"{verdict} {lead_swing_factor}"
                 else:
-                    verdict = (
-                        f"{verdict} 초반 이닝 운영에 따라 체감 우위가 쉽게 바뀔 수 있습니다."
-                    )
+                    verdict = f"{verdict} 초반 이닝 운영에 따라 체감 우위가 쉽게 바뀔 수 있습니다."
 
     return {
         "summary": summary,
@@ -3383,20 +3394,24 @@ def _build_deterministic_coach_response(
     if analysis.get("swing_factors"):
         _append_distinct_note_part(coach_note_parts, str(analysis["swing_factors"][0]))
     if analysis.get("risks"):
-        _append_distinct_note_part(coach_note_parts, str(analysis["risks"][0]["description"]))
+        _append_distinct_note_part(
+            coach_note_parts, str(analysis["risks"][0]["description"])
+        )
     if evidence.stage_label != "REGULAR" and evidence.series_state:
         _append_distinct_note_part(
             coach_note_parts,
             evidence.series_state.summary_text(
                 evidence.home_team_name, evidence.away_team_name
-            )
+            ),
         )
     if not coach_note_parts:
         _append_distinct_note_part(
             coach_note_parts,
-            "확인된 실데이터 기준으로는 결과를 가른 운영 장면과 득점 연결 구간을 함께 복기해야 합니다."
-            if _is_completed_review(evidence)
-            else "확인된 실데이터 기준으로는 최근 흐름과 정규시즌 베이스라인을 함께 봐야 합니다."
+            (
+                "확인된 실데이터 기준으로는 결과를 가른 운영 장면과 득점 연결 구간을 함께 복기해야 합니다."
+                if _is_completed_review(evidence)
+                else "확인된 실데이터 기준으로는 최근 흐름과 정규시즌 베이스라인을 함께 봐야 합니다."
+            ),
         )
 
     response = CoachResponse(
