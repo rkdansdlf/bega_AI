@@ -226,14 +226,14 @@ FastAPI Application (8001)
 
 ### 환경 설정
 
-1.  **.env 파일 생성:**
+1.  **로컬 `.env` 파일 생성:**
     
     `.env.example` 파일을 복사하여 실제 값으로 채워주세요:
     
     ```env
     # --- LLM/임베딩 프로바이더 선택 ---
     LLM_PROVIDER=openrouter          # openrouter(기본), gemini
-    EMBED_PROVIDER=openrouter        # openrouter(기본), gemini, openai, hf, local
+    EMBED_PROVIDER=openai            # openai(기본), openrouter, gemini, hf, local
     
     # --- OpenRouter 설정 (기본) ---
     OPENROUTER_API_KEY=sk-or-...
@@ -253,13 +253,25 @@ FastAPI Application (8001)
     
     # --- 데이터베이스 ---
     POSTGRES_DB_URL=postgresql://user:pass@host:5432/db
-    
+    # Optional fallback for ops scripts
+    # OCI_DB_URL=postgresql://user:pass@host:5432/db
+
+    # --- Backend와 공유하는 내부 인증 / CORS ---
+    AI_INTERNAL_TOKEN=local-dev-ai-internal-token
+    # JSON 배열 또는 CSV 둘 다 허용
+    CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+
     # --- 공통 설정 ---
     DEFAULT_SEARCH_LIMIT=15
     MAX_OUTPUT_TOKENS=1024
     ```
+
+2.  **Docker/prod-style `.env.prod` 파일 생성:**
+
+    repo 루트에서 `.env.prod.example`을 `.env.prod`로 복사하고 실제 값을 채워주세요.
+    `.env.prod`는 로컬 운영자 파일이며 Git에 커밋하지 않습니다.
     
-2.  **pgvector 확장 설치:**
+3.  **pgvector 확장 설치:**
     
     PostgreSQL에서 pgvector 확장을 활성화합니다:
     

@@ -76,6 +76,19 @@ def test_stream_cancelled_failed_cache_reopens_even_after_attempt_limit():
     assert _should_generate_from_gate(gate) is True
 
 
+def test_stream_cancelled_failed_cache_reopens_immediately():
+    recent_time = datetime.now(timezone.utc) - timedelta(seconds=5)
+    gate = _determine_cache_gate(
+        status="FAILED",
+        has_cached_json=False,
+        updated_at=recent_time,
+        error_code="stream_cancelled",
+        attempt_count=1,
+    )
+    assert gate == "MISS_GENERATE"
+    assert _should_generate_from_gate(gate) is True
+
+
 def test_pending_fresh_waits_without_generation():
     fresh_time = datetime.now(timezone.utc) - timedelta(seconds=120)
     gate = _determine_cache_gate(
