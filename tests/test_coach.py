@@ -497,6 +497,83 @@ class TestCoachEvidenceHelpers:
         assert reconciled is not None
         assert reconciled.game_no == 2
         assert reconciled.previous_games == 1
+        assert reconciled.confirmed_previous_games == 0
+        assert reconciled.series_state_partial is True
+        assert reconciled.series_state_hint_mismatch is True
+
+    def test_postponed_game_status_bucket_is_not_completed(self):
+        from app.routers.coach import _normalize_game_status_bucket
+
+        assert _normalize_game_status_bucket("POSTPONED") == "UNKNOWN"
+        assert _normalize_game_status_bucket("CANCELLED") == "UNKNOWN"
+
+    def test_completed_review_without_clutch_data_is_partial(self):
+        from app.routers.coach import _determine_data_quality
+
+        evidence = _build_game_evidence(
+            game_status="COMPLETED",
+            game_status_bucket="COMPLETED",
+        )
+        tool_results = {
+            "home": {
+                "summary": {"found": True},
+                "advanced": {"found": True},
+            },
+            "away": {
+                "summary": {"found": True},
+                "advanced": {"found": True},
+            },
+            "clutch_moments": {"found": False, "moments": []},
+        }
+
+        assert _determine_data_quality(evidence, tool_results) == "partial"
+
+    def test_preview_verdict_keeps_pitcher_sentence_well_formed(self):
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence(
+            home_team_name="KT 위즈",
+            away_team_name="LG 트윈스",
+            home_pitcher="패트릭",
+            away_pitcher="송승기",
+        )
+        tool_results = {
+            "home": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.790}}},
+                "recent": {"found": False},
+                "player_form_signals": {},
+            },
+            "away": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.765}}},
+                "recent": {"found": False},
+                "player_form_signals": {},
+            },
+            "matchup": {},
+            "clutch_moments": {"found": False, "moments": []},
+        }
+
+        payload = _build_deterministic_coach_response(evidence, tool_results)
+
+        assert "좌우합니다.에 따라" not in payload["analysis"]["verdict"]
+        assert "송승기과" not in payload["analysis"]["verdict"]
+        assert "송승기와 KT 위즈 패트릭" in payload["analysis"]["verdict"]
+
+    def test_compact_coach_note_does_not_repeat_or_cut_mid_sentence(self):
+        from app.routers.coach import _build_compact_coach_note
+
+        coach_note = _build_compact_coach_note(
+            [
+                "LG 트윈스가 기초 지표 우위를 실제 결과로 연결했습니다.",
+                "1회초 김현수 타석의 WPA -10.5%p 변동이 실제 승부처였습니다.",
+                "1회초 김현수 타석의 WPA -10.5%p 변동이 실제 승부처였습니다.",
+            ],
+            max_length=140,
+        )
+
+        assert coach_note.endswith(".")
+        assert coach_note.count("실제 승부처였습니다.") == 1
 
 
 # ============================================================
@@ -856,6 +933,102 @@ class TestCoachFastPath:
         assert "하락" in form_metric["value"]
         assert any("폼 점수" in item for item in payload["analysis"]["strengths"])
 
+    def test_preview_deterministic_response_avoids_sentence_gluing(self):
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence()
+        tool_results = {
+            "home": {
+                "recent": {"summary": {"wins": 3, "losses": 2, "draws": 0, "run_diff": 5}},
+                "advanced": {"metrics": {"batting": {"ops": 0.790}}},
+                "summary": {},
+            },
+            "away": {
+                "recent": {"summary": {"wins": 2, "losses": 3, "draws": 0, "run_diff": -3}},
+                "advanced": {"metrics": {"batting": {"ops": 0.720}}},
+                "summary": {},
+            },
+            "matchup": {},
+        }
+
+        payload = _build_deterministic_coach_response(evidence, tool_results)
+
+        assert "좌우합니다.에 따라" not in payload["analysis"]["verdict"]
+        assert "좌우합니다.에 따라" not in payload["detailed_markdown"]
+
+    def test_completed_deterministic_response_avoids_sentence_gluing(self):
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence(
+            game_status="COMPLETED",
+            game_status_bucket="COMPLETED",
+            summary_items=["결승타 김도영"],
+        )
+        tool_results = {
+            "home": {
+                "recent": {"summary": {"wins": 4, "losses": 1, "draws": 0, "run_diff": 7}},
+                "advanced": {"metrics": {"batting": {"ops": 0.801}}},
+                "summary": {},
+            },
+            "away": {
+                "recent": {"summary": {"wins": 2, "losses": 3, "draws": 0, "run_diff": -2}},
+                "advanced": {"metrics": {"batting": {"ops": 0.734}}},
+                "summary": {},
+            },
+            "matchup": {},
+            "clutch_moments": {"found": False, "moments": []},
+        }
+
+        payload = _build_deterministic_coach_response(evidence, tool_results)
+
+        assert "기록됐습니다.이 결과를" not in payload["analysis"]["verdict"]
+        assert "기록됐습니다.이 결과를" not in payload["detailed_markdown"]
+        assert "기록됐습니다.이 결과를" not in payload["coach_note"]
+
+    def test_deterministic_response_deduplicates_coach_note_clutch_sentence(self):
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence(
+            game_status="COMPLETED",
+            game_status_bucket="COMPLETED",
+        )
+        tool_results = {
+            "home": {
+                "recent": {"summary": {"wins": 4, "losses": 1, "draws": 0, "run_diff": 8}},
+                "advanced": {
+                    "metrics": {"batting": {"ops": 0.812}},
+                    "fatigue_index": {"bullpen_share": 41.0},
+                },
+                "summary": {},
+            },
+            "away": {
+                "recent": {"summary": {"wins": 1, "losses": 4, "draws": 0, "run_diff": -6}},
+                "advanced": {
+                    "metrics": {"batting": {"ops": 0.701}},
+                    "fatigue_index": {"bullpen_share": 49.8},
+                },
+                "summary": {},
+            },
+            "matchup": {},
+            "clutch_moments": {
+                "found": True,
+                "moments": [
+                    {
+                        "inning_label": "8회말",
+                        "outs": 1,
+                        "bases_before": "1,2루",
+                        "description": "홍창기 결승 2루타",
+                        "wpa_delta_pct": 18.4,
+                        "batter_name": "홍창기",
+                    }
+                ],
+            },
+        }
+
+        payload = _build_deterministic_coach_response(evidence, tool_results)
+
+        assert payload["coach_note"].count("8회말 홍창기 타석") == 1
+
     def test_focus_section_requirements(self):
         """선택 focus별 섹션 요구사항 생성 테스트"""
         from app.routers.coach import _build_focus_section_requirements
@@ -1008,6 +1181,77 @@ class TestCoachFastPath:
         assert sanitized["summary"]["draws"] == 0
         assert len(sanitized["games"]) == 4
         assert sanitized["found"] is True
+
+    def test_sanitize_matchup_result_marks_partial_when_series_history_is_short(self):
+        from app.routers.coach import (
+            EvidenceSeriesState,
+            _sanitize_matchup_result_for_evidence,
+        )
+
+        evidence = _build_game_evidence(
+            stage_label="KS",
+            round_display="한국시리즈",
+            league_type_code=5,
+            series_state=EvidenceSeriesState(
+                stage_label="KS",
+                round_display="한국시리즈",
+                game_no=5,
+                previous_games=4,
+                confirmed_previous_games=3,
+                home_team_wins=1,
+                away_team_wins=2,
+                series_state_partial=True,
+                series_state_hint_mismatch=True,
+            ),
+        )
+        matchup = {
+            "found": True,
+            "games": [{"game_id": f"g{i}"} for i in range(10)],
+            "summary": {
+                "total_games": 10,
+                "team1_wins": 6,
+                "team2_wins": 4,
+                "draws": 0,
+            },
+        }
+
+        sanitized = _sanitize_matchup_result_for_evidence(evidence, matchup)
+
+        assert sanitized["series_state_partial"] is True
+        assert sanitized["summary"]["total_games"] == 3
+        assert sanitized["summary"]["team1_wins"] == 1
+        assert sanitized["summary"]["team2_wins"] == 2
+        assert len(sanitized["games"]) == 3
+
+    def test_postseason_headline_uses_round_only_when_series_score_is_partial(self):
+        from app.routers.coach import (
+            EvidenceSeriesState,
+            _build_deterministic_headline,
+        )
+
+        evidence = _build_game_evidence(
+            away_team_name="한화 이글스",
+            home_team_name="LG 트윈스",
+            stage_label="KS",
+            round_display="한국시리즈",
+            league_type_code=5,
+            series_state=EvidenceSeriesState(
+                stage_label="KS",
+                round_display="한국시리즈",
+                game_no=5,
+                previous_games=4,
+                confirmed_previous_games=3,
+                home_team_wins=1,
+                away_team_wins=2,
+                series_state_partial=True,
+                series_state_hint_mismatch=True,
+            ),
+        )
+
+        headline = _build_deterministic_headline(evidence, {})
+
+        assert "5차전" in headline
+        assert "승 vs" not in headline
 
     def test_execute_coach_tools_parallel_passes_postseason_season_id(
         self, monkeypatch

@@ -171,14 +171,34 @@ class EvidenceSeriesState:
     round_display: str = "정규시즌"
     game_no: Optional[int] = None
     previous_games: int = 0
+    confirmed_previous_games: int = 0
     home_team_wins: int = 0
     away_team_wins: int = 0
+    series_state_partial: bool = False
+    series_state_hint_mismatch: bool = False
+
+    def matchup_label(self) -> str:
+        if self.game_no is None:
+            return self.round_display
+        return f"{self.round_display} {self.game_no}차전"
+
+    def has_confirmed_score(self) -> bool:
+        return (
+            self.game_no is not None
+            and self.previous_games > 0
+            and not self.series_state_partial
+        )
 
     def summary_text(self, home_team_name: str, away_team_name: str) -> str:
         if self.game_no is None:
             return f"{self.round_display} 전황 데이터가 없습니다."
         if self.previous_games <= 0:
-            return f"{self.round_display} {self.game_no}차전 시작 전입니다."
+            return f"{self.matchup_label()} 시작 전입니다."
+        if self.series_state_partial:
+            return (
+                f"{self.matchup_label()}입니다. "
+                "시리즈 전적은 DB 이력 부족으로 축약 표시합니다."
+            )
         return (
             f"{self.round_display} 시리즈 전적: "
             f"{away_team_name} {self.away_team_wins}승 "
@@ -415,6 +435,57 @@ def _primary_review_summary_item(evidence: GameEvidence) -> Optional[str]:
     return prioritized or fallback
 
 
+def _append_distinct_note_part(parts: List[str], candidate: Optional[str]) -> None:
+    text = _clean_summary_text(candidate)
+    if not text:
+        return
+
+    normalized = re.sub(r"\s+", " ", text).strip().rstrip(".!?")
+    if not normalized:
+        return
+
+    for existing in parts:
+        existing_normalized = re.sub(r"\s+", " ", existing).strip().rstrip(".!?")
+        if (
+            normalized == existing_normalized
+            or normalized in existing_normalized
+            or existing_normalized in normalized
+        ):
+            return
+
+    parts.append(text)
+
+
+def _build_compact_coach_note(parts: List[str], *, max_length: int = 220) -> str:
+    selected: List[str] = []
+    selected_keys: List[str] = []
+    for part in parts:
+        sentence = _ensure_sentence(part)
+        if not sentence:
+            continue
+        sentence_key = re.sub(r"\s+", " ", sentence).strip().rstrip(".!?")
+        if any(
+            sentence_key == existing_key
+            or sentence_key in existing_key
+            or existing_key in sentence_key
+            for existing_key in selected_keys
+        ):
+            continue
+
+        candidate = " ".join([*selected, sentence]).strip()
+        if len(candidate) > max_length and selected:
+            break
+
+        selected.append(sentence)
+        selected_keys.append(sentence_key)
+        if len(selected) >= 2 and len(candidate) >= max_length * 0.7:
+            break
+
+    if not selected:
+        return ""
+    return _truncate_text_naturally(" ".join(selected), max_length=max_length)
+
+
 def _append_team_fact_lines(
     fact_lines: List[str],
     numeric_tokens: Set[str],
@@ -591,19 +662,23 @@ def _build_coach_fact_sheet(
         fact_lines, numeric_tokens, tool_results, "home", evidence.home_team_name
     )
 
-    matchup_summary = tool_results.get("matchup", {}).get("summary", {}) or {}
+    matchup = tool_results.get("matchup", {}) or {}
+    matchup_summary = matchup.get("summary", {}) or {}
     if matchup_summary:
-        fact = _build_fact_line(
-            "맞대결 전적",
-            (
-                f"{evidence.away_team_name} {matchup_summary.get('team2_wins', 0)}승 / "
-                f"{evidence.home_team_name} {matchup_summary.get('team1_wins', 0)}승 / "
-                f"{matchup_summary.get('draws', 0)}무"
-            ),
-        )
-        if fact:
-            fact_lines.append(fact)
-            extend_numeric_tokens([fact], numeric_tokens)
+        if _matchup_is_partial(matchup):
+            caveat_lines.append("시리즈 맞대결 전적은 DB 이력 부족으로 축약 표시합니다.")
+        else:
+            fact = _build_fact_line(
+                "맞대결 전적",
+                (
+                    f"{evidence.away_team_name} {matchup_summary.get('team2_wins', 0)}승 / "
+                    f"{evidence.home_team_name} {matchup_summary.get('team1_wins', 0)}승 / "
+                    f"{matchup_summary.get('draws', 0)}무"
+                ),
+            )
+            if fact:
+                fact_lines.append(fact)
+                extend_numeric_tokens([fact], numeric_tokens)
 
     clutch_moments = _clutch_moments(tool_results)
     if clutch_moments:
@@ -697,7 +772,7 @@ def _normalize_game_status_bucket(game_status: Optional[str]) -> str:
     if normalized in {"SCHEDULED", "READY", "NOT_STARTED", "PENDING"}:
         return "SCHEDULED"
     if normalized in {"POSTPONED", "CANCELLED", "CANCELED", "SUSPENDED"}:
-        return "COMPLETED"
+        return "UNKNOWN"
     return "UNKNOWN"
 
 
@@ -715,6 +790,52 @@ def _normalize_name_token(value: Optional[str]) -> Optional[str]:
 def _clean_summary_text(value: Optional[str]) -> Optional[str]:
     text = " ".join(str(value or "").split()).strip()
     return text or None
+
+
+def _has_batchim(text: str) -> bool:
+    for char in reversed(text.strip()):
+        if "가" <= char <= "힣":
+            return (ord(char) - ord("가")) % 28 != 0
+    return False
+
+
+def _join_with_korean_and(left: str, right: str) -> str:
+    connector = "과" if _has_batchim(left) else "와"
+    return f"{left}{connector} {right}"
+
+
+def _ensure_sentence(value: Optional[str]) -> Optional[str]:
+    text = _clean_summary_text(value)
+    if not text:
+        return None
+    if text[-1] in ".!?。！？":
+        return text
+    return f"{text}."
+
+
+def _truncate_text_naturally(
+    value: Optional[str],
+    *,
+    max_length: int,
+    preserve_newlines: bool = False,
+) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not preserve_newlines:
+        text = " ".join(text.split()).strip()
+    if len(text) <= max_length:
+        return text
+
+    floor = max(max_length // 2, max_length - 160, 1)
+    for idx in range(min(len(text), max_length), floor, -1):
+        if text[idx - 1] in ".!?。！？\n":
+            return text[:idx].rstrip()
+
+    last_break = max(text.rfind(" ", 0, max_length - 2), text.rfind("\n", 0, max_length - 2))
+    if last_break >= floor:
+        return text[:last_break].rstrip() + "..."
+    return text[: max_length - 3].rstrip() + "..."
 
 
 def _summarize_lineup_players(players: List[str], limit: int = 4) -> str:
@@ -838,6 +959,10 @@ def _determine_data_quality(
             return "partial"
         return "insufficient"
     if assessment.expected_data_quality == "partial":
+        return "partial"
+    if _is_completed_review(evidence) and not tool_results.get("clutch_moments", {}).get(
+        "found"
+    ):
         return "partial"
     if evidence.game_id and baseline_count >= 2:
         return "grounded"
@@ -1153,9 +1278,7 @@ def _determine_cache_gate(
         age_seconds = _calc_row_age_seconds(updated_at)
         attempts = _normalize_attempt_count(attempt_count)
         if str(error_code or "").strip().lower() == COACH_STREAM_CANCELLED_ERROR_CODE:
-            if age_seconds > FAILED_RETRY_AFTER_SECONDS:
-                return "MISS_GENERATE"
-            return "FAILED_RETRY_WAIT"
+            return "MISS_GENERATE"
         if _is_retryable_cache_error_code(error_code) and (
             attempts >= COACH_CACHE_MAX_RETRYABLE_ATTEMPTS
         ):
@@ -1899,92 +2022,91 @@ def _fetch_series_state(
     if not evidence.game_id or evidence.stage_label in {"REGULAR", "PRE", "UNKNOWN"}:
         return None
 
-    row = conn.execute(
-        """
-        SELECT
-            COUNT(*) AS previous_games,
-            SUM(
-                CASE
-                    WHEN UPPER(TRIM(COALESCE(g.home_team, ''))) = UPPER(TRIM(%s))
-                     AND g.home_score IS NOT NULL
-                     AND g.away_score IS NOT NULL
-                     AND g.home_score > g.away_score
-                    THEN 1
-                    WHEN UPPER(TRIM(COALESCE(g.away_team, ''))) = UPPER(TRIM(%s))
-                     AND g.home_score IS NOT NULL
-                     AND g.away_score IS NOT NULL
-                     AND g.away_score > g.home_score
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS home_team_wins,
-            SUM(
-                CASE
-                    WHEN UPPER(TRIM(COALESCE(g.home_team, ''))) = UPPER(TRIM(%s))
-                     AND g.home_score IS NOT NULL
-                     AND g.away_score IS NOT NULL
-                     AND g.home_score > g.away_score
-                    THEN 1
-                    WHEN UPPER(TRIM(COALESCE(g.away_team, ''))) = UPPER(TRIM(%s))
-                     AND g.home_score IS NOT NULL
-                     AND g.away_score IS NOT NULL
-                     AND g.away_score > g.home_score
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS away_team_wins
-        FROM game g
-        LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
-        WHERE COALESCE(ks.season_year, EXTRACT(YEAR FROM g.game_date)::int) = %s
-          AND COALESCE(ks.league_type_code, 0) = %s
-          AND (
+    previous_games = list(
+        conn.execute(
+            """
+            SELECT
+                g.game_id,
+                g.game_date,
+                UPPER(TRIM(COALESCE(g.home_team, ''))) AS home_team_code,
+                UPPER(TRIM(COALESCE(g.away_team, ''))) AS away_team_code,
+                g.home_score,
+                g.away_score
+            FROM game g
+            LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
+            WHERE COALESCE(ks.season_year, EXTRACT(YEAR FROM g.game_date)::int) = %s
+              AND COALESCE(ks.league_type_code, 0) = %s
+              AND (
+                (
+                  UPPER(TRIM(COALESCE(g.home_team, ''))) = UPPER(TRIM(%s))
+                  AND UPPER(TRIM(COALESCE(g.away_team, ''))) = UPPER(TRIM(%s))
+                )
+                OR (
+                  UPPER(TRIM(COALESCE(g.home_team, ''))) = UPPER(TRIM(%s))
+                  AND UPPER(TRIM(COALESCE(g.away_team, ''))) = UPPER(TRIM(%s))
+                )
+              )
+              AND (
+                UPPER(TRIM(COALESCE(g.game_status, ''))) IN ('COMPLETED', 'FINAL', 'FINISHED', 'DONE', 'END', 'E', 'F')
+                OR (g.home_score IS NOT NULL AND g.away_score IS NOT NULL)
+              )
+              AND (
+                g.game_date < %s
+                OR (g.game_date = %s AND g.game_id < %s)
+              )
+            ORDER BY g.game_date ASC NULLS LAST, g.game_id ASC
+            """,
             (
-              UPPER(TRIM(COALESCE(g.home_team, ''))) = UPPER(TRIM(%s))
-              AND UPPER(TRIM(COALESCE(g.away_team, ''))) = UPPER(TRIM(%s))
-            )
-            OR (
-              UPPER(TRIM(COALESCE(g.home_team, ''))) = UPPER(TRIM(%s))
-              AND UPPER(TRIM(COALESCE(g.away_team, ''))) = UPPER(TRIM(%s))
-            )
-          )
-          AND (
-            UPPER(TRIM(COALESCE(g.game_status, ''))) IN ('COMPLETED', 'FINAL', 'FINISHED', 'DONE', 'END', 'E', 'F')
-            OR (g.home_score IS NOT NULL AND g.away_score IS NOT NULL)
-          )
-          AND (
-            g.game_date < %s
-            OR (g.game_date = %s AND g.game_id < %s)
-          )
-        """,
-        (
-            evidence.home_team_code,
-            evidence.home_team_code,
-            evidence.away_team_code,
-            evidence.away_team_code,
-            evidence.season_year,
-            evidence.league_type_code,
-            evidence.home_team_code,
-            evidence.away_team_code,
-            evidence.away_team_code,
-            evidence.home_team_code,
-            evidence.game_date,
-            evidence.game_date,
-            evidence.game_id,
-        ),
-    ).fetchone()
-    if not row:
-        return None
+                evidence.season_year,
+                evidence.league_type_code,
+                evidence.home_team_code,
+                evidence.away_team_code,
+                evidence.away_team_code,
+                evidence.home_team_code,
+                evidence.game_date,
+                evidence.game_date,
+                evidence.game_id,
+            ),
+        ).fetchall()
+        or []
+    )
+    actual_previous_games = len(previous_games)
+    expected_previous_games = actual_previous_games
+    game_no = actual_previous_games + 1
+    hint_mismatch = False
+    if evidence.stage_game_no_hint is not None:
+        expected_previous_games = max(int(evidence.stage_game_no_hint) - 1, 0)
+        game_no = evidence.stage_game_no_hint
+        hint_mismatch = actual_previous_games != expected_previous_games
 
-    previous_games = int(row[0] or 0)
-    home_team_wins = int(row[1] or 0)
-    away_team_wins = int(row[2] or 0)
+    confirmed_previous_games = min(actual_previous_games, expected_previous_games)
+    home_team_wins = 0
+    away_team_wins = 0
+    home_team_code = str(evidence.home_team_code or "").strip().upper()
+    away_team_code = str(evidence.away_team_code or "").strip().upper()
+    for _, _, db_home_team_code, db_away_team_code, home_score, away_score in previous_games[:confirmed_previous_games]:
+        if home_score is None or away_score is None or home_score == away_score:
+            continue
+        winner_code = (
+            str(db_home_team_code or "").strip().upper()
+            if home_score > away_score
+            else str(db_away_team_code or "").strip().upper()
+        )
+        if winner_code == home_team_code:
+            home_team_wins += 1
+        elif winner_code == away_team_code:
+            away_team_wins += 1
+
     return EvidenceSeriesState(
         stage_label=evidence.stage_label,
         round_display=evidence.round_display,
-        game_no=previous_games + 1,
-        previous_games=previous_games,
+        game_no=game_no,
+        previous_games=expected_previous_games,
+        confirmed_previous_games=confirmed_previous_games,
         home_team_wins=home_team_wins,
         away_team_wins=away_team_wins,
+        series_state_partial=hint_mismatch,
+        series_state_hint_mismatch=hint_mismatch,
     )
 
 
@@ -2002,19 +2124,59 @@ def _reconcile_series_state_with_hint(
             round_display=evidence.round_display,
             game_no=evidence.stage_game_no_hint,
             previous_games=expected_previous_games,
+            confirmed_previous_games=0,
+            series_state_partial=expected_previous_games > 0,
+            series_state_hint_mismatch=expected_previous_games > 0,
         )
 
-    if series_state.game_no != evidence.stage_game_no_hint:
+    confirmed_previous_games = min(
+        int(series_state.confirmed_previous_games or series_state.previous_games or 0),
+        expected_previous_games,
+    )
+    hint_mismatch = (
+        series_state.game_no != evidence.stage_game_no_hint
+        or int(series_state.previous_games or 0) != expected_previous_games
+    )
+    if hint_mismatch:
         logger.info(
-            "[Coach] Overriding series game number from hint game_id=%s db=%s hint=%s",
+            "[Coach] Reconciled postseason series hint game_id=%s db_game_no=%s hint=%s db_previous=%s expected_previous=%s",
             evidence.game_id,
             series_state.game_no,
             evidence.stage_game_no_hint,
+            series_state.previous_games,
+            expected_previous_games,
         )
-        series_state.game_no = evidence.stage_game_no_hint
-    if series_state.previous_games < expected_previous_games:
-        series_state.previous_games = expected_previous_games
+    series_state.game_no = evidence.stage_game_no_hint
+    series_state.previous_games = expected_previous_games
+    series_state.confirmed_previous_games = confirmed_previous_games
+    series_state.series_state_hint_mismatch = (
+        series_state.series_state_hint_mismatch
+        or confirmed_previous_games != expected_previous_games
+    )
+    series_state.series_state_partial = (
+        series_state.series_state_partial or series_state.series_state_hint_mismatch
+    )
     return series_state
+
+
+def _series_score_text(evidence: GameEvidence) -> Optional[str]:
+    series_state = evidence.series_state
+    if not series_state or not series_state.has_confirmed_score():
+        return None
+    return (
+        f"{evidence.away_team_name} {series_state.away_team_wins}승 vs "
+        f"{evidence.home_team_name} {series_state.home_team_wins}승"
+    )
+
+
+def _series_context_label(evidence: GameEvidence) -> Optional[str]:
+    if not evidence.series_state:
+        return None
+    return evidence.series_state.matchup_label()
+
+
+def _matchup_is_partial(matchup: Dict[str, Any]) -> bool:
+    return bool((matchup or {}).get("series_state_partial"))
 
 
 def _matchup_total_games(matchup: Dict[str, Any]) -> int:
@@ -2043,22 +2205,53 @@ def _sanitize_matchup_result_for_evidence(
         return matchup
 
     expected_previous_games = max(int(evidence.series_state.previous_games or 0), 0)
+    confirmed_previous_games = max(
+        int(
+            evidence.series_state.confirmed_previous_games
+            or evidence.series_state.previous_games
+            or 0
+        ),
+        0,
+    )
     expected_team1_wins = max(int(evidence.series_state.home_team_wins or 0), 0)
     expected_team2_wins = max(int(evidence.series_state.away_team_wins or 0), 0)
     expected_draws = max(
         expected_previous_games - expected_team1_wins - expected_team2_wins,
         0,
     )
+    confirmed_draws = max(
+        confirmed_previous_games - expected_team1_wins - expected_team2_wins,
+        0,
+    )
     actual_total = _matchup_total_games(matchup)
     games = matchup.get("games") or []
+    summary = matchup.get("summary", {}) or {}
+    sanitized = dict(matchup)
+    if evidence.series_state.series_state_partial:
+        sanitized["games"] = list(games[:confirmed_previous_games])
+        sanitized["summary"] = {
+            **summary,
+            "total_games": confirmed_previous_games,
+            "team1_wins": expected_team1_wins,
+            "team2_wins": expected_team2_wins,
+            "draws": confirmed_draws,
+        }
+        sanitized["found"] = confirmed_previous_games > 0
+        sanitized["series_state_partial"] = True
+        logger.warning(
+            "[Coach] Partial postseason matchup scope game_id=%s stage=%s confirmed_total=%s expected_total=%s",
+            evidence.game_id,
+            evidence.stage_label,
+            confirmed_previous_games,
+            expected_previous_games,
+        )
+        return sanitized
     if (
         actual_total <= expected_previous_games
         and len(games) <= expected_previous_games
     ):
         return matchup
 
-    summary = matchup.get("summary", {}) or {}
-    sanitized = dict(matchup)
     sanitized["games"] = list(games[:expected_previous_games])
     sanitized["summary"] = {
         **summary,
@@ -2068,6 +2261,7 @@ def _sanitize_matchup_result_for_evidence(
         "draws": expected_draws,
     }
     sanitized["found"] = expected_previous_games > 0
+    sanitized["series_state_partial"] = False
     logger.warning(
         "[Coach] Sanitized postseason matchup scope game_id=%s stage=%s actual_total=%s expected_total=%s",
         evidence.game_id,
@@ -2408,7 +2602,12 @@ def _has_matchup_support(
     if (
         evidence.stage_label != "REGULAR"
         and evidence.series_state is not None
-        and int(evidence.series_state.previous_games or 0) > 0
+        and int(
+            evidence.series_state.confirmed_previous_games
+            or evidence.series_state.previous_games
+            or 0
+        )
+        > 0
     ):
         return True
     return False
@@ -2550,13 +2749,12 @@ def _build_deterministic_metrics(
     away_adv = _advanced_metrics(away_data)
 
     if evidence.stage_label != "REGULAR" and evidence.series_state:
+        series_score_text = _series_score_text(evidence)
+        series_context_label = _series_context_label(evidence) or evidence.round_display
         metrics.append(
             {
-                "label": "시리즈 전적",
-                "value": (
-                    f"{evidence.away_team_name} {evidence.series_state.away_team_wins}승 "
-                    f"vs {evidence.home_team_name} {evidence.series_state.home_team_wins}승"
-                ),
+                "label": "시리즈 전적" if series_score_text else "시리즈 맥락",
+                "value": series_score_text or series_context_label,
                 "status": "warning",
                 "trend": "neutral",
                 "is_critical": True,
@@ -2912,14 +3110,18 @@ def _build_deterministic_analysis(
         strengths.append(evidence.series_state.summary_text(home_name, away_name))
         swing_factors.append(evidence.series_state.summary_text(home_name, away_name))
     if evidence.home_pitcher or evidence.away_pitcher:
+        pitcher_matchup_text = _join_with_korean_and(
+            f"{away_name} {evidence.away_pitcher or '미정'}",
+            f"{home_name} {evidence.home_pitcher or '미정'}",
+        )
         strengths.append(
             f"발표 선발은 {away_name} {evidence.away_pitcher or '미정'} / {home_name} {evidence.home_pitcher or '미정'}입니다."
         )
         swing_factors.append(
             (
-                f"초반 3이닝에서 {away_name} {evidence.away_pitcher or '미정'}와 {home_name} {evidence.home_pitcher or '미정'}의 이닝 소화력이 실제 흐름 차이로 이어졌는지 먼저 복기해야 합니다."
+                f"초반 3이닝에서 {pitcher_matchup_text}의 이닝 소화력이 실제 흐름 차이로 이어졌는지 먼저 복기해야 합니다."
                 if review_mode
-                else f"초반 3이닝은 {away_name} {evidence.away_pitcher or '미정'}와 {home_name} {evidence.home_pitcher or '미정'}의 이닝 소화력이 좌우합니다."
+                else f"초반 3이닝은 {pitcher_matchup_text}의 이닝 소화력이 좌우합니다."
             )
         )
     if evidence.lineup_announced:
@@ -3041,34 +3243,54 @@ def _build_deterministic_analysis(
         edge_team = home_name if home_score > away_score else away_name
         trailing_team = away_name if edge_team == home_name else home_name
         margin = abs(home_score - away_score)
+        lead_swing_factor = _ensure_sentence(swing_factors[0] if swing_factors else None)
+        lead_risk = _ensure_sentence(risks[0]["description"] if risks else None)
         if review_mode:
             summary = f"{edge_team}가 확인된 지표 우위를 실제 결과로 더 잘 연결했고, {trailing_team}은 기회를 살리는 구간에서 차이가 났습니다."
             if margin >= 2:
-                verdict = (
-                    f"{edge_team}가 기초 지표 우위를 실제 결과로 연결했고, "
-                    f"{swing_factors[0] if swing_factors else risks[0]['description'] if risks else '후반 불펜과 초반 선발 운영이'} 결과를 가른 핵심 구간으로 남았습니다."
-                )
+                verdict = f"{edge_team}가 기초 지표 우위를 실제 결과로 연결했습니다."
+                if lead_swing_factor:
+                    verdict = f"{verdict} {lead_swing_factor}"
+                elif lead_risk:
+                    verdict = (
+                        f"{verdict} {lead_risk} "
+                        "결과를 가른 핵심 구간으로 남았습니다."
+                    )
+                else:
+                    verdict = (
+                        f"{verdict} 후반 불펜과 초반 선발 운영이 "
+                        "결과를 가른 핵심 구간으로 남았습니다."
+                    )
             else:
-                verdict = (
-                    f"{edge_team}가 근소 우위를 실제 승부처에서 먼저 살렸고, "
-                    f"{swing_factors[0] if swing_factors else '초반 이닝 운영'}이 결과를 가른 변수로 보입니다."
-                )
+                verdict = f"{edge_team}가 근소 우위를 실제 승부처에서 먼저 살렸습니다."
+                if lead_swing_factor:
+                    verdict = f"{verdict} {lead_swing_factor}"
+                else:
+                    verdict = f"{verdict} 초반 이닝 운영이 결과를 가른 변수로 보입니다."
         else:
             summary = f"{edge_team}가 확인된 지표에서 먼저 앞서지만, {trailing_team}도 운용 변수 하나로 흐름을 뒤집을 여지는 남아 있습니다."
             if margin >= 2:
-                verdict = (
-                    f"{edge_team}가 기초 지표 우위를 갖고 출발하지만, "
-                    f"{risks[0]['description'] if risks else '후반 불펜과 초반 선발 운영이'} 승부처로 남습니다."
-                )
+                verdict = f"{edge_team}가 기초 지표 우위를 갖고 출발합니다."
+                if lead_risk:
+                    verdict = f"{verdict} {lead_risk}"
+                elif lead_swing_factor:
+                    verdict = f"{verdict} {lead_swing_factor}"
+                else:
+                    verdict = (
+                        f"{verdict} 후반 불펜과 초반 선발 운영이 승부처로 남습니다."
+                    )
             else:
-                verdict = (
-                    f"{edge_team}가 근소 우세이나 격차는 크지 않아, "
-                    f"{swing_factors[0] if swing_factors else '초반 이닝 운영'}에 따라 체감 우위가 쉽게 바뀔 수 있습니다."
-                )
+                verdict = f"{edge_team}가 근소 우세지만 격차는 크지 않습니다."
+                if lead_swing_factor:
+                    verdict = f"{verdict} {lead_swing_factor}"
+                else:
+                    verdict = (
+                        f"{verdict} 초반 이닝 운영에 따라 체감 우위가 쉽게 바뀔 수 있습니다."
+                    )
 
     return {
         "summary": summary,
-        "verdict": verdict,
+        "verdict": _truncate_text_naturally(verdict, max_length=240),
         "strengths": strengths[:4],
         "weaknesses": weaknesses[:3],
         "risks": risks[:2],
@@ -3089,36 +3311,32 @@ def _build_deterministic_headline(
         _primary_review_summary_item(evidence) if review_mode else None
     )
     if evidence.stage_label != "REGULAR" and evidence.series_state:
-        return (
-            f"{evidence.away_team_name} {evidence.series_state.away_team_wins}승 vs "
-            f"{evidence.home_team_name} {evidence.series_state.home_team_wins}승, "
-            f"{evidence.round_display} {evidence.series_state.game_no}차전"
-        )[:60]
+        series_score_text = _series_score_text(evidence)
+        series_context_label = _series_context_label(evidence) or evidence.round_display
+        if series_score_text:
+            return f"{series_score_text}, {series_context_label}"
+        return f"{series_context_label}, {evidence.away_team_name}-{evidence.home_team_name}"
     if review_mode and clutch_moments:
         top_moment = clutch_moments[0]
         batter_name = _normalize_name_token(top_moment.get("batter_name")) or "승부처"
         return (
             f"{batter_name}의 {top_moment.get('inning_label', '핵심 장면')}, "
             f"{evidence.away_team_name}-{evidence.home_team_name} 경기 리뷰"
-        )[:60]
+        )
     if review_mode and review_summary_item:
         return (
             f"{review_summary_item}, "
             f"{evidence.away_team_name}-{evidence.home_team_name} 경기 리뷰"
-        )[:60]
+        )
     if evidence.home_pitcher or evidence.away_pitcher:
         return (
             f"{evidence.away_pitcher or evidence.away_team_name} vs "
             f"{evidence.home_pitcher or evidence.home_team_name}, "
             f"{'경기 리뷰' if review_mode else '승부처 해석'}"
-        )[:60]
+        )
     if review_mode:
-        return f"{evidence.away_team_name} vs {evidence.home_team_name}, 데이터 기반 경기 리뷰"[
-            :60
-        ]
-    return f"{evidence.away_team_name} vs {evidence.home_team_name}, 데이터 기반 코치 브리핑"[
-        :60
-    ]
+        return f"{evidence.away_team_name} vs {evidence.home_team_name}, 데이터 기반 경기 리뷰"
+    return f"{evidence.away_team_name} vs {evidence.home_team_name}, 데이터 기반 코치 브리핑"
 
 
 def _build_deterministic_markdown(
@@ -3147,7 +3365,11 @@ def _build_deterministic_markdown(
         sections.append("## 해석 한계" if review_mode else "## 불확실성")
         sections.extend(f"- {item}" for item in analysis["uncertainty"])
 
-    return "\n".join(sections)[:500]
+    return _truncate_text_naturally(
+        "\n".join(sections),
+        max_length=900,
+        preserve_newlines=True,
+    )
 
 
 def _build_deterministic_coach_response(
@@ -3157,19 +3379,21 @@ def _build_deterministic_coach_response(
     analysis = _build_deterministic_analysis(evidence, tool_results)
     coach_note_parts: List[str] = []
     if analysis.get("verdict"):
-        coach_note_parts.append(str(analysis["verdict"]))
+        _append_distinct_note_part(coach_note_parts, str(analysis["verdict"]))
     if analysis.get("swing_factors"):
-        coach_note_parts.append(str(analysis["swing_factors"][0]))
+        _append_distinct_note_part(coach_note_parts, str(analysis["swing_factors"][0]))
     if analysis.get("risks"):
-        coach_note_parts.append(str(analysis["risks"][0]["description"]))
+        _append_distinct_note_part(coach_note_parts, str(analysis["risks"][0]["description"]))
     if evidence.stage_label != "REGULAR" and evidence.series_state:
-        coach_note_parts.append(
+        _append_distinct_note_part(
+            coach_note_parts,
             evidence.series_state.summary_text(
                 evidence.home_team_name, evidence.away_team_name
             )
         )
     if not coach_note_parts:
-        coach_note_parts.append(
+        _append_distinct_note_part(
+            coach_note_parts,
             "확인된 실데이터 기준으로는 결과를 가른 운영 장면과 득점 연결 구간을 함께 복기해야 합니다."
             if _is_completed_review(evidence)
             else "확인된 실데이터 기준으로는 최근 흐름과 정규시즌 베이스라인을 함께 봐야 합니다."
@@ -3181,7 +3405,7 @@ def _build_deterministic_coach_response(
         key_metrics=_build_deterministic_metrics(evidence, tool_results),
         analysis=analysis,
         detailed_markdown=_build_deterministic_markdown(evidence, tool_results),
-        coach_note=" ".join(coach_note_parts)[:120],
+        coach_note=_build_compact_coach_note(coach_note_parts),
     )
     return response.model_dump()
 
@@ -3870,11 +4094,14 @@ def _format_coach_context(
         summary = matchup.get("summary", {})
         t1 = matchup.get("team1", "팀1")
         t2 = matchup.get("team2", "팀2")
-        parts.append(
-            f"- {t1} {summary.get('team1_wins', 0)}승 / "
-            f"{t2} {summary.get('team2_wins', 0)}승 / "
-            f"{summary.get('draws', 0)}무"
-        )
+        if _matchup_is_partial(matchup):
+            parts.append("- DB 이력 부족으로 시리즈 스코어 축약 표시")
+        else:
+            parts.append(
+                f"- {t1} {summary.get('team1_wins', 0)}승 / "
+                f"{t2} {summary.get('team2_wins', 0)}승 / "
+                f"{summary.get('draws', 0)}무"
+            )
         parts.append("| 날짜 | 스코어 | 결과 |")
         parts.append("|------|--------|------|")
         for g in matchup.get("games", [])[:3]:

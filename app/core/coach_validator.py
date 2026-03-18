@@ -17,19 +17,56 @@ logger = logging.getLogger(__name__)
 MAX_KEY_METRIC_VALUE_LENGTH = 50
 MAX_CRITICAL_METRICS = 2
 FALLBACK_HEADLINE = "AI 코치 분석 요약"
-MAX_ANALYSIS_TEXT_LENGTH = 180
+MAX_ANALYSIS_TEXT_LENGTH = 240
 MAX_ANALYSIS_LIST_ITEMS = 4
 MAX_ANALYSIS_LIST_ITEM_LENGTH = 140
+MAX_DETAILED_MARKDOWN_LENGTH = 900
+MAX_COACH_NOTE_LENGTH = 220
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_SENTENCE_BOUNDARY_PATTERN = re.compile(r"[.!?。！？](?:\s|$)")
+
+
+def _truncate_text(value: Any, *, max_length: int, collapse_whitespace: bool) -> str:
+    if not isinstance(value, str):
+        return ""
+
+    text = " ".join(value.split()).strip() if collapse_whitespace else value.strip()
+    if len(text) <= max_length:
+        return text
+
+    hard_limit = max(0, max_length - 3)
+    minimum_boundary = max(0, hard_limit // 2)
+    boundary_candidates: List[int] = []
+
+    prefix = text[: hard_limit + 1]
+    for match in _SENTENCE_BOUNDARY_PATTERN.finditer(prefix):
+        boundary = match.end()
+        if match.group(0)[-1].isspace():
+            boundary -= 1
+        if boundary >= minimum_boundary:
+            boundary_candidates.append(boundary)
+
+    newline_boundary = prefix.rfind("\n")
+    if newline_boundary >= minimum_boundary:
+        boundary_candidates.append(newline_boundary)
+
+    space_boundary = prefix.rfind(" ")
+    if space_boundary >= minimum_boundary:
+        boundary_candidates.append(space_boundary)
+
+    cutoff = max(boundary_candidates) if boundary_candidates else hard_limit
+    suffix = text[cutoff:].strip()
+    if suffix and text[:cutoff].rstrip().endswith((".", "!", "?", "。", "！", "？")):
+        return text[:cutoff].rstrip()
+    return text[:cutoff].rstrip() + "..."
 
 
 def _normalize_short_text(value: Any, *, max_length: int) -> str:
-    if not isinstance(value, str):
-        return ""
-    normalized = " ".join(value.split()).strip()
-    if len(normalized) > max_length:
-        return normalized[: max_length - 3] + "..."
-    return normalized
+    return _truncate_text(
+        value,
+        max_length=max_length,
+        collapse_whitespace=True,
+    )
 
 
 def _normalize_text_list(
@@ -192,10 +229,14 @@ class CoachResponse(BaseModel):
     )
     analysis: AnalysisSection = Field(default_factory=AnalysisSection)
     detailed_markdown: str = Field(
-        default="", max_length=500, description="상세 분석 마크다운 (최대 500자)"
+        default="",
+        max_length=MAX_DETAILED_MARKDOWN_LENGTH,
+        description="상세 분석 마크다운",
     )
     coach_note: str = Field(
-        default="", max_length=120, description="전략적 제언 (최대 120자)"
+        default="",
+        max_length=MAX_COACH_NOTE_LENGTH,
+        description="전략적 제언",
     )
 
     @field_validator("headline", mode="before")
@@ -204,7 +245,7 @@ class CoachResponse(BaseModel):
         """headline 길이 제한 및 정리"""
         if not isinstance(v, str) or not v.strip():
             raise ValueError("headline은 비어있을 수 없습니다.")
-        v = v.strip()
+        v = " ".join(v.split()).strip()
 
         # [Fix] "headline": "Title" 형태의 중복 키 패턴 제거
         # LLM이 JSON 형식을 값 안에 포함시키는 환각 방지
@@ -219,31 +260,23 @@ class CoachResponse(BaseModel):
         if v.startswith('"') and v.endswith('"'):
             v = v[1:-1]
 
-        if len(v) > 60:
-            v = v[:57] + "..."
-        return v
+        return _truncate_text(v, max_length=60, collapse_whitespace=True)
 
     @field_validator("detailed_markdown", mode="before")
     @classmethod
     def truncate_markdown(cls, v: str) -> str:
-        """detailed_markdown 길이 제한 (프롬프트 규칙: 최대 500자)"""
-        if not isinstance(v, str):
-            return ""
-        v = v.strip()
-        if len(v) > 500:
-            v = v[:497] + "..."
-        return v
+        """detailed_markdown 길이 제한"""
+        return _truncate_text(
+            v,
+            max_length=MAX_DETAILED_MARKDOWN_LENGTH,
+            collapse_whitespace=False,
+        )
 
     @field_validator("coach_note", mode="before")
     @classmethod
     def truncate_coach_note(cls, v: str) -> str:
-        """coach_note 길이 제한 (프롬프트 규칙: 최대 120자)"""
-        if not isinstance(v, str):
-            return ""
-        v = v.strip()
-        if len(v) > 120:
-            v = v[:117] + "..."
-        return v
+        """coach_note 길이 제한"""
+        return _truncate_text(v, max_length=MAX_COACH_NOTE_LENGTH, collapse_whitespace=True)
 
     @field_validator("key_metrics", mode="before")
     @classmethod
