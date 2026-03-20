@@ -57,7 +57,9 @@ def test_convert_team_id_to_name_prefers_database_query_tool() -> None:
     assert agent._convert_team_id_to_name("SK") == "SK 와이번스"
 
 
-def test_convert_team_id_to_name_keeps_static_fallback_for_missing_tool_mapping() -> None:
+def test_convert_team_id_to_name_keeps_static_fallback_for_missing_tool_mapping() -> (
+    None
+):
     agent = _build_agent()
 
     assert agent._convert_team_id_to_name("HH") == "한화 이글스"

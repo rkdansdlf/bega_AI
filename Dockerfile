@@ -9,8 +9,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# Install runtime system dependencies needed by the app.
+# Install runtime system dependencies needed by the app, including security updates.
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
     libpq5 \
     libjpeg62-turbo \
@@ -41,5 +42,5 @@ EXPOSE 8001
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
 
-# Run the FastAPI application (no --reload in production)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+# Run the FastAPI application (no --reload in production; uvloop for async perf)
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--loop", "uvloop", "--workers", "2"]

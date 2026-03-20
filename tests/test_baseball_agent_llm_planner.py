@@ -28,7 +28,10 @@ def test_select_llm_planner_prompt_uses_team_mode_for_team_analysis() -> None:
     )
 
     assert planner_mode == "team_llm_planner"
-    assert "허용 도구: get_team_summary, get_team_advanced_metrics, get_team_rank, get_team_last_game" in prompt
+    assert (
+        "허용 도구: get_team_summary, get_team_advanced_metrics, get_team_rank, get_team_last_game"
+        in prompt
+    )
 
 
 def test_select_llm_planner_prompt_uses_player_mode_for_player_analysis() -> None:
@@ -102,7 +105,9 @@ def test_soft_filter_llm_tool_calls_limits_team_planner_scope() -> None:
     ]
 
 
-def test_soft_filter_llm_tool_calls_prioritizes_player_stats_for_player_planner() -> None:
+def test_soft_filter_llm_tool_calls_prioritizes_player_stats_for_player_planner() -> (
+    None
+):
     agent = _build_agent()
     query = "김현수 통산 분석해줘"
     entity_filter = extract_entities_from_query(query)

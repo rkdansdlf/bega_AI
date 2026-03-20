@@ -8,6 +8,7 @@ AI 서비스가 실행 중인 상태에서 사용합니다:
 간단한 패턴 기반 경고를 표시합니다.
 최종 판단은 사람이 직접 내용을 읽고 결정해야 합니다.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,7 +19,6 @@ import urllib.request
 import urllib.error
 from dataclasses import dataclass
 from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # 설정
@@ -41,9 +41,9 @@ _GUIDE_PATTERN = re.compile(r"가능한 원인|대안|연도.*다시|선수명.*
 class Scenario:
     name: str
     question: str
-    expect_disclaimer: bool   # DB-down 면책 문구 기대
-    expect_guide: bool        # Zero-hit 가이드 기대
-    expect_no_stats: bool     # 수치 단정 없어야 함
+    expect_disclaimer: bool  # DB-down 면책 문구 기대
+    expect_guide: bool  # Zero-hit 가이드 기대
+    expect_no_stats: bool  # 수치 단정 없어야 함
     description: str
 
 
@@ -87,6 +87,7 @@ SCENARIOS: list[Scenario] = [
 # API 호출
 # ---------------------------------------------------------------------------
 
+
 def call_completion(base_url: str, question: str, token: str) -> Optional[str]:
     url = f"{base_url}/ai/chat/completion"
     payload = json.dumps({"question": question, "history": None}).encode("utf-8")
@@ -114,6 +115,7 @@ def call_completion(base_url: str, question: str, token: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # 패턴 체크
 # ---------------------------------------------------------------------------
+
 
 def check_answer(answer: str, scenario: Scenario) -> list[str]:
     warnings = []
@@ -145,10 +147,15 @@ def check_answer(answer: str, scenario: Scenario) -> list[str]:
 # 메인
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="LLM 환각 방지 수동 QA")
-    parser.add_argument("--url", default="http://localhost:8001", help="AI 서비스 base URL")
-    parser.add_argument("--token", default="dev-internal-token", help="X-Internal-Api-Key 값")
+    parser.add_argument(
+        "--url", default="http://localhost:8001", help="AI 서비스 base URL"
+    )
+    parser.add_argument(
+        "--token", default="dev-internal-token", help="X-Internal-Api-Key 값"
+    )
     args = parser.parse_args()
 
     print("=" * 70)
@@ -156,8 +163,12 @@ def main():
     print(f"대상 서비스: {args.url}")
     print("=" * 70)
     print()
-    print("참고: S1 (DB-down) 시나리오는 실제 DB 연결 차단이 필요하므로 여기서는 제외합니다.")
-    print("      직접 DB_URL을 잘못된 값으로 설정 후 서비스를 재시작하여 수동으로 확인하세요.")
+    print(
+        "참고: S1 (DB-down) 시나리오는 실제 DB 연결 차단이 필요하므로 여기서는 제외합니다."
+    )
+    print(
+        "      직접 DB_URL을 잘못된 값으로 설정 후 서비스를 재시작하여 수동으로 확인하세요."
+    )
     print()
 
     has_warning = False

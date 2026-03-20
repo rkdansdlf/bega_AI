@@ -486,9 +486,18 @@ def diagnose_games(
                             "home_team_wins": series_state.home_team_wins,
                             "away_team_wins": series_state.away_team_wins,
                             "previous_games": series_state.previous_games,
+                            "confirmed_previous_games": series_state.confirmed_previous_games,
                         }
                         if series_state
                         else None
+                    ),
+                    "series_state_partial": bool(
+                        series_state.series_state_partial if series_state else False
+                    ),
+                    "series_state_hint_mismatch": bool(
+                        series_state.series_state_hint_mismatch
+                        if series_state
+                        else False
                     ),
                     "expected_data_quality": assessment.expected_data_quality,
                     "root_causes": list(assessment.root_causes),
@@ -509,6 +518,12 @@ def build_diagnosis_summary(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]
     stage_counts = Counter(
         str(item.get("stage_label") or "UNKNOWN") for item in records
     )
+    series_state_partial_count = sum(
+        1 for item in records if bool(item.get("series_state_partial"))
+    )
+    series_state_hint_mismatch_count = sum(
+        1 for item in records if bool(item.get("series_state_hint_mismatch"))
+    )
     return {
         "total_games": len(records),
         "quality_distribution": {
@@ -527,6 +542,8 @@ def build_diagnosis_summary(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]
             "unknown": league_counts.get("unknown", 0),
         },
         "stage_distribution": dict(sorted(stage_counts.items())),
+        "series_state_partial_count": series_state_partial_count,
+        "series_state_hint_mismatch_count": series_state_hint_mismatch_count,
     }
 
 
@@ -1093,6 +1110,9 @@ def validate_records(
             )
 
             hard_failures = compare_backend_meta(record, backend_meta)
+            series_game_no_mismatch = any(
+                "seriesGameNo mismatch" in failure for failure in hard_failures
+            )
             soft_warnings: List[str] = []
 
             for request_mode, capture in (
@@ -1132,6 +1152,7 @@ def validate_records(
                     },
                     "hard_failures": hard_failures,
                     "soft_warnings": soft_warnings,
+                    "series_game_no_mismatch": series_game_no_mismatch,
                     "ok": not hard_failures,
                 }
             )
@@ -1157,6 +1178,9 @@ def validate_records(
             "soft_warning_count": soft_warning_count,
             "passed_targets": sum(1 for item in results if item["ok"]),
             "failed_targets": sum(1 for item in results if not item["ok"]),
+            "series_game_no_mismatch_count": sum(
+                1 for item in results if item.get("series_game_no_mismatch")
+            ),
         },
     }
 
@@ -1182,6 +1206,10 @@ def build_recommendations(records: Sequence[Dict[str, Any]]) -> List[str]:
         recommendations.append(
             "포스트시즌 season/stage 매핑과 series 계산 쿼리를 점검하세요."
         )
+    if any(bool(item.get("series_state_partial")) for item in records):
+        recommendations.append(
+            "포스트시즌 DB 이력이 부족한 경기는 시리즈 스코어를 축약 표시하므로 series 백필 범위를 점검하세요."
+        )
 
     if not recommendations:
         recommendations.append("즉시 조치할 데이터 적재 경고는 감지되지 않았습니다.")
@@ -1204,6 +1232,7 @@ def build_report_payload(
             "soft_warning_count": 0,
             "passed_targets": 0,
             "failed_targets": 0,
+            "series_game_no_mismatch_count": 0,
         },
     )
     recommendations = build_recommendations(diagnosis)
@@ -1254,6 +1283,12 @@ def render_markdown_report(report: Dict[str, Any]) -> str:
             f"포스트시즌 {diagnosis_summary['league_distribution']['postseason']}, "
             f"시범 {diagnosis_summary['league_distribution']['preseason']}, "
             f"기타 {diagnosis_summary['league_distribution']['unknown']}"
+        ),
+        (
+            "- 시리즈 진단: "
+            f"partial {diagnosis_summary['series_state_partial_count']}, "
+            f"hint_mismatch {diagnosis_summary['series_state_hint_mismatch_count']}, "
+            f"validation_seriesGameNo_mismatch {validation_summary.get('series_game_no_mismatch_count', 0)}"
         ),
         (
             "- 주요 원인: "

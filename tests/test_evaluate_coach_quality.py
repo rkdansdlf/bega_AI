@@ -239,3 +239,59 @@ def test_evaluate_reports_generation_mix_failures():
     assert "llm_manual_rate_fail" in result["failure_codes"]
     assert "fallback_rate_fail" in result["failure_codes"]
     assert "focus_section_missing_rate_fail" in result["failure_codes"]
+
+
+def test_evaluate_reports_accepts_completed_review_clutch_summary():
+    reports = [
+        _report(
+            {
+                "cases": 12,
+                "success": 12,
+                "generated_success_count": 12,
+                "failed": 0,
+                "validator_fail_count": 0,
+                "cache_invalid_year_count": 0,
+                "legacy_residual_total": 0,
+                "warning_rate": 0.05,
+                "critical_over_limit_rate": 0.0,
+                "focus_section_missing_rate": 0.0,
+                "llm_manual_rate": 0.5,
+                "fallback_rate": 0.0,
+                "target_years": [2025],
+                "game_type": "POST",
+                "focus_signature": "matchup+bullpen",
+            },
+            {"game_type": "POST"},
+        )
+    ]
+
+    result = evaluate_reports(reports, require_game_type="POST")
+
+    assert result["status"] == "PASS"
+
+
+def test_evaluate_reports_tracks_preview_form_focus_signature():
+    reports = [
+        _report(
+            {
+                "cases": 8,
+                "success": 8,
+                "generated_success_count": 8,
+                "failed": 0,
+                "validator_fail_count": 0,
+                "cache_invalid_year_count": 0,
+                "legacy_residual_total": 0,
+                "warning_rate": 0.0,
+                "critical_over_limit_rate": 0.0,
+                "focus_section_missing_rate": 0.0,
+                "llm_manual_rate": 0.25,
+                "fallback_rate": 0.0,
+                "target_focus": ["batting"],
+            },
+            {"focus": ["batting"]},
+        )
+    ]
+
+    result = evaluate_reports(reports)
+
+    assert result["metrics"]["observed_focus_signatures"] == ["batting"]

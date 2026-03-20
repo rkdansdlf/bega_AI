@@ -96,16 +96,20 @@ def load_environment() -> None:
     load_dotenv(root / ".env")
 
 
+def normalize_database_url(raw_url: str) -> str:
+    if raw_url.startswith("jdbc:"):
+        return raw_url[len("jdbc:") :]
+    return raw_url
+
+
 def resolve_database_url() -> str:
-    for key in ("OCI_DB_URL", "POSTGRES_DB_URL", "DATABASE_URL"):
+    for key in ("POSTGRES_DB_URL", "OCI_DB_URL", "DATABASE_URL"):
         value = os.getenv(key)
         if value:
-            return value
+            return normalize_database_url(value)
     db_url = os.getenv("DB_URL")
     if db_url:
-        if db_url.startswith("jdbc:"):
-            return db_url[len("jdbc:") :]
-        return db_url
+        return normalize_database_url(db_url)
     raise RuntimeError("PostgreSQL connection URL not found in environment.")
 
 

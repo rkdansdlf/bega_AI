@@ -27,7 +27,11 @@ def resolve_team_display_name(
                 exc,
             )
         else:
-            if isinstance(resolved_name, str) and resolved_name.strip() and resolved_name != team_value:
+            if (
+                isinstance(resolved_name, str)
+                and resolved_name.strip()
+                and resolved_name != team_value
+            ):
                 return resolved_name
 
     fallback_name = _DEFAULT_TEAM_RESOLVER.display_name(team_value)

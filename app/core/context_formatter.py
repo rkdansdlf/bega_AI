@@ -715,7 +715,9 @@ class ContextFormatter:
             parts.append(
                 f"- {year}년 최소 출전 기준 미달 (타자 100타석, 선발투수 70이닝, 불펜투수 30이닝)"
             )
-            parts.append("- 해당 연도에 KBO 리그 소속이 아닌 선수 (외국 리그 또는 은퇴)")
+            parts.append(
+                "- 해당 연도에 KBO 리그 소속이 아닌 선수 (외국 리그 또는 은퇴)"
+            )
         if entity_filter.season_year and entity_filter.season_year < 2015:
             parts.append(
                 f"- {entity_filter.season_year}년은 현재 DB 수록 범위(2015년~) 이전일 수 있음"
@@ -743,13 +745,9 @@ class ContextFormatter:
                 f"- 선수명을 정확히 확인하거나 다른 연도({alt_year_prev}년, {alt_year_next}년)로 다시 질문"
             )
         if entity_filter.team_id:
-            parts.append(
-                "- 팀명 대신 선수 이름으로 검색하거나 연도 범위를 바꿔 질문"
-            )
+            parts.append("- 팀명 대신 선수 이름으로 검색하거나 연도 범위를 바꿔 질문")
         if entity_filter.stat_type:
-            parts.append(
-                "- 통계 항목명을 바꾸거나 상위 순위(TOP 5, TOP 10)로 질문"
-            )
+            parts.append("- 통계 항목명을 바꾸거나 상위 순위(TOP 5, TOP 10)로 질문")
         parts.append("- 연도를 빼고 '역대' 또는 '최근'으로 질문해보기")
         parts.append("")
         parts.append(

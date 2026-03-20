@@ -26,6 +26,10 @@ _SUPPRESSED_SOURCE_TABLES = ("game_inning_scores",)
 _PGVECTOR_SEARCH_PATH = "public, extensions, security"
 _IVFFLAT_PROBES = 512
 
+# rag_chunks 테이블 존재 여부 캐시 (프로세스 수명 동안 유효)
+# 테이블은 배포 후 변경되지 않으므로 프로세스 재시작 시 자동 무효화됨
+_rag_chunks_table_exists: Optional[bool] = None
+
 
 def _vector_literal(vector: Sequence[float]) -> str:
     """Python 리스트 형태의 벡터를 pgvector가 인식하는 문자열 형태로 변환합니다.
@@ -49,7 +53,15 @@ def _ensure_pgvector_session(conn: psycopg.Connection) -> None:
 
 
 def _rag_chunks_exists(conn: psycopg.Connection) -> bool:
-    """`rag_chunks` 테이블이 존재하는지 확인합니다."""
+    """`rag_chunks` 테이블이 존재하는지 확인합니다.
+
+    결과를 모듈 레벨 변수에 캐싱하여 information_schema 반복 조회를 방지합니다.
+    존재가 확인된 경우에만 캐싱하며, False는 캐싱하지 않아 초기화 시나리오(테이블 생성 전
+    요청이 먼저 들어오는 경우)에도 올바르게 동작합니다.
+    """
+    global _rag_chunks_table_exists
+    if _rag_chunks_table_exists is True:
+        return True
     try:
         _ensure_pgvector_session(conn)
         with conn.cursor() as cursor:
@@ -62,7 +74,10 @@ def _rag_chunks_exists(conn: psycopg.Connection) -> bool:
                 );
                 """)
             row = cursor.fetchone()
-            return bool(row[0]) if row else False
+            result = bool(row[0]) if row else False
+            if result:
+                _rag_chunks_table_exists = True
+            return result
     except Exception:
         return False
 
@@ -253,7 +268,9 @@ def similarity_search(
         return []
     except (PsycopgOperationalError, PsycopgInterfaceError, TimeoutError) as exc:
         logger.error("[Search] DB unreachable during similarity_search: %s", exc)
-        raise DBRetrievalError("pgvector query failed — DB unreachable", cause=exc) from exc
+        raise DBRetrievalError(
+            "pgvector query failed — DB unreachable", cause=exc
+        ) from exc
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
     logger.info(
