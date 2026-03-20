@@ -9,7 +9,6 @@ import re
 import json
 import logging
 import asyncio
-import os
 import time
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 import psycopg
@@ -45,6 +44,7 @@ from ..core.entity_extractor import (
     extract_entities_from_query,
     extract_team,
 )  # 엔티티 추출 임포트
+from ..config import Settings
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -154,6 +154,7 @@ class BaseballStatisticsAgent:
         self,
         connection: psycopg.Connection,
         llm_generator,
+        settings: Optional[Settings] = None,
         fast_path_enabled: bool = True,
         fast_path_scope: str = "team",
         fast_path_min_messages: int = 1,
@@ -173,6 +174,7 @@ class BaseballStatisticsAgent:
     ):
         self.connection = connection
         self.llm_generator = llm_generator
+        self.settings = settings
         self.db_query_tool = DatabaseQueryTool(connection)
         self.regulation_query_tool = RegulationQueryTool(connection)
         self.game_query_tool = GameQueryTool(connection)
@@ -260,6 +262,22 @@ class BaseballStatisticsAgent:
 
         # 등록 가능한 도구들
         self._register_tools()
+
+    def _settings_int(self, attr_name: str, default: int) -> int:
+        if self.settings is None:
+            return default
+        value = getattr(self.settings, attr_name, default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _resolve_perf_model_name(self) -> str:
+        if self.settings is None:
+            return "unknown"
+        if self.settings.llm_provider == "gemini":
+            return self.settings.gemini_model
+        return self.settings.openrouter_model
 
     def _register_tools(self):
         """사용 가능한 도구들을 등록합니다."""
@@ -4270,6 +4288,12 @@ class BaseballStatisticsAgent:
                         ]
                 except StopAsyncIteration:
                     answer_iterator = None
+                except asyncio.CancelledError:
+                    logger.info(
+                        "[BaseballAgent] Answer stream prefetch cancelled query=%s",
+                        query[:120],
+                    )
+                    raise
                 except Exception as exc:
                     logger.error(
                         "[BaseballAgent] Answer stream prefetch failed: %s", exc
@@ -4353,7 +4377,7 @@ class BaseballStatisticsAgent:
                 "first_token_retry_max_attempts": effective_retry_max_attempts,
                 "first_token_timeout_reason": first_token_timeout_reason,
                 "planner_mode": planner_mode,
-                "model": os.getenv("OPENROUTER_MODEL", "openrouter/free"),
+                "model": self._resolve_perf_model_name(),
             },
         }
 
@@ -4366,6 +4390,12 @@ class BaseballStatisticsAgent:
             try:
                 async for chunk in answer_iterator:
                     yield {"type": "answer_chunk", "content": chunk}
+            except asyncio.CancelledError:
+                logger.info(
+                    "[BaseballAgent] Answer stream iteration cancelled query=%s",
+                    query[:120],
+                )
+                raise
             except Exception as exc:
                 logger.error("[BaseballAgent] Answer stream iteration failed: %s", exc)
                 yield {
@@ -7971,7 +8001,13 @@ class BaseballStatisticsAgent:
                 and is_team_query
                 and isinstance(answer_max_tokens, int)
             ):
-                team_cap = 520 if len(tool_results) <= 2 else 650
+                team_cap = self._settings_int(
+                    "chat_team_answer_cap_base", 520
+                )
+                if len(tool_results) > 2:
+                    team_cap = self._settings_int(
+                        "chat_team_answer_cap_heavy", 650
+                    )
                 compact_query = query.replace(" ", "")
                 brief_query = len(compact_query) <= 24
                 low_complexity_markers = (
@@ -7992,24 +8028,59 @@ class BaseballStatisticsAgent:
                     "자세히",
                 )
                 if is_fast_path_answer:
-                    team_cap = 360 if request_mode == "stream" else 460
+                    if request_mode == "stream":
+                        team_cap = self._settings_int(
+                            "chat_team_answer_cap_fast_path_stream", 360
+                        )
+                    else:
+                        team_cap = self._settings_int(
+                            "chat_team_answer_cap_fast_path_completion", 460
+                        )
                 if brief_query and any(m in query for m in low_complexity_markers):
-                    team_cap = min(team_cap, 460)
+                    team_cap = min(
+                        team_cap,
+                        self._settings_int("chat_team_answer_cap_brief", 460),
+                    )
                 if any(m in query for m in high_complexity_markers):
-                    team_cap = max(team_cap, 600)
+                    team_cap = max(
+                        team_cap,
+                        self._settings_int(
+                            "chat_team_answer_cap_high_complexity", 600
+                        ),
+                    )
                 if request_mode == "stream":
-                    team_cap = min(team_cap, 420)
+                    team_cap = min(
+                        team_cap,
+                        self._settings_int("chat_team_answer_cap_stream", 420),
+                    )
                 if is_fast_path_answer and request_mode == "stream":
-                    team_cap = min(team_cap, 360)
+                    team_cap = min(
+                        team_cap,
+                        self._settings_int(
+                            "chat_team_answer_cap_fast_path_stream", 360
+                        ),
+                    )
                 if is_fast_path_answer and request_mode == "completion":
-                    team_cap = min(team_cap, 460)
+                    team_cap = min(
+                        team_cap,
+                        self._settings_int(
+                            "chat_team_answer_cap_fast_path_completion", 460
+                        ),
+                    )
                 answer_max_tokens = min(answer_max_tokens, team_cap)
             if (
                 self.chat_dynamic_token_enabled
                 and request_mode == "completion"
                 and isinstance(answer_max_tokens, int)
             ):
-                completion_cap = 880 if is_team_query else 1200
+                completion_cap = self._settings_int(
+                    (
+                        "chat_completion_answer_cap_team"
+                        if is_team_query
+                        else "chat_completion_answer_cap_general"
+                    ),
+                    880 if is_team_query else 1200,
+                )
                 answer_max_tokens = min(answer_max_tokens, completion_cap)
             logger.info(
                 "[AnswerBudget] max_tokens=%s dynamic=%s query_len=%d tool_count=%d team_query=%s mode=%s",

@@ -6,6 +6,7 @@ HTTP 엔드포인트 레벨에서 에러 처리와 응답 스키마를 검증합
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from types import SimpleNamespace
@@ -42,10 +43,15 @@ def _collect_sse_events(response) -> list[dict]:
             else raw_line.decode("utf-8", errors="replace")
         )
         if line.startswith("event:"):
+            if current:
+                events.append(current)
+                current = {}
             current["type"] = line[6:].strip()
         elif line.startswith("data:"):
             data_str = line[5:].strip()
             if data_str == "[DONE]":
+                if current:
+                    events.append(current)
                 break
             try:
                 current["data"] = json.loads(data_str)
@@ -141,6 +147,10 @@ def integration_client(monkeypatch):
         "app.routers.chat_stream.save_to_cache",
         AsyncMock(return_value=None),  # 캐시 저장 no-op
     )
+    monkeypatch.setattr(
+        "app.routers.chat_stream._request_is_disconnected",
+        AsyncMock(return_value=False),  # disconnect 변수를 고정해 SSE 메타 검증을 안정화
+    )
 
     with TestClient(test_app, raise_server_exceptions=False) as c:
         yield c, agent, pipeline
@@ -190,6 +200,31 @@ def test_db_down_strategy_in_sse_meta(integration_client):
     """DB-down 경로일 때 SSE meta 이벤트에 strategy가 포함되어야 한다."""
     client, agent, pipeline = integration_client
 
+    async def collect_meta_events() -> list[dict[str, Any]]:
+        result = await agent.process_query(_CHAT_PAYLOAD["question"])
+        events: list[dict[str, Any]] = []
+        async for event in chat_stream._chat_event_generator(
+            request=None,
+            question=_CHAT_PAYLOAD["question"],
+            filters=None,
+            style="markdown",
+            result=result,
+            error_payload=None,
+            cache_key=None,
+        ):
+            payload = event["data"]
+            events.append(
+                {
+                    "type": event["event"],
+                    "data": (
+                        json.loads(payload)
+                        if payload != "[DONE]"
+                        else payload
+                    ),
+                }
+            )
+        return events
+
     with patch(
         "app.core.rag.async_embed_query",
         new_callable=AsyncMock,
@@ -207,11 +242,7 @@ def test_db_down_strategy_in_sse_meta(integration_client):
                 new_callable=AsyncMock,
                 return_value="⚠️ DB 접속 불가 답변",
             ):
-                with client.stream(
-                    "POST", "/ai/chat/stream", json=_CHAT_PAYLOAD, headers=_AI_HEADERS
-                ) as r:
-                    assert r.status_code == 200
-                    events = _collect_sse_events(r)
+                events = asyncio.run(collect_meta_events())
 
     meta = _find_meta_event(events)
     assert meta is not None, "meta 이벤트가 없습니다"

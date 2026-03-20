@@ -214,10 +214,42 @@ class Settings(BaseSettings):
 
     # --- 검색(Retrieval) 관련 설정 ---
     default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
+    retrieval_multi_query_limit_per_query: int = Field(
+        8, validation_alias="RETRIEVAL_MULTI_QUERY_LIMIT_PER_QUERY"
+    )
+    retrieval_fallback_limit_relaxed: int = Field(
+        20, validation_alias="RETRIEVAL_FALLBACK_LIMIT_RELAXED"
+    )
+    retrieval_fallback_limit_minimal: int = Field(
+        25, validation_alias="RETRIEVAL_FALLBACK_LIMIT_MINIMAL"
+    )
+    retrieval_ivfflat_probes: int = Field(
+        512, validation_alias="RETRIEVAL_IVFFLAT_PROBES"
+    )
+    retrieval_hnsw_ef_search: int = Field(
+        100, validation_alias="RETRIEVAL_HNSW_EF_SEARCH"
+    )
+    rag_chunk_target_chars: int = Field(
+        650, validation_alias="RAG_CHUNK_TARGET_CHARS"
+    )
+    rag_chunk_max_chars: int = Field(900, validation_alias="RAG_CHUNK_MAX_CHARS")
+    rag_chunk_min_chars: int = Field(180, validation_alias="RAG_CHUNK_MIN_CHARS")
+    rag_chunk_overlap_chars: int = Field(
+        80, validation_alias="RAG_CHUNK_OVERLAP_CHARS"
+    )
 
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
     max_output_tokens: int = Field(4096, validation_alias="MAX_OUTPUT_TOKENS")
+    chat_completion_timeout_seconds: float = Field(
+        0.0, validation_alias="CHAT_COMPLETION_TIMEOUT_SECONDS"
+    )
+    chat_sse_ping_seconds: int = Field(
+        15, validation_alias="CHAT_SSE_PING_SECONDS"
+    )
+    chat_cached_stream_chunk_size: int = Field(
+        200, validation_alias="CHAT_CACHED_STREAM_CHUNK_SIZE"
+    )
     chat_dynamic_token_enabled: bool = Field(
         True, validation_alias="CHAT_DYNAMIC_TOKEN_ENABLED"
     )
@@ -277,6 +309,45 @@ class Settings(BaseSettings):
     chat_fast_path_fallback_on_empty: bool = Field(
         True, validation_alias="CHAT_FAST_PATH_FALLBACK_ON_EMPTY"
     )
+    chat_team_answer_cap_base: int = Field(
+        520, validation_alias="CHAT_TEAM_ANSWER_CAP_BASE"
+    )
+    chat_team_answer_cap_heavy: int = Field(
+        650, validation_alias="CHAT_TEAM_ANSWER_CAP_HEAVY"
+    )
+    chat_team_answer_cap_brief: int = Field(
+        460, validation_alias="CHAT_TEAM_ANSWER_CAP_BRIEF"
+    )
+    chat_team_answer_cap_high_complexity: int = Field(
+        600, validation_alias="CHAT_TEAM_ANSWER_CAP_HIGH_COMPLEXITY"
+    )
+    chat_team_answer_cap_stream: int = Field(
+        420, validation_alias="CHAT_TEAM_ANSWER_CAP_STREAM"
+    )
+    chat_team_answer_cap_fast_path_stream: int = Field(
+        360, validation_alias="CHAT_TEAM_ANSWER_CAP_FAST_PATH_STREAM"
+    )
+    chat_team_answer_cap_fast_path_completion: int = Field(
+        460, validation_alias="CHAT_TEAM_ANSWER_CAP_FAST_PATH_COMPLETION"
+    )
+    chat_completion_answer_cap_team: int = Field(
+        880, validation_alias="CHAT_COMPLETION_ANSWER_CAP_TEAM"
+    )
+    chat_completion_answer_cap_general: int = Field(
+        1200, validation_alias="CHAT_COMPLETION_ANSWER_CAP_GENERAL"
+    )
+
+    # --- 임베딩 설정 ---
+    embed_batch_size: int = Field(32, validation_alias="EMBED_BATCH_SIZE")
+    embed_dim: int = Field(1536, validation_alias="EMBED_DIM")
+    hf_embed_model: str = Field(
+        "intfloat/multilingual-e5-large", validation_alias="HF_EMBED_MODEL"
+    )
+    hf_embed_batch: int = Field(16, validation_alias="HF_BATCH")
+    gemini_embed_max_tokens: int = Field(
+        3072, validation_alias="GEMINI_MAX_TOKENS"
+    )
+    gemini_embed_rpm: int = Field(60, validation_alias="GEMINI_RPM")
 
     # --- Monitoring ---
     sentry_dsn: Optional[str] = Field(None, validation_alias="SENTRY_DSN")
@@ -301,6 +372,12 @@ class Settings(BaseSettings):
     def _validate_chat_openrouter_empty_chunk_backoff_ms(cls, value: int) -> int:
         if value < 50:
             raise ValueError("CHAT_OPENROUTER_EMPTY_CHUNK_BACKOFF_MS must be >= 50")
+        return value
+
+    @field_validator("chat_completion_timeout_seconds")
+    def _validate_chat_completion_timeout_seconds(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("CHAT_COMPLETION_TIMEOUT_SECONDS must be >= 0")
         return value
 
     @field_validator("chat_first_token_watchdog_seconds")
@@ -369,10 +446,42 @@ class Settings(BaseSettings):
         "chat_tool_result_max_items",
         "chat_tool_parallel_max_concurrency",
         "chat_fast_path_tool_cap",
+        "default_search_limit",
+        "retrieval_multi_query_limit_per_query",
+        "retrieval_fallback_limit_relaxed",
+        "retrieval_fallback_limit_minimal",
+        "retrieval_ivfflat_probes",
+        "retrieval_hnsw_ef_search",
+        "rag_chunk_target_chars",
+        "rag_chunk_max_chars",
+        "rag_chunk_min_chars",
+        "rag_chunk_overlap_chars",
+        "chat_sse_ping_seconds",
+        "chat_cached_stream_chunk_size",
+        "chat_team_answer_cap_base",
+        "chat_team_answer_cap_heavy",
+        "chat_team_answer_cap_brief",
+        "chat_team_answer_cap_high_complexity",
+        "chat_team_answer_cap_stream",
+        "chat_team_answer_cap_fast_path_stream",
+        "chat_team_answer_cap_fast_path_completion",
+        "chat_completion_answer_cap_team",
+        "chat_completion_answer_cap_general",
+        "embed_batch_size",
+        "embed_dim",
+        "hf_embed_batch",
+        "gemini_embed_max_tokens",
+        "gemini_embed_rpm",
     )
     def _validate_chat_positive_threshold(cls, value: int) -> int:
         if value < 1:
             raise ValueError("Chat optimization threshold 값은 1 이상이어야 합니다.")
+        return value
+
+    @field_validator("rag_chunk_overlap_chars")
+    def _validate_chunk_overlap_threshold(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("RAG_CHUNK_OVERLAP_CHARS must be >= 0")
         return value
 
     @field_validator("chat_fast_path_min_messages")

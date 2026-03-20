@@ -32,6 +32,8 @@ from app.core.chunking import smart_chunks
 from scripts.ingest_from_kbo import (
     ChunkPayload,
     TABLE_PROFILES,
+    build_static_profile_chunk_payloads,
+    build_static_source_row_prefix,
     build_content,
     build_select_query,
     build_title,
@@ -135,6 +137,7 @@ def collect_missing_ids(
 def _append_chunks(
     *,
     buffer: List[ChunkPayload],
+    settings: Any,
     source_table: str,
     source_row_id: str,
     title: str,
@@ -146,7 +149,7 @@ def _append_chunks(
     player_id: Optional[str],
     meta: Dict[str, Any],
 ) -> None:
-    chunks = smart_chunks(content)
+    chunks = smart_chunks(content, settings=settings)
     if not chunks:
         return
     if len(chunks) == 1:
@@ -183,6 +186,21 @@ def _append_chunks(
         )
 
 
+def build_static_target_payloads(
+    target: CoverageTarget,
+    *,
+    settings: Any,
+) -> List[ChunkPayload]:
+    profile = TABLE_PROFILES.get(target.table, {})
+    if not profile.get("source_file"):
+        raise ValueError(f"Coverage target '{target.table}' is not a static source_file profile")
+    return build_static_profile_chunk_payloads(
+        target.table,
+        profile,
+        settings=settings,
+    )
+
+
 def reembed_target_missing_rows(
     *,
     source_conn: psycopg.Connection,
@@ -198,6 +216,41 @@ def reembed_target_missing_rows(
 
     table = target.table
     profile = TABLE_PROFILES.get(table, {})
+    settings = get_settings()
+    if profile.get("source_file"):
+        payloads = build_static_target_payloads(target, settings=settings)
+        static_prefix = build_static_source_row_prefix(table, profile)
+        with dest_conn.cursor() as write_cur:
+            write_cur.execute("SET statement_timeout TO 0;")
+            write_cur.execute(
+                """
+                DELETE FROM rag_chunks
+                WHERE source_table = %s
+                  AND (source_row_id = %s OR source_row_id LIKE %s)
+                """,
+                (
+                    target.source_table,
+                    static_prefix,
+                    f"{static_prefix}#part%",
+                ),
+            )
+            buffer = list(payloads)
+            flushed_chunks = flush_chunks(
+                write_cur,
+                settings,
+                buffer,
+                max_concurrency=max_concurrency,
+                commit_interval=commit_interval,
+                stats={"since_commit": 0},
+                skip_embedding=False,
+            )
+        dest_conn.commit()
+        return {
+            "missing_ids": len(missing_ids),
+            "matched_rows": 1 if payloads else 0,
+            "flushed_chunks": flushed_chunks,
+        }
+
     pk_columns = get_primary_key_columns(source_conn, table)
     pk_hint: Sequence[str] = profile.get("pk_hint", [])
     season_year_filter = target.year if target.year != 0 else None
@@ -210,7 +263,6 @@ def reembed_target_missing_rows(
         since=None,
     )
     source_table = target.source_table
-    settings = get_settings()
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     buffer: List[ChunkPayload] = []
     stats: Dict[str, Any] = {"since_commit": 0}
@@ -281,6 +333,7 @@ def reembed_target_missing_rows(
 
                 _append_chunks(
                     buffer=buffer,
+                    settings=settings,
                     source_table=source_table,
                     source_row_id=source_row_id,
                     title=title,

@@ -32,7 +32,7 @@ async def ingest_document(
     _: None = Depends(rate_limit_debug_dependency),
 ):
     settings = get_settings()
-    chunks = smart_chunks(payload.content)
+    chunks = smart_chunks(payload.content, settings=settings)
     embeddings = await async_embed_texts(chunks, settings)
     chunk_count = len(chunks)
 

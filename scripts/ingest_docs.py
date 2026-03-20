@@ -22,6 +22,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from app.config import get_settings
 from app.core.chunking import smart_chunks
 from app.core.embeddings import async_embed_texts
+from scripts.ingest_from_kbo import (
+    TABLE_PROFILES,
+    build_static_chunk_meta,
+    build_static_source_row_id,
+    build_static_source_row_prefix,
+)
 
 # --- 설정 ---
 # 인덱싱할 최상위 디렉토리 목록
@@ -33,8 +39,6 @@ TARGET_DIRS = [
 ]
 # 인덱싱할 파일 확장자
 FILE_EXTENSION = ".md"
-# 데이터베이스에 저장될 때 사용할 출처(source) 테이블 이름
-SOURCE_TABLE_NAME = "markdown_docs"
 PGVECTOR_SEARCH_PATH = "public, extensions, security"
 
 
@@ -133,6 +137,26 @@ def infer_doc_metadata(relative_path: str) -> dict[str, str]:
     }
 
 
+def resolve_static_profile(file_path: str) -> tuple[str, dict[str, object]] | None:
+    resolved_path = Path(file_path).resolve()
+    for profile_key, profile in TABLE_PROFILES.items():
+        source_file = profile.get("source_file")
+        if not source_file:
+            continue
+        if Path(source_file).resolve() == resolved_path:
+            return profile_key, profile
+    return None
+
+
+def infer_source_table(relative_path: str) -> str:
+    normalized = relative_path.lower()
+    if normalized.startswith("docs/kbo_rulebook/"):
+        return "kbo_regulations"
+    if normalized.endswith("kbo_metrics_explained.md"):
+        return "kbo_definitions"
+    return "markdown_docs"
+
+
 async def main():
     """메인 인덱싱 실행 함수."""
     settings = get_settings()
@@ -165,30 +189,68 @@ async def main():
                 relative_path = (
                     Path(file_path).resolve().relative_to(PROJECT_ROOT).as_posix()
                 )
-                metadata = infer_doc_metadata(relative_path)
+                profile_match = resolve_static_profile(file_path)
+                if profile_match:
+                    profile_key, profile = profile_match
+                    source_table_name = str(profile.get("source_table", "markdown_docs"))
+                    title = str(profile.get("title") or Path(relative_path).name)
+                    season_year = int(profile.get("season_year", season_year) or 0)
+                    metadata = build_static_chunk_meta(
+                        profile_key,
+                        profile,
+                        chunk_index=1,
+                    )
+                    metadata.pop("chunk_index", None)
+                else:
+                    source_table_name = infer_source_table(relative_path)
+                    title = Path(relative_path).name
+                    metadata = infer_doc_metadata(relative_path)
+                    metadata["source_file"] = str(Path(file_path).resolve())
+                    metadata["source_path"] = relative_path
 
                 # 청크 분할 및 임베딩 생성
-                chunks = smart_chunks(content)
+                chunks = smart_chunks(content, settings=settings)
                 embeddings = await async_embed_texts(chunks, settings)
+
+                source_profile = profile_match[0] if profile_match else source_table_name
+                static_profile = (
+                    profile_match[1]
+                    if profile_match
+                    else {
+                        "source_table": source_table_name,
+                        "source_file": Path(file_path).resolve(),
+                    }
+                )
+                static_prefix = build_static_source_row_prefix(
+                    source_profile,
+                    static_profile,
+                )
 
                 cur.execute(
                     """
                     DELETE FROM rag_chunks
                     WHERE source_table = %s
-                      AND left(source_row_id, %s) = %s
+                      AND (source_row_id = %s OR source_row_id LIKE %s)
                     """,
                     (
-                        SOURCE_TABLE_NAME,
-                        len(relative_path) + 1,
-                        f"{relative_path}_",
+                        source_table_name,
+                        static_prefix,
+                        f"{static_prefix}#part%",
                     ),
                 )
 
                 # 데이터베이스에 저장
-                for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                total_chunks = len(chunks)
+                for i, (chunk, embedding) in enumerate(zip(chunks, embeddings), start=1):
                     vector_literal = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
-                    # 고유 ID로 파일 경로와 청크 인덱스 사용
-                    source_row_id = f"{relative_path}_{i}"
+                    source_row_id = build_static_source_row_id(
+                        source_profile,
+                        static_profile,
+                        chunk_index=i,
+                        total_chunks=total_chunks,
+                    )
+                    chunk_meta = dict(metadata)
+                    chunk_meta["chunk_index"] = i
 
                     cur.execute(
                         """
@@ -206,11 +268,11 @@ async def main():
                         (
                             season_year,
                             league_type_code,
-                            SOURCE_TABLE_NAME,
+                            source_table_name,
                             source_row_id,
-                            Path(relative_path).name,
+                            title,
                             chunk,
-                            json.dumps(metadata, ensure_ascii=False),
+                            json.dumps(chunk_meta, ensure_ascii=False),
                             vector_literal,
                         ),
                     )

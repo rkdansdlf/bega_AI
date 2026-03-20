@@ -460,7 +460,11 @@ class RAGPipeline:
         self.query_transformer = QueryTransformer(self._generate)
         self.context_formatter = ContextFormatter()
         # 야구 통계 전용 에이전트 초기화
-        self.baseball_agent = BaseballStatisticsAgent(connection, self._generate)
+        self.baseball_agent = BaseballStatisticsAgent(
+            connection,
+            self._generate,
+            settings=settings,
+        )
         self.wpa_calculator = WPACalculator()
         self._retrieval_error: Optional[str] = (
             None  # set if DB was unreachable during retrieval
@@ -575,15 +579,18 @@ class RAGPipeline:
         limit: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
         entity_filter: Optional[Any] = None,
+        use_hyde: bool = True,
     ) -> List[Dict[str, Any]]:
-        hyde_prompt = HYDE_PROMPT.format(question=query)
-        hyde_messages = [{"role": "user", "content": hyde_prompt}]
+        search_query = query
+        if use_hyde:
+            hyde_prompt = HYDE_PROMPT.format(question=query)
+            hyde_messages = [{"role": "user", "content": hyde_prompt}]
 
-        try:
-            hypothetical_document = await self._generate(hyde_messages)
-            search_query = hypothetical_document
-        except Exception:
-            search_query = query
+            try:
+                hypothetical_document = await self._generate(hyde_messages)
+                search_query = hypothetical_document
+            except Exception:
+                search_query = query
 
         limit = limit or self.settings.default_search_limit
         embedding = await async_embed_query(search_query, self.settings)
@@ -609,6 +616,7 @@ class RAGPipeline:
                     limit=limit,
                     filters=filters,
                     keyword=keyword,
+                    settings=self.settings,
                 )
         except DBRetrievalError as exc:
             logger.error("[RAG] DB retrieval error in retrieve(): %s", exc)
@@ -623,6 +631,7 @@ class RAGPipeline:
         *,
         filters: Optional[Dict[str, Any]] = None,
         use_llm_expansion: bool = False,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Multi-query retrieval을 사용하여 검색 품질을 향상시킵니다.
@@ -644,12 +653,19 @@ class RAGPipeline:
                 logger.warning(f"[RAG] LLM query expansion failed: {e}")
 
         # Multi-query retrieval 수행
+        effective_limit = max(1, int(limit or self.settings.default_search_limit))
+        effective_limit_per_query = max(
+            int(self.settings.retrieval_multi_query_limit_per_query),
+            effective_limit,
+        )
+
         docs = await multi_query_retrieval(
             query_variations,
             self.retrieve,
             filters or {},
             entity_filter=entity_filter,
-            limit_per_query=8,
+            limit_per_query=effective_limit_per_query,
+            limit=effective_limit,
         )
 
         logger.info(f"[RAG] Multi-query retrieval returned {len(docs)} documents")
@@ -1336,6 +1352,11 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         search_strategy = enhance_search_strategy(query)
         entity_filter = search_strategy["entity_filter"]
         extracted_filters = search_strategy["db_filters"]
+        raw_search_limit = search_strategy.get("search_limit")
+        if raw_search_limit in (None, ""):
+            search_limit = self.settings.default_search_limit
+        else:
+            search_limit = max(1, int(raw_search_limit))
         is_game_query = self._is_game_query(query)
         is_game_flow_narrative = self._is_game_flow_narrative_query(query)
 
@@ -1417,10 +1438,16 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
                 _results = await asyncio.gather(
                     self.retrieve_with_multi_query(
-                        query, entity_filter, filters=pitcher_filters
+                        query,
+                        entity_filter,
+                        filters=pitcher_filters,
+                        limit=search_limit,
                     ),
                     self.retrieve_with_multi_query(
-                        query, entity_filter, filters=batter_filters
+                        query,
+                        entity_filter,
+                        filters=batter_filters,
+                        limit=search_limit,
                     ),
                     return_exceptions=True,
                 )
@@ -1442,7 +1469,10 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             else:
                 # Position-specific multi-query search
                 docs = await self.retrieve_with_multi_query(
-                    query, entity_filter, filters=final_filters
+                    query,
+                    entity_filter,
+                    filters=final_filters,
+                    limit=search_limit,
                 )
 
         elif entity_filter.player_name:
@@ -1453,14 +1483,21 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             player_filters = dict(final_filters)
             player_filters.pop("source_table", None)  # Remove source_table filter
             docs = await self.retrieve_with_multi_query(
-                query, entity_filter, filters=player_filters, use_llm_expansion=False
+                query,
+                entity_filter,
+                filters=player_filters,
+                use_llm_expansion=False,
+                limit=search_limit,
             )
 
         else:
             logger.info("[RAG] General search strategy with multi-query")
             # Use multi-query for general searches to improve coverage
             docs = await self.retrieve_with_multi_query(
-                query, entity_filter, filters=final_filters
+                query,
+                entity_filter,
+                filters=final_filters,
+                limit=search_limit,
             )
 
         # 3. Fallback Strategy
@@ -1472,13 +1509,27 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             # Try removing source_table first
             if "source_table" in fallback_filters:
                 fallback_filters.pop("source_table")
-                docs = await self.retrieve(query, filters=fallback_filters, limit=20)
+                docs = await self.retrieve(
+                    query,
+                    filters=fallback_filters,
+                    limit=max(
+                        search_limit,
+                        int(self.settings.retrieval_fallback_limit_relaxed),
+                    ),
+                )
                 logger.info(f"[RAG] Fallback without source_table: {len(docs)} docs")
 
             # If still no results, try without team filter
             if not docs and "team_id" in fallback_filters:
                 fallback_filters.pop("team_id")
-                docs = await self.retrieve(query, filters=fallback_filters, limit=20)
+                docs = await self.retrieve(
+                    query,
+                    filters=fallback_filters,
+                    limit=max(
+                        search_limit,
+                        int(self.settings.retrieval_fallback_limit_relaxed),
+                    ),
+                )
                 logger.info(f"[RAG] Fallback without team filter: {len(docs)} docs")
 
             # Final fallback: only keep year and league filters
@@ -1488,7 +1539,14 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     minimal_filters["season_year"] = final_filters["season_year"]
                 if "meta.league" in final_filters:
                     minimal_filters["meta.league"] = final_filters["meta.league"]
-                docs = await self.retrieve(query, filters=minimal_filters, limit=25)
+                docs = await self.retrieve(
+                    query,
+                    filters=minimal_filters,
+                    limit=max(
+                        search_limit,
+                        int(self.settings.retrieval_fallback_limit_minimal),
+                    ),
+                )
                 logger.info(f"[RAG] Minimal fallback: {len(docs)} docs")
 
         logger.info(f"[RAG] Final retrieval result: {len(docs)} documents")

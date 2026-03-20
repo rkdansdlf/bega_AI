@@ -86,3 +86,30 @@ def test_resolve_primary_key_columns_prefers_profile_override(monkeypatch: Any) 
     )
 
     assert pk_columns == ["game_id"]
+
+
+def test_static_profile_source_row_ids_do_not_collide() -> None:
+    rules_profile = ingest_script.TABLE_PROFILES["markdown_docs_rules_terms"]
+    metrics_profile = ingest_script.TABLE_PROFILES["markdown_docs_strategy_metrics"]
+
+    rules_prefix = ingest_script.build_static_source_row_prefix(
+        "markdown_docs_rules_terms",
+        rules_profile,
+    )
+    metrics_prefix = ingest_script.build_static_source_row_prefix(
+        "markdown_docs_strategy_metrics",
+        metrics_profile,
+    )
+
+    assert rules_prefix != metrics_prefix
+    assert rules_prefix.startswith("markdown_docs:")
+    assert metrics_prefix.startswith("markdown_docs:")
+    assert (
+        ingest_script.build_static_source_row_id(
+            "markdown_docs_rules_terms",
+            rules_profile,
+            chunk_index=2,
+            total_chunks=3,
+        )
+        == f"{rules_prefix}#part2"
+    )
