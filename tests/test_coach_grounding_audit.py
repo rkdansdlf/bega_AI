@@ -7,10 +7,12 @@ from scripts.coach_grounding_audit import (
     BackendMatchMeta,
     build_league_context,
     build_report_payload,
+    build_diagnosis_summary,
     call_coach_analyze,
     compare_backend_meta,
     fetch_backend_match_meta,
     parse_sse_stream,
+    render_markdown_report,
     resolve_default_internal_api_key,
     select_validation_samples,
     validate_capture,
@@ -435,3 +437,80 @@ def test_write_report_files_creates_timestamped_and_latest_outputs(tmp_path: Pat
     assert Path(paths["markdown"]).exists()
     assert Path(paths["latest_json"]).exists()
     assert Path(paths["latest_markdown"]).exists()
+
+
+def test_build_diagnosis_summary_counts_series_state_partial_flags():
+    summary = build_diagnosis_summary(
+        [
+            {
+                "game_id": "g1",
+                "stage_label": "KS",
+                "expected_data_quality": "partial",
+                "root_causes": [],
+                "series_state_partial": True,
+                "series_state_hint_mismatch": False,
+            },
+            {
+                "game_id": "g2",
+                "stage_label": "PO",
+                "expected_data_quality": "grounded",
+                "root_causes": [],
+                "series_state_partial": False,
+                "series_state_hint_mismatch": False,
+            },
+        ]
+    )
+
+    assert summary["series_state_partial_count"] == 1
+    assert summary["series_state_hint_mismatch_count"] == 0
+
+
+def test_render_markdown_report_includes_series_diagnostics():
+    report = build_report_payload(
+        command="all",
+        options={"command": "all"},
+        diagnosis=[
+            {
+                "game_id": "g1",
+                "game_date": "2025-10-31",
+                "season_year": 2025,
+                "home_team_id": "LG",
+                "away_team_id": "HH",
+                "stage_label": "KS",
+                "expected_data_quality": "partial",
+                "root_causes": [],
+                "series_state_partial": True,
+                "series_state_hint_mismatch": False,
+            }
+        ],
+        validation={
+            "targets": ["g1"],
+            "results": [
+                {
+                    "diagnosis": {
+                        "game_id": "g1",
+                        "away_team_id": "HH",
+                        "home_team_id": "LG",
+                    },
+                    "hard_failures": [],
+                    "soft_warnings": [],
+                    "series_game_no_mismatch": True,
+                    "ok": True,
+                }
+            ],
+            "summary": {
+                "total_targets": 1,
+                "hard_failure_count": 0,
+                "soft_warning_count": 0,
+                "passed_targets": 1,
+                "failed_targets": 0,
+                "series_game_no_mismatch_count": 1,
+            },
+        },
+    )
+
+    markdown = render_markdown_report(report)
+
+    assert "시리즈 진단" in markdown
+    assert "partial 1" in markdown
+    assert "validation_seriesGameNo_mismatch 1" in markdown

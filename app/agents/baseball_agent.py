@@ -137,6 +137,8 @@ PLAYER_LLM_ALLOWED_TOOLS = {
     "get_player_stats",
     "get_career_stats",
 }
+
+
 class BaseballStatisticsAgent:
     """
     야구 통계 전문 에이전트
@@ -2624,7 +2626,9 @@ class BaseballStatisticsAgent:
         player_name: str,
         entity_context: str,
     ) -> str:
-        prefers_career = any(token in query_text.lower() for token in ["통산", "커리어", "총"])
+        prefers_career = any(
+            token in query_text.lower() for token in ["통산", "커리어", "총"]
+        )
         primary_tool = "get_career_stats" if prefers_career else "get_player_stats"
         secondary_tool = "get_player_stats" if prefers_career else "get_career_stats"
         return (
