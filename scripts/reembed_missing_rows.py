@@ -193,7 +193,9 @@ def build_static_target_payloads(
 ) -> List[ChunkPayload]:
     profile = TABLE_PROFILES.get(target.table, {})
     if not profile.get("source_file"):
-        raise ValueError(f"Coverage target '{target.table}' is not a static source_file profile")
+        raise ValueError(
+            f"Coverage target '{target.table}' is not a static source_file profile"
+        )
     return build_static_profile_chunk_payloads(
         target.table,
         profile,

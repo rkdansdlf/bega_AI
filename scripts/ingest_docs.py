@@ -192,7 +192,9 @@ async def main():
                 profile_match = resolve_static_profile(file_path)
                 if profile_match:
                     profile_key, profile = profile_match
-                    source_table_name = str(profile.get("source_table", "markdown_docs"))
+                    source_table_name = str(
+                        profile.get("source_table", "markdown_docs")
+                    )
                     title = str(profile.get("title") or Path(relative_path).name)
                     season_year = int(profile.get("season_year", season_year) or 0)
                     metadata = build_static_chunk_meta(
@@ -212,7 +214,9 @@ async def main():
                 chunks = smart_chunks(content, settings=settings)
                 embeddings = await async_embed_texts(chunks, settings)
 
-                source_profile = profile_match[0] if profile_match else source_table_name
+                source_profile = (
+                    profile_match[0] if profile_match else source_table_name
+                )
                 static_profile = (
                     profile_match[1]
                     if profile_match
@@ -241,7 +245,9 @@ async def main():
 
                 # 데이터베이스에 저장
                 total_chunks = len(chunks)
-                for i, (chunk, embedding) in enumerate(zip(chunks, embeddings), start=1):
+                for i, (chunk, embedding) in enumerate(
+                    zip(chunks, embeddings), start=1
+                ):
                     vector_literal = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
                     source_row_id = build_static_source_row_id(
                         source_profile,

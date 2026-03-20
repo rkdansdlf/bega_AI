@@ -240,7 +240,9 @@ def _cosine_similarity(
     if not query_embedding or not doc_embedding:
         return 0.0
     dot = sum(float(a) * float(b) for a, b in zip(query_embedding, doc_embedding))
-    query_norm = math.sqrt(sum(float(value) * float(value) for value in query_embedding))
+    query_norm = math.sqrt(
+        sum(float(value) * float(value) for value in query_embedding)
+    )
     doc_norm = math.sqrt(sum(float(value) * float(value) for value in doc_embedding))
     if query_norm == 0.0 or doc_norm == 0.0:
         return 0.0
@@ -334,7 +336,9 @@ async def _run_variant(
     )
 
 
-def _aggregate_variant(rows: Sequence[Dict[str, Any]], variant_name: str) -> Dict[str, Any]:
+def _aggregate_variant(
+    rows: Sequence[Dict[str, Any]], variant_name: str
+) -> Dict[str, Any]:
     variant_rows = [row[variant_name] for row in rows]
     total = len(variant_rows)
     successful = [row for row in variant_rows if not row.get("error")]

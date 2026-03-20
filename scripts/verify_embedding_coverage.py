@@ -345,8 +345,6 @@ def _parse_row_id_pairs(row_id: str) -> Dict[str, str]:
     return pairs
 
 
-
-
 def _load_actual_ids(
     dest_cur,
     target: CoverageTarget,

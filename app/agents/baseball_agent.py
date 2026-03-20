@@ -8001,13 +8001,9 @@ class BaseballStatisticsAgent:
                 and is_team_query
                 and isinstance(answer_max_tokens, int)
             ):
-                team_cap = self._settings_int(
-                    "chat_team_answer_cap_base", 520
-                )
+                team_cap = self._settings_int("chat_team_answer_cap_base", 520)
                 if len(tool_results) > 2:
-                    team_cap = self._settings_int(
-                        "chat_team_answer_cap_heavy", 650
-                    )
+                    team_cap = self._settings_int("chat_team_answer_cap_heavy", 650)
                 compact_query = query.replace(" ", "")
                 brief_query = len(compact_query) <= 24
                 low_complexity_markers = (
@@ -8044,9 +8040,7 @@ class BaseballStatisticsAgent:
                 if any(m in query for m in high_complexity_markers):
                     team_cap = max(
                         team_cap,
-                        self._settings_int(
-                            "chat_team_answer_cap_high_complexity", 600
-                        ),
+                        self._settings_int("chat_team_answer_cap_high_complexity", 600),
                     )
                 if request_mode == "stream":
                     team_cap = min(

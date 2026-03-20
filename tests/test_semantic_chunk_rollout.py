@@ -74,7 +74,9 @@ def test_run_rollout_dry_run_does_not_execute_subprocess(
     assert rollout.run_rollout(args) == 0
     captured = capsys.readouterr().out
     assert "verify_coverage" in captured
-    summary = json.loads((tmp_path / "dry_run_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads(
+        (tmp_path / "dry_run_summary.json").read_text(encoding="utf-8")
+    )
     assert summary["status"] == "dry_run"
 
 

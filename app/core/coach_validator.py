@@ -415,7 +415,9 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
             try:
                 parsed = json.loads(auto_closed)
                 if isinstance(parsed, dict):
-                    logger.info("[CoachValidator] Auto-closed incomplete JSON successfully")
+                    logger.info(
+                        "[CoachValidator] Auto-closed incomplete JSON successfully"
+                    )
                     return auto_closed
             except json.JSONDecodeError:
                 pass

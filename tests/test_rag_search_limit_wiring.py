@@ -37,10 +37,18 @@ def _search_strategy(search_limit: int, *, db_filters=None):
 async def test_run_passes_search_strategy_limit_to_multi_query(monkeypatch) -> None:
     pipeline = _make_pipeline()
 
-    monkeypatch.setattr("app.core.rag.enhance_search_strategy", lambda _query: _search_strategy(13))
-    monkeypatch.setattr(pipeline, "_is_statistical_query", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(pipeline, "_is_general_conversation", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(pipeline, "_is_regulation_query", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "app.core.rag.enhance_search_strategy", lambda _query: _search_strategy(13)
+    )
+    monkeypatch.setattr(
+        pipeline, "_is_statistical_query", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(
+        pipeline, "_is_general_conversation", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(
+        pipeline, "_is_regulation_query", lambda *_args, **_kwargs: False
+    )
     monkeypatch.setattr(pipeline, "_is_game_query", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         pipeline,
@@ -60,7 +68,9 @@ async def test_run_passes_search_strategy_limit_to_multi_query(monkeypatch) -> N
         assert limit == 13
         raise RuntimeError("limit_asserted")
 
-    monkeypatch.setattr(pipeline, "retrieve_with_multi_query", _fake_retrieve_with_multi_query)
+    monkeypatch.setattr(
+        pipeline, "retrieve_with_multi_query", _fake_retrieve_with_multi_query
+    )
 
     with pytest.raises(RuntimeError, match="limit_asserted"):
         await pipeline.run("일반 검색 질문", intent="stats_lookup")
@@ -72,11 +82,19 @@ async def test_run_uses_configured_fallback_limit(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "app.core.rag.enhance_search_strategy",
-        lambda _query: _search_strategy(9, db_filters={"source_table": "markdown_docs"}),
+        lambda _query: _search_strategy(
+            9, db_filters={"source_table": "markdown_docs"}
+        ),
     )
-    monkeypatch.setattr(pipeline, "_is_statistical_query", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(pipeline, "_is_general_conversation", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(pipeline, "_is_regulation_query", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        pipeline, "_is_statistical_query", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(
+        pipeline, "_is_general_conversation", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(
+        pipeline, "_is_regulation_query", lambda *_args, **_kwargs: False
+    )
     monkeypatch.setattr(pipeline, "_is_game_query", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         pipeline,
@@ -99,7 +117,9 @@ async def test_run_uses_configured_fallback_limit(monkeypatch) -> None:
         assert limit == 14
         raise RuntimeError("fallback_limit_asserted")
 
-    monkeypatch.setattr(pipeline, "retrieve_with_multi_query", _fake_retrieve_with_multi_query)
+    monkeypatch.setattr(
+        pipeline, "retrieve_with_multi_query", _fake_retrieve_with_multi_query
+    )
     monkeypatch.setattr(pipeline, "retrieve", _fake_retrieve)
 
     with pytest.raises(RuntimeError, match="fallback_limit_asserted"):

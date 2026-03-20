@@ -26,7 +26,4 @@ def test_build_targets_includes_static_source_file_profiles() -> None:
         and target.source_table == "kbo_regulations"
         for target in targets
     )
-    assert any(
-        target.source_table == "kbo_definitions"
-        for target in targets
-    )
+    assert any(target.source_table == "kbo_definitions" for target in targets)

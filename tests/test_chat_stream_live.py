@@ -55,7 +55,9 @@ def stream_app(monkeypatch):
     mock_conn_ctx.__exit__ = MagicMock(return_value=False)
     mock_pool.connection = MagicMock(return_value=mock_conn_ctx)
 
-    monkeypatch.setattr("app.routers.chat_stream.get_connection_pool", lambda: mock_pool)
+    monkeypatch.setattr(
+        "app.routers.chat_stream.get_connection_pool", lambda: mock_pool
+    )
     monkeypatch.setattr(
         "app.routers.chat_stream.get_cached_response",
         AsyncMock(return_value=None),
@@ -98,7 +100,9 @@ def test_stream_route_emits_status_before_delayed_first_token(stream_app) -> Non
                 },
             }
 
-    stream_app.dependency_overrides[chat_stream.get_agent] = lambda: _DelayedStreamAgent()
+    stream_app.dependency_overrides[chat_stream.get_agent] = (
+        lambda: _DelayedStreamAgent()
+    )
 
     with TestClient(stream_app, raise_server_exceptions=False) as client:
         with client.stream(
@@ -114,7 +118,9 @@ def test_stream_route_emits_status_before_delayed_first_token(stream_app) -> Non
 
 
 @pytest.mark.asyncio
-async def test_live_event_generator_emits_fallback_meta_on_partial_stream_error() -> None:
+async def test_live_event_generator_emits_fallback_meta_on_partial_stream_error() -> (
+    None
+):
     async def _broken_stream():
         yield {"type": "answer_chunk", "content": "부분 응답"}
         raise RuntimeError("stream exploded")
