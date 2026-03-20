@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -1126,6 +1127,132 @@ def build_canonical_source_row_id(row: Dict[str, Any], table: str) -> Optional[s
     return "|".join(parts)
 
 
+def _relative_source_file_path(source_file: Path) -> str:
+    resolved = Path(source_file).resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _default_static_knowledge_type(source_table: str) -> str:
+    if source_table == "kbo_regulations":
+        return "rules_terms"
+    if source_table == "kbo_definitions":
+        return "strategy_metrics"
+    return "document"
+
+
+def build_static_source_row_prefix(profile_key: str, profile: Dict[str, Any]) -> str:
+    source_table = str(profile.get("source_table", profile_key))
+    relative_path = _relative_source_file_path(Path(profile["source_file"]))
+    raw_slug = relative_path[:-3] if relative_path.lower().endswith(".md") else relative_path
+    slug = re.sub(r"[^0-9a-z]+", "_", raw_slug.lower()).strip("_")
+    if not slug:
+        slug = hashlib.md5(relative_path.encode("utf-8")).hexdigest()[:12]
+    return f"{source_table}:{slug}"
+
+
+def build_static_source_row_id(
+    profile_key: str,
+    profile: Dict[str, Any],
+    *,
+    chunk_index: int,
+    total_chunks: int,
+) -> str:
+    prefix = build_static_source_row_prefix(profile_key, profile)
+    if total_chunks <= 1:
+        return prefix
+    return f"{prefix}#part{chunk_index}"
+
+
+def build_static_chunk_meta(
+    profile_key: str,
+    profile: Dict[str, Any],
+    *,
+    chunk_index: int,
+) -> Dict[str, Any]:
+    source_table = str(profile.get("source_table", profile_key))
+    relative_path = _relative_source_file_path(Path(profile["source_file"]))
+    return {
+        "source_file": str(Path(profile["source_file"]).resolve()),
+        "source_path": relative_path,
+        "source_profile": profile_key,
+        "chunk_index": chunk_index,
+        "league_scope": profile.get(
+            "league_scope",
+            "kbo+baseball" if source_table == "markdown_docs" else "kbo",
+        ),
+        "knowledge_type": profile.get(
+            "knowledge_type",
+            _default_static_knowledge_type(source_table),
+        ),
+        "freshness": profile.get("freshness", "evergreen"),
+    }
+
+
+def read_static_profile_content(profile_key: str, profile: Dict[str, Any]) -> str:
+    source_file = Path(profile["source_file"]).resolve()
+    try:
+        return source_file.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Static source file not found for profile '{profile_key}': {source_file}"
+        ) from exc
+
+
+def build_static_profile_chunk_payloads(
+    profile_key: str,
+    profile: Dict[str, Any],
+    *,
+    settings: Any,
+    content: Optional[str] = None,
+) -> List[ChunkPayload]:
+    raw_content = (
+        content if content is not None else read_static_profile_content(profile_key, profile)
+    )
+    normalized_content = raw_content.strip()
+    if not normalized_content:
+        return []
+
+    if profile.get("single_chunk"):
+        chunks = [normalized_content]
+    else:
+        chunks = smart_chunks(raw_content, settings=settings)
+    if not chunks:
+        return []
+
+    total_chunks = len(chunks)
+    source_table = str(profile.get("source_table", profile_key))
+    season_year = int(profile.get("season_year", 0) or 0)
+    title = str(profile.get("title") or profile_key)
+
+    return [
+        ChunkPayload(
+            table=source_table,
+            source_row_id=build_static_source_row_id(
+                profile_key,
+                profile,
+                chunk_index=idx,
+                total_chunks=total_chunks,
+            ),
+            title=title,
+            content=chunk,
+            season_year=season_year,
+            season_id=None,
+            league_type_code=0,
+            team_id=None,
+            player_id=None,
+            meta=build_static_chunk_meta(
+                profile_key,
+                profile,
+                chunk_index=idx,
+            ),
+        )
+        for idx, chunk in enumerate(chunks, start=1)
+    ]
+
+
 def build_source_row_id(
     row: Dict[str, Any],
     table: str,
@@ -1459,6 +1586,7 @@ def _build_chunk_payload_dicts_for_row(
     today_str: str,
 ) -> List[Dict[str, Any]]:
     profile = TABLE_PROFILES.get(table_name, {})
+    settings = get_settings()
     target_source_table = str(profile.get("source_table", table_name))
     title = build_title(row, table_name, source_row_id, profile)
     renderer = profile.get("renderer")
@@ -1495,7 +1623,7 @@ def _build_chunk_payload_dicts_for_row(
     if profile.get("single_chunk"):
         chunks = [content.strip()] if content and content.strip() else []
     else:
-        chunks = smart_chunks(content)
+        chunks = smart_chunks(content, settings=settings)
     if not chunks:
         return []
 
@@ -1769,59 +1897,36 @@ def ingest_table(
         if "source_file" in profile:
             print(f"      정적 파일 '{profile['source_file']}'을(를) 수집 중입니다...")
             try:
-                with open(profile["source_file"], "r", encoding="utf-8") as f:
-                    content = f.read()
-            except FileNotFoundError:
-                print(f"오류: '{profile['source_file']}' 파일을 찾을 수 없습니다.")
+                payloads = build_static_profile_chunk_payloads(
+                    table_name,
+                    profile,
+                    settings=settings,
+                )
+            except RuntimeError as exc:
+                print(f"오류: {exc}")
                 return 0
 
-            chunks = smart_chunks(content)
-            if not chunks:
+            if not payloads:
                 print(
                     f"오류: '{profile['source_file']}' 파일 내용에서 청크를 생성할 수 없습니다."
                 )
                 return 0
 
-            for idx, chunk in enumerate(chunks, start=1):
-                buffer.append(
-                    ChunkPayload(
-                        table=profile["source_table"],
-                        source_row_id=f"{profile['source_table']}_part_{idx}",
-                        title=profile["title"],
-                        content=chunk,
-                        season_year=int(profile.get("season_year", 0) or 0),
-                        season_id=None,
-                        league_type_code=0,
-                        team_id=None,
-                        player_id=None,
-                        meta={
-                            "source_file": str(profile["source_file"]),
-                            "chunk_index": idx,
-                            "league_scope": profile.get(
-                                "league_scope",
-                                (
-                                    "kbo+baseball"
-                                    if profile.get("source_table") == "markdown_docs"
-                                    else "kbo"
-                                ),
-                            ),
-                            "knowledge_type": profile.get(
-                                "knowledge_type",
-                                (
-                                    "rules_terms"
-                                    if profile.get("source_table") == "kbo_regulations"
-                                    else (
-                                        "strategy_metrics"
-                                        if profile.get("source_table")
-                                        == "kbo_definitions"
-                                        else "document"
-                                    )
-                                ),
-                            ),
-                            "freshness": profile.get("freshness", "evergreen"),
-                        },
-                    )
-                )
+            static_prefix = build_static_source_row_prefix(table_name, profile)
+            write_cur.execute(
+                """
+                DELETE FROM rag_chunks
+                WHERE source_table = %s
+                  AND (source_row_id = %s OR source_row_id LIKE %s)
+                """,
+                (
+                    profile["source_table"],
+                    static_prefix,
+                    f"{static_prefix}#part%",
+                ),
+            )
+
+            buffer.extend(payloads)
             flushed = flush_chunks(
                 write_cur,
                 settings,
@@ -1831,7 +1936,7 @@ def ingest_table(
                 stats=stats,
                 skip_embedding=skip_embedding,
             )
-            total_chunks += flushed
+            total_chunks = flushed
             dest_conn.commit()  # Commit after static file ingestion
             if flushed > 0:
                 print(f"      총 {flushed}개 청크를 처리했습니다.", flush=True)

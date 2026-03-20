@@ -294,6 +294,55 @@ class CoachResponse(BaseModel):
 # ============================================================
 
 
+_TRAILING_COMMA_PATTERN = re.compile(r",\s*([}\]])")
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Remove trailing commas before } or ] (common LLM JSON mistake)."""
+    return _TRAILING_COMMA_PATTERN.sub(r"\1", text)
+
+
+def _try_auto_close_json(text: str) -> Optional[str]:
+    """Attempt to close incomplete JSON by balancing braces/brackets."""
+    open_braces = 0
+    open_brackets = 0
+    in_string = False
+    escape_next = False
+
+    for ch in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\":
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            open_braces += 1
+        elif ch == "}":
+            open_braces -= 1
+        elif ch == "[":
+            open_brackets += 1
+        elif ch == "]":
+            open_brackets -= 1
+
+    if open_braces <= 0 and open_brackets <= 0:
+        return None  # Already balanced or over-closed
+
+    # Only attempt closing if imbalance is small (likely truncation)
+    if open_braces > 3 or open_brackets > 3:
+        return None
+
+    closed = text.rstrip().rstrip(",")
+    closed += "]" * max(0, open_brackets)
+    closed += "}" * max(0, open_braces)
+    return closed
+
+
 def extract_json_from_response(raw_response: str) -> Optional[str]:
     """
     LLM 응답에서 JSON 부분을 추출합니다.
@@ -302,36 +351,49 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
     - 순수 JSON
     - ```json ... ``` 코드 블록
     - 앞뒤 텍스트가 있는 JSON
+    - trailing comma 제거
+    - 불완전 JSON 자동 닫기
     """
     if not raw_response:
         return None
 
     text = _CONTROL_CHAR_PATTERN.sub(" ", raw_response).strip()
 
-    # Case 1: ```json 코드 블록
+    # Case 1: ```json 코드 블록 (prefer the largest dict-looking block)
     json_block_pattern = r"```(?:json)?\s*([\s\S]*?)```"
     matches = re.findall(json_block_pattern, text)
     if matches:
-        return matches[0].strip()
+        # Pick the first block that looks like a JSON object
+        for match in matches:
+            candidate = _strip_trailing_commas(match.strip())
+            if candidate.startswith("{"):
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except json.JSONDecodeError:
+                    pass
+        # Fall back to first match with trailing comma fix
+        return _strip_trailing_commas(matches[0].strip())
 
+    # Try with trailing comma removal first
+    cleaned = _strip_trailing_commas(text)
     decoder = json.JSONDecoder()
-    for idx, char in enumerate(text):
+    for idx, char in enumerate(cleaned):
         if char != "{":
             continue
         try:
-            parsed, end_idx = decoder.raw_decode(text[idx:])
+            parsed, end_idx = decoder.raw_decode(cleaned[idx:])
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            return text[idx : idx + end_idx]
+            return cleaned[idx : idx + end_idx]
 
-    # Case 2: { ... } JSON 객체 직접 찾기
-    # 가장 바깥쪽 중괄호 매칭
+    # Case 2: { ... } JSON 객체 직접 찾기 (brace matching)
     brace_count = 0
     start_idx = -1
     end_idx = -1
 
-    for i, char in enumerate(text):
+    for i, char in enumerate(cleaned):
         if char == "{":
             if brace_count == 0:
                 start_idx = i
@@ -343,7 +405,20 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
                 break
 
     if start_idx != -1 and end_idx != -1:
-        return text[start_idx:end_idx]
+        return cleaned[start_idx:end_idx]
+
+    # Case 3: Incomplete JSON - try auto-closing
+    if start_idx != -1 and end_idx == -1:
+        fragment = cleaned[start_idx:]
+        auto_closed = _try_auto_close_json(fragment)
+        if auto_closed:
+            try:
+                parsed = json.loads(auto_closed)
+                if isinstance(parsed, dict):
+                    logger.info("[CoachValidator] Auto-closed incomplete JSON successfully")
+                    return auto_closed
+            except json.JSONDecodeError:
+                pass
 
     return None
 

@@ -48,6 +48,7 @@ from scripts.batch_coach_matchup_cache import (
     _normalize_recovered_pending_result,
     call_analyze_with_retries,
     collect_cache_verification_results,
+    force_rebuild_delete,
     load_targets,
     parse_cache_state_filter,
     parse_status_bucket_filter,
@@ -117,6 +118,15 @@ async def async_main(args: argparse.Namespace) -> int:
     if not targets:
         print("No auto_brief targets found.")
         return 0
+
+    if args.force_rebuild and not args.verify_cache_only:
+        keys = [t.cache_key for t in targets]
+        stats = force_rebuild_delete(keys)
+        print(
+            f"Force rebuild: deleted {stats.get('deleted_cache_rows', 0)} cache rows "
+            f"(blocked={stats.get('unsafe_force_rebuild_blocked_count', 0)}, "
+            f"missing={stats.get('missing_cache_row_count', 0)})"
+        )
 
     print(
         f"=== auto_brief batch: {len(targets)} targets "
@@ -364,6 +374,11 @@ def parse_args() -> argparse.Namespace:
         "--quality-report",
         default=None,
         help="Output quality report JSON path.",
+    )
+    parser.add_argument(
+        "--force-rebuild",
+        action="store_true",
+        help="Delete selected auto_brief cache keys before replaying.",
     )
     parser.add_argument(
         "--verify-cache-only",

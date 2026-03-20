@@ -570,6 +570,7 @@ def get_agent(
     return BaseballStatisticsAgent(
         connection=conn,
         llm_generator=llm_generator,
+        settings=settings,
         fast_path_enabled=settings.chat_fast_path_enabled,
         fast_path_scope=settings.chat_fast_path_scope,
         fast_path_min_messages=settings.chat_fast_path_min_messages,

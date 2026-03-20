@@ -28,6 +28,8 @@ from app.config import get_settings
 from scripts.ingest_from_kbo import (
     CANONICAL_SOURCE_ROW_KEYS,
     TABLE_PROFILES,
+    build_static_profile_chunk_payloads,
+    build_static_source_row_prefix,
     build_canonical_source_row_id,
     build_select_query,
     build_source_row_id,
@@ -56,6 +58,11 @@ STATIC_TABLES: List[str] = [
     "stadiums",
     "player_basic",
     "player_movements",
+]
+STATIC_FILE_PROFILES: List[str] = [
+    table_name
+    for table_name, profile in TABLE_PROFILES.items()
+    if profile.get("source_file")
 ]
 
 # 과거 source_row_id 규칙(legacy)에서 canonical 규칙으로 매핑할 때 사용하는 키.
@@ -143,6 +150,12 @@ def build_targets(mode: str, start_year: int, end_year: int) -> List[CoverageTar
             targets.append(
                 CoverageTarget(table=table, year=0, source_table=source_table)
             )
+        for table in STATIC_FILE_PROFILES:
+            profile = TABLE_PROFILES.get(table, {})
+            source_table = str(profile.get("source_table", table))
+            targets.append(
+                CoverageTarget(table=table, year=0, source_table=source_table)
+            )
     return targets
 
 
@@ -216,6 +229,27 @@ def _load_expected_ids(
     target: CoverageTarget,
 ) -> tuple[int, Dict[str, str]]:
     profile = TABLE_PROFILES.get(target.table, {})
+    if profile.get("source_file"):
+        insert_sql = "INSERT INTO expected_ids (id) VALUES (%s) ON CONFLICT DO NOTHING"
+        settings = get_settings()
+        payload = [
+            (chunk.source_row_id,)
+            for chunk in build_static_profile_chunk_payloads(
+                target.table,
+                profile,
+                settings=settings,
+            )
+        ]
+        if payload:
+            dest_cur.executemany(insert_sql, payload)
+        else:
+            dest_cur.execute(
+                insert_sql,
+                (build_static_source_row_prefix(target.table, profile),),
+            )
+        dest_cur.execute("SELECT count(*) FROM expected_ids")
+        return int(dest_cur.fetchone()[0]), {}
+
     pk_columns = resolve_primary_key_columns(source_conn, target.table, profile)
     pk_hint: Sequence[str] = profile.get("pk_hint", [])
     season_year = target.year if target.year != 0 else None
@@ -258,14 +292,9 @@ def _load_expected_ids(
     return int(dest_cur.fetchone()[0]), legacy_aliases
 
 
-def _parse_row_id_pairs(row_id: str) -> Dict[str, str]:
-    pairs: Dict[str, str] = {}
-    for token in row_id.split("|"):
-        if "=" not in token:
-            continue
-        key, value = token.split("=", 1)
-        pairs[key] = value
-    return pairs
+def _is_source_file_target(table: str) -> bool:
+    profile = TABLE_PROFILES.get(table, {})
+    return bool(profile.get("source_file"))
 
 
 def normalize_actual_source_row_id(
@@ -274,6 +303,9 @@ def normalize_actual_source_row_id(
     meta: Optional[Dict[str, Any]] = None,
     legacy_aliases: Optional[Dict[str, str]] = None,
 ) -> str:
+    if _is_source_file_target(table):
+        return raw_source_row_id
+
     base = raw_source_row_id.split("#part", 1)[0]
     pairs = _parse_row_id_pairs(base)
 
@@ -301,6 +333,18 @@ def normalize_actual_source_row_id(
             return mapped
 
     return base
+
+
+def _parse_row_id_pairs(row_id: str) -> Dict[str, str]:
+    pairs: Dict[str, str] = {}
+    for token in row_id.split("|"):
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        pairs[key] = value
+    return pairs
+
+
 
 
 def _load_actual_ids(

@@ -6,6 +6,7 @@ Query Transformation과 Multi-query Retrieval을 위한 모듈입니다.
 """
 
 import asyncio
+import inspect
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -253,6 +254,7 @@ async def multi_query_retrieval(
     filters: Dict[str, Any],
     entity_filter: Optional[Any] = None,
     limit_per_query: int = 5,
+    limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     여러 쿼리 변형으로 병렬 검색을 수행하고 결과를 결합합니다.
@@ -269,6 +271,8 @@ async def multi_query_retrieval(
     logger.info(
         f"[MultiQuery] Starting retrieval with {len(query_variations)} variations"
     )
+    retrieve_signature = inspect.signature(retrieve_func)
+    supports_use_hyde = "use_hyde" in retrieve_signature.parameters
 
     # 모든 쿼리 변형에 대한 코루틴 생성 (아직 실행 안 됨)
     coroutines = [
@@ -277,6 +281,11 @@ async def multi_query_retrieval(
             filters=filters,
             limit=limit_per_query,
             entity_filter=entity_filter,
+            **(
+                {"use_hyde": variation.variation_type == "original"}
+                if supports_use_hyde
+                else {}
+            ),
         )
         for variation in query_variations
     ]
@@ -339,4 +348,6 @@ async def multi_query_retrieval(
     logger.info(
         f"[MultiQuery] Combined {len(all_results)} results into {len(final_docs)} unique docs"
     )
+    if limit is not None and limit > 0:
+        return final_docs[:limit]
     return final_docs

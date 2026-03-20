@@ -30,7 +30,11 @@ def test_ingest_document_keeps_single_chunk_identity(monkeypatch) -> None:
     async def fake_embed_texts(chunks, settings):
         return [[0.1, 0.2] for _ in chunks]
 
-    monkeypatch.setattr(ingest, "smart_chunks", lambda text: ["single chunk"])
+    monkeypatch.setattr(
+        ingest,
+        "smart_chunks",
+        lambda text, settings=None: ["single chunk"],
+    )
     monkeypatch.setattr(ingest, "async_embed_texts", fake_embed_texts)
     monkeypatch.setattr(ingest, "get_settings", lambda: SimpleNamespace())
 
@@ -54,7 +58,11 @@ def test_ingest_document_suffixes_multi_chunk_source_rows(monkeypatch) -> None:
     async def fake_embed_texts(chunks, settings):
         return [[0.1, 0.2] for _ in chunks]
 
-    monkeypatch.setattr(ingest, "smart_chunks", lambda text: ["part one", "part two"])
+    monkeypatch.setattr(
+        ingest,
+        "smart_chunks",
+        lambda text, settings=None: ["part one", "part two"],
+    )
     monkeypatch.setattr(ingest, "async_embed_texts", fake_embed_texts)
     monkeypatch.setattr(ingest, "get_settings", lambda: SimpleNamespace())
 

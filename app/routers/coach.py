@@ -3353,10 +3353,19 @@ def _build_deterministic_headline(
 def _build_deterministic_markdown(
     evidence: GameEvidence,
     tool_results: Dict[str, Any],
+    resolved_focus: Optional[List[str]] = None,
 ) -> str:
     review_mode = _is_completed_review(evidence)
     analysis = _build_deterministic_analysis(evidence, tool_results)
     sections: List[str] = []
+
+    # Inject ALL focus section headers at the top so they survive truncation
+    if resolved_focus:
+        for focus in resolved_focus:
+            header = FOCUS_SECTION_HEADERS.get(focus)
+            if header:
+                sections.append(header)
+
     sections.append("## 결과 진단" if review_mode else "## 코치 판단")
     sections.append(f"- {analysis.get('verdict') or analysis.get('summary')}")
 
@@ -3378,14 +3387,42 @@ def _build_deterministic_markdown(
 
     return _truncate_text_naturally(
         "\n".join(sections),
-        max_length=900,
+        max_length=1500,
         preserve_newlines=True,
     )
+
+
+def _ensure_detailed_markdown(
+    response_payload: Dict[str, Any],
+    resolved_focus: Optional[List[str]] = None,
+) -> None:
+    """If detailed_markdown is empty, synthesize from analysis fields + focus headers."""
+    if response_payload.get("detailed_markdown"):
+        return
+    analysis = response_payload.get("analysis", {})
+    sections: List[str] = []
+    for focus in (resolved_focus or []):
+        header = FOCUS_SECTION_HEADERS.get(focus)
+        if header:
+            sections.append(header)
+    verdict = analysis.get("verdict") or analysis.get("summary")
+    if verdict:
+        sections.append(f"- {verdict}")
+    for key in ("why_it_matters", "swing_factors", "watch_points"):
+        items = analysis.get(key) or []
+        for item in items[:2]:
+            sections.append(f"- {item}")
+    if analysis.get("uncertainty"):
+        for item in analysis["uncertainty"][:1]:
+            sections.append(f"- {item}")
+    if sections:
+        response_payload["detailed_markdown"] = "\n".join(sections)
 
 
 def _build_deterministic_coach_response(
     evidence: GameEvidence,
     tool_results: Dict[str, Any],
+    resolved_focus: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     analysis = _build_deterministic_analysis(evidence, tool_results)
     coach_note_parts: List[str] = []
@@ -3419,7 +3456,7 @@ def _build_deterministic_coach_response(
         sentiment="neutral",
         key_metrics=_build_deterministic_metrics(evidence, tool_results),
         analysis=analysis,
-        detailed_markdown=_build_deterministic_markdown(evidence, tool_results),
+        detailed_markdown=_build_deterministic_markdown(evidence, tool_results, resolved_focus),
         coach_note=_build_compact_coach_note(coach_note_parts),
     )
     return response.model_dump()
@@ -3457,12 +3494,23 @@ def _collect_allowed_entity_names(
                 normalized = _normalize_name_token(item.get("player_name"))
                 if normalized:
                     names.add(normalized)
+    # All WPA clutch moments (not just top 6) for broader coverage
     clutch_moments = _clutch_moments(tool_results)
-    for item in clutch_moments[:6]:
+    for item in clutch_moments:
         for key in ("batter_name", "pitcher_name"):
             normalized = _normalize_name_token(item.get(key))
             if normalized:
                 names.add(normalized)
+    # Head-to-head matchup player names (starting pitchers, key batters)
+    matchup = tool_results.get("matchup", {}) or {}
+    for game in (matchup.get("games") or [])[:10]:
+        if isinstance(game, dict):
+            for key in ("home_pitcher", "away_pitcher", "player_name",
+                        "batter_name", "pitcher_name", "winning_pitcher",
+                        "losing_pitcher", "save_pitcher"):
+                normalized = _normalize_name_token(game.get(key))
+                if normalized:
+                    names.add(normalized)
     for item in evidence.summary_items:
         for token in _collect_grounding_candidates(str(item or "")):
             if token in COMMON_ENTITY_STOPWORDS or token in ENGLISH_ENTITY_STOPWORDS:
@@ -5048,6 +5096,7 @@ async def analyze_team(
                     response_payload = _build_deterministic_coach_response(
                         game_evidence,
                         tool_results,
+                        resolved_focus=resolved_focus,
                     )
                     response_json = json.dumps(response_payload, ensure_ascii=False)
                     meta_defaults = _build_meta_payload_defaults(
@@ -5340,9 +5389,11 @@ async def analyze_team(
                     response_payload = _build_deterministic_coach_response(
                         game_evidence,
                         tool_results,
+                        resolved_focus=resolved_focus,
                     )
                     response_json = json.dumps(response_payload, ensure_ascii=False)
 
+                _ensure_detailed_markdown(response_payload, resolved_focus)
                 missing_focus_sections = _find_missing_focus_sections(
                     response_payload, response_focus_targets
                 )

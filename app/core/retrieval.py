@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from psycopg.errors import UndefinedTable
 from psycopg import OperationalError as PsycopgOperationalError
 from psycopg import InterfaceError as PsycopgInterfaceError
+from ..config import Settings, get_settings
 from .exceptions import DBRetrievalError
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,6 @@ _INTERNAL_FILTER_INCLUDE_INNING_SCORES = "_include_game_inning_scores"
 _INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES = "_exclude_source_tables"
 _SUPPRESSED_SOURCE_TABLES = ("game_inning_scores",)
 _PGVECTOR_SEARCH_PATH = "public, extensions, security"
-_IVFFLAT_PROBES = 512
 
 # rag_chunks 테이블 존재 여부 캐시 (프로세스 수명 동안 유효)
 # 테이블은 배포 후 변경되지 않으므로 프로세스 재시작 시 자동 무효화됨
@@ -45,14 +45,28 @@ def _ensure_pgvector_search_path(conn: psycopg.Connection) -> None:
         cursor.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
 
 
-def _ensure_pgvector_session(conn: psycopg.Connection) -> None:
+def _resolve_settings(settings: Optional[Settings]) -> Settings:
+    if settings is not None:
+        return settings
+    return get_settings()
+
+
+def _ensure_pgvector_session(
+    conn: psycopg.Connection,
+    settings: Optional[Settings] = None,
+) -> None:
     """pgvector 검색 세션 설정을 보정합니다."""
+    active_settings = _resolve_settings(settings)
+    probes = max(1, int(active_settings.retrieval_ivfflat_probes))
     with conn.cursor() as cursor:
         cursor.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
-        cursor.execute(f"SET ivfflat.probes = {_IVFFLAT_PROBES}")
+        cursor.execute(f"SET ivfflat.probes = {probes}")
 
 
-def _rag_chunks_exists(conn: psycopg.Connection) -> bool:
+def _rag_chunks_exists(
+    conn: psycopg.Connection,
+    settings: Optional[Settings] = None,
+) -> bool:
     """`rag_chunks` 테이블이 존재하는지 확인합니다.
 
     결과를 모듈 레벨 변수에 캐싱하여 information_schema 반복 조회를 방지합니다.
@@ -63,7 +77,7 @@ def _rag_chunks_exists(conn: psycopg.Connection) -> bool:
     if _rag_chunks_table_exists is True:
         return True
     try:
-        _ensure_pgvector_session(conn)
+        _ensure_pgvector_session(conn, settings)
         with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT EXISTS(
@@ -89,6 +103,7 @@ def similarity_search(
     limit: int,
     filters: Optional[Dict[str, Any]] = None,
     keyword: Optional[str] = None,
+    settings: Optional[Settings] = None,
 ) -> List[Dict[str, Any]]:
     """주어진 임베딩과 유사한 문서를 데이터베이스에서 검색합니다.
 
@@ -109,7 +124,9 @@ def similarity_search(
             "Firestore search has been removed. PostgreSQL pgvector search is supported only."
         )
 
-    if not _rag_chunks_exists(conn):
+    active_settings = _resolve_settings(settings)
+
+    if not _rag_chunks_exists(conn, active_settings):
         logger.warning("[Search] rag_chunks table is not available.")
         return []
 
@@ -258,10 +275,10 @@ def similarity_search(
     start_time = time.perf_counter()
 
     try:
-        _ensure_pgvector_session(conn)
+        _ensure_pgvector_session(conn, active_settings)
         with conn.cursor(row_factory=dict_row) as cur:
-            # HNSW 검색 정확도 튜닝 (Recall 향상)
-            cur.execute("SET LOCAL hnsw.ef_search = 100;")
+            ef_search = max(1, int(active_settings.retrieval_hnsw_ef_search))
+            cur.execute(f"SET LOCAL hnsw.ef_search = {ef_search};")
             cur.execute(sql, final_params)
             rows = cur.fetchall()
     except UndefinedTable:
