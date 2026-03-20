@@ -1146,7 +1146,9 @@ def _default_static_knowledge_type(source_table: str) -> str:
 def build_static_source_row_prefix(profile_key: str, profile: Dict[str, Any]) -> str:
     source_table = str(profile.get("source_table", profile_key))
     relative_path = _relative_source_file_path(Path(profile["source_file"]))
-    raw_slug = relative_path[:-3] if relative_path.lower().endswith(".md") else relative_path
+    raw_slug = (
+        relative_path[:-3] if relative_path.lower().endswith(".md") else relative_path
+    )
     slug = re.sub(r"[^0-9a-z]+", "_", raw_slug.lower()).strip("_")
     if not slug:
         slug = hashlib.md5(relative_path.encode("utf-8")).hexdigest()[:12]
@@ -1209,7 +1211,9 @@ def build_static_profile_chunk_payloads(
     content: Optional[str] = None,
 ) -> List[ChunkPayload]:
     raw_content = (
-        content if content is not None else read_static_profile_content(profile_key, profile)
+        content
+        if content is not None
+        else read_static_profile_content(profile_key, profile)
     )
     normalized_content = raw_content.strip()
     if not normalized_content:

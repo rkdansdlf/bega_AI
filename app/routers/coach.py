@@ -3401,7 +3401,7 @@ def _ensure_detailed_markdown(
         return
     analysis = response_payload.get("analysis", {})
     sections: List[str] = []
-    for focus in (resolved_focus or []):
+    for focus in resolved_focus or []:
         header = FOCUS_SECTION_HEADERS.get(focus)
         if header:
             sections.append(header)
@@ -3456,7 +3456,9 @@ def _build_deterministic_coach_response(
         sentiment="neutral",
         key_metrics=_build_deterministic_metrics(evidence, tool_results),
         analysis=analysis,
-        detailed_markdown=_build_deterministic_markdown(evidence, tool_results, resolved_focus),
+        detailed_markdown=_build_deterministic_markdown(
+            evidence, tool_results, resolved_focus
+        ),
         coach_note=_build_compact_coach_note(coach_note_parts),
     )
     return response.model_dump()
@@ -3505,9 +3507,16 @@ def _collect_allowed_entity_names(
     matchup = tool_results.get("matchup", {}) or {}
     for game in (matchup.get("games") or [])[:10]:
         if isinstance(game, dict):
-            for key in ("home_pitcher", "away_pitcher", "player_name",
-                        "batter_name", "pitcher_name", "winning_pitcher",
-                        "losing_pitcher", "save_pitcher"):
+            for key in (
+                "home_pitcher",
+                "away_pitcher",
+                "player_name",
+                "batter_name",
+                "pitcher_name",
+                "winning_pitcher",
+                "losing_pitcher",
+                "save_pitcher",
+            ):
                 normalized = _normalize_name_token(game.get(key))
                 if normalized:
                     names.add(normalized)

@@ -229,14 +229,10 @@ class Settings(BaseSettings):
     retrieval_hnsw_ef_search: int = Field(
         100, validation_alias="RETRIEVAL_HNSW_EF_SEARCH"
     )
-    rag_chunk_target_chars: int = Field(
-        650, validation_alias="RAG_CHUNK_TARGET_CHARS"
-    )
+    rag_chunk_target_chars: int = Field(650, validation_alias="RAG_CHUNK_TARGET_CHARS")
     rag_chunk_max_chars: int = Field(900, validation_alias="RAG_CHUNK_MAX_CHARS")
     rag_chunk_min_chars: int = Field(180, validation_alias="RAG_CHUNK_MIN_CHARS")
-    rag_chunk_overlap_chars: int = Field(
-        80, validation_alias="RAG_CHUNK_OVERLAP_CHARS"
-    )
+    rag_chunk_overlap_chars: int = Field(80, validation_alias="RAG_CHUNK_OVERLAP_CHARS")
 
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
@@ -244,9 +240,7 @@ class Settings(BaseSettings):
     chat_completion_timeout_seconds: float = Field(
         0.0, validation_alias="CHAT_COMPLETION_TIMEOUT_SECONDS"
     )
-    chat_sse_ping_seconds: int = Field(
-        15, validation_alias="CHAT_SSE_PING_SECONDS"
-    )
+    chat_sse_ping_seconds: int = Field(15, validation_alias="CHAT_SSE_PING_SECONDS")
     chat_cached_stream_chunk_size: int = Field(
         200, validation_alias="CHAT_CACHED_STREAM_CHUNK_SIZE"
     )
@@ -344,9 +338,7 @@ class Settings(BaseSettings):
         "intfloat/multilingual-e5-large", validation_alias="HF_EMBED_MODEL"
     )
     hf_embed_batch: int = Field(16, validation_alias="HF_BATCH")
-    gemini_embed_max_tokens: int = Field(
-        3072, validation_alias="GEMINI_MAX_TOKENS"
-    )
+    gemini_embed_max_tokens: int = Field(3072, validation_alias="GEMINI_MAX_TOKENS")
     gemini_embed_rpm: int = Field(60, validation_alias="GEMINI_RPM")
 
     # --- Monitoring ---

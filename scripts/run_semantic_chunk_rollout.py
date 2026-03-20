@@ -291,7 +291,9 @@ def _write_rollout_summary(
     )
 
 
-def _failure_payload(*, step: str, reason: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _failure_payload(
+    *, step: str, reason: str, details: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "step": step,
         "reason": reason,

@@ -37,7 +37,9 @@ def resolve_chunking_config(
         target_chars=int(
             target_chars
             if target_chars is not None
-            else getattr(settings, "rag_chunk_target_chars", ChunkingConfig.target_chars)
+            else getattr(
+                settings, "rag_chunk_target_chars", ChunkingConfig.target_chars
+            )
         ),
         max_chars=int(
             max_chars
@@ -157,8 +159,10 @@ def _segment_text(text: str) -> List[_Segment]:
         if _looks_like_table_start(lines, index):
             block = [lines[index].rstrip()]
             index += 1
-            while index < total_lines and lines[index].strip() and _is_table_line(
-                lines[index]
+            while (
+                index < total_lines
+                and lines[index].strip()
+                and _is_table_line(lines[index])
             ):
                 block.append(lines[index].rstrip())
                 index += 1
@@ -376,9 +380,10 @@ def smart_chunks(
     current = expanded_segments[0].text
     current_kind = expanded_segments[0].kind
     for segment in expanded_segments[1:]:
-        structural_boundary = (
-            current_kind in {"table", "list"} or segment.kind in {"table", "list"}
-        )
+        structural_boundary = current_kind in {"table", "list"} or segment.kind in {
+            "table",
+            "list",
+        }
         if structural_boundary:
             chunks.append(current.strip())
             chunk_kinds.append(current_kind)

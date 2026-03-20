@@ -605,12 +605,15 @@ async def _chat_event_generator(
         )
         public_error = "temporary_generation_issue"
 
-    finish_reason = "cancelled" if stream_cancelled else ("error" if public_error else "completed")
+    finish_reason = (
+        "cancelled" if stream_cancelled else ("error" if public_error else "completed")
+    )
     meta_payload_raw = {
         "tool_calls": tool_calls_serialized,
         "tool_results": tool_results_serialized,
         "data_sources": result.get("data_sources", []),
-        "verified": bool(result.get("verified", False)) and not bool(answer_stream_error),
+        "verified": bool(result.get("verified", False))
+        and not bool(answer_stream_error),
         "visualizations": result.get("visualizations", []),
         "style": style,
         "cached": False,
@@ -830,7 +833,9 @@ async def _chat_live_event_generator(
         public_error = "temporary_generation_issue"
 
     intent = buffered_meta.get("intent")
-    finish_reason = "cancelled" if stream_cancelled else ("error" if public_error else "completed")
+    finish_reason = (
+        "cancelled" if stream_cancelled else ("error" if public_error else "completed")
+    )
     meta_payload_raw = {
         "tool_calls": tool_calls_serialized,
         "tool_results": tool_results_serialized,
@@ -987,7 +992,10 @@ async def _stream_response(
             context=agent_context,
         )
     except asyncio.CancelledError:
-        logger.info("chat_stream cancelled before response could start. question=%s", question[:120])
+        logger.info(
+            "chat_stream cancelled before response could start. question=%s",
+            question[:120],
+        )
         raise
     except Exception:  # noqa: BLE001
         logger.exception("chat_stream에서 오류가 발생했습니다.")
@@ -1148,7 +1156,9 @@ async def chat_completion(
     )
     timeout_deadline: Optional[float] = None
     if completion_timeout_seconds > 0:
-        timeout_deadline = asyncio.get_running_loop().time() + completion_timeout_seconds
+        timeout_deadline = (
+            asyncio.get_running_loop().time() + completion_timeout_seconds
+        )
 
     try:
         context_messages = (

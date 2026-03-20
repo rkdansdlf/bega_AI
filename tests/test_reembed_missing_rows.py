@@ -8,7 +8,9 @@ from scripts.verify_embedding_coverage import CoverageTarget
 
 
 class _FakeCursor:
-    def __init__(self, rows: List[Dict[str, Any]] | None = None, connection: Any = None):
+    def __init__(
+        self, rows: List[Dict[str, Any]] | None = None, connection: Any = None
+    ):
         self._rows = list(rows or [])
         self.connection = connection if connection is not None else self
         self.executed: List[tuple[Any, Any]] = []
@@ -61,7 +63,9 @@ class _FakeSourceConnection:
 class _ForbiddenSourceConnection:
     def cursor(self, *args, **kwargs) -> _FakeCursor:
         del args, kwargs
-        raise AssertionError("source DB should not be queried for static source_file profiles")
+        raise AssertionError(
+            "source DB should not be queried for static source_file profiles"
+        )
 
 
 def test_build_static_target_payloads_are_stable_and_match_profile_metadata() -> None:
@@ -154,7 +158,9 @@ def test_reembed_row_target_keeps_canonical_source_row_id(monkeypatch: Any) -> N
         return flushed
 
     monkeypatch.setattr(reembed_script, "flush_chunks", _fake_flush_chunks)
-    monkeypatch.setattr(reembed_script, "get_primary_key_columns", lambda *_args: ["id"])
+    monkeypatch.setattr(
+        reembed_script, "get_primary_key_columns", lambda *_args: ["id"]
+    )
     monkeypatch.setattr(
         reembed_script,
         "build_select_query",

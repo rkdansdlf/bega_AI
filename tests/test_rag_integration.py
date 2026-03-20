@@ -149,7 +149,9 @@ def integration_client(monkeypatch):
     )
     monkeypatch.setattr(
         "app.routers.chat_stream._request_is_disconnected",
-        AsyncMock(return_value=False),  # disconnect 변수를 고정해 SSE 메타 검증을 안정화
+        AsyncMock(
+            return_value=False
+        ),  # disconnect 변수를 고정해 SSE 메타 검증을 안정화
     )
 
     with TestClient(test_app, raise_server_exceptions=False) as c:
@@ -216,11 +218,7 @@ def test_db_down_strategy_in_sse_meta(integration_client):
             events.append(
                 {
                     "type": event["event"],
-                    "data": (
-                        json.loads(payload)
-                        if payload != "[DONE]"
-                        else payload
-                    ),
+                    "data": (json.loads(payload) if payload != "[DONE]" else payload),
                 }
             )
         return events
