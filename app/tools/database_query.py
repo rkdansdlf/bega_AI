@@ -15,6 +15,7 @@ from app.core import kbo_metrics
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 from app.tools.team_mapping_loader import (
     fetch_team_mapping_rows,
+    load_cached_team_mapping_rows,
     load_team_mappings_with_retry,
 )
 from app.tools.team_resolution_metrics import get_team_resolution_metrics
@@ -397,8 +398,12 @@ class DatabaseQueryTool:
         self.mapping_dependency_degraded = False
         self.mapping_dependency_reason: Optional[str] = None
 
-        # DB에서 최신 매핑 로드하여 위 딕셔너리 정밀 업데이트
-        self._load_team_mappings()
+        cached_rows = load_cached_team_mapping_rows()
+        if cached_rows:
+            self.team_resolver.sync_from_team_rows(cached_rows)
+            self.mapping_dependency_reason = "shared_cache"
+        else:
+            self._load_team_mappings()
 
         # KBO 포지션 약어 매핑
         self.position_mapping = {

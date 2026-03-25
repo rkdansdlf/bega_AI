@@ -91,12 +91,18 @@ def test_stream_route_emits_status_before_delayed_first_token(stream_app) -> Non
                     "visualizations": [],
                     "intent": "test",
                     "planner_mode": "test",
+                    "planner_cache_hit": True,
+                    "tool_execution_mode": "parallel",
                     "grounding_mode": "test",
                     "source_tier": "test",
                     "answer_sources": [],
                     "as_of_date": "2026-03-19",
                     "fallback_reason": None,
-                    "perf": {"model": "test"},
+                    "perf": {
+                        "model": "test",
+                        "planner_cache_hit": True,
+                        "tool_execution_mode": "parallel",
+                    },
                 },
             }
 
@@ -115,6 +121,14 @@ def test_stream_route_emits_status_before_delayed_first_token(stream_app) -> Non
 
     assert response.status_code == 200
     assert events[0]["type"] == "status"
+    meta_events = [event for event in events if event["type"] == "meta"]
+    assert meta_events
+    meta_data = meta_events[-1]["data"]
+    assert meta_data["planner_cache_hit"] is True
+    assert meta_data["tool_execution_mode"] == "parallel"
+    assert meta_data["perf"]["planner_cache_hit"] is True
+    assert isinstance(meta_data["perf"]["first_token_ms"], (int, float))
+    assert meta_data["perf"]["first_token_ms"] > 0
 
 
 @pytest.mark.asyncio
@@ -145,6 +159,7 @@ async def test_live_event_generator_emits_fallback_meta_on_partial_stream_error(
     assert meta_events[-1]["data"]["fallback_answer_used"] is True
     assert meta_events[-1]["data"]["error"] == "temporary_generation_issue"
     assert meta_events[-1]["data"]["verified"] is False
+    assert isinstance(meta_events[-1]["data"]["perf"]["first_token_ms"], (int, float))
 
 
 @pytest.mark.asyncio
@@ -173,3 +188,4 @@ async def test_live_event_generator_emits_cancelled_meta_and_done_on_abort() -> 
     meta_data = meta_events[-1]["data"]
     assert meta_data["finish_reason"] == "cancelled"
     assert meta_data["cancelled"] is True
+    assert isinstance(meta_data["perf"]["first_token_ms"], (int, float))

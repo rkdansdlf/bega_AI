@@ -38,12 +38,17 @@ class QueryTransformer:
         self.llm_generate = llm_generate_func
 
     def expand_query_with_rules(
-        self, original_query: str, entity_filter
+        self,
+        original_query: str,
+        entity_filter,
+        *,
+        max_variations: int = 5,
     ) -> List[QueryVariation]:
         """
         규칙 기반으로 쿼리를 확장합니다.
         빠르고 예측 가능한 방법으로 다양한 쿼리 변형을 생성합니다.
         """
+        safe_max_variations = max(1, int(max_variations))
         variations = [QueryVariation(original_query, "original", 1.0)]
 
         # 1. 통계 지표 확장
@@ -65,8 +70,29 @@ class QueryTransformer:
             )
             variations.extend(ranking_expansions)
 
-        logger.info(f"[QueryTransformer] Generated {len(variations)} query variations")
-        return variations[:5]  # 최대 5개로 제한
+        deduped_variations: List[QueryVariation] = []
+        seen_queries: set[str] = set()
+        for variation in variations:
+            normalized_query = variation.query.strip()
+            if not normalized_query or normalized_query in seen_queries:
+                continue
+            seen_queries.add(normalized_query)
+            deduped_variations.append(
+                QueryVariation(
+                    normalized_query,
+                    variation.variation_type,
+                    variation.weight,
+                )
+            )
+            if len(deduped_variations) >= safe_max_variations:
+                break
+
+        logger.info(
+            "[QueryTransformer] Generated %d query variations (cap=%d)",
+            len(deduped_variations),
+            safe_max_variations,
+        )
+        return deduped_variations
 
     def _expand_stat_queries(self, query: str, entity_filter) -> List[QueryVariation]:
         """통계 지표 관련 쿼리를 확장합니다."""

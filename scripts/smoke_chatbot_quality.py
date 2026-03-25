@@ -56,6 +56,15 @@ DEFAULT_QUESTION_LIST_PATH = (
 DEFAULT_REGULATION_CANARY_PATH = (
     Path(__file__).resolve().with_name("smoke_chatbot_quality_regulations_20.txt")
 )
+DEFAULT_LLM_CANARY_PATH = (
+    Path(__file__).resolve().with_name("smoke_chatbot_quality_llm_canary_20.txt")
+)
+OFFICIAL_QUESTION_LISTS = {
+    "regmix_100": DEFAULT_QUESTION_LIST_PATH,
+    "regulations_20": DEFAULT_REGULATION_CANARY_PATH,
+    "llm_canary_20": DEFAULT_LLM_CANARY_PATH,
+}
+CONSOLE_FAILED_CASE_PREVIEW_LIMIT = 3
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,7 +92,11 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional path to newline-separated questions file. "
             f"Default: {DEFAULT_QUESTION_LIST_PATH}. "
-            f"Regulation canary: {DEFAULT_REGULATION_CANARY_PATH}."
+            "Official presets: "
+            + ", ".join(
+                f"{name}={path}" for name, path in OFFICIAL_QUESTION_LISTS.items()
+            )
+            + "."
         ),
     )
     parser.add_argument(
@@ -622,6 +635,8 @@ def _check_stream(
                         data = line[5:].strip()
                         if data == "[DONE]":
                             seen_done = True
+                            if current_event == "done":
+                                break
                             continue
                         if current_event == "message":
                             try:
@@ -818,7 +833,7 @@ def _extract_planner_mode(item: Dict[str, Any]) -> str:
             if isinstance(metadata, dict):
                 mode = metadata.get("planner_mode")
     if not isinstance(mode, str):
-        meta = item.get("meta")
+        meta = _extract_meta_payload(item)
         if isinstance(meta, dict):
             mode = meta.get("planner_mode")
             if not isinstance(mode, str):
@@ -830,12 +845,246 @@ def _extract_planner_mode(item: Dict[str, Any]) -> str:
     return "unknown"
 
 
+def _extract_stream_meta_from_sample_response(sample_response: Any) -> Dict[str, Any]:
+    if not isinstance(sample_response, str) or "event:" not in sample_response:
+        return {}
+
+    normalized = sample_response.replace("\\nevent:", "\nevent:").replace(
+        "\\ndata:", "\ndata:"
+    )
+    current_event = ""
+    meta_payload: Dict[str, Any] = {}
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("event:"):
+            current_event = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("data:") and current_event == "meta":
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                continue
+            try:
+                parsed = json.loads(payload)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                meta_payload = parsed
+    return meta_payload
+
+
+def _extract_meta_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    merged_meta: Dict[str, Any] = {}
+    sample_response = item.get("sample_response")
+    if isinstance(sample_response, dict):
+        metadata = sample_response.get("metadata")
+        if isinstance(metadata, dict):
+            merged_meta.update(metadata)
+
+    parsed_stream_meta = _extract_stream_meta_from_sample_response(sample_response)
+    if parsed_stream_meta:
+        merged_meta.update(parsed_stream_meta)
+
+    meta = item.get("meta")
+    if isinstance(meta, dict):
+        merged_meta.update(meta)
+
+    return merged_meta
+
+
+def _extract_perf_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    sample_response = item.get("sample_response")
+    if isinstance(sample_response, dict):
+        perf = sample_response.get("perf")
+        if isinstance(perf, dict):
+            return perf
+        metadata = sample_response.get("metadata")
+        if isinstance(metadata, dict):
+            nested_perf = metadata.get("perf")
+            if isinstance(nested_perf, dict):
+                return nested_perf
+
+    meta = _extract_meta_payload(item)
+    if isinstance(meta, dict):
+        perf = meta.get("perf")
+        if isinstance(perf, dict):
+            return perf
+
+    return {}
+
+
+def _categorize_planner_mode(mode: str) -> str:
+    normalized = mode.strip().lower()
+    if normalized.startswith("fast_path"):
+        return "fast_path"
+    if "llm" in normalized:
+        return "llm"
+    if normalized == "predefined":
+        return "predefined"
+    if normalized.startswith("analysis_error"):
+        return "analysis_error"
+    if normalized == "cache":
+        return "cache"
+    if normalized == "unknown":
+        return "unknown"
+    return "other"
+
+
+def _distribution_summary(values: List[str]) -> Dict[str, Dict[str, Any]]:
+    total = len(values)
+    if total <= 0:
+        return {}
+
+    counts: Dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+
+    return {
+        key: {
+            "count": count,
+            "ratio": _ratio(count, total),
+        }
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    }
+
+
+def _planner_mode_distribution(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    return _distribution_summary([_extract_planner_mode(item) for item in items])
+
+
+def _planner_bucket_distribution(
+    items: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    return _distribution_summary(
+        [_categorize_planner_mode(_extract_planner_mode(item)) for item in items]
+    )
+
+
+def _extract_planner_cache_hit(item: Dict[str, Any]) -> Optional[bool]:
+    sample_response = item.get("sample_response")
+    if isinstance(sample_response, dict):
+        direct = sample_response.get("planner_cache_hit")
+        if isinstance(direct, bool):
+            return direct
+        metadata = sample_response.get("metadata")
+        if isinstance(metadata, dict):
+            nested = metadata.get("planner_cache_hit")
+            if isinstance(nested, bool):
+                return nested
+
+    meta = _extract_meta_payload(item)
+    if isinstance(meta, dict):
+        direct = meta.get("planner_cache_hit")
+        if isinstance(direct, bool):
+            return direct
+
+    perf = _extract_perf_payload(item)
+    planner_cache_hit = perf.get("planner_cache_hit")
+    if isinstance(planner_cache_hit, bool):
+        return planner_cache_hit
+    return None
+
+
+def _planner_cache_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    known_values = [
+        cache_hit
+        for cache_hit in (_extract_planner_cache_hit(item) for item in items)
+        if isinstance(cache_hit, bool)
+    ]
+    known_total = len(known_values)
+    hit_count = sum(1 for cache_hit in known_values if cache_hit)
+
+    return {
+        "known_total": known_total,
+        "hit_count": hit_count,
+        "miss_count": known_total - hit_count,
+        "hit_ratio": _ratio(hit_count, known_total),
+    }
+
+
+def _extract_tool_execution_mode(item: Dict[str, Any]) -> str:
+    sample_response = item.get("sample_response")
+    if isinstance(sample_response, dict):
+        direct = sample_response.get("tool_execution_mode")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        metadata = sample_response.get("metadata")
+        if isinstance(metadata, dict):
+            nested = metadata.get("tool_execution_mode")
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+
+    meta = _extract_meta_payload(item)
+    if isinstance(meta, dict):
+        direct = meta.get("tool_execution_mode")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+
+    perf = _extract_perf_payload(item)
+    mode = perf.get("tool_execution_mode")
+    if isinstance(mode, str) and mode.strip():
+        return mode.strip()
+    return "unknown"
+
+
+def _tool_execution_mode_distribution(
+    items: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    return _distribution_summary([_extract_tool_execution_mode(item) for item in items])
+
+
+def _build_failed_cases(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    failed_cases: List[Dict[str, Any]] = []
+    for item in items:
+        if item.get("ok"):
+            continue
+        failed_cases.append(
+            {
+                "endpoint": item.get("endpoint"),
+                "question": item.get("question"),
+                "planner_mode": _extract_planner_mode(item),
+                "planner_bucket": _categorize_planner_mode(
+                    _extract_planner_mode(item)
+                ),
+                "planner_cache_hit": _extract_planner_cache_hit(item),
+                "tool_execution_mode": _extract_tool_execution_mode(item),
+                "status_code": item.get("status_code"),
+                "error": item.get("error"),
+                "latency_ms": item.get("latency_ms"),
+                "cached": bool(item.get("cached", False)),
+                "fallback_reason": _extract_meta_payload(item).get("fallback_reason"),
+                "quality_pass": bool(item.get("quality_pass", False)),
+            }
+        )
+    return failed_cases
+
+
 def _planner_mode_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for item in items:
         mode = _extract_planner_mode(item)
         grouped.setdefault(mode, []).append(item)
     return {mode: _endpoint_metrics(group) for mode, group in grouped.items()}
+
+
+def _perf_metric_summary(items: List[Dict[str, Any]], key: str) -> Dict[str, Any]:
+    values: List[float] = []
+    for item in items:
+        raw = _extract_perf_payload(item).get(key)
+        if isinstance(raw, (int, float)):
+            values.append(round(float(raw), 2))
+
+    values.sort()
+    return {
+        "count": len(values),
+        "min": values[0] if values else None,
+        "max": values[-1] if values else None,
+        "avg": round(sum(values) / len(values), 2) if values else None,
+        "p50": _percentile(values, 0.50),
+        "p95": _percentile(values, 0.95),
+        "p99": _percentile(values, 0.99),
+    }
 
 
 def _summarize_results(
@@ -887,8 +1136,43 @@ def _summarize_results(
             "completion": _planner_mode_metrics(completion),
             "stream": _planner_mode_metrics(stream),
         },
+        "planner_mode_distribution": {
+            "overall": _planner_mode_distribution(results),
+            "completion": _planner_mode_distribution(completion),
+            "stream": _planner_mode_distribution(stream),
+        },
+        "planner_bucket_distribution": {
+            "overall": _planner_bucket_distribution(results),
+            "completion": _planner_bucket_distribution(completion),
+            "stream": _planner_bucket_distribution(stream),
+        },
+        "planner_cache_metrics": {
+            "overall": _planner_cache_metrics(results),
+            "completion": _planner_cache_metrics(completion),
+            "stream": _planner_cache_metrics(stream),
+        },
+        "perf_metrics": {
+            "overall": {
+                "first_token_ms": _perf_metric_summary(results, "first_token_ms"),
+                "total_ms": _perf_metric_summary(results, "total_ms"),
+            },
+            "completion": {
+                "first_token_ms": _perf_metric_summary(completion, "first_token_ms"),
+                "total_ms": _perf_metric_summary(completion, "total_ms"),
+            },
+            "stream": {
+                "first_token_ms": _perf_metric_summary(stream, "first_token_ms"),
+                "total_ms": _perf_metric_summary(stream, "total_ms"),
+            },
+        },
+        "tool_execution_mode_distribution": {
+            "overall": _tool_execution_mode_distribution(results),
+            "completion": _tool_execution_mode_distribution(completion),
+            "stream": _tool_execution_mode_distribution(stream),
+        },
         "completion_fallback_metrics": completion_fallback_metrics,
         "stream_fallback_metrics": stream_fallback_metrics,
+        "failed_cases": _build_failed_cases(results),
         "stream_fallback_ratio_max": stream_fallback_ratio_max,
         "stream_fallback_ratio_ok": stream_fallback_ratio_ok,
         "overall_error_rate": _ratio(failed, total),
@@ -930,6 +1214,20 @@ def _build_report_payload(
         "summary": summary,
         "results": results,
     }
+
+
+def _build_console_summary(
+    summary: Dict[str, Any], *, failed_case_limit: int = CONSOLE_FAILED_CASE_PREVIEW_LIMIT
+) -> Dict[str, Any]:
+    compact_summary = dict(summary)
+    failed_cases = compact_summary.pop("failed_cases", None)
+    if isinstance(failed_cases, list):
+        compact_summary["failed_case_count"] = len(failed_cases)
+        if failed_cases:
+            compact_summary["failed_case_preview"] = failed_cases[
+                : max(0, failed_case_limit)
+            ]
+    return {"summary": compact_summary}
 
 
 def _write_output_report(
@@ -1075,7 +1373,6 @@ def main() -> int:
             results=results,
         )
         summary = report["summary"]
-        print(json.dumps({"summary": summary}, ensure_ascii=False, indent=2))
 
         if output_path is not None:
             _write_output_report(
@@ -1090,7 +1387,6 @@ def main() -> int:
                 stream_fallback_ratio_max=args.stream_fallback_ratio_max,
                 results=results,
             )
-            print(f"report saved: {output_path}")
 
         if args.summary_output:
             summary_output = Path(args.summary_output)
@@ -1104,6 +1400,19 @@ def main() -> int:
                 json.dumps(summary_payload, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+
+        print(
+            json.dumps(
+                _build_console_summary(summary),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+        if output_path is not None:
+            print(f"report saved: {output_path}")
+
+        if args.summary_output:
             print(f"summary saved: {summary_output}")
 
         if args.strict and (

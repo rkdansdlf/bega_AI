@@ -3396,27 +3396,33 @@ def _ensure_detailed_markdown(
     response_payload: Dict[str, Any],
     resolved_focus: Optional[List[str]] = None,
 ) -> None:
-    """If detailed_markdown is empty, synthesize from analysis fields + focus headers."""
-    if response_payload.get("detailed_markdown"):
-        return
-    analysis = response_payload.get("analysis", {})
-    sections: List[str] = []
+    """Ensure detailed_markdown contains all focus section headers."""
+    existing_md = str(response_payload.get("detailed_markdown") or "")
+    missing_headers: List[str] = []
     for focus in resolved_focus or []:
         header = FOCUS_SECTION_HEADERS.get(focus)
-        if header:
-            sections.append(header)
-    verdict = analysis.get("verdict") or analysis.get("summary")
-    if verdict:
-        sections.append(f"- {verdict}")
-    for key in ("why_it_matters", "swing_factors", "watch_points"):
-        items = analysis.get(key) or []
-        for item in items[:2]:
-            sections.append(f"- {item}")
-    if analysis.get("uncertainty"):
-        for item in analysis["uncertainty"][:1]:
-            sections.append(f"- {item}")
-    if sections:
-        response_payload["detailed_markdown"] = "\n".join(sections)
+        if header and header not in existing_md:
+            missing_headers.append(header)
+    if not missing_headers and existing_md:
+        return
+    if not existing_md:
+        analysis = response_payload.get("analysis", {})
+        sections: List[str] = list(missing_headers)
+        verdict = analysis.get("verdict") or analysis.get("summary")
+        if verdict:
+            sections.append(f"- {verdict}")
+        for key in ("why_it_matters", "swing_factors", "watch_points"):
+            items = analysis.get(key) or []
+            for item in items[:2]:
+                sections.append(f"- {item}")
+        if analysis.get("uncertainty"):
+            for item in analysis["uncertainty"][:1]:
+                sections.append(f"- {item}")
+        if sections:
+            response_payload["detailed_markdown"] = "\n".join(sections)
+    else:
+        prefix = "\n".join(missing_headers)
+        response_payload["detailed_markdown"] = prefix + "\n" + existing_md
 
 
 def _build_deterministic_coach_response(

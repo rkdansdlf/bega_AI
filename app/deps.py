@@ -8,21 +8,58 @@ import secrets
 from typing import Any, Optional
 
 import psycopg
+import httpx
 from psycopg_pool import ConnectionPool, PoolTimeout
 from fastapi import Depends, Header, HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
 
 from .config import get_settings
+from .core.http_clients import close_shared_httpx_clients, get_shared_httpx_client
 from .core.rag import RAGPipeline
 from .ml.intent_router import predict_intent, load_clf
 from .agents.baseball_agent import BaseballStatisticsAgent
 from .core.chat_cache import CREATE_TABLE_SQL as CHAT_CACHE_DDL
 from .core.chat_cache import cleanup_expired as _cleanup_expired_cache
 from .core.security_metrics import record_security_event
+from .core.shared_resources import get_shared_latest_baseball_tool
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성)
 _connection_pool: Optional[ConnectionPool] = None
+
+# 전역 싱글톤: stateless 컴포넌트 (앱 수명 동안 재사용)
+_shared_context_formatter = None
+_shared_wpa_calculator = None
+_gemini_configured = False
+
+
+def _get_shared_context_formatter():
+    """ContextFormatter 싱글톤 반환."""
+    global _shared_context_formatter
+    if _shared_context_formatter is None:
+        from .core.rag import ContextFormatter
+        _shared_context_formatter = ContextFormatter()
+    return _shared_context_formatter
+
+
+def _get_shared_wpa_calculator():
+    """WPACalculator 싱글톤 반환."""
+    global _shared_wpa_calculator
+    if _shared_wpa_calculator is None:
+        from .core.rag import WPACalculator
+        _shared_wpa_calculator = WPACalculator()
+    return _shared_wpa_calculator
+
+
+def _ensure_gemini_configured():
+    """Gemini SDK를 한 번만 초기화."""
+    global _gemini_configured
+    if not _gemini_configured:
+        settings = get_settings()
+        if settings.gemini_api_key:
+            import google.generativeai as genai
+            genai.configure(api_key=settings.gemini_api_key)
+            _gemini_configured = True
 COACH_OPENROUTER_BLOCKED_MODELS = {
     "openrouter/auto",
     "upstage/solar-pro-3:free",
@@ -253,12 +290,16 @@ async def lifespan(app):
 
     yield
 
-    # 종료 시: cleanup 태스크 취소 후 커넥션 풀 정리
+    # 종료 시: cleanup 태스크 취소 후 리소스 정리
     cleanup_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
+
+    # httpx 클라이언트 정리
+    await close_shared_httpx_clients()
+
     close_connection_pool()  # 모든 커넥션 정리
 
 
@@ -290,7 +331,12 @@ def get_rag_pipeline(
     conn: psycopg.Connection = Depends(get_db_connection),
 ) -> RAGPipeline:
     settings = get_settings()
-    return RAGPipeline(settings=settings, connection=conn)
+    return RAGPipeline(
+        settings=settings,
+        connection=conn,
+        context_formatter=_get_shared_context_formatter(),
+        wpa_calculator=_get_shared_wpa_calculator(),
+    )
 
 
 def get_agent(
@@ -354,24 +400,26 @@ def get_agent(
     )
     async def fetch_completion_stream(payload, headers):
         """Helper function to fetch stream with retry logic."""
-        # Timeout: allow longer streaming windows before marking model as failed.
-        timeout_config = httpx.Timeout(30.0, connect=5.0, read=30.0, pool=5.0)
-        async with httpx.AsyncClient(timeout=timeout_config) as client:
-            async with client.stream(
-                "POST",
-                f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                json=payload,
-                headers=headers,
-            ) as response:
-                # Log error response body for 4xx errors before raising
-                if response.status_code >= 400 and response.status_code < 500:
-                    error_body = await response.aread()
-                    logger.error(
-                        f"[OpenRouter 4xx] Status: {response.status_code}, Body: {error_body.decode('utf-8', errors='replace')}"
-                    )
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    yield line
+        client = get_shared_httpx_client(
+            "openrouter",
+            timeout=120.0,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+        async with client.stream(
+            "POST",
+            f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers,
+        ) as response:
+            # Log error response body for 4xx errors before raising
+            if response.status_code >= 400 and response.status_code < 500:
+                error_body = await response.aread()
+                logger.error(
+                    f"[OpenRouter 4xx] Status: {response.status_code}, Body: {error_body.decode('utf-8', errors='replace')}"
+                )
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                yield line
 
     async def openrouter_generator(messages, max_tokens=None):
         """OpenRouter LLM generator with optional max_tokens override."""
@@ -524,7 +572,7 @@ def get_agent(
         # max_tokens 오버라이드 지원
         effective_max_tokens = max_tokens or settings.max_output_tokens
 
-        genai.configure(api_key=settings.gemini_api_key)
+        _ensure_gemini_configured()
         model = genai.GenerativeModel(settings.gemini_model)
 
         # Convert messages to Gemini format
@@ -571,6 +619,7 @@ def get_agent(
         connection=conn,
         llm_generator=llm_generator,
         settings=settings,
+        latest_baseball_tool=get_shared_latest_baseball_tool(),
         fast_path_enabled=settings.chat_fast_path_enabled,
         fast_path_scope=settings.chat_fast_path_scope,
         fast_path_min_messages=settings.chat_fast_path_min_messages,
@@ -659,19 +708,20 @@ def get_coach_llm_generator():
                     chunk_count = 0
                     empty_choice_count = 0
                     malformed_chunk_count = 0
-                    timeout_config = httpx.Timeout(
-                        settings.coach_llm_read_timeout,
-                        connect=5.0,
-                        read=settings.coach_llm_read_timeout,
-                        pool=5.0,
+                    client = get_shared_httpx_client(
+                        "openrouter",
+                        timeout=120.0,
+                        limits=httpx.Limits(
+                            max_connections=20,
+                            max_keepalive_connections=10,
+                        ),
                     )
-                    async with httpx.AsyncClient(timeout=timeout_config) as client:
-                        async with client.stream(
-                            "POST",
-                            f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                            json=payload,
-                            headers=headers,
-                        ) as response:
+                    async with client.stream(
+                        "POST",
+                        f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                    ) as response:
                             if (
                                 response.status_code >= 400
                                 and response.status_code < 500

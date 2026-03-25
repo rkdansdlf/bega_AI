@@ -20,6 +20,8 @@ import httpx
 
 from ..config import Settings
 from .embeddings import async_embed_query
+from .http_clients import get_shared_httpx_client
+from .shared_resources import get_shared_latest_baseball_tool
 from .prompts import FOLLOWUP_PROMPT, SYSTEM_PROMPT, HYDE_PROMPT
 from .retrieval import similarity_search
 from . import kbo_metrics
@@ -454,18 +456,21 @@ class RAGPipeline:
         *,
         settings: Settings,
         connection: psycopg.Connection,
+        context_formatter: Optional[ContextFormatter] = None,
+        wpa_calculator: Optional["WPACalculator"] = None,
     ) -> None:
         self.settings = settings
         self.connection = connection
         self.query_transformer = QueryTransformer(self._generate)
-        self.context_formatter = ContextFormatter()
+        self.context_formatter = context_formatter or ContextFormatter()
         # 야구 통계 전용 에이전트 초기화
         self.baseball_agent = BaseballStatisticsAgent(
             connection,
             self._generate,
             settings=settings,
+            latest_baseball_tool=get_shared_latest_baseball_tool(),
         )
-        self.wpa_calculator = WPACalculator()
+        self.wpa_calculator = wpa_calculator or WPACalculator()
         self._retrieval_error: Optional[str] = (
             None  # set if DB was unreachable during retrieval
         )
@@ -579,7 +584,7 @@ class RAGPipeline:
         limit: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
         entity_filter: Optional[Any] = None,
-        use_hyde: bool = True,
+        use_hyde: bool = False,
     ) -> List[Dict[str, Any]]:
         search_query = query
         if use_hyde:
@@ -640,8 +645,20 @@ class RAGPipeline:
         logger.info(f"[RAG] Multi-query retrieval for: {query}")
 
         # 규칙 기반 쿼리 확장
+        rule_variation_cap = max(
+            1,
+            int(
+                getattr(
+                    self.settings,
+                    "retrieval_multi_query_rule_variation_max",
+                    5,
+                )
+            ),
+        )
         query_variations = self.query_transformer.expand_query_with_rules(
-            query, entity_filter
+            query,
+            entity_filter,
+            max_variations=rule_variation_cap,
         )
 
         # LLM 기반 쿼리 확장 (선택적)
@@ -670,6 +687,27 @@ class RAGPipeline:
 
         logger.info(f"[RAG] Multi-query retrieval returned {len(docs)} documents")
         return docs
+
+    def _should_use_single_query_retrieval(
+        self,
+        *,
+        search_strategy: Dict[str, Any],
+        entity_filter: Any,
+        final_filters: Dict[str, Any],
+    ) -> bool:
+        if not bool(
+            getattr(self.settings, "retrieval_single_query_for_strict_entity", True)
+        ):
+            return False
+        if bool(search_strategy.get("is_ranking_query")):
+            return False
+        if getattr(entity_filter, "player_name", None):
+            return True
+        if final_filters.get("source_table"):
+            return True
+        if getattr(entity_filter, "team_id", None):
+            return True
+        return False
 
     async def _generate(self, messages: Sequence[Dict[str, str]]) -> str:
         provider = self.settings.llm_provider
@@ -729,12 +767,16 @@ class RAGPipeline:
             "max_tokens": self.settings.max_output_tokens,
         }
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
+        client = get_shared_httpx_client(
+            "openrouter",
+            timeout=httpx.Timeout(120.0, connect=10.0, read=60.0, pool=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+        response = await client.post(
+            f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers,
+        )
 
         response.raise_for_status()
         data = response.json()
@@ -804,8 +846,12 @@ class RAGPipeline:
         url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
         params = {"key": self.settings.gemini_api_key}
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload, params=params)
+        client = get_shared_httpx_client(
+            "gemini",
+            timeout=httpx.Timeout(60.0, connect=10.0, read=60.0, pool=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+        response = await client.post(url, json=payload, params=params)
 
         response.raise_for_status()
         data = response.json()
@@ -1475,18 +1521,29 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     limit=search_limit,
                 )
 
-        elif entity_filter.player_name:
-            logger.info(
-                f"[RAG] Player-specific query: {entity_filter.player_name} (LLM expansion disabled for speed)"
-            )
-            # For specific player queries, use multi-query with relaxed filters
-            player_filters = dict(final_filters)
-            player_filters.pop("source_table", None)  # Remove source_table filter
-            docs = await self.retrieve_with_multi_query(
+        elif (not is_game_flow_narrative) and self._should_use_single_query_retrieval(
+            search_strategy=search_strategy,
+            entity_filter=entity_filter,
+            final_filters=final_filters,
+        ):
+            single_query_filters = dict(final_filters)
+            if entity_filter.player_name:
+                logger.info(
+                    "[RAG] Player-specific strict-entity query: %s (single-query retrieval)",
+                    entity_filter.player_name,
+                )
+                single_query_filters.pop("source_table", None)
+            elif single_query_filters.get("source_table"):
+                logger.info(
+                    "[RAG] Source-table constrained strict query: %s (single-query retrieval)",
+                    single_query_filters.get("source_table"),
+                )
+            else:
+                logger.info("[RAG] Team/entity strict query detected - using single-query retrieval")
+            docs = await self.retrieve(
                 query,
-                entity_filter,
-                filters=player_filters,
-                use_llm_expansion=False,
+                filters=single_query_filters,
+                entity_filter=entity_filter,
                 limit=search_limit,
             )
 
@@ -1516,6 +1573,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                         search_limit,
                         int(self.settings.retrieval_fallback_limit_relaxed),
                     ),
+                    use_hyde=False,
                 )
                 logger.info(f"[RAG] Fallback without source_table: {len(docs)} docs")
 
@@ -1529,6 +1587,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                         search_limit,
                         int(self.settings.retrieval_fallback_limit_relaxed),
                     ),
+                    use_hyde=False,
                 )
                 logger.info(f"[RAG] Fallback without team filter: {len(docs)} docs")
 
@@ -1546,6 +1605,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                         search_limit,
                         int(self.settings.retrieval_fallback_limit_minimal),
                     ),
+                    use_hyde=False,
                 )
                 logger.info(f"[RAG] Minimal fallback: {len(docs)} docs")
 

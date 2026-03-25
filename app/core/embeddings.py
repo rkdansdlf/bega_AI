@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import httpx
 
 from ..config import Settings
+from .http_clients import get_shared_httpx_client
 
 logger = logging.getLogger(__name__)
 
@@ -53,33 +54,42 @@ def _normalize_query(text: str) -> str:
 
 
 def _embed_signature(settings: Settings) -> str:
-    provider = settings.embed_provider or "unknown"
-    embed_dim = str(settings.embed_dim) if settings.embed_dim else ""
+    provider = getattr(settings, "embed_provider", None) or "unknown"
+    embed_dim_value = getattr(settings, "embed_dim", None)
+    embed_dim = str(embed_dim_value) if embed_dim_value else ""
 
     if provider == "openai":
         model = (
-            settings.openai_embed_model
-            or settings.embed_model
+            getattr(settings, "openai_embed_model", None)
+            or getattr(settings, "embed_model", None)
             or "text-embedding-3-small"
         )
         return f"{provider}:{model}:{embed_dim}"
     if provider == "openrouter":
         model = (
-            settings.openrouter_embed_model
-            or settings.embed_model
+            getattr(settings, "openrouter_embed_model", None)
+            or getattr(settings, "embed_model", None)
             or "openai/text-embedding-3-small"
         )
         return f"{provider}:{model}:{embed_dim}"
     if provider == "gemini":
-        model = settings.gemini_embed_model or settings.embed_model or ""
+        model = (
+            getattr(settings, "gemini_embed_model", None)
+            or getattr(settings, "embed_model", None)
+            or ""
+        )
         return f"{provider}:{model}:{embed_dim}"
     if provider == "hf":
-        model = settings.embed_model or settings.hf_embed_model
+        model = getattr(settings, "embed_model", None) or getattr(
+            settings,
+            "hf_embed_model",
+            None,
+        )
         return f"{provider}:{model}"
     if provider == "local":
         return f"{provider}:local"
 
-    model = settings.embed_model or ""
+    model = getattr(settings, "embed_model", None) or ""
     return f"{provider}:{model}:{embed_dim}"
 
 
@@ -201,14 +211,16 @@ async def _embed_gemini(
         "X-Goog-Api-Key": settings.gemini_api_key,
     }
 
-    # 동시성 제어를 위한 HTTP 클라이언트 설정을 구성합니다.
     effective_concurrency = max(max_concurrency, 1)
-    limits = httpx.Limits(
-        max_connections=effective_concurrency,
-        max_keepalive_connections=1,
+    client = get_shared_httpx_client(
+        "embeddings-gemini",
+        timeout=httpx.Timeout(30.0, connect=10.0, read=30.0, pool=10.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
 
-    async def post_chunk(chunk: Sequence[str]) -> List[List[float]]:
+    async def post_chunk(
+        chunk: Sequence[str], client: httpx.AsyncClient
+    ) -> List[List[float]]:
         """텍스트 청크를 API에 전송하고 임베딩 결과를 받습니다."""
         prepared_texts: List[str] = []
         for text in chunk:
@@ -233,13 +245,12 @@ async def _embed_gemini(
                 for text in prepared_texts
             ],
         }
-        async with httpx.AsyncClient(timeout=30.0, limits=limits) as client:
-            response = await client.post(
-                url,
-                params=params,
-                headers=headers,
-                content=json.dumps(payload, ensure_ascii=False),
-            )
+        response = await client.post(
+            url,
+            params=params,
+            headers=headers,
+            content=json.dumps(payload, ensure_ascii=False),
+        )
         try:
             response.raise_for_status()
             data = response.json()
@@ -284,7 +295,7 @@ async def _embed_gemini(
             backoff = 1.0
             while True:
                 try:
-                    chunk_vectors = await post_chunk(chunk)
+                    chunk_vectors = await post_chunk(chunk, client)
                     results_map[idx] = chunk_vectors
                     break
                 except (EmbeddingError, httpx.HTTPError) as exc:
@@ -353,11 +364,11 @@ async def _embed_openai(
     max_retries = 5
 
     effective_concurrency = max(max_concurrency, 1)
-    limits = httpx.Limits(
-        max_connections=effective_concurrency,
-        max_keepalive_connections=1,
+    client = get_shared_httpx_client(
+        "embeddings-openai",
+        timeout=httpx.Timeout(60.0, connect=10.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
-    timeout = httpx.Timeout(60.0, connect=10.0)
 
     async def post_chunk(
         chunk: Sequence[str], client: httpx.AsyncClient
@@ -435,10 +446,9 @@ async def _embed_openai(
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, 30.0)
 
-    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
-        await asyncio.gather(
-            *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
-        )
+    await asyncio.gather(
+        *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
+    )
 
     # 순서대로 결과 취합
     results: List[List[float]] = []
@@ -497,11 +507,11 @@ async def _embed_openrouter(
     effective_concurrency = max(max_concurrency, 1)
     semaphore = asyncio.Semaphore(effective_concurrency)
 
-    limits = httpx.Limits(
-        max_connections=effective_concurrency,
-        max_keepalive_connections=1,
+    client = get_shared_httpx_client(
+        "embeddings-openrouter",
+        timeout=httpx.Timeout(60.0, connect=10.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
-    timeout = httpx.Timeout(60.0, connect=10.0)
 
     async def post_chunk(
         chunk: Sequence[str], client: httpx.AsyncClient
@@ -572,14 +582,9 @@ async def _embed_openrouter(
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, 30.0)
 
-    async with httpx.AsyncClient(
-        timeout=timeout,
-        limits=limits,
-        follow_redirects=False,
-    ) as client:
-        await asyncio.gather(
-            *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
-        )
+    await asyncio.gather(
+        *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
+    )
 
     # 순서대로 결과 취합
     results: List[List[float]] = []

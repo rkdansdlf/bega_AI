@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.errors import UndefinedTable
+from psycopg.errors import QueryCanceled, UndefinedTable
 from psycopg import OperationalError as PsycopgOperationalError
 from psycopg import InterfaceError as PsycopgInterfaceError
 from ..config import Settings, get_settings
@@ -278,11 +278,25 @@ def similarity_search(
         _ensure_pgvector_session(conn, active_settings)
         with conn.cursor(row_factory=dict_row) as cur:
             ef_search = max(1, int(active_settings.retrieval_hnsw_ef_search))
+            statement_timeout_ms = max(
+                1, int(active_settings.retrieval_statement_timeout_ms)
+            )
             cur.execute(f"SET LOCAL hnsw.ef_search = {ef_search};")
+            cur.execute(f"SET LOCAL statement_timeout = {statement_timeout_ms};")
             cur.execute(sql, final_params)
             rows = cur.fetchall()
     except UndefinedTable:
         return []
+    except QueryCanceled as exc:
+        logger.warning(
+            "[Search] similarity_search timed out after %dms (hybrid=%s): %s",
+            int(active_settings.retrieval_statement_timeout_ms),
+            bool(keyword),
+            exc,
+        )
+        raise DBRetrievalError(
+            "pgvector query timed out", cause=exc
+        ) from exc
     except (PsycopgOperationalError, PsycopgInterfaceError, TimeoutError) as exc:
         logger.error("[Search] DB unreachable during similarity_search: %s", exc)
         raise DBRetrievalError(
