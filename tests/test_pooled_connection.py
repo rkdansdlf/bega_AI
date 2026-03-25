@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+import psycopg
+
+from app.core.exceptions import DBRetrievalError
 from app.tools.document_query import DocumentQueryTool
 from app.tools.pooled_connection import connection_scope
 from app.tools.query_logging import (
@@ -90,6 +93,70 @@ def test_document_query_tool_retries_with_fresh_connection(monkeypatch, caplog):
         "kbo_regulations",
     ]
     assert result["documents"][0]["title"] == "규정"
+
+
+def test_document_query_tool_reuses_query_embedding_cache(monkeypatch):
+    tool = DocumentQueryTool(
+        SimpleNamespace(closed=False),
+        settings=SimpleNamespace(embed_provider="local", embed_model="stub"),
+    )
+    calls = {"count": 0}
+
+    def _fake_embed_texts(texts, settings):
+        calls["count"] += 1
+        return [[0.1, 0.2, 0.3]]
+
+    monkeypatch.setattr("app.tools.document_query.embed_texts", _fake_embed_texts)
+
+    first = tool._embed_query("  테스트 질의 ")
+    second = tool._embed_query("테스트   질의")
+
+    assert calls["count"] == 1
+    assert first == second
+
+
+def test_document_query_tool_uses_exact_term_fallback_on_similarity_timeout(
+    monkeypatch,
+):
+    tool = DocumentQueryTool(
+        SimpleNamespace(closed=False),
+        settings=SimpleNamespace(embed_provider="local", embed_model="stub"),
+    )
+    similarity_calls = []
+
+    monkeypatch.setattr(tool, "_embed_query", lambda query: [0.1, 0.2, 0.3])
+
+    def _fake_similarity_search(conn, embedding, *, limit, keyword, settings):
+        similarity_calls.append(keyword)
+        raise DBRetrievalError(
+            "pgvector query timed out",
+            cause=psycopg.errors.QueryCanceled("statement timeout"),
+        )
+
+    monkeypatch.setattr(
+        "app.tools.document_query.similarity_search", _fake_similarity_search
+    )
+    monkeypatch.setattr(
+        tool,
+        "_search_exact_term_documents",
+        lambda conn, query_lower, limit: [
+            {
+                "title": "WHIP 설명",
+                "content": "설명",
+                "source_table": "markdown_docs",
+                "source_row_id": "doc-1",
+                "meta": {},
+                "similarity": 1.0,
+                "combined_score": 1.0,
+            }
+        ],
+    )
+
+    docs = tool._search_documents_once(SimpleNamespace(), "WHIP 뜻이 뭐야?", limit=1)
+
+    assert similarity_calls == ["WHIP 뜻이 뭐야?", None]
+    assert len(docs) == 1
+    assert docs[0]["title"] == "WHIP 설명"
 
 
 def test_regulation_query_tool_retries_with_fresh_connection(monkeypatch, caplog):

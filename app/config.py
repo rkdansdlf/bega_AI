@@ -214,6 +214,12 @@ class Settings(BaseSettings):
 
     # --- 검색(Retrieval) 관련 설정 ---
     default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
+    retrieval_single_query_for_strict_entity: bool = Field(
+        True, validation_alias="RETRIEVAL_SINGLE_QUERY_FOR_STRICT_ENTITY"
+    )
+    retrieval_multi_query_rule_variation_max: int = Field(
+        3, validation_alias="RETRIEVAL_MULTI_QUERY_RULE_VARIATION_MAX"
+    )
     retrieval_multi_query_limit_per_query: int = Field(
         8, validation_alias="RETRIEVAL_MULTI_QUERY_LIMIT_PER_QUERY"
     )
@@ -228,6 +234,9 @@ class Settings(BaseSettings):
     )
     retrieval_hnsw_ef_search: int = Field(
         100, validation_alias="RETRIEVAL_HNSW_EF_SEARCH"
+    )
+    retrieval_statement_timeout_ms: int = Field(
+        8000, validation_alias="RETRIEVAL_STATEMENT_TIMEOUT_MS"
     )
     rag_chunk_target_chars: int = Field(650, validation_alias="RAG_CHUNK_TARGET_CHARS")
     rag_chunk_max_chars: int = Field(900, validation_alias="RAG_CHUNK_MAX_CHARS")
@@ -280,6 +289,12 @@ class Settings(BaseSettings):
     chat_tool_parallel_enabled: bool = Field(
         True, validation_alias="CHAT_TOOL_PARALLEL_ENABLED"
     )
+    chat_tool_parallel_split_batch_enabled: bool = Field(
+        True, validation_alias="CHAT_TOOL_PARALLEL_SPLIT_BATCH_ENABLED"
+    )
+    chat_tool_parallel_serial_tools_raw: str = Field(
+        "", validation_alias="CHAT_TOOL_PARALLEL_SERIAL_TOOLS"
+    )
     chat_tool_parallel_max_concurrency: int = Field(
         2, validation_alias="CHAT_TOOL_PARALLEL_MAX_CONCURRENCY"
     )
@@ -302,6 +317,12 @@ class Settings(BaseSettings):
     chat_fast_path_tool_cap: int = Field(2, validation_alias="CHAT_FAST_PATH_TOOL_CAP")
     chat_fast_path_fallback_on_empty: bool = Field(
         True, validation_alias="CHAT_FAST_PATH_FALLBACK_ON_EMPTY"
+    )
+    chat_planner_cache_ttl_seconds: int = Field(
+        15, validation_alias="CHAT_PLANNER_CACHE_TTL_SECONDS"
+    )
+    chat_planner_cache_max_entries: int = Field(
+        512, validation_alias="CHAT_PLANNER_CACHE_MAX_ENTRIES"
     )
     chat_team_answer_cap_base: int = Field(
         520, validation_alias="CHAT_TEAM_ANSWER_CAP_BASE"
@@ -438,12 +459,16 @@ class Settings(BaseSettings):
         "chat_tool_result_max_items",
         "chat_tool_parallel_max_concurrency",
         "chat_fast_path_tool_cap",
+        "chat_planner_cache_ttl_seconds",
+        "chat_planner_cache_max_entries",
         "default_search_limit",
+        "retrieval_multi_query_rule_variation_max",
         "retrieval_multi_query_limit_per_query",
         "retrieval_fallback_limit_relaxed",
         "retrieval_fallback_limit_minimal",
         "retrieval_ivfflat_probes",
         "retrieval_hnsw_ef_search",
+        "retrieval_statement_timeout_ms",
         "rag_chunk_target_chars",
         "rag_chunk_max_chars",
         "rag_chunk_min_chars",
@@ -492,6 +517,10 @@ class Settings(BaseSettings):
         return value
 
     @property
+    def chat_tool_parallel_serial_tools(self) -> List[str]:
+        return self._parse_string_list(self.chat_tool_parallel_serial_tools_raw)
+
+    @property
     def cors_allowed_origins(self) -> List[str]:
         """CORS 정책에 따라 허용된 출처 목록을 반환합니다."""
         origins = self.cors_origins
@@ -502,24 +531,8 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> List[str]:
         """CORS_ORIGINS 값을 JSON 배열/콤마 구분 문자열 모두 허용해 파싱합니다."""
-        raw = (self.cors_origins_raw or "").strip()
-        if not raw:
-            return DEFAULT_CORS_ORIGINS
-        if raw.startswith("["):
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, list):
-                    normalized = [
-                        str(origin).strip() for origin in parsed if str(origin).strip()
-                    ]
-                    if normalized:
-                        return normalized
-            except Exception:
-                logger.warning(
-                    "Failed to parse CORS_ORIGINS as JSON list; fallback to CSV parsing."
-                )
-        parsed_csv = [origin.strip() for origin in raw.split(",") if origin.strip()]
-        return parsed_csv or DEFAULT_CORS_ORIGINS
+        parsed = self._parse_string_list(self.cors_origins_raw)
+        return parsed or DEFAULT_CORS_ORIGINS
 
     @property
     def is_local_dev_environment(self) -> bool:
@@ -536,6 +549,26 @@ class Settings(BaseSettings):
         if self.is_local_dev_environment:
             return LOCAL_DEV_AI_INTERNAL_TOKEN
         return None
+
+    @staticmethod
+    def _parse_string_list(raw_value: str) -> List[str]:
+        raw = (raw_value or "").strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    normalized = [
+                        str(item).strip() for item in parsed if str(item).strip()
+                    ]
+                    if normalized:
+                        return normalized
+            except Exception:
+                logger.warning(
+                    "Failed to parse list-like setting as JSON list; fallback to CSV parsing."
+                )
+        return [item.strip() for item in raw.split(",") if item.strip()]
 
     @staticmethod
     def _is_local_origin(origin: str) -> bool:

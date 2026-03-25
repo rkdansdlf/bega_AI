@@ -35,6 +35,7 @@ from scripts.ingest_from_kbo import (
     build_source_row_id,
     resolve_primary_key_columns,
 )
+from scripts.sync_rag_chunks import _load_settings_from_env_file
 
 SEASONAL_TABLES: List[str] = [
     "kbo_seasons",
@@ -119,18 +120,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Source DB URL override. Defaults to settings.database_url.",
     )
     parser.add_argument(
+        "--source-env-file",
+        default="",
+        help="Env file used to resolve source DB config when --source-db-url is omitted.",
+    )
+    parser.add_argument(
         "--dest-db-url",
         default="",
         help="Destination DB URL override. Defaults to settings.database_url.",
+    )
+    parser.add_argument(
+        "--dest-env-file",
+        default="",
+        help="Env file used to resolve destination DB config when --dest-db-url is omitted.",
     )
     return parser
 
 
 def resolve_db_urls(args: argparse.Namespace) -> tuple[str, str]:
     settings = get_settings()
-    source_db_url = args.source_db_url.strip() or settings.database_url
-    dest_db_url = args.dest_db_url.strip() or settings.database_url
+    source_db_url = args.source_db_url.strip()
+    dest_db_url = args.dest_db_url.strip()
+
+    if not source_db_url:
+        if args.source_env_file.strip():
+            source_db_url = _load_settings_from_env_file(args.source_env_file).database_url
+        else:
+            source_db_url = settings.database_url
+
+    if not dest_db_url:
+        if args.dest_env_file.strip():
+            dest_db_url = _load_settings_from_env_file(args.dest_env_file).database_url
+        else:
+            dest_db_url = settings.database_url
     return source_db_url, dest_db_url
+
+
+def _safe_close_connection(conn: Any) -> None:
+    close = getattr(conn, "close", None)
+    if close is None:
+        return
+    error_cls = getattr(psycopg, "OperationalError", Exception)
+    try:
+        close()
+    except error_cls:
+        pass
 
 
 def build_targets(mode: str, start_year: int, end_year: int) -> List[CoverageTarget]:
@@ -297,6 +331,29 @@ def _is_source_file_target(table: str) -> bool:
     return bool(profile.get("source_file"))
 
 
+def build_actual_rows_query(
+    target: CoverageTarget,
+) -> tuple[str, tuple[Any, ...]]:
+    read_sql = """
+        SELECT source_row_id, meta
+        FROM rag_chunks
+        WHERE source_table = %s
+    """
+    params: List[Any] = [target.source_table]
+
+    if _is_source_file_target(target.table):
+        profile = TABLE_PROFILES.get(target.table, {})
+        static_prefix = build_static_source_row_prefix(target.table, profile)
+        read_sql += " AND (source_row_id = %s OR source_row_id LIKE %s)"
+        params.extend([static_prefix, f"{static_prefix}#part%"])
+        return read_sql, tuple(params)
+
+    if target.year != 0:
+        read_sql += " AND season_year = %s"
+        params.append(target.year)
+    return read_sql, tuple(params)
+
+
 def normalize_actual_source_row_id(
     raw_source_row_id: str,
     table: str,
@@ -350,17 +407,7 @@ def _load_actual_ids(
     target: CoverageTarget,
     legacy_aliases: Dict[str, str],
 ) -> int:
-    read_sql = """
-        SELECT source_row_id, meta
-        FROM rag_chunks
-        WHERE source_table = %s
-    """
-    params: tuple[Any, ...]
-    if target.year == 0:
-        params = (target.source_table,)
-    else:
-        read_sql += " AND season_year = %s"
-        params = (target.source_table, target.year)
+    read_sql, params = build_actual_rows_query(target)
 
     insert_sql = "INSERT INTO actual_ids (id) VALUES (%s) ON CONFLICT DO NOTHING"
     with dest_cur.connection.cursor() as read_cur:
@@ -549,19 +596,21 @@ def main() -> int:
 
     exit_code = 0
     try:
-        with psycopg.connect(source_db_url, autocommit=True) as source_conn:
-            with psycopg.connect(dest_db_url) as dest_conn:
-                for idx, target in enumerate(targets, start=1):
-                    print(
-                        f"[{idx}/{len(targets)}] verifying table={target.table} year={target.year}"
-                    )
-                    result = verify_target(
-                        source_conn=source_conn,
-                        dest_conn=dest_conn,
-                        target=target,
-                        sample_limit=args.sample_limit,
-                    )
-                    rows.append(result)
+        for idx, target in enumerate(targets, start=1):
+            print(f"[{idx}/{len(targets)}] verifying table={target.table} year={target.year}")
+            source_conn = psycopg.connect(source_db_url, autocommit=True)
+            dest_conn = psycopg.connect(dest_db_url)
+            try:
+                result = verify_target(
+                    source_conn=source_conn,
+                    dest_conn=dest_conn,
+                    target=target,
+                    sample_limit=args.sample_limit,
+                )
+            finally:
+                _safe_close_connection(source_conn)
+                _safe_close_connection(dest_conn)
+            rows.append(result)
     except Exception as exc:
         report["fatal_error"] = str(exc)
         exit_code = 1

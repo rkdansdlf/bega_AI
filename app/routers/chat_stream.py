@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import tempfile
+import time
 from datetime import date, datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from dotenv import load_dotenv
@@ -426,6 +427,9 @@ def _make_cached_sse_response(
                     "style": style,
                     "cached": True,
                     "intent": cached.get("intent"),
+                    "planner_mode": "cache",
+                    "planner_cache_hit": False,
+                    "tool_execution_mode": "none",
                     "grounding_mode": "cache",
                     "source_tier": "cache",
                     "answer_sources": [],
@@ -441,6 +445,9 @@ def _make_cached_sse_response(
                         "answer_ms": 0.0,
                         "first_token_ms": 0.0,
                         "tool_count": 0,
+                        "tool_execution_mode": "none",
+                        "planner_cache_hit": False,
+                        "planner_mode": "cache",
                         "model": "cache",
                     },
                 },
@@ -474,6 +481,22 @@ def _log_cancelled_stream(question: str, source: str) -> None:
     logger.info("chat_stream cancelled source=%s question=%s", source, question[:120])
 
 
+def _clone_perf_payload(raw_perf: Any) -> Dict[str, Any]:
+    if isinstance(raw_perf, dict):
+        return dict(raw_perf)
+    return {}
+
+
+def _finalize_stream_perf_payload(
+    raw_perf: Any,
+    *,
+    first_token_ms: Optional[float],
+) -> Dict[str, Any]:
+    perf_payload = _clone_perf_payload(raw_perf)
+    perf_payload["first_token_ms"] = first_token_ms
+    return perf_payload
+
+
 async def _chat_event_generator(
     *,
     request: Optional[Request],
@@ -485,6 +508,17 @@ async def _chat_event_generator(
     cache_key: Optional[str],
 ) -> AsyncGenerator[Dict[str, str], None]:
     """Build the SSE event stream while respecting downstream disconnects."""
+    stream_started_at = time.perf_counter()
+    first_message_ms: Optional[float] = None
+
+    def _mark_first_message() -> None:
+        nonlocal first_message_ms
+        if first_message_ms is None:
+            first_message_ms = round(
+                (time.perf_counter() - stream_started_at) * 1000,
+                2,
+            )
+
     if error_payload:
         if await _request_is_disconnected(request):
             _log_cancelled_stream(question, "before-error-status")
@@ -535,6 +569,7 @@ async def _chat_event_generator(
                 if not delta:
                     continue
                 full_response_chunks.append(delta)
+                _mark_first_message()
                 yield {
                     "event": "message",
                     "data": json.dumps({"delta": delta}, ensure_ascii=False),
@@ -550,6 +585,7 @@ async def _chat_event_generator(
                 "같은 질문을 한 번 더 보내주시면 바로 다시 이어서 볼게요."
             )
             full_response_chunks.append(fallback_text)
+            _mark_first_message()
             yield {
                 "event": "message",
                 "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
@@ -572,6 +608,7 @@ async def _chat_event_generator(
             rendered = await _render_answer(result, style)
             full_response_chunks.append(_ensure_quality_answer_text(rendered))
             full_response_text = "".join(full_response_chunks)
+            _mark_first_message()
             yield {
                 "event": "message",
                 "data": json.dumps({"delta": full_response_text}, ensure_ascii=False),
@@ -620,6 +657,8 @@ async def _chat_event_generator(
         "intent": intent,
         "strategy": result.get("strategy"),
         "planner_mode": result.get("planner_mode"),
+        "planner_cache_hit": bool(result.get("planner_cache_hit", False)),
+        "tool_execution_mode": result.get("tool_execution_mode"),
         "grounding_mode": result.get("grounding_mode"),
         "source_tier": result.get("source_tier"),
         "answer_sources": result.get("answer_sources", []),
@@ -627,7 +666,10 @@ async def _chat_event_generator(
         "fallback_reason": result.get("fallback_reason"),
         "fallback_answer_used": bool(result.get("fallback_answer_used", False))
         or bool(answer_stream_error),
-        "perf": result.get("perf"),
+        "perf": _finalize_stream_perf_payload(
+            result.get("perf"),
+            first_token_ms=first_message_ms,
+        ),
         "error": public_error,
         "finish_reason": finish_reason,
         "cancelled": stream_cancelled,
@@ -717,6 +759,8 @@ async def _chat_live_event_generator(
     stream,
 ) -> AsyncGenerator[Dict[str, str], None]:
     settings = get_settings()
+    stream_started_at = time.perf_counter()
+    first_message_ms: Optional[float] = None
     full_response_chunks: List[str] = []
     buffered_meta: Dict[str, Any] = {}
     answer_stream_error: Optional[str] = None
@@ -730,6 +774,14 @@ async def _chat_live_event_generator(
         "event": "status",
         "data": json.dumps({"message": "⏺️"}, ensure_ascii=False),
     }
+
+    def _mark_first_message() -> None:
+        nonlocal first_message_ms
+        if first_message_ms is None:
+            first_message_ms = round(
+                (time.perf_counter() - stream_started_at) * 1000,
+                2,
+            )
 
     try:
         async for event in stream:
@@ -771,6 +823,7 @@ async def _chat_live_event_generator(
                 if not delta:
                     continue
                 full_response_chunks.append(delta)
+                _mark_first_message()
                 yield {
                     "event": "message",
                     "data": json.dumps({"delta": delta}, ensure_ascii=False),
@@ -790,6 +843,7 @@ async def _chat_live_event_generator(
             "같은 질문을 한 번 더 보내주시면 바로 다시 이어서 볼게요."
         )
         full_response_chunks.append(fallback_text)
+        _mark_first_message()
         yield {
             "event": "message",
             "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
@@ -848,6 +902,8 @@ async def _chat_live_event_generator(
         "intent": intent,
         "strategy": buffered_meta.get("strategy"),
         "planner_mode": buffered_meta.get("planner_mode"),
+        "planner_cache_hit": bool(buffered_meta.get("planner_cache_hit", False)),
+        "tool_execution_mode": buffered_meta.get("tool_execution_mode"),
         "grounding_mode": buffered_meta.get("grounding_mode"),
         "source_tier": buffered_meta.get("source_tier"),
         "answer_sources": buffered_meta.get("answer_sources", []),
@@ -855,7 +911,10 @@ async def _chat_live_event_generator(
         "fallback_reason": buffered_meta.get("fallback_reason"),
         "fallback_answer_used": bool(buffered_meta.get("fallback_answer_used", False))
         or bool(answer_stream_error),
-        "perf": buffered_meta.get("perf"),
+        "perf": _finalize_stream_perf_payload(
+            buffered_meta.get("perf"),
+            first_token_ms=first_message_ms,
+        ),
         "error": public_error,
         "finish_reason": finish_reason,
         "cancelled": stream_cancelled,
@@ -1132,6 +1191,9 @@ async def chat_completion(
                         "visualizations": [],
                         "intent": cached.get("intent"),
                         "cached": True,
+                        "planner_mode": "cache",
+                        "planner_cache_hit": False,
+                        "tool_execution_mode": "none",
                         "grounding_mode": "cache",
                         "source_tier": "cache",
                         "answer_sources": [],
@@ -1145,6 +1207,9 @@ async def chat_completion(
                             "answer_ms": 0.0,
                             "first_token_ms": 0.0,
                             "tool_count": 0,
+                            "tool_execution_mode": "none",
+                            "planner_cache_hit": False,
+                            "planner_mode": "cache",
                             "model": "cache",
                         },
                     }

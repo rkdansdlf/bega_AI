@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional JSON report output path.",
     )
     parser.add_argument(
+        "--summary-output",
+        type=str,
+        default=None,
+        help="Optional compact summary JSON output path.",
+    )
+    parser.add_argument(
         "--chat-question-list",
         type=str,
         default=None,
@@ -477,6 +483,10 @@ def build_summary(results: List[Dict[str, Any]]) -> Dict[str, int]:
     return {"total": total, "passed": passed, "failed": failed}
 
 
+def _build_console_summary(summary: Dict[str, int]) -> Dict[str, Dict[str, int]]:
+    return {"summary": dict(summary)}
+
+
 def main() -> int:
     args = parse_args()
     base_url = args.base_url.rstrip("/")
@@ -554,8 +564,6 @@ def main() -> int:
         "summary": summary,
     }
 
-    print(json.dumps({"summary": summary}, ensure_ascii=False))
-
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -563,7 +571,22 @@ def main() -> int:
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    if args.summary_output:
+        summary_output = Path(args.summary_output)
+        summary_output.parent.mkdir(parents=True, exist_ok=True)
+        summary_output.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    print(json.dumps(_build_console_summary(summary), ensure_ascii=False))
+
+    if args.output:
         print(f"Wrote report: {output_path}")
+
+    if args.summary_output:
+        print(f"Wrote summary: {summary_output}")
 
     if args.strict and summary["failed"] > 0:
         return 1

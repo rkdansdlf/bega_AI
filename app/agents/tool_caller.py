@@ -7,6 +7,7 @@
 
 import logging
 import re
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 from dataclasses import dataclass
@@ -286,6 +287,11 @@ class ToolCaller:
 
         return results
 
+    async def execute_tool_async(self, tool_call: ToolCall) -> ToolResult:
+        """단일 도구를 event loop 밖에서 실행합니다."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.execute_tool, tool_call)
+
     async def execute_multiple_tools_parallel(
         self, tool_calls: List[ToolCall], max_concurrency: int | None = None
     ) -> List[ToolResult]:
@@ -301,8 +307,6 @@ class ToolCaller:
         Returns:
             각 도구의 실행 결과 목록 (입력 순서 유지)
         """
-        import asyncio
-
         logger.info(
             "[ToolCaller] Executing %d tools in parallel (max_concurrency=%s)",
             len(tool_calls),
@@ -317,12 +321,11 @@ class ToolCaller:
 
         async def execute_single_async(tool_call: ToolCall) -> ToolResult:
             """단일 도구를 비동기적으로 실행합니다."""
-            loop = asyncio.get_event_loop()
             if semaphore is None:
-                return await loop.run_in_executor(None, self.execute_tool, tool_call)
+                return await self.execute_tool_async(tool_call)
 
             async with semaphore:
-                return await loop.run_in_executor(None, self.execute_tool, tool_call)
+                return await self.execute_tool_async(tool_call)
 
         # 병렬 실행
         tasks = [execute_single_async(tc) for tc in tool_calls]

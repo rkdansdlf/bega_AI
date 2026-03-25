@@ -3,9 +3,18 @@ from unittest.mock import MagicMock
 from app.tools.database_query import DatabaseQueryTool
 from app.tools.game_query import GameQueryTool
 from app.tools.team_code_resolver import TeamCodeResolver
+from app.tools import team_mapping_loader
 
 
 class TestTeamMappingRobustness:
+    @pytest.fixture(autouse=True)
+    def reset_shared_team_mapping_cache(self):
+        team_mapping_loader._team_mapping_cache_rows = None
+        team_mapping_loader._team_mapping_cache_loaded_at = 0.0
+        yield
+        team_mapping_loader._team_mapping_cache_rows = None
+        team_mapping_loader._team_mapping_cache_loaded_at = 0.0
+
     @pytest.fixture
     def mock_db_connection(self):
         mock_conn = MagicMock()
@@ -60,6 +69,35 @@ class TestTeamMappingRobustness:
         assert "KH" in variants
         assert "WO" in variants
         assert "NX" in variants
+
+    def test_game_tool_uses_shared_mapping_cache(
+        self, monkeypatch, mock_db_connection
+    ):
+        cached_rows = [
+            {
+                "team_id": "HT",
+                "team_name": "해태 타이거즈",
+                "franchise_id": 1,
+                "founded_year": 1982,
+                "is_active": False,
+                "current_code": "KIA",
+            }
+        ]
+
+        monkeypatch.setattr(
+            "app.tools.game_query.load_cached_team_mapping_rows",
+            lambda: cached_rows,
+        )
+        monkeypatch.setattr(
+            GameQueryTool,
+            "_load_team_mappings",
+            lambda self: pytest.fail("shared cache should bypass DB mapping reload"),
+        )
+
+        tool = GameQueryTool(mock_db_connection)
+
+        assert tool.mapping_dependency_reason == "shared_cache"
+        assert tool.get_team_code("해태") == "KIA"
 
     def test_game_tool_game_query_params(self, game_tool):
         # Verify that providing a team name results in ANY(%s) param logic
@@ -120,6 +158,20 @@ class TestTeamMappingRobustness:
         assert "inning_number" not in inning_query
         assert result["games"][0]["box_score"]["home_1"] == 1
         assert result["games"][0]["box_score"]["away_2"] == 2
+
+    def test_game_tool_recent_games_query_uses_any_and_year_filters(self, game_tool):
+        mock_cursor = game_tool.connection.cursor.return_value
+        mock_cursor.execute.reset_mock()
+        mock_cursor.fetchall.return_value = []
+
+        game_tool.get_team_recent_games("SSG", limit=3, year=2025)
+
+        query, params = mock_cursor.execute.call_args[0]
+        assert "g.home_team = ANY(%s)" in query
+        assert "EXTRACT(YEAR FROM g.game_date) = %s" in query
+        assert "SSG" in params[0]
+        assert params[2] == 2025
+        assert params[-1] == 3
 
     def test_db_tool_leaderboard_query_params(self, monkeypatch, mock_db_connection):
         monkeypatch.setenv("TEAM_CODE_READ_MODE", "canonical_only")

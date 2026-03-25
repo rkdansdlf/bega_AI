@@ -75,6 +75,9 @@ from app.core.renderers.baseball import (
     render_pitching_season,
     render_hitter_game,
     render_pitcher_game,
+    render_team_batting_season,
+    render_team_pitching_season,
+    render_stat_ranking,
 )
 
 
@@ -370,11 +373,14 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
                 ks.season_year,
                 ks.league_type_code,
                 s.stadium_name,
+                gm.updated_at AS game_updated_at,
                 ht.team_name AS home_team_name,
                 at.team_name AS away_team_name
             FROM game g
             LEFT JOIN kbo_seasons ks
               ON ks.season_id = g.season_id
+            LEFT JOIN game_metadata gm
+              ON gm.game_id = g.game_id
             LEFT JOIN stadiums s
               ON s.stadium_id = g.stadium_id
             LEFT JOIN teams ht
@@ -397,7 +403,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["id", "game_id"],
         "season_filter_column": "ks.season_year",
-        "since_filter_column": "g.updated_at",
+        "since_filter_column": "gm.updated_at",
     },
     "game_flow_summary": {
         "description": "KBO 경기 흐름 요약",
@@ -798,28 +804,28 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
     "player_movements": {
         "description": "선수 이동 기록 (FA, 트레이드, 드래프트)",
         "title_fields": [
-            ["date"],
+            ["movement_date"],
             ["section"],
             ["player_name"],
         ],
         "select_sql": """
             SELECT
                 pm.*,
-                EXTRACT(YEAR FROM pm.date) AS season_year,
+                EXTRACT(YEAR FROM pm.movement_date) AS season_year,
                 t.team_name
             FROM player_movements pm
             LEFT JOIN teams t ON t.team_id = pm.team_code
-            ORDER BY pm.date DESC, pm.player_name
+            ORDER BY pm.movement_date DESC, pm.player_name
         """,
         "highlights": [
-            ("날짜", ["date"]),
+            ("날짜", ["movement_date"]),
             ("이동 유형", ["section"]),
             ("선수", ["player_name"]),
             ("팀", ["team_name", "team_code"]),
             ("비고", ["remarks"]),
         ],
-        "pk_hint": ["id", "date", "player_name"],
-        "season_filter_column": None,
+        "pk_hint": ["id", "movement_date", "player_name"],
+        "season_filter_column": "EXTRACT(YEAR FROM pm.movement_date)",
         "since_filter_column": "pm.updated_at",
     },
     "team_franchises": {
@@ -872,7 +878,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["player_id"],
         "season_filter_column": None,
-        "since_filter_column": "pb.updated_at",
+        "since_filter_column": None,
     },
     "team_name_mapping": {
         "description": "풀네임-코드 매핑",
@@ -911,6 +917,95 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["team_id", "id"],
         "season_filter_column": None,
         "since_filter_column": "tp.updated_at",
+    },
+    "team_season_batting": {
+        "description": "KBO 팀 시즌 타격 기록",
+        "kind": "team_batting_season",
+        "title_fields": [
+            ["season"],
+            ["team_name", "team_id"],
+        ],
+        "select_sql": """
+            SELECT
+                tsb.*,
+                t.team_name AS display_team_name
+            FROM team_season_batting tsb
+            LEFT JOIN teams t ON t.team_id = tsb.team_id
+            ORDER BY tsb.season DESC, tsb.team_id
+        """,
+        "highlights": [
+            ("시즌", ["season"]),
+            ("팀", ["team_name", "team_id"]),
+            ("경기", ["games"]),
+            ("타율", ["avg"]),
+            ("OPS", ["ops"]),
+            ("홈런", ["home_runs"]),
+            ("타점", ["rbi"]),
+            ("도루", ["stolen_bases"]),
+        ],
+        "pk_hint": ["id", "team_id", "season", "league"],
+        "renderer": render_team_batting_season,
+        "season_filter_column": "tsb.season",
+        "since_filter_column": "tsb.updated_at",
+    },
+    "team_season_pitching": {
+        "description": "KBO 팀 시즌 투수 기록",
+        "kind": "team_pitching_season",
+        "title_fields": [
+            ["season"],
+            ["team_name", "team_id"],
+        ],
+        "select_sql": """
+            SELECT
+                tsp.*,
+                t.team_name AS display_team_name
+            FROM team_season_pitching tsp
+            LEFT JOIN teams t ON t.team_id = tsp.team_id
+            ORDER BY tsp.season DESC, tsp.team_id
+        """,
+        "highlights": [
+            ("시즌", ["season"]),
+            ("팀", ["team_name", "team_id"]),
+            ("경기", ["games"]),
+            ("승", ["wins"]),
+            ("패", ["losses"]),
+            ("ERA", ["era"]),
+            ("WHIP", ["whip"]),
+            ("탈삼진", ["strikeouts"]),
+        ],
+        "pk_hint": ["id", "team_id", "season", "league"],
+        "renderer": render_team_pitching_season,
+        "season_filter_column": "tsp.season",
+        "since_filter_column": "tsp.updated_at",
+    },
+    "stat_rankings": {
+        "description": "KBO 시즌 부문별 리더 순위",
+        "title_fields": [
+            ["season"],
+            ["metric"],
+            ["entity_label"],
+        ],
+        "select_sql": """
+            SELECT
+                sr.*,
+                sr.season AS season_year,
+                t.team_name
+            FROM stat_rankings sr
+            LEFT JOIN teams t ON t.team_id = sr.team_id
+            ORDER BY sr.season DESC, sr.metric, sr.rank
+        """,
+        "highlights": [
+            ("시즌", ["season"]),
+            ("부문", ["metric"]),
+            ("선수", ["entity_label", "entity_id"]),
+            ("팀", ["team_name", "team_id"]),
+            ("기록", ["value"]),
+            ("순위", ["rank"]),
+        ],
+        "pk_hint": ["id", "season", "metric", "entity_id"],
+        "renderer": render_stat_ranking,
+        "season_filter_column": "sr.season",
+        "since_filter_column": "sr.updated_at",
     },
     "game_summary": {
         "description": "경기 요약 정보 (승리 타점, 홈런 등 주요 기록 설명)",
@@ -960,6 +1055,10 @@ DEFAULT_TABLES = [
     # 시즌 통계
     "player_season_batting",
     "player_season_pitching",
+    # 팀 시즌 통계 + 랭킹
+    "team_season_batting",
+    "team_season_pitching",
+    "stat_rankings",
     # 경기 정보
     "game",
     "game_metadata",
@@ -988,6 +1087,7 @@ DEFAULT_TABLES = [
 
 TARGET_RPM = 10
 MIN_DELAY_SECONDS = 60 / TARGET_RPM
+PGVECTOR_SEARCH_PATH = "public, extensions, security"
 
 STADIUM_ID_ALIAS_MAP: Dict[str, str] = {
     "CHANGWON": "NCPARK",
@@ -1019,6 +1119,9 @@ CANONICAL_SOURCE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "stadiums": ("stadium_id",),
     "player_basic": ("player_id",),
     "player_movements": ("id",),
+    "team_season_batting": ("id",),
+    "team_season_pitching": ("id",),
+    "stat_rankings": ("id",),
 }
 
 
@@ -2079,6 +2182,7 @@ def ingest(
     dest_conn.autocommit = True
     with dest_conn.cursor() as cur:
         cur.execute("SET statement_timeout TO 0;")
+        cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
     dest_conn.autocommit = original_autocommit
 
     ingested_total = 0

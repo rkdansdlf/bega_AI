@@ -161,3 +161,66 @@ def test_game_flow_summary_profile_matches_current_schema() -> None:
     assert profile["since_filter_column"] == "latest_updated_at"
     assert "MAX(ip.updated_at)" in profile["select_sql"]
     assert "g.updated_at" not in profile["select_sql"]
+
+
+def test_player_basic_profile_disables_incremental_since_filter(sample_since) -> None:
+    profile = TABLE_PROFILES["player_basic"]
+
+    assert profile["since_filter_column"] is None
+
+    query, params = build_select_query(
+        table="player_basic",
+        profile=profile,
+        pk_columns=["player_id"],
+        limit=None,
+        season_year=None,
+        since=sample_since,
+    )
+
+    assert "updated_at" not in query
+    assert params == ()
+
+
+def test_player_movements_profile_matches_current_schema(sample_since) -> None:
+    profile = TABLE_PROFILES["player_movements"]
+
+    assert profile["title_fields"][0] == ["movement_date"]
+    assert profile["pk_hint"] == ["id", "movement_date", "player_name"]
+    assert profile["season_filter_column"] == "EXTRACT(YEAR FROM pm.movement_date)"
+    assert "EXTRACT(YEAR FROM pm.movement_date) AS season_year" in profile["select_sql"]
+    assert "ORDER BY pm.movement_date DESC" in profile["select_sql"]
+
+    query, params = build_select_query(
+        table="player_movements",
+        profile=profile,
+        pk_columns=["id"],
+        limit=None,
+        season_year=2025,
+        since=sample_since,
+    )
+
+    assert (
+        "WHERE EXTRACT(YEAR FROM pm.movement_date) = %s AND pm.updated_at >= %s"
+        in query
+    )
+    assert params == (2025, sample_since)
+
+
+def test_game_profile_uses_game_metadata_updated_at(sample_since) -> None:
+    profile = TABLE_PROFILES["game"]
+
+    assert profile["since_filter_column"] == "gm.updated_at"
+    assert "LEFT JOIN game_metadata gm" in profile["select_sql"]
+    assert "gm.updated_at AS game_updated_at" in profile["select_sql"]
+
+    query, params = build_select_query(
+        table="game",
+        profile=profile,
+        pk_columns=["game_id"],
+        limit=None,
+        season_year=2025,
+        since=sample_since,
+    )
+
+    assert "WHERE ks.season_year = %s AND gm.updated_at >= %s" in query
+    assert params == (2025, sample_since)

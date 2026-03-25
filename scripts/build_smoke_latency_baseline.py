@@ -15,6 +15,11 @@ PRESET_INPUTS = {
         REPORTS_DIR / "smoke_chatbot_quality_regmix_100_baseline_summary.json",
         REPORTS_DIR / "smoke_chatbot_quality_regmix_100_v3_summary.json",
     ],
+    "llm_canary_20": [
+        REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_baseline_summary.json",
+        REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_v1_summary.json",
+        REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_v2_summary.json",
+    ],
     "regulations_20": [
         REPORTS_DIR / "smoke_chatbot_quality_regulations_20_baseline_summary.json",
         REPORTS_DIR / "smoke_chatbot_quality_regulations_20_v1_summary.json",
@@ -22,6 +27,7 @@ PRESET_INPUTS = {
 }
 PRESET_OUTPUTS = {
     "regmix_100": REPORTS_DIR / "smoke_latency_baseline_regmix_100.json",
+    "llm_canary_20": REPORTS_DIR / "smoke_latency_baseline_llm_canary_20.json",
     "regulations_20": REPORTS_DIR / "smoke_latency_baseline_regulations_20.json",
 }
 
@@ -56,6 +62,18 @@ def _avg(values: List[float]) -> Optional[float]:
     return round(sum(values) / len(values), 6)
 
 
+def _min(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    return round(min(values), 6)
+
+
+def _max(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    return round(max(values), 6)
+
+
 def _collect_metric_values(
     reports: List[Dict[str, Any]], path: List[str]
 ) -> List[float]:
@@ -76,25 +94,66 @@ def _build_endpoint_baseline(
     reports: List[Dict[str, Any]], endpoint_key: str
 ) -> Dict[str, Any]:
     base_path = ["summary", endpoint_key]
+    endpoint_name = endpoint_key.replace("_metrics", "")
+    p50_values = _collect_metric_values(reports, base_path + ["latency_ms", "p50"])
+    p95_values = _collect_metric_values(reports, base_path + ["latency_ms", "p95"])
+    p99_values = _collect_metric_values(reports, base_path + ["latency_ms", "p99"])
+    avg_values = _collect_metric_values(reports, base_path + ["latency_ms", "avg"])
+    first_token_p50_values = _collect_metric_values(
+        reports,
+        ["summary", "perf_metrics", endpoint_name, "first_token_ms", "p50"],
+    )
+    first_token_p95_values = _collect_metric_values(
+        reports,
+        ["summary", "perf_metrics", endpoint_name, "first_token_ms", "p95"],
+    )
+    first_token_p99_values = _collect_metric_values(
+        reports,
+        ["summary", "perf_metrics", endpoint_name, "first_token_ms", "p99"],
+    )
+    first_token_avg_values = _collect_metric_values(
+        reports,
+        ["summary", "perf_metrics", endpoint_name, "first_token_ms", "avg"],
+    )
     return {
         "pass_rate": _avg(_collect_metric_values(reports, base_path + ["pass_rate"])),
         "error_rate": _avg(_collect_metric_values(reports, base_path + ["error_rate"])),
         "timeout_rate": _avg(
             _collect_metric_values(reports, base_path + ["timeout_rate"])
         ),
+        "fallback_ratio": _avg(
+            _collect_metric_values(
+                reports,
+                ["summary", f"{endpoint_name}_fallback_metrics", "fallback_ratio"],
+            )
+        ),
         "latency_ms": {
-            "p50": _avg(
-                _collect_metric_values(reports, base_path + ["latency_ms", "p50"])
-            ),
-            "p95": _avg(
-                _collect_metric_values(reports, base_path + ["latency_ms", "p95"])
-            ),
-            "p99": _avg(
-                _collect_metric_values(reports, base_path + ["latency_ms", "p99"])
-            ),
-            "avg": _avg(
-                _collect_metric_values(reports, base_path + ["latency_ms", "avg"])
-            ),
+            "p50": _avg(p50_values),
+            "p50_min": _min(p50_values),
+            "p50_max": _max(p50_values),
+            "p95": _avg(p95_values),
+            "p95_min": _min(p95_values),
+            "p95_max": _max(p95_values),
+            "p99": _avg(p99_values),
+            "p99_min": _min(p99_values),
+            "p99_max": _max(p99_values),
+            "avg": _avg(avg_values),
+            "avg_min": _min(avg_values),
+            "avg_max": _max(avg_values),
+        },
+        "first_token_ms": {
+            "p50": _avg(first_token_p50_values),
+            "p50_min": _min(first_token_p50_values),
+            "p50_max": _max(first_token_p50_values),
+            "p95": _avg(first_token_p95_values),
+            "p95_min": _min(first_token_p95_values),
+            "p95_max": _max(first_token_p95_values),
+            "p99": _avg(first_token_p99_values),
+            "p99_min": _min(first_token_p99_values),
+            "p99_max": _max(first_token_p99_values),
+            "avg": _avg(first_token_avg_values),
+            "avg_min": _min(first_token_avg_values),
+            "avg_max": _max(first_token_avg_values),
         },
     }
 
