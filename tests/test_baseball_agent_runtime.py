@@ -65,13 +65,18 @@ def test_runtime_reuses_shared_agent_and_rebinds_request_context(monkeypatch):
     assert shared_agent.tool_definitions is runtime.tool_definitions
     assert shared_agent.tool_description_text is runtime.tool_description_text
     assert shared_agent.tool_caller.tools is runtime.tool_caller_factory.tools
-    assert shared_agent.tool_caller.get_tool_descriptions() is runtime.tool_description_text
+    assert (
+        shared_agent.tool_caller.get_tool_descriptions()
+        is runtime.tool_description_text
+    )
     assert (
         shared_agent.tool_caller._resolve_tool_function("get_player_stats").__self__
         is shared_agent
     )
     assert shared_agent.chat_intent_router._router is runtime.chat_intent_router
-    assert shared_agent.chat_renderer_registry._registry is runtime.chat_renderer_registry
+    assert (
+        shared_agent.chat_renderer_registry._registry is runtime.chat_renderer_registry
+    )
     assert db_query_one is not db_query_two
     assert document_query_one is not document_query_two
     assert db_query_one.connection is conn_one
@@ -168,12 +173,14 @@ def test_tool_caller_async_preserves_request_context(monkeypatch):
 
     async def _run():
         with runtime.request_context(SimpleNamespace(label="async")):
-            return await runtime.shared_agent.tool_caller.execute_multiple_tools_parallel(
-                [
-                    ToolCall("get_team_basic_info", {"team_name": "LG"}),
-                    ToolCall("get_team_basic_info", {"team_name": "KT"}),
-                ],
-                max_concurrency=2,
+            return (
+                await runtime.shared_agent.tool_caller.execute_multiple_tools_parallel(
+                    [
+                        ToolCall("get_team_basic_info", {"team_name": "LG"}),
+                        ToolCall("get_team_basic_info", {"team_name": "KT"}),
+                    ],
+                    max_concurrency=2,
+                )
             )
 
     results = asyncio.run(_run())
@@ -202,9 +209,11 @@ async def test_tool_caller_async_isolated_across_concurrent_tasks(monkeypatch):
             if len(entered) == 2:
                 ready.set()
             await ready.wait()
-            results = await runtime.shared_agent.tool_caller.execute_multiple_tools_parallel(
-                [ToolCall("get_team_basic_info", {"team_name": label})],
-                max_concurrency=1,
+            results = (
+                await runtime.shared_agent.tool_caller.execute_multiple_tools_parallel(
+                    [ToolCall("get_team_basic_info", {"team_name": label})],
+                    max_concurrency=1,
+                )
             )
             return label, results[0].data["connection_label"]
 

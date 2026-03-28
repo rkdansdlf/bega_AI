@@ -328,7 +328,8 @@ def test_sync_rag_chunks_can_truncate_destination(monkeypatch: Any) -> None:
     )
 
     assert any(
-        "TRUNCATE TABLE rag_chunks" in query for query, _params in dest_init_cur.executed
+        "TRUNCATE TABLE rag_chunks" in query
+        for query, _params in dest_init_cur.executed
     )
 
 

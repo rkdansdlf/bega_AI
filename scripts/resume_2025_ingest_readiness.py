@@ -137,9 +137,7 @@ def run_resume(args: argparse.Namespace, forwarded_args: Sequence[str]) -> int:
             return int(readiness_result.returncode)
 
         if attempt < attempts and args.poll_seconds > 0:
-            print(
-                f"oracle_probe_status=blocked retry_in_seconds={args.poll_seconds}"
-            )
+            print(f"oracle_probe_status=blocked retry_in_seconds={args.poll_seconds}")
             time.sleep(max(0.0, args.poll_seconds))
 
     print("oracle_probe_status=blocked")
@@ -161,7 +159,9 @@ def run_resume(args: argparse.Namespace, forwarded_args: Sequence[str]) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args, forwarded_args = parser.parse_known_args(list(argv) if argv is not None else None)
+    args, forwarded_args = parser.parse_known_args(
+        list(argv) if argv is not None else None
+    )
     return run_resume(args, forwarded_args)
 
 

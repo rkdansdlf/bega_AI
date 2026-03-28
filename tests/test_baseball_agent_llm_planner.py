@@ -71,7 +71,10 @@ def test_select_llm_planner_prompt_uses_player_mode_for_player_analysis() -> Non
     assert planner_mode == "player_llm_planner"
     assert "허용 도구: validate_player, get_player_stats, get_career_stats" in prompt
     assert "JSON 한 줄만 출력한다." in prompt
-    assert "analysis와 expected_result는 12자 이내로 짧게 쓰고 설명문은 금지한다." in prompt
+    assert (
+        "analysis와 expected_result는 12자 이내로 짧게 쓰고 설명문은 금지한다."
+        in prompt
+    )
 
 
 def test_select_llm_planner_prompt_prioritizes_career_tool_for_career_queries() -> None:
@@ -93,7 +96,9 @@ def test_select_llm_planner_prompt_prioritizes_career_tool_for_career_queries() 
 
 
 def test_extract_player_names_preserves_multi_player_query_order() -> None:
-    query = "김도영, 문보경, 노시환을 묶어서 보면 타석 접근법을 각각 어떻게 설명할 수 있어?"
+    query = (
+        "김도영, 문보경, 노시환을 묶어서 보면 타석 접근법을 각각 어떻게 설명할 수 있어?"
+    )
 
     assert extract_player_names(query, limit=3) == ["김도영", "문보경", "노시환"]
 
@@ -349,7 +354,9 @@ def test_analyze_query_and_plan_tools_uses_player_fast_path_for_multi_player_exp
     assert all(call.parameters["year"] == 2025 for call in plan["tool_calls"])
 
 
-def test_analyze_query_and_plan_tools_uses_player_fast_path_when_ranking_phrase_is_negated() -> None:
+def test_analyze_query_and_plan_tools_uses_player_fast_path_when_ranking_phrase_is_negated() -> (
+    None
+):
     agent = _build_agent()
     agent._resolve_chat_intent = lambda query, entity_filter: SimpleNamespace(
         intent=ChatIntent.UNKNOWN
@@ -383,7 +390,9 @@ def test_analyze_query_and_plan_tools_uses_player_fast_path_when_ranking_phrase_
     assert all(call.parameters["position"] == "batting" for call in plan["tool_calls"])
 
 
-def test_build_reference_fast_path_plan_skips_player_fast_path_for_multi_player_ranking_query() -> None:
+def test_build_reference_fast_path_plan_skips_player_fast_path_for_multi_player_ranking_query() -> (
+    None
+):
     agent = _build_agent()
     agent._resolve_chat_intent = lambda query, entity_filter: SimpleNamespace(
         intent=ChatIntent.UNKNOWN
@@ -469,7 +478,9 @@ def test_analyze_query_and_plan_tools_keeps_cache_alive_for_completion_stream_ga
             "error": None,
         }
 
-    monkeypatch.setattr("app.agents.baseball_agent.time.monotonic", lambda: monotonic_now["value"])
+    monkeypatch.setattr(
+        "app.agents.baseball_agent.time.monotonic", lambda: monotonic_now["value"]
+    )
     agent._analyze_query_with_llm = _fake_llm
 
     async def _run():
@@ -715,7 +726,9 @@ def test_process_query_stream_emits_player_fast_path_answer_before_metadata_for_
             "error": None,
         }
 
-    agent._analyze_query_and_plan_tools = lambda query, context: _player_fast_path_plan()
+    agent._analyze_query_and_plan_tools = (
+        lambda query, context: _player_fast_path_plan()
+    )
     agent._execute_tool_batch_async = lambda tool_calls: _empty_results()
     agent._generate_verified_answer = _fast_answer
 
@@ -954,7 +967,9 @@ def test_build_player_fast_path_tool_calls_infers_pitching_from_query() -> None:
     ]
 
 
-def test_build_structured_deterministic_answer_for_multi_player_batter_narrative() -> None:
+def test_build_structured_deterministic_answer_for_multi_player_batter_narrative() -> (
+    None
+):
     agent = _build_agent()
 
     answer = agent._build_structured_deterministic_answer(
@@ -1052,7 +1067,9 @@ def test_build_structured_deterministic_answer_for_multi_player_batter_narrative
     assert "출처: DB 조회 결과" in answer
 
 
-def test_build_chat_reference_answer_for_multi_player_pitcher_narrative_mentions_missing_player() -> None:
+def test_build_chat_reference_answer_for_multi_player_pitcher_narrative_mentions_missing_player() -> (
+    None
+):
     agent = _build_agent()
 
     answer = agent._build_chat_reference_answer(
@@ -1131,7 +1148,9 @@ def test_build_chat_reference_answer_for_multi_player_pitcher_narrative_mentions
     assert "제외" in answer or "빠진 선수" in answer
 
 
-def test_build_structured_deterministic_answer_returns_none_when_multi_player_usable_count_is_low() -> None:
+def test_build_structured_deterministic_answer_returns_none_when_multi_player_usable_count_is_low() -> (
+    None
+):
     agent = _build_agent()
 
     answer = agent._build_structured_deterministic_answer(
@@ -1291,7 +1310,9 @@ def test_process_query_stream_retries_once_on_answer_prefetch_error_for_completi
 
     events = asyncio.run(_run())
     metadata = next(event["data"] for event in events if event["type"] == "metadata")
-    answer_chunks = [event["content"] for event in events if event["type"] == "answer_chunk"]
+    answer_chunks = [
+        event["content"] for event in events if event["type"] == "answer_chunk"
+    ]
 
     assert answer_chunks == ["정상 복구 답변"]
     assert metadata["error"] is None
@@ -1374,7 +1395,9 @@ def test_process_query_stream_recovers_with_deterministic_answer_on_prefetch_err
 
     events = asyncio.run(_run())
     metadata = next(event["data"] for event in events if event["type"] == "metadata")
-    answer_chunks = [event["content"] for event in events if event["type"] == "answer_chunk"]
+    answer_chunks = [
+        event["content"] for event in events if event["type"] == "answer_chunk"
+    ]
 
     assert metadata["error"] is None
     assert metadata["fallback_answer_used"] is True

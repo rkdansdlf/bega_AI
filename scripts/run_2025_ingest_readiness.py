@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import psycopg
 
@@ -38,13 +38,19 @@ DEFAULT_SYNC_TABLES = (
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "reports" / "ingest_readiness"
 
 SYNC_TABLE_RE = re.compile(r"^== Syncing (?P<table>[a-zA-Z0-9_]+) ==$")
-SYNC_COUNTS_RE = re.compile(r"^source_rows=(?P<source>\d+) target_rows=(?P<target>\d+)$")
+SYNC_COUNTS_RE = re.compile(
+    r"^source_rows=(?P<source>\d+) target_rows=(?P<target>\d+)$"
+)
 SYNC_FINISHED_RE = re.compile(
     r"^finished table=(?P<table>[a-zA-Z0-9_]+) synced_rows=(?P<synced>\d+)$"
 )
 SYNC_SELECTED_ALIAS_RE = re.compile(r"^selected_oracle_alias=(?P<alias>[a-zA-Z0-9_]+)$")
-SYNC_SELECTED_ALIAS_FALLBACK_RE = re.compile(r"^selected_alias_fallback=(?P<value>yes|no)$")
-SYNC_ORACLE_FAILURE_REASON_RE = re.compile(r"^oracle_failure_reason=(?P<reason>[a-z_]+)$")
+SYNC_SELECTED_ALIAS_FALLBACK_RE = re.compile(
+    r"^selected_alias_fallback=(?P<value>yes|no)$"
+)
+SYNC_ORACLE_FAILURE_REASON_RE = re.compile(
+    r"^oracle_failure_reason=(?P<reason>[a-z_]+)$"
+)
 SYNC_ORACLE_RESOLUTION_STATUS_RE = re.compile(
     r"^oracle_alias_resolution_status=(?P<status>ready|blocked)$"
 )
@@ -56,7 +62,9 @@ ORACLE_LISTENER_DETAIL_RE = re.compile(
     r'Service "(?P<service>[^"]+)" is not registered with the listener at host "(?P<host>[^"]+)" port (?P<port>\d+)',
     re.IGNORECASE,
 )
-INGEST_TABLE_RE = re.compile(r"^ 테이블 '(?P<table>[^']+)'을\(를\) 수집 중입니다 \.\.\.$")
+INGEST_TABLE_RE = re.compile(
+    r"^ 테이블 '(?P<table>[^']+)'을\(를\) 수집 중입니다 \.\.\.$"
+)
 INGEST_FINISHED_RE = re.compile(
     r"^   -> 테이블 '(?P<table>[^']+)'에서 (?P<chunks>\d+)개 청크를 작성했습니다 "
     r"\(배치=(?P<batches>\d+), 임베딩 호출=(?P<embedding_calls>\d+), "
@@ -83,7 +91,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run 2025 season sync + ingest + readiness validation and emit a JSON report."
     )
     parser.add_argument("--season-year", type=int, default=2025)
-    parser.add_argument("--since", default="", help="Incremental ingest timestamp (ISO8601).")
+    parser.add_argument(
+        "--since", default="", help="Incremental ingest timestamp (ISO8601)."
+    )
     parser.add_argument(
         "--output",
         default="",
@@ -120,21 +130,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("ORACLE_SERVICE_NAME", "efh9m9c9h109963k_high"),
     )
     parser.add_argument("--oracle-timeout-seconds", type=int, default=10)
-    parser.add_argument("--source-db-url", default="", help="Override source PostgreSQL URL.")
-    parser.add_argument("--limit", type=int, default=0, help="Optional per-table ingest row limit.")
+    parser.add_argument(
+        "--source-db-url", default="", help="Override source PostgreSQL URL."
+    )
+    parser.add_argument(
+        "--limit", type=int, default=0, help="Optional per-table ingest row limit."
+    )
     parser.add_argument("--read-batch-size", type=int, default=500)
     parser.add_argument("--embed-batch-size", type=int, default=32)
     parser.add_argument("--max-concurrency", type=int, default=5)
     parser.add_argument("--commit-interval", type=int, default=500)
-    parser.add_argument("--parallel-engine", choices=("thread", "subinterp"), default="thread")
+    parser.add_argument(
+        "--parallel-engine", choices=("thread", "subinterp"), default="thread"
+    )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--no-embed", action="store_true")
     parser.add_argument("--use-legacy-renderer", action="store_true")
-    parser.add_argument("--coverage-mode", choices=("all", "seasonal", "static"), default="all")
+    parser.add_argument(
+        "--coverage-mode", choices=("all", "seasonal", "static"), default="all"
+    )
     parser.add_argument("--coverage-sample-limit", type=int, default=20)
     parser.add_argument("--benchmark-limit", type=int, default=5)
     parser.add_argument("--base-url", default="http://127.0.0.1:8001")
-    parser.add_argument("--internal-api-key", default=os.getenv("AI_INTERNAL_TOKEN", ""))
+    parser.add_argument(
+        "--internal-api-key", default=os.getenv("AI_INTERNAL_TOKEN", "")
+    )
     parser.add_argument("--smoke-batch-size", type=int, default=20)
     parser.add_argument("--smoke-question-list", default="")
     parser.add_argument("--smoke-timeout", type=float, default=180.0)
@@ -313,7 +333,12 @@ def _discover_wallet_service_targets(
             port = int(port_match.group(1).strip()) if port_match else None
         except ValueError:
             port = None
-        if (not selected_aliases or current_alias in selected_aliases) and host_match and port is not None and service_match:
+        if (
+            (not selected_aliases or current_alias in selected_aliases)
+            and host_match
+            and port is not None
+            and service_match
+        ):
             services.append(
                 {
                     "alias": current_alias,
@@ -425,9 +450,11 @@ def build_readiness_handoff_markdown(
     next_action = (
         str(oracle_remediation.get("summary"))
         if oracle_remediation
-        else "Review the failed readiness checks before rerunning the pipeline."
-        if failure_reasons
-        else "Proceed with the planned ingest schedule."
+        else (
+            "Review the failed readiness checks before rerunning the pipeline."
+            if failure_reasons
+            else "Proceed with the planned ingest schedule."
+        )
     )
     resume_command = oracle_remediation.get("resume_command") or []
     dba_checklist = [
@@ -505,14 +532,22 @@ def write_latest_pointer_files(
         "generated_at_utc": report.get("generated_at_utc"),
         "report_path": str(report_path),
         "artifact_dir": str((report.get("artifacts") or {}).get("artifact_dir", "")),
-        "handoff_markdown": str((report.get("artifacts") or {}).get("handoff_markdown", "")),
-        "support_bundle": str((report.get("artifacts") or {}).get("support_bundle", "")),
+        "handoff_markdown": str(
+            (report.get("artifacts") or {}).get("handoff_markdown", "")
+        ),
+        "support_bundle": str(
+            (report.get("artifacts") or {}).get("support_bundle", "")
+        ),
         "oracle_escalation_markdown": str(
             (report.get("artifacts") or {}).get("oracle_escalation_markdown", "")
         ),
-        "resume_command": list((report.get("oracle_remediation") or {}).get("resume_command") or []),
+        "resume_command": list(
+            (report.get("oracle_remediation") or {}).get("resume_command") or []
+        ),
         "ready": bool((report.get("readiness") or {}).get("ready", False)),
-        "failure_reasons": list((report.get("readiness") or {}).get("failure_reasons") or []),
+        "failure_reasons": list(
+            (report.get("readiness") or {}).get("failure_reasons") or []
+        ),
     }
     _write_text(
         latest_pointer_path,
@@ -532,9 +567,13 @@ def build_oracle_remediation(
     oracle_diagnostics: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     failure_reason = (sync_summary or {}).get("oracle_failure_reason")
-    if not failure_reason and (oracle_diagnostics or {}).get("listener_registration_missing"):
+    if not failure_reason and (oracle_diagnostics or {}).get(
+        "listener_registration_missing"
+    ):
         failure_reason = "listener_registration_missing"
-    if not failure_reason and (oracle_diagnostics or {}).get("listener_refused_connection"):
+    if not failure_reason and (oracle_diagnostics or {}).get(
+        "listener_refused_connection"
+    ):
         failure_reason = "listener_refused_connection"
     if not failure_reason:
         return None
@@ -562,33 +601,42 @@ def build_oracle_remediation(
 
     if failure_reason == "listener_registration_missing":
         aliases = list((oracle_diagnostics or {}).get("aliases") or [])
-        service_names = sorted({
-            str(alias.get("listener_service_name"))
-            for alias in aliases
-            if alias.get("listener_service_name")
-        } | {
-            str(target.get("listener_service_name"))
-            for target in wallet_targets
-            if target.get("listener_service_name")
-        })
-        listener_hosts = sorted({
-            str(alias.get("listener_host"))
-            for alias in aliases
-            if alias.get("listener_host")
-        } | {
-            str(target.get("listener_host"))
-            for target in wallet_targets
-            if target.get("listener_host")
-        })
-        listener_ports = sorted({
-            int(alias.get("listener_port"))
-            for alias in aliases
-            if alias.get("listener_port") is not None
-        } | {
-            int(target.get("listener_port"))
-            for target in wallet_targets
-            if target.get("listener_port") is not None
-        })
+        service_names = sorted(
+            {
+                str(alias.get("listener_service_name"))
+                for alias in aliases
+                if alias.get("listener_service_name")
+            }
+            | {
+                str(target.get("listener_service_name"))
+                for target in wallet_targets
+                if target.get("listener_service_name")
+            }
+        )
+        listener_hosts = sorted(
+            {
+                str(alias.get("listener_host"))
+                for alias in aliases
+                if alias.get("listener_host")
+            }
+            | {
+                str(target.get("listener_host"))
+                for target in wallet_targets
+                if target.get("listener_host")
+            }
+        )
+        listener_ports = sorted(
+            {
+                int(alias.get("listener_port"))
+                for alias in aliases
+                if alias.get("listener_port") is not None
+            }
+            | {
+                int(target.get("listener_port"))
+                for target in wallet_targets
+                if target.get("listener_port") is not None
+            }
+        )
         verification_command = [
             sys.executable,
             str(REPO_ROOT / "scripts" / "sync_kbo_data.py"),
@@ -728,7 +776,7 @@ def build_oracle_escalation_markdown(
     sync_summary = report.get("sync") or {}
     steps = report.get("steps") or {}
     sync_step = steps.get("sync") or {}
-    diagnostics_step = ((diagnostics or {}).get("step") or {})
+    diagnostics_step = (diagnostics or {}).get("step") or {}
     input_payload = report.get("input") or {}
 
     lines = [
@@ -743,7 +791,11 @@ def build_oracle_escalation_markdown(
         "",
         "## Request",
         "",
-        str(remediation.get("summary", "Review Oracle probe details before retrying sync.")),
+        str(
+            remediation.get(
+                "summary", "Review Oracle probe details before retrying sync."
+            )
+        ),
     ]
 
     listener_host = remediation.get("listener_host")
@@ -815,7 +867,9 @@ def build_oracle_escalation_markdown(
     if diagnostics_stderr_path:
         lines.append(f"- Oracle diagnostics stderr: `{diagnostics_stderr_path}`")
 
-    failed_aliases = [alias for alias in (diagnostics.get("aliases") or []) if not alias.get("ok")]
+    failed_aliases = [
+        alias for alias in (diagnostics.get("aliases") or []) if not alias.get("ok")
+    ]
     if failed_aliases:
         lines.extend(["", "## Failed Aliases", ""])
         for alias in failed_aliases:
@@ -878,7 +932,9 @@ def parse_sync_stdout(stdout: str) -> Dict[str, Any]:
 
         oracle_resolution_status_match = SYNC_ORACLE_RESOLUTION_STATUS_RE.match(line)
         if oracle_resolution_status_match:
-            oracle_alias_resolution_status = oracle_resolution_status_match.group("status")
+            oracle_alias_resolution_status = oracle_resolution_status_match.group(
+                "status"
+            )
 
     total_synced_rows = sum(row.get("synced_rows", 0) for row in per_table.values())
     summary = {
@@ -923,9 +979,7 @@ def parse_ingest_stdout(stdout: str) -> Dict[str, Any]:
                     "embedding_calls": int(finished_match.group("embedding_calls")),
                     "sleep_seconds": float(finished_match.group("sleep_seconds")),
                     "parallel_engine": finished_match.group("engine").strip(),
-                    "parallel_engine_fallbacks": int(
-                        finished_match.group("fallbacks")
-                    ),
+                    "parallel_engine_fallbacks": int(finished_match.group("fallbacks")),
                 }
             )
             current_table = table
@@ -937,7 +991,9 @@ def parse_ingest_stdout(stdout: str) -> Dict[str, Any]:
             continue
 
         if current_table and "총 " in line and "개 청크를 처리했습니다." in line:
-            processed_match = re.search(r"총 (?P<count>\d+)개 청크를 처리했습니다\.", line)
+            processed_match = re.search(
+                r"총 (?P<count>\d+)개 청크를 처리했습니다\.", line
+            )
             if processed_match:
                 per_table.setdefault(current_table, {}).update(
                     {"processed_chunks": int(processed_match.group("count"))}
@@ -945,9 +1001,11 @@ def parse_ingest_stdout(stdout: str) -> Dict[str, Any]:
 
     return {
         "table_count": len(per_table),
-        "total_chunks_written": total_chunks
-        if total_chunks is not None
-        else sum(row.get("chunks_written", 0) for row in per_table.values()),
+        "total_chunks_written": (
+            total_chunks
+            if total_chunks is not None
+            else sum(row.get("chunks_written", 0) for row in per_table.values())
+        ),
         "tables": [
             {"table": table, **values}
             for table, values in sorted(per_table.items(), key=lambda item: item[0])
@@ -1012,7 +1070,9 @@ def count_missing_embeddings(
         with conn.cursor() as cur:
             cur.execute(count_query, (source_tables, season_year))
             count_rows = cur.fetchall()
-            cur.execute(sample_query, (source_tables, season_year, sample_limit_per_table))
+            cur.execute(
+                sample_query, (source_tables, season_year, sample_limit_per_table)
+            )
             sample_rows = cur.fetchall()
 
     sample_rows_by_table: Dict[str, List[Dict[str, Any]]] = {}
@@ -1047,7 +1107,9 @@ def count_missing_embeddings(
     }
 
 
-def _build_step_payload(step: Optional[StepRunResult], skipped: bool = False) -> Dict[str, Any]:
+def _build_step_payload(
+    step: Optional[StepRunResult], skipped: bool = False
+) -> Dict[str, Any]:
     if skipped:
         return {"status": "skipped"}
     if step is None:
@@ -1076,7 +1138,9 @@ def build_final_report(
     smoke_summary_report: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     coverage_summary = (coverage_report or {}).get("summary") or {}
-    benchmark_summary = ((benchmark_report or {}).get("summary") or {}).get("overall") or {}
+    benchmark_summary = ((benchmark_report or {}).get("summary") or {}).get(
+        "overall"
+    ) or {}
     smoke_summary = (smoke_summary_report or {}).get("summary") or {}
     oracle_remediation = build_oracle_remediation(
         args=args,
@@ -1085,8 +1149,10 @@ def build_final_report(
     )
 
     readiness_checks = {
-        "sync_ok": args.skip_sync or (steps.get("sync") is not None and steps["sync"].exit_code == 0),
-        "ingest_ok": args.skip_ingest or (steps.get("ingest") is not None and steps["ingest"].exit_code == 0),
+        "sync_ok": args.skip_sync
+        or (steps.get("sync") is not None and steps["sync"].exit_code == 0),
+        "ingest_ok": args.skip_ingest
+        or (steps.get("ingest") is not None and steps["ingest"].exit_code == 0),
         "coverage_ok": args.skip_coverage
         or (
             steps.get("coverage") is not None
@@ -1112,11 +1178,7 @@ def build_final_report(
     }
     ready = all(readiness_checks.values())
 
-    failures = [
-        name
-        for name, passed in readiness_checks.items()
-        if not passed
-    ]
+    failures = [name for name, passed in readiness_checks.items() if not passed]
 
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1124,7 +1186,9 @@ def build_final_report(
             "season_year": args.season_year,
             "since": args.since or None,
             "sync_tables": args.sync_tables,
-            "ingest_tables": [table for table in args.ingest_tables if table != "rag_chunks"],
+            "ingest_tables": [
+                table for table in args.ingest_tables if table != "rag_chunks"
+            ],
             "parallel_engine": args.parallel_engine,
             "workers": args.workers,
             "read_batch_size": args.read_batch_size,
@@ -1141,7 +1205,9 @@ def build_final_report(
         },
         "steps": {
             "sync": _build_step_payload(steps.get("sync"), skipped=args.skip_sync),
-            "ingest": _build_step_payload(steps.get("ingest"), skipped=args.skip_ingest),
+            "ingest": _build_step_payload(
+                steps.get("ingest"), skipped=args.skip_ingest
+            ),
             "coverage": _build_step_payload(
                 steps.get("coverage"),
                 skipped=args.skip_coverage,
@@ -1157,26 +1223,32 @@ def build_final_report(
         "oracle_remediation": oracle_remediation,
         "ingest": ingest_summary,
         "embeddings": missing_embeddings,
-        "coverage": {
-            "summary": coverage_summary,
-            "rows_with_gaps": [
-                row
-                for row in (coverage_report or {}).get("rows", [])
-                if row.get("missing_count", 0) > 0 or row.get("extra_count", 0) > 0
-            ][:20],
-        }
-        if coverage_report
-        else None,
-        "benchmark": {
-            "summary": benchmark_summary,
-        }
-        if benchmark_report
-        else None,
-        "smoke": {
-            "summary": smoke_summary,
-        }
-        if smoke_summary_report
-        else None,
+        "coverage": (
+            {
+                "summary": coverage_summary,
+                "rows_with_gaps": [
+                    row
+                    for row in (coverage_report or {}).get("rows", [])
+                    if row.get("missing_count", 0) > 0 or row.get("extra_count", 0) > 0
+                ][:20],
+            }
+            if coverage_report
+            else None
+        ),
+        "benchmark": (
+            {
+                "summary": benchmark_summary,
+            }
+            if benchmark_report
+            else None
+        ),
+        "smoke": (
+            {
+                "summary": smoke_summary,
+            }
+            if smoke_summary_report
+            else None
+        ),
     }
 
 
@@ -1191,7 +1263,11 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    output_path = Path(args.output).expanduser().resolve() if args.output else _default_output_path()
+    output_path = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else _default_output_path()
+    )
     artifact_dir = output_path.parent / output_path.stem
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1300,7 +1376,9 @@ def main() -> int:
             cwd=PROJECT_ROOT,
             artifact_dir=artifact_dir,
         )
-        ingest_summary = parse_ingest_stdout(_read_text(final_steps["ingest"].stdout_path))
+        ingest_summary = parse_ingest_stdout(
+            _read_text(final_steps["ingest"].stdout_path)
+        )
 
     if not args.skip_coverage:
         coverage_command = [
@@ -1424,7 +1502,13 @@ def main() -> int:
         handoff_markdown=handoff_markdown,
         report=final_report,
     )
-    print(json.dumps({"output": str(output_path), "readiness": final_report["readiness"]}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {"output": str(output_path), "readiness": final_report["readiness"]},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
     return 0 if final_report["readiness"]["ready"] else 1
 

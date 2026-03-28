@@ -26,7 +26,9 @@ def test_verify_rag_uses_runtime_factory(monkeypatch, capsys) -> None:
             return []
 
     monkeypatch.setattr(verify_rag, "get_settings", lambda: fake_settings)
-    monkeypatch.setattr(verify_rag, "create_baseball_agent_runtime", lambda settings: "runtime")
+    monkeypatch.setattr(
+        verify_rag, "create_baseball_agent_runtime", lambda settings: "runtime"
+    )
     monkeypatch.setattr(verify_rag, "RAGPipeline", _FakePipeline)
     monkeypatch.setattr(verify_rag.psycopg, "connect", _fake_connect)
 

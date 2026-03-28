@@ -62,7 +62,9 @@ def test_render_lines_skips_warning_detail_when_warning_absent() -> None:
         },
     }
 
-    lines = formatter.render_lines("[quality-regression] ai", "latest_eval=foo.json", payload)
+    lines = formatter.render_lines(
+        "[quality-regression] ai", "latest_eval=foo.json", payload
+    )
 
     assert len(lines) == 1
     assert lines[0] == (

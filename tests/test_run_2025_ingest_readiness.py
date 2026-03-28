@@ -73,7 +73,9 @@ def test_parse_ingest_stdout_extracts_chunk_metrics() -> None:
     assert summary["tables"][1]["parallel_engine_fallbacks"] == 1
 
 
-def test_parse_oracle_diagnostics_stdout_extracts_listener_registration_failures() -> None:
+def test_parse_oracle_diagnostics_stdout_extracts_listener_registration_failures() -> (
+    None
+):
     stdout = """
 Discovered 2 wallet aliases in /tmp/wallet (direct probe)
 efh9m9c9h109963k_high: FAIL - DPY-6005: cannot connect to database. | DPY-6001: Service "gdc7f6256e3d53b_efh9m9c9h109963k_high.adb.oraclecloud.com" is not registered with the listener at host "146.56.121.170" port 1522. (Similar to ORA-12514)
@@ -86,7 +88,10 @@ efh9m9c9h109963k_medium: OK
     assert summary["ok_count"] == 1
     assert summary["failed_count"] == 1
     assert summary["listener_registration_missing"] is True
-    assert summary["aliases"][0]["listener_service_name"] == "gdc7f6256e3d53b_efh9m9c9h109963k_high.adb.oraclecloud.com"
+    assert (
+        summary["aliases"][0]["listener_service_name"]
+        == "gdc7f6256e3d53b_efh9m9c9h109963k_high.adb.oraclecloud.com"
+    )
     assert summary["aliases"][0]["listener_host"] == "146.56.121.170"
     assert summary["aliases"][0]["listener_port"] == 1522
 
@@ -417,10 +422,18 @@ def test_build_oracle_escalation_markdown_includes_dba_request() -> None:
     assert "gdc7f6256e3d53b_efh9m9c9h109963k_high.adb.oraclecloud.com" in markdown
     assert "/tmp/readiness/sync.stdout.log" in markdown
     assert "/tmp/readiness/sync_oracle_diagnostics.stdout.log" in markdown
-    assert "/tmp/python /tmp/sync_kbo_data.py --check-oracle-services-direct" in markdown
-    assert "/tmp/python /tmp/resume_2025_ingest_readiness.py --season-year 2025" in markdown
+    assert (
+        "/tmp/python /tmp/sync_kbo_data.py --check-oracle-services-direct" in markdown
+    )
+    assert (
+        "/tmp/python /tmp/resume_2025_ingest_readiness.py --season-year 2025"
+        in markdown
+    )
     assert "## DBA Checklist" in markdown
-    assert "Confirm the database/service is fully available in the Oracle control plane." in markdown
+    assert (
+        "Confirm the database/service is fully available in the Oracle control plane."
+        in markdown
+    )
 
 
 def test_write_support_bundle_writes_manifest_and_archive(tmp_path: Path) -> None:
@@ -428,8 +441,12 @@ def test_write_support_bundle_writes_manifest_and_archive(tmp_path: Path) -> Non
     artifact_dir.mkdir()
     report_path = tmp_path / "report.json"
     report_path.write_text('{"ready": false}\n', encoding="utf-8")
-    (artifact_dir / "oracle-escalation.md").write_text("# Oracle Escalation Note\n", encoding="utf-8")
-    (artifact_dir / "sync.stdout.log").write_text("oracle_alias_resolution_status=blocked\n", encoding="utf-8")
+    (artifact_dir / "oracle-escalation.md").write_text(
+        "# Oracle Escalation Note\n", encoding="utf-8"
+    )
+    (artifact_dir / "sync.stdout.log").write_text(
+        "oracle_alias_resolution_status=blocked\n", encoding="utf-8"
+    )
 
     bundle_paths = readiness.write_support_bundle(
         artifact_dir=artifact_dir,
@@ -496,9 +513,15 @@ def test_build_readiness_handoff_markdown_includes_failure_and_artifacts() -> No
     assert "Register the wallet service names on the Oracle listener" in markdown
     assert "/tmp/artifacts/support-bundle.tar.gz" in markdown
     assert "`sync_ok`: `False`" in markdown
-    assert "/tmp/python /tmp/resume_2025_ingest_readiness.py --season-year 2025" in markdown
+    assert (
+        "/tmp/python /tmp/resume_2025_ingest_readiness.py --season-year 2025"
+        in markdown
+    )
     assert "## DBA Checklist" in markdown
-    assert "Confirm the database/service is fully available in the Oracle control plane." in markdown
+    assert (
+        "Confirm the database/service is fully available in the Oracle control plane."
+        in markdown
+    )
 
 
 def test_write_latest_pointer_files_writes_pointer_and_handoff(tmp_path: Path) -> None:
@@ -617,7 +640,9 @@ def test_count_missing_embeddings_includes_sample_rows(monkeypatch) -> None:
         def cursor(self) -> FakeCursor:
             return FakeCursor()
 
-    monkeypatch.setattr(readiness.psycopg, "connect", lambda database_url: FakeConnection())
+    monkeypatch.setattr(
+        readiness.psycopg, "connect", lambda database_url: FakeConnection()
+    )
 
     report = readiness.count_missing_embeddings(
         database_url="postgresql://example",
@@ -628,4 +653,6 @@ def test_count_missing_embeddings_includes_sample_rows(monkeypatch) -> None:
     assert report["total_missing_embeddings"] == 2
     assert report["rows"][0]["source_table"] == "kbo_regulations"
     assert report["rows"][0]["sample_rows"][0]["source_row_id"] == "reg_dummy_001"
-    assert report["rows"][0]["sample_rows"][1]["source_profile"] == "kbo_regulations_basic"
+    assert (
+        report["rows"][0]["sample_rows"][1]["source_profile"] == "kbo_regulations_basic"
+    )

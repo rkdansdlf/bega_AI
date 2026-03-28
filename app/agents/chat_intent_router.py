@@ -914,8 +914,10 @@ class ChatIntentRouter:
         wants_lineup = any(
             token in query_lower for token in ["라인업", "선발", "스타팅", "타순"]
         )
-        wants_box_score = self._is_box_score_query(query_lower) or self._is_game_flow_narrative_query(query_lower) or any(
-            token in query_lower for token in ["스코어", "점수", "결과"]
+        wants_box_score = (
+            self._is_box_score_query(query_lower)
+            or self._is_game_flow_narrative_query(query_lower)
+            or any(token in query_lower for token in ["스코어", "점수", "결과"])
         )
 
         if not wants_lineup or not (wants_schedule or wants_box_score):
@@ -958,7 +960,8 @@ class ChatIntentRouter:
         if not self._is_player_lookup_query(query_lower):
             return []
         if not any(
-            token in query_lower for token in ["순위", "몇 위", "몇위", "랭킹", "리더보드"]
+            token in query_lower
+            for token in ["순위", "몇 위", "몇위", "랭킹", "리더보드"]
         ):
             return []
 
@@ -1023,9 +1026,7 @@ class ChatIntentRouter:
         cleaned = re.sub(r"(은|는|이|가|을|를)$", "", cleaned)
         return cleaned
 
-    def _extract_player_comparison_names(
-        self, query: str
-    ) -> Optional[tuple[str, str]]:
+    def _extract_player_comparison_names(self, query: str) -> Optional[tuple[str, str]]:
         normalized_query = query.replace("VS", "vs").replace("Vs", "vs")
         patterns = [
             r"([가-힣A-Za-z]{2,20})\s*(?:선수)?\s*(?:와|과|랑|이랑)\s*([가-힣A-Za-z]{2,20})(?:선수)?",

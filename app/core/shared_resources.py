@@ -11,4 +11,3 @@ from ..tools.latest_baseball import LatestBaseballSearchTool
 def get_shared_latest_baseball_tool() -> LatestBaseballSearchTool:
     """Return a process-wide LatestBaseballSearchTool instance."""
     return LatestBaseballSearchTool()
-

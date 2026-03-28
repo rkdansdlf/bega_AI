@@ -1539,7 +1539,9 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     single_query_filters.get("source_table"),
                 )
             else:
-                logger.info("[RAG] Team/entity strict query detected - using single-query retrieval")
+                logger.info(
+                    "[RAG] Team/entity strict query detected - using single-query retrieval"
+                )
             docs = await self.retrieve(
                 query,
                 filters=single_query_filters,

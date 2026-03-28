@@ -70,7 +70,7 @@ def _summary_doc(
                         "p95": stream_first_message_p95,
                         "p99": stream_first_message_p95 + 30,
                         "avg": stream_first_message_p95 - 15,
-                    }
+                    },
                 },
             },
         }
@@ -143,16 +143,13 @@ def test_llm_canary_preset_paths_are_registered() -> None:
             / "smoke_chatbot_quality_llm_canary_20_baseline_summary.json"
         ),
         str(
-            baseline.REPORTS_DIR
-            / "smoke_chatbot_quality_llm_canary_20_v1_summary.json"
+            baseline.REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_v1_summary.json"
         ),
         str(
-            baseline.REPORTS_DIR
-            / "smoke_chatbot_quality_llm_canary_20_v2_summary.json"
+            baseline.REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_v2_summary.json"
         ),
         str(
-            baseline.REPORTS_DIR
-            / "smoke_chatbot_quality_llm_canary_20_v3_summary.json"
+            baseline.REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_v3_summary.json"
         ),
     ]
     assert output == (
@@ -166,7 +163,10 @@ def test_reports_dir_respects_environment_override(monkeypatch, tmp_path) -> Non
     try:
         args = argparse.Namespace(inputs=None, preset="llm_canary_20", output=None)
         assert reloaded._resolve_inputs(args) == [
-            str(Path(tmp_path) / "smoke_chatbot_quality_llm_canary_20_baseline_summary.json"),
+            str(
+                Path(tmp_path)
+                / "smoke_chatbot_quality_llm_canary_20_baseline_summary.json"
+            ),
             str(Path(tmp_path) / "smoke_chatbot_quality_llm_canary_20_v1_summary.json"),
             str(Path(tmp_path) / "smoke_chatbot_quality_llm_canary_20_v2_summary.json"),
             str(Path(tmp_path) / "smoke_chatbot_quality_llm_canary_20_v3_summary.json"),

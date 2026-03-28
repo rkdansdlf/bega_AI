@@ -142,9 +142,7 @@ class ToolCaller:
     def describe_definitions(definitions: Iterable[ToolDefinition]) -> str:
         descriptions = []
         for definition in definitions:
-            descriptions.append(
-                f"**{definition.tool_name}**: {definition.description}"
-            )
+            descriptions.append(f"**{definition.tool_name}**: {definition.description}")
             if definition.parameters_schema:
                 param_lines = []
                 for param_name, param_desc in definition.parameters_schema.items():
@@ -284,7 +282,9 @@ class ToolCaller:
                 descriptions.append(f"**{tool_name}**: {tool_info['description']}")
                 if tool_info["parameters_schema"]:
                     param_lines = []
-                    for param_name, param_desc in tool_info["parameters_schema"].items():
+                    for param_name, param_desc in tool_info[
+                        "parameters_schema"
+                    ].items():
                         param_lines.append(f"  - {param_name}: {param_desc}")
                     descriptions.append("\n".join(param_lines))
                 descriptions.append("")

@@ -45,6 +45,7 @@ def _get_shared_context_formatter():
     global _shared_context_formatter
     if _shared_context_formatter is None:
         from .core.rag import ContextFormatter
+
         _shared_context_formatter = ContextFormatter()
     return _shared_context_formatter
 
@@ -54,6 +55,7 @@ def _get_shared_wpa_calculator():
     global _shared_wpa_calculator
     if _shared_wpa_calculator is None:
         from .core.rag import WPACalculator
+
         _shared_wpa_calculator = WPACalculator()
     return _shared_wpa_calculator
 
@@ -75,6 +77,8 @@ def _initialize_shared_baseball_agent_runtime() -> BaseballAgentRuntime:
 
 def get_shared_baseball_agent_runtime() -> BaseballAgentRuntime:
     return _get_shared_baseball_agent_runtime()
+
+
 COACH_OPENROUTER_BLOCKED_MODELS = {
     "openrouter/auto",
     "upstage/solar-pro-3:free",
@@ -498,56 +502,53 @@ def get_coach_llm_generator():
                         json=payload,
                         headers=headers,
                     ) as response:
-                            if (
-                                response.status_code >= 400
-                                and response.status_code < 500
-                            ):
-                                error_body = await response.aread()
-                                logger.error(
-                                    "[Coach OpenRouter 4xx] Status: %s, Body: %s",
-                                    response.status_code,
-                                    error_body.decode("utf-8", errors="replace"),
-                                )
-                            response.raise_for_status()
-                            async for line in response.aiter_lines():
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                if line.startswith("data: "):
-                                    data_str = line[6:].strip()
-                                    if data_str == "[DONE]":
-                                        break
-                                    try:
-                                        data = json.loads(data_str)
-                                        delta, parse_reason = (
-                                            _parse_openrouter_stream_delta(data)
-                                        )
-                                        if parse_reason in {
-                                            "missing_choices",
-                                            "empty_choices",
-                                        }:
-                                            empty_choice_count += 1
-                                        elif parse_reason in {
-                                            "non_object_payload",
-                                            "malformed_choice",
-                                        }:
-                                            malformed_chunk_count += 1
-                                        if delta:
-                                            chunk_count += 1
-                                            yield delta
-                                    except json.JSONDecodeError:
+                        if response.status_code >= 400 and response.status_code < 500:
+                            error_body = await response.aread()
+                            logger.error(
+                                "[Coach OpenRouter 4xx] Status: %s, Body: %s",
+                                response.status_code,
+                                error_body.decode("utf-8", errors="replace"),
+                            )
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    data = json.loads(data_str)
+                                    delta, parse_reason = (
+                                        _parse_openrouter_stream_delta(data)
+                                    )
+                                    if parse_reason in {
+                                        "missing_choices",
+                                        "empty_choices",
+                                    }:
+                                        empty_choice_count += 1
+                                    elif parse_reason in {
+                                        "non_object_payload",
+                                        "malformed_choice",
+                                    }:
                                         malformed_chunk_count += 1
-                                        continue
-                                else:
-                                    if line and not line.startswith(":"):
-                                        logger.info(
-                                            "[Coach OpenRouter Raw] %s: %s", model, line
+                                    if delta:
+                                        chunk_count += 1
+                                        yield delta
+                                except json.JSONDecodeError:
+                                    malformed_chunk_count += 1
+                                    continue
+                            else:
+                                if line and not line.startswith(":"):
+                                    logger.info(
+                                        "[Coach OpenRouter Raw] %s: %s", model, line
+                                    )
+                                    if "error" in line.lower():
+                                        logger.error(
+                                            "[Coach OpenRouter Error Detail] %s",
+                                            line,
                                         )
-                                        if "error" in line.lower():
-                                            logger.error(
-                                                "[Coach OpenRouter Error Detail] %s",
-                                                line,
-                                            )
 
                     if chunk_count == 0:
                         if malformed_chunk_count > 0:

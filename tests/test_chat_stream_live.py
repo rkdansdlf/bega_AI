@@ -129,7 +129,10 @@ def test_stream_route_emits_status_before_delayed_first_token(stream_app) -> Non
     assert meta_data["perf"]["planner_cache_hit"] is True
     assert isinstance(meta_data["perf"]["first_token_ms"], (int, float))
     assert meta_data["perf"]["first_token_ms"] > 0
-    assert meta_data["perf"]["stream_first_message_ms"] == meta_data["perf"]["first_token_ms"]
+    assert (
+        meta_data["perf"]["stream_first_message_ms"]
+        == meta_data["perf"]["first_token_ms"]
+    )
 
 
 @pytest.mark.asyncio

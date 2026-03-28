@@ -213,9 +213,7 @@ class TestRetrieveFlag:
                         "app.core.rag.similarity_search",
                         return_value=[fake_doc],
                     ):
-                        result = await pipeline.retrieve(
-                            "테스트 쿼리", use_hyde=True
-                        )
+                        result = await pipeline.retrieve("테스트 쿼리", use_hyde=True)
             return result, mock_generate, mock_embed
 
         result, mock_generate, mock_embed = asyncio.run(run())

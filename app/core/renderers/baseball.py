@@ -1031,6 +1031,7 @@ if __name__ == "__main__":  # pragma: no cover - simple manual sanity check
 
     # ── Team season / stat ranking renderers ──────────────────
 
+
 def render_team_batting_season(
     row: Dict[str, Any],
     *,
@@ -1089,9 +1090,14 @@ def render_team_batting_season(
 
     aliases = [team, row.get("team_id")]
     meta = make_meta(
-        row, kind="team_batting_season",
+        row,
+        kind="team_batting_season",
         aliases=[a for a in aliases if a],
-        extra_stats={"avg": float(row.get("avg") or 0), "ops": float(row.get("ops") or 0), "home_runs": int(row.get("home_runs") or 0)},
+        extra_stats={
+            "avg": float(row.get("avg") or 0),
+            "ops": float(row.get("ops") or 0),
+            "home_runs": int(row.get("home_runs") or 0),
+        },
     )
     source_line = f"[출처] KBO 공식 팀 타격 기록 (team_season_batting#{row.get('id','')}) / 기준일 {today}"
 
@@ -1151,9 +1157,13 @@ def render_team_pitching_season(
 
     aliases = [team, row.get("team_id")]
     meta = make_meta(
-        row, kind="team_pitching_season",
+        row,
+        kind="team_pitching_season",
         aliases=[a for a in aliases if a],
-        extra_stats={"era": float(row.get("era") or 0), "whip": float(row.get("whip") or 0)},
+        extra_stats={
+            "era": float(row.get("era") or 0),
+            "whip": float(row.get("whip") or 0),
+        },
     )
     source_line = f"[출처] KBO 공식 팀 투수 기록 (team_season_pitching#{row.get('id','')}) / 기준일 {today}"
 
@@ -1161,10 +1171,18 @@ def render_team_pitching_season(
 
 
 METRIC_LABELS = {
-    "batting_avg": "타율", "home_runs": "홈런", "rbi": "타점",
-    "stolen_bases": "도루", "hits": "안타", "ops": "OPS", "runs": "득점",
-    "era": "방어율", "wins": "승리", "saves": "세이브",
-    "pitching_strikeouts": "탈삼진", "holds": "홀드",
+    "batting_avg": "타율",
+    "home_runs": "홈런",
+    "rbi": "타점",
+    "stolen_bases": "도루",
+    "hits": "안타",
+    "ops": "OPS",
+    "runs": "득점",
+    "era": "방어율",
+    "wins": "승리",
+    "saves": "세이브",
+    "pitching_strikeouts": "탈삼진",
+    "holds": "홀드",
 }
 
 
@@ -1205,18 +1223,20 @@ def render_stat_ranking(
 
     aliases = [player, team, row.get("team_id"), row.get("entity_id")]
     meta = make_meta(
-        row, kind="stat_ranking",
+        row,
+        kind="stat_ranking",
         aliases=[str(a) for a in aliases if a],
         extra_stats={"metric": metric, "rank": rank, "value": value},
     )
-    source_line = f"[출처] KBO 공식 기록 (stat_rankings#{row.get('id','')}) / 기준일 {today}"
+    source_line = (
+        f"[출처] KBO 공식 기록 (stat_rankings#{row.get('id','')}) / 기준일 {today}"
+    )
 
     parts = [tl_dr, core]
     if detail_block:
         parts.append(detail_block)
     parts.extend([f"[META] {meta}", source_line])
     return "\n".join(parts)
-
 
     sample_pitcher1 = {
         "game_id": "20250501HHLT0",

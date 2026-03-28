@@ -9,10 +9,8 @@ def _build_agent_for_fast_path(
 ) -> BaseballStatisticsAgent:
     agent = BaseballStatisticsAgent.__new__(BaseballStatisticsAgent)
     agent._resolve_award_query_type = lambda query, entity_filter: None
-    agent._detect_team_alias_from_query = (
-        lambda query: "LG"
-        if "LG" in query
-        else ("KT" if "KT" in query else None)
+    agent._detect_team_alias_from_query = lambda query: (
+        "LG" if "LG" in query else ("KT" if "KT" in query else None)
     )
     agent.fast_path_tool_cap = 2
     agent._team_name_cache = {}

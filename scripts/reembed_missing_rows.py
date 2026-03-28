@@ -246,7 +246,11 @@ def _copy_existing_chunk_rows(
         meta = row.get("meta")
         payload.append(
             (
-                json.dumps(meta, ensure_ascii=False, default=str) if meta is not None else None,
+                (
+                    json.dumps(meta, ensure_ascii=False, default=str)
+                    if meta is not None
+                    else None
+                ),
                 row.get("season_year"),
                 row.get("season_id"),
                 row.get("league_type_code"),
@@ -496,7 +500,9 @@ def main() -> int:
         source_db_url = args.supabase_url.strip()
     if not source_db_url:
         if args.source_env_file.strip():
-            source_db_url = _load_settings_from_env_file(args.source_env_file).database_url
+            source_db_url = _load_settings_from_env_file(
+                args.source_env_file
+            ).database_url
         else:
             source_db_url = settings.source_db_url
 

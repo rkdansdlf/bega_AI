@@ -106,7 +106,9 @@ def test_plan_destination_write_merges_when_canonical_exists() -> None:
 
 
 def test_canonicalize_blocked_aliases_reports_updates(monkeypatch: Any) -> None:
-    target = CoverageTarget(table="game_inning_scores", year=2021, source_table="game_inning_scores")
+    target = CoverageTarget(
+        table="game_inning_scores", year=2021, source_table="game_inning_scores"
+    )
     source_conn = _FakeConnection([])
     dest_init_cur = _FakeCursor()
     dest_conn = _FakeConnection([dest_init_cur])
