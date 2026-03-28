@@ -73,3 +73,11 @@ def test_cors_origins_accepts_csv(monkeypatch):
         "https://www.begabaseball.xyz",
         "https://api.begabaseball.xyz",
     ]
+
+
+def test_chat_planner_cache_ttl_defaults_to_60_seconds(monkeypatch):
+    monkeypatch.delenv("CHAT_PLANNER_CACHE_TTL_SECONDS", raising=False)
+
+    settings = Settings()
+
+    assert settings.chat_planner_cache_ttl_seconds == 60

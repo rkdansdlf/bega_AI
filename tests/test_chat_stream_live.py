@@ -129,6 +129,7 @@ def test_stream_route_emits_status_before_delayed_first_token(stream_app) -> Non
     assert meta_data["perf"]["planner_cache_hit"] is True
     assert isinstance(meta_data["perf"]["first_token_ms"], (int, float))
     assert meta_data["perf"]["first_token_ms"] > 0
+    assert meta_data["perf"]["stream_first_message_ms"] == meta_data["perf"]["first_token_ms"]
 
 
 @pytest.mark.asyncio
@@ -160,6 +161,9 @@ async def test_live_event_generator_emits_fallback_meta_on_partial_stream_error(
     assert meta_events[-1]["data"]["error"] == "temporary_generation_issue"
     assert meta_events[-1]["data"]["verified"] is False
     assert isinstance(meta_events[-1]["data"]["perf"]["first_token_ms"], (int, float))
+    assert isinstance(
+        meta_events[-1]["data"]["perf"]["stream_first_message_ms"], (int, float)
+    )
 
 
 @pytest.mark.asyncio
@@ -189,3 +193,4 @@ async def test_live_event_generator_emits_cancelled_meta_and_done_on_abort() -> 
     assert meta_data["finish_reason"] == "cancelled"
     assert meta_data["cancelled"] is True
     assert isinstance(meta_data["perf"]["first_token_ms"], (int, float))
+    assert isinstance(meta_data["perf"]["stream_first_message_ms"], (int, float))

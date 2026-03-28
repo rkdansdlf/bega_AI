@@ -882,6 +882,208 @@ class DatabaseQueryTool:
 
         return result
 
+    def get_player_season_stats_batch(
+        self,
+        player_names: List[str],
+        year: int,
+        position: str = "both",
+    ) -> List[Dict[str, Any]]:
+        """
+        여러 선수의 시즌 통계를 한 번의 번들 조회로 가져옵니다.
+
+        Returns:
+            입력 순서를 유지하는 결과 목록
+        """
+        logger.info(
+            "[DatabaseQuery] Querying player stats batch: count=%d, year=%s, position=%s",
+            len(player_names),
+            year,
+            position,
+        )
+
+        def _empty_result(requested_name: str) -> Dict[str, Any]:
+            return {
+                "requested_player_name": requested_name,
+                "player_name": requested_name,
+                "resolved_player_name": None,
+                "year": year,
+                "batting_stats": None,
+                "pitching_stats": None,
+                "found": False,
+                "error": None,
+                "batch_lookup": True,
+            }
+
+        normalized_names = [str(name or "").strip() for name in player_names if str(name or "").strip()]
+        if not normalized_names:
+            return []
+
+        results = [_empty_result(name) for name in normalized_names]
+        results_by_name = {
+            result["requested_player_name"]: result for result in results
+        }
+
+        values_sql = ", ".join(["(%s, %s)"] * len(normalized_names))
+        values_params: List[Any] = []
+        for index, requested_name in enumerate(normalized_names):
+            values_params.extend([index, requested_name])
+
+        batting_query = f"""
+            WITH requested(player_order, requested_name) AS (
+                VALUES {values_sql}
+            ),
+            ranked AS (
+                SELECT
+                    requested.player_order,
+                    requested.requested_name,
+                    pb.name AS resolved_player_name,
+                    t.team_name,
+                    psb.season AS season_year,
+                    psb.plate_appearances,
+                    psb.at_bats,
+                    psb.hits,
+                    psb.doubles,
+                    psb.triples,
+                    psb.home_runs,
+                    psb.rbi,
+                    psb.runs,
+                    psb.walks,
+                    psb.strikeouts,
+                    psb.stolen_bases,
+                    psb.caught_stealing,
+                    psb.avg,
+                    psb.obp,
+                    psb.slg,
+                    psb.ops,
+                    psb.babip,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY requested.player_order
+                        ORDER BY
+                            CASE
+                                WHEN LOWER(pb.name) = LOWER(requested.requested_name) THEN 0
+                                ELSE 1
+                            END,
+                            psb.plate_appearances DESC,
+                            pb.name
+                    ) AS row_num
+                FROM requested
+                JOIN player_basic pb
+                    ON LOWER(pb.name) LIKE LOWER('%%' || requested.requested_name || '%%')
+                JOIN player_season_batting psb
+                    ON psb.player_id = pb.player_id
+                    AND psb.season = %s
+                LEFT JOIN teams t
+                    ON psb.team_code = t.team_id
+            )
+            SELECT *
+            FROM ranked
+            WHERE row_num = 1
+            ORDER BY player_order
+        """
+
+        pitching_query = f"""
+            WITH requested(player_order, requested_name) AS (
+                VALUES {values_sql}
+            ),
+            ranked AS (
+                SELECT
+                    requested.player_order,
+                    requested.requested_name,
+                    pb.name AS resolved_player_name,
+                    t.team_name,
+                    psp.season AS season_year,
+                    psp.games,
+                    psp.games_started,
+                    psp.wins,
+                    psp.losses,
+                    psp.saves,
+                    psp.holds,
+                    psp.innings_pitched,
+                    psp.hits_allowed,
+                    psp.runs_allowed,
+                    psp.earned_runs,
+                    psp.home_runs_allowed,
+                    psp.walks_allowed,
+                    psp.strikeouts,
+                    psp.era,
+                    psp.whip,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY requested.player_order
+                        ORDER BY
+                            CASE
+                                WHEN LOWER(pb.name) = LOWER(requested.requested_name) THEN 0
+                                ELSE 1
+                            END,
+                            psp.innings_pitched DESC,
+                            pb.name
+                    ) AS row_num
+                FROM requested
+                JOIN player_basic pb
+                    ON LOWER(pb.name) LIKE LOWER('%%' || requested.requested_name || '%%')
+                JOIN player_season_pitching psp
+                    ON psp.player_id = pb.player_id
+                    AND psp.season = %s
+                LEFT JOIN teams t
+                    ON psp.team_code = t.team_id
+            )
+            SELECT *
+            FROM ranked
+            WHERE row_num = 1
+            ORDER BY player_order
+        """
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+
+            if position in ["batting", "both"]:
+                cursor.execute(batting_query, (*values_params, year))
+                for row in cursor.fetchall():
+                    row_dict = dict(row)
+                    requested_name = str(row_dict.pop("requested_name"))
+                    row_dict.pop("player_order", None)
+                    row_dict.pop("row_num", None)
+                    row_dict["player_name"] = row_dict.pop(
+                        "resolved_player_name", requested_name
+                    )
+                    result = results_by_name.get(requested_name)
+                    if result is None:
+                        continue
+                    result["batting_stats"] = row_dict
+                    result["resolved_player_name"] = row_dict.get("player_name")
+                    result["player_name"] = row_dict.get("player_name") or requested_name
+                    result["found"] = True
+
+            if position in ["pitching", "both"]:
+                cursor.execute(pitching_query, (*values_params, year))
+                for row in cursor.fetchall():
+                    row_dict = dict(row)
+                    requested_name = str(row_dict.pop("requested_name"))
+                    row_dict.pop("player_order", None)
+                    row_dict.pop("row_num", None)
+                    row_dict["player_name"] = row_dict.pop(
+                        "resolved_player_name", requested_name
+                    )
+                    result = results_by_name.get(requested_name)
+                    if result is None:
+                        continue
+                    result["pitching_stats"] = row_dict
+                    if not result.get("resolved_player_name"):
+                        result["resolved_player_name"] = row_dict.get("player_name")
+                        result["player_name"] = (
+                            row_dict.get("player_name") or requested_name
+                        )
+                    result["found"] = True
+
+        except Exception as e:
+            logger.error(f"[DatabaseQuery] Error querying batch player stats: {e}")
+            for result in results:
+                result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return results
+
     def get_team_leaderboard(
         self,
         stat_name: str,

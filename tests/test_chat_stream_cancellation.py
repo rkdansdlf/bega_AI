@@ -36,7 +36,7 @@ def _build_result(answer: object) -> dict[str, object]:
             "analysis_ms": 1.0,
             "tool_ms": 2.0,
             "answer_ms": 3.0,
-            "first_token_ms": 999.0,
+            "first_token_ms": 12.5,
         },
     }
 
@@ -72,8 +72,8 @@ async def test_chat_event_generator_stops_on_answer_cancellation_without_fallbac
     meta_payload = json.loads(events[2]["data"])
     assert meta_payload["finish_reason"] == "cancelled"
     assert meta_payload["cancelled"] is True
-    assert isinstance(meta_payload["perf"]["first_token_ms"], (int, float))
-    assert meta_payload["perf"]["first_token_ms"] != 999.0
+    assert meta_payload["perf"]["first_token_ms"] == 12.5
+    assert isinstance(meta_payload["perf"]["stream_first_message_ms"], (int, float))
     save_to_cache.assert_not_awaited()
 
 
@@ -119,5 +119,5 @@ async def test_chat_event_generator_emits_additive_meta_on_normal_completion() -
     meta_payload = json.loads(events[2]["data"])
     assert meta_payload["finish_reason"] == "completed"
     assert meta_payload["cancelled"] is False
-    assert isinstance(meta_payload["perf"]["first_token_ms"], (int, float))
-    assert meta_payload["perf"]["first_token_ms"] != 999.0
+    assert meta_payload["perf"]["first_token_ms"] == 12.5
+    assert isinstance(meta_payload["perf"]["stream_first_message_ms"], (int, float))

@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from ..core.entity_extractor import extract_entities_from_query, extract_team
 from .tool_caller import ToolCall
@@ -50,10 +50,10 @@ class ChatIntentRouter:
     def __init__(
         self,
         *,
-        resolve_reference_year: Callable[[str, Any], int],
-        detect_team_alias: Callable[[str], Optional[str]],
-        resolve_award_query_type: Callable[[str, Any], Optional[str]],
-        build_team_tool_calls: Callable[[str, str, int], list[ToolCall]],
+        resolve_reference_year=None,
+        detect_team_alias=None,
+        resolve_award_query_type=None,
+        build_team_tool_calls=None,
         fast_path_enabled: bool,
         fast_path_scope: str,
     ) -> None:
@@ -64,14 +64,40 @@ class ChatIntentRouter:
         self._fast_path_enabled = fast_path_enabled
         self._fast_path_scope = fast_path_scope
 
+    def bind(self, agent: Any) -> "_BoundChatIntentRouter":
+        return _BoundChatIntentRouter(router=self, agent=agent)
+
     def resolve(
         self,
         query: str,
         entity_filter: Any,
         context: Optional[dict[str, Any]] = None,
+        *,
+        agent: Any = None,
     ) -> IntentDecision:
+        resolve_reference_year = (
+            agent._resolve_reference_year
+            if agent is not None
+            else self._resolve_reference_year
+        )
+        detect_team_alias = (
+            agent._detect_team_alias_from_query
+            if agent is not None
+            else self._detect_team_alias
+        )
+        resolve_award_query_type = (
+            agent._resolve_award_query_type
+            if agent is not None
+            else self._resolve_award_query_type
+        )
+        build_team_tool_calls = (
+            agent._build_team_fast_path_tool_calls
+            if agent is not None
+            else self._build_team_tool_calls
+        )
+
         query_lower = query.lower()
-        season_year = self._resolve_reference_year(query, entity_filter)
+        season_year = resolve_reference_year(query, entity_filter)
         if self._is_vague_followup_query(query_lower):
             previous_query = self._find_previous_user_question(context, query)
             if previous_query:
@@ -80,6 +106,7 @@ class ChatIntentRouter:
                     previous_query,
                     previous_entity_filter,
                     None,
+                    agent=agent,
                 )
                 delegated_intent = delegated.resolved_intent or delegated.intent
                 if delegated_intent != ChatIntent.UNKNOWN:
@@ -117,7 +144,7 @@ class ChatIntentRouter:
         team_name = (
             getattr(entity_filter, "team_id", None)
             or extract_team(query)
-            or self._detect_team_alias(query)
+            or detect_team_alias(query)
         )
         player_name = (
             getattr(entity_filter, "player_name", None)
@@ -230,7 +257,11 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.TEAM_ANALYSIS,
                 planner_mode="fast_path",
-                tool_calls=self._build_team_tool_calls(query, team_name, season_year),
+                tool_calls=build_team_tool_calls(
+                    query,
+                    team_name,
+                    season_year,
+                ),
                 subject_type="team",
                 season_year=season_year,
                 metric_policy="team_fast_path",
@@ -250,7 +281,7 @@ class ChatIntentRouter:
                 analysis="규정성 질문으로 판단되어 규정 검색 fast-path를 사용합니다.",
             )
 
-        award_type = self._resolve_award_query_type(query, entity_filter)
+        award_type = resolve_award_query_type(query, entity_filter)
         if award_type:
             parameters: dict[str, Any] = {"year": season_year}
             if award_type != "any":
@@ -321,7 +352,11 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.TEAM_ANALYSIS,
                 planner_mode="fast_path",
-                tool_calls=self._build_team_tool_calls(query, team_name, season_year),
+                tool_calls=build_team_tool_calls(
+                    query,
+                    team_name,
+                    season_year,
+                ),
                 subject_type="team_metric",
                 season_year=season_year,
                 metric_policy="team_metric_lookup",
@@ -1335,4 +1370,23 @@ class ChatIntentRouter:
                 "다승",
                 "war",
             ]
+        )
+
+
+class _BoundChatIntentRouter:
+    def __init__(self, *, router: ChatIntentRouter, agent: Any) -> None:
+        self._router = router
+        self._agent = agent
+
+    def resolve(
+        self,
+        query: str,
+        entity_filter: Any,
+        context: Optional[dict[str, Any]] = None,
+    ) -> IntentDecision:
+        return self._router.resolve(
+            query,
+            entity_filter,
+            context,
+            agent=self._agent,
         )

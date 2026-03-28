@@ -319,7 +319,7 @@ class Settings(BaseSettings):
         True, validation_alias="CHAT_FAST_PATH_FALLBACK_ON_EMPTY"
     )
     chat_planner_cache_ttl_seconds: int = Field(
-        15, validation_alias="CHAT_PLANNER_CACHE_TTL_SECONDS"
+        60, validation_alias="CHAT_PLANNER_CACHE_TTL_SECONDS"
     )
     chat_planner_cache_max_entries: int = Field(
         512, validation_alias="CHAT_PLANNER_CACHE_MAX_ENTRIES"

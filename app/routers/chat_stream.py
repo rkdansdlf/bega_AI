@@ -444,6 +444,7 @@ def _make_cached_sse_response(
                         "tool_ms": 0.0,
                         "answer_ms": 0.0,
                         "first_token_ms": 0.0,
+                        "stream_first_message_ms": 0.0,
                         "tool_count": 0,
                         "tool_execution_mode": "none",
                         "planner_cache_hit": False,
@@ -490,10 +491,13 @@ def _clone_perf_payload(raw_perf: Any) -> Dict[str, Any]:
 def _finalize_stream_perf_payload(
     raw_perf: Any,
     *,
-    first_token_ms: Optional[float],
+    first_message_ms: Optional[float],
 ) -> Dict[str, Any]:
     perf_payload = _clone_perf_payload(raw_perf)
-    perf_payload["first_token_ms"] = first_token_ms
+    raw_first_token_ms = perf_payload.get("first_token_ms")
+    if not isinstance(raw_first_token_ms, (int, float)):
+        perf_payload["first_token_ms"] = first_message_ms
+    perf_payload["stream_first_message_ms"] = first_message_ms
     return perf_payload
 
 
@@ -668,7 +672,7 @@ async def _chat_event_generator(
         or bool(answer_stream_error),
         "perf": _finalize_stream_perf_payload(
             result.get("perf"),
-            first_token_ms=first_message_ms,
+            first_message_ms=first_message_ms,
         ),
         "error": public_error,
         "finish_reason": finish_reason,
@@ -913,7 +917,7 @@ async def _chat_live_event_generator(
         or bool(answer_stream_error),
         "perf": _finalize_stream_perf_payload(
             buffered_meta.get("perf"),
-            first_token_ms=first_message_ms,
+            first_message_ms=first_message_ms,
         ),
         "error": public_error,
         "finish_reason": finish_reason,

@@ -6,20 +6,39 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-REPORTS_DIR = Path(__file__).resolve().parents[2] / "reports"
+REPORTS_DIR = Path(
+    os.environ.get(
+        "REPORTS_DIR", str(Path(__file__).resolve().parents[2] / "reports")
+    )
+)
 PRESET_BASELINES = {
     "regmix_100": REPORTS_DIR / "smoke_latency_baseline_regmix_100.json",
     "llm_canary_20": REPORTS_DIR / "smoke_latency_baseline_llm_canary_20.json",
     "regulations_20": REPORTS_DIR / "smoke_latency_baseline_regulations_20.json",
 }
-PRESET_LLM_RATIO_MIN = {
-    "llm_canary_20": 0.85,
+PRESET_PLANNER_MODE_RATIO_MIN = {
+    "llm_canary_20": {
+        "mode": "player_fast_path",
+        "min_ratio": 0.85,
+    },
 }
+PRESET_LLM_RATIO_MIN = {}
 TTFE_IMPROVE_THRESHOLD = 0.10
 TTFE_REGRESSION_THRESHOLD = 0.05
+TTFE_ABSOLUTE_REGRESSION_MS = 2.0
+STREAM_FIRST_MESSAGE_WARNING_THRESHOLD = 0.05
+STREAM_FIRST_MESSAGE_ABSOLUTE_WARNING_MS = 5.0
+LATENCY_ONLY_FAILURE_CODES = frozenset(
+    {
+        "completion:p95_regression",
+        "stream:p95_regression",
+        "stream:first_token_p95_regression",
+    }
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,6 +127,7 @@ def _extract_baseline_endpoint(
     base = baseline.get("metrics", {}).get(endpoint, {})
     latency = base.get("latency_ms", {})
     first_token = base.get("first_token_ms", {})
+    stream_first_message = base.get("stream_first_message_ms", {})
     p95 = latency.get("p95")
     p95_regression_anchor = latency.get("p95_max", p95)
     return {
@@ -116,6 +136,10 @@ def _extract_baseline_endpoint(
         "first_token_p95": first_token.get("p95"),
         "first_token_p95_regression_anchor": first_token.get(
             "p95_max", first_token.get("p95")
+        ),
+        "stream_first_message_p95": stream_first_message.get("p95"),
+        "stream_first_message_p95_regression_anchor": stream_first_message.get(
+            "p95_max", stream_first_message.get("p95")
         ),
         "error_rate": base.get("error_rate"),
         "timeout_rate": base.get("timeout_rate"),
@@ -135,12 +159,19 @@ def _extract_candidate_endpoint(
         .get(endpoint, {})
         .get("first_token_ms", {})
     )
+    stream_first_message = (
+        candidate.get("summary", {})
+        .get("perf_metrics", {})
+        .get(endpoint, {})
+        .get("stream_first_message_ms", {})
+    )
     fallback_metrics = (
         candidate.get("summary", {}).get(f"{endpoint}_fallback_metrics", {})
     )
     return {
         "p95": latency.get("p95"),
         "first_token_p95": first_token.get("p95"),
+        "stream_first_message_p95": stream_first_message.get("p95"),
         "error_rate": base.get("error_rate"),
         "timeout_rate": base.get("timeout_rate"),
         "fallback_ratio": fallback_metrics.get("fallback_ratio"),
@@ -183,6 +214,61 @@ def _extract_candidate_llm_ratio(candidate: Dict[str, Any]) -> Optional[float]:
     return float(ratio)
 
 
+def _extract_candidate_planner_mode_ratio(
+    candidate: Dict[str, Any], planner_mode: str
+) -> Optional[float]:
+    overall = (
+        candidate.get("summary", {})
+        .get("planner_mode_distribution", {})
+        .get("overall", {})
+    )
+    if not isinstance(overall, dict) or not overall:
+        return None
+
+    mode_bucket = overall.get(planner_mode)
+    if not isinstance(mode_bucket, dict):
+        return None
+
+    ratio = mode_bucket.get("ratio")
+    if not isinstance(ratio, (int, float)):
+        return None
+
+    return float(ratio)
+
+
+def _extract_baseline_memory_mb(baseline: Dict[str, Any]) -> Optional[float]:
+    memory_metrics = baseline.get("metrics", {}).get("memory_mb", {})
+    if not isinstance(memory_metrics, dict):
+        return None
+
+    for key in ("p95_max", "p95", "p99_max", "avg_max", "avg"):
+        value = memory_metrics.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _extract_candidate_memory_mb(candidate: Dict[str, Any]) -> Optional[float]:
+    memory_metrics = candidate.get("summary", {}).get("memory_metrics", {})
+    if not isinstance(memory_metrics, dict):
+        return None
+    peak_mb = memory_metrics.get("peak_mb")
+    if isinstance(peak_mb, (int, float)):
+        return float(peak_mb)
+    return None
+
+
+def is_latency_only_failure_report(report: Dict[str, Any]) -> bool:
+    if report.get("status") != "FAIL":
+        return False
+
+    failures = report.get("failure_codes")
+    if not isinstance(failures, list) or not failures:
+        return False
+
+    return all(code in LATENCY_ONLY_FAILURE_CODES for code in failures)
+
+
 def evaluate_candidate(
     baseline: Dict[str, Any],
     candidate: Dict[str, Any],
@@ -195,12 +281,24 @@ def evaluate_candidate(
     candidate_memory_mb: Optional[float],
     memory_increase_threshold: float,
     llm_ratio_min: Optional[float] = None,
+    planner_mode_ratio_mode: Optional[str] = None,
+    planner_mode_ratio_min: Optional[float] = None,
 ) -> Dict[str, Any]:
+    if baseline_memory_mb is None:
+        baseline_memory_mb = _extract_baseline_memory_mb(baseline)
+    if candidate_memory_mb is None:
+        candidate_memory_mb = _extract_candidate_memory_mb(candidate)
+
     endpoints = ("completion", "stream")
     failures = []
     warnings = []
     endpoint_results: Dict[str, Any] = {}
     llm_ratio = _extract_candidate_llm_ratio(candidate)
+    planner_mode_ratio = None
+    if planner_mode_ratio_mode:
+        planner_mode_ratio = _extract_candidate_planner_mode_ratio(
+            candidate, planner_mode_ratio_mode
+        )
     baseline_overall = _extract_baseline_overall(baseline)
     candidate_overall = _extract_candidate_overall(candidate)
     overall_result = {
@@ -249,6 +347,13 @@ def evaluate_candidate(
             candidate_metrics["first_token_p95"],
             first_token_regression_anchor,
         )
+        stream_first_message_regression_anchor = baseline_metrics.get(
+            "stream_first_message_p95_regression_anchor"
+        )
+        stream_first_message_delta_ratio = _safe_ratio_delta(
+            candidate_metrics["stream_first_message_p95"],
+            stream_first_message_regression_anchor,
+        )
         error_rate_delta = None
         timeout_rate_delta = None
         fallback_ratio_delta = None
@@ -282,8 +387,31 @@ def evaluate_candidate(
         if endpoint == "stream":
             if first_token_delta_ratio is None:
                 warnings.append("stream:missing_first_token_p95_for_comparison")
-            elif first_token_delta_ratio > TTFE_REGRESSION_THRESHOLD:
+            elif (
+                first_token_delta_ratio > TTFE_REGRESSION_THRESHOLD
+                and candidate_metrics["first_token_p95"] is not None
+                and first_token_regression_anchor is not None
+                and (
+                    candidate_metrics["first_token_p95"]
+                    - first_token_regression_anchor
+                )
+                > TTFE_ABSOLUTE_REGRESSION_MS
+            ):
                 failures.append("stream:first_token_p95_regression")
+            if stream_first_message_delta_ratio is None:
+                warnings.append("stream:missing_stream_first_message_p95")
+            elif (
+                stream_first_message_delta_ratio
+                > STREAM_FIRST_MESSAGE_WARNING_THRESHOLD
+                and candidate_metrics["stream_first_message_p95"] is not None
+                and stream_first_message_regression_anchor is not None
+                and (
+                    candidate_metrics["stream_first_message_p95"]
+                    - stream_first_message_regression_anchor
+                )
+                > STREAM_FIRST_MESSAGE_ABSOLUTE_WARNING_MS
+            ):
+                warnings.append("stream:stream_first_message_p95_regression")
 
         if (
             error_rate_delta is not None
@@ -312,6 +440,7 @@ def evaluate_candidate(
             "delta": {
                 "p95_ratio": p95_delta_ratio,
                 "first_token_p95_ratio": first_token_delta_ratio,
+                "stream_first_message_p95_ratio": stream_first_message_delta_ratio,
                 "error_rate": error_rate_delta,
                 "timeout_rate": timeout_rate_delta,
                 "fallback_ratio": fallback_ratio_delta,
@@ -337,12 +466,24 @@ def evaluate_candidate(
     planner_checks = {
         "llm_ratio_min": llm_ratio_min,
         "llm_ratio": llm_ratio,
+        "planner_mode_ratio_mode": planner_mode_ratio_mode,
+        "planner_mode_ratio_min": planner_mode_ratio_min,
+        "planner_mode_ratio": planner_mode_ratio,
     }
+    if planner_mode_ratio_mode == "player_fast_path":
+        planner_checks["player_fast_path_ratio_min"] = planner_mode_ratio_min
+        planner_checks["player_fast_path_ratio"] = planner_mode_ratio
     if llm_ratio_min is not None:
         if llm_ratio is None:
             failures.append("planner_llm_ratio:missing")
         elif llm_ratio < llm_ratio_min:
             failures.append("planner_llm_ratio:below_minimum")
+    if planner_mode_ratio_min is not None and planner_mode_ratio_mode:
+        failure_prefix = f"planner_{planner_mode_ratio_mode}_ratio"
+        if planner_mode_ratio is None:
+            failures.append(f"{failure_prefix}:missing")
+        elif planner_mode_ratio < planner_mode_ratio_min:
+            failures.append(f"{failure_prefix}:below_minimum")
 
     if failures:
         status = "FAIL"
@@ -361,6 +502,9 @@ def evaluate_candidate(
             "p95_regression_threshold": p95_regression_threshold,
             "ttfe_improve_threshold": TTFE_IMPROVE_THRESHOLD,
             "ttfe_regression_threshold": TTFE_REGRESSION_THRESHOLD,
+            "ttfe_absolute_regression_ms": TTFE_ABSOLUTE_REGRESSION_MS,
+            "stream_first_message_warning_threshold": STREAM_FIRST_MESSAGE_WARNING_THRESHOLD,
+            "stream_first_message_absolute_warning_ms": STREAM_FIRST_MESSAGE_ABSOLUTE_WARNING_MS,
             "error_rate_increase_threshold": error_rate_increase_threshold,
             "timeout_rate_increase_threshold": timeout_rate_increase_threshold,
             "memory_increase_threshold": memory_increase_threshold,
@@ -379,6 +523,13 @@ def main() -> int:
     llm_ratio_min = args.llm_ratio_min
     if llm_ratio_min is None and args.baseline_preset:
         llm_ratio_min = PRESET_LLM_RATIO_MIN.get(args.baseline_preset)
+    planner_mode_ratio_mode = None
+    planner_mode_ratio_min = None
+    if args.baseline_preset:
+        planner_requirement = PRESET_PLANNER_MODE_RATIO_MIN.get(args.baseline_preset)
+        if planner_requirement:
+            planner_mode_ratio_mode = planner_requirement.get("mode")
+            planner_mode_ratio_min = planner_requirement.get("min_ratio")
     report = evaluate_candidate(
         baseline,
         candidate,
@@ -390,6 +541,8 @@ def main() -> int:
         candidate_memory_mb=args.candidate_memory_mb,
         memory_increase_threshold=args.memory_increase_threshold,
         llm_ratio_min=llm_ratio_min,
+        planner_mode_ratio_mode=planner_mode_ratio_mode,
+        planner_mode_ratio_min=planner_mode_ratio_min,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if args.output:

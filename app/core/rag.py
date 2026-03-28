@@ -21,14 +21,14 @@ import httpx
 from ..config import Settings
 from .embeddings import async_embed_query
 from .http_clients import get_shared_httpx_client
-from .shared_resources import get_shared_latest_baseball_tool
 from .prompts import FOLLOWUP_PROMPT, SYSTEM_PROMPT, HYDE_PROMPT
 from .retrieval import similarity_search
 from . import kbo_metrics
 from .entity_extractor import enhance_search_strategy
 from .query_transformer import QueryTransformer, multi_query_retrieval
 from .context_formatter import ContextFormatter
-from ..agents.baseball_agent import BaseballStatisticsAgent
+from ..agents.baseball_agent import BaseballAgentRuntime
+from ..agents.shared_runtime import initialize_shared_baseball_agent_runtime
 from .wpa_calculator import WPACalculator
 from .retry_utils import llm_retry
 from .exceptions import DBRetrievalError
@@ -456,6 +456,7 @@ class RAGPipeline:
         *,
         settings: Settings,
         connection: psycopg.Connection,
+        agent_runtime: BaseballAgentRuntime | None = None,
         context_formatter: Optional[ContextFormatter] = None,
         wpa_calculator: Optional["WPACalculator"] = None,
     ) -> None:
@@ -463,13 +464,10 @@ class RAGPipeline:
         self.connection = connection
         self.query_transformer = QueryTransformer(self._generate)
         self.context_formatter = context_formatter or ContextFormatter()
-        # 야구 통계 전용 에이전트 초기화
-        self.baseball_agent = BaseballStatisticsAgent(
-            connection,
-            self._generate,
-            settings=settings,
-            latest_baseball_tool=get_shared_latest_baseball_tool(),
+        self.agent_runtime = agent_runtime or initialize_shared_baseball_agent_runtime(
+            settings
         )
+        self.baseball_agent = self.agent_runtime.shared_agent
         self.wpa_calculator = wpa_calculator or WPACalculator()
         self._retrieval_error: Optional[str] = (
             None  # set if DB was unreachable during retrieval
@@ -1279,9 +1277,11 @@ class RAGPipeline:
 
         try:
             # 야구 에이전트를 통한 처리 시도
-            agent_result = await self.baseball_agent.process_query(
-                query, {"intent": intent, "filters": filters, "history": history}
-            )
+            with self.agent_runtime.request_context(self.connection):
+                agent_result = await self.baseball_agent.process_query(
+                    query,
+                    {"intent": intent, "filters": filters, "history": history},
+                )
 
             if agent_result["verified"] and not agent_result.get("error"):
                 logger.info(
