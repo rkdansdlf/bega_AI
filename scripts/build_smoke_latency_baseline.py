@@ -6,23 +6,31 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-REPORTS_DIR = Path(__file__).resolve().parents[2] / "reports"
+REPORTS_DIR = Path(
+    os.environ.get(
+        "REPORTS_DIR", str(Path(__file__).resolve().parents[2] / "reports")
+    )
+)
 PRESET_INPUTS = {
     "regmix_100": [
         REPORTS_DIR / "smoke_chatbot_quality_regmix_100_baseline_summary.json",
         REPORTS_DIR / "smoke_chatbot_quality_regmix_100_v3_summary.json",
+        REPORTS_DIR / "smoke_chatbot_quality_regmix_100_v4_summary.json",
     ],
     "llm_canary_20": [
         REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_baseline_summary.json",
         REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_v1_summary.json",
         REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_v2_summary.json",
+        REPORTS_DIR / "smoke_chatbot_quality_llm_canary_20_v3_summary.json",
     ],
     "regulations_20": [
         REPORTS_DIR / "smoke_chatbot_quality_regulations_20_baseline_summary.json",
         REPORTS_DIR / "smoke_chatbot_quality_regulations_20_v1_summary.json",
+        REPORTS_DIR / "smoke_chatbot_quality_regulations_20_v2_summary.json",
     ],
 }
 PRESET_OUTPUTS = {
@@ -74,6 +82,25 @@ def _max(values: List[float]) -> Optional[float]:
     return round(max(values), 6)
 
 
+def _percentile(values: List[float], percentile: float) -> Optional[float]:
+    if not values:
+        return None
+    sorted_values = sorted(float(value) for value in values)
+    if len(sorted_values) == 1:
+        return round(sorted_values[0], 6)
+
+    rank = (len(sorted_values) - 1) * percentile
+    lower = int(rank)
+    upper = min(lower + 1, len(sorted_values) - 1)
+    if lower == upper:
+        return round(sorted_values[lower], 6)
+    weight = rank - lower
+    value = (
+        sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * weight
+    )
+    return round(value, 6)
+
+
 def _collect_metric_values(
     reports: List[Dict[str, Any]], path: List[str]
 ) -> List[float]:
@@ -115,6 +142,22 @@ def _build_endpoint_baseline(
         reports,
         ["summary", "perf_metrics", endpoint_name, "first_token_ms", "avg"],
     )
+    stream_first_message_p50_values = _collect_metric_values(
+        reports,
+        ["summary", "perf_metrics", endpoint_name, "stream_first_message_ms", "p50"],
+    )
+    stream_first_message_p95_values = _collect_metric_values(
+        reports,
+        ["summary", "perf_metrics", endpoint_name, "stream_first_message_ms", "p95"],
+    )
+    stream_first_message_p99_values = _collect_metric_values(
+        reports,
+        ["summary", "perf_metrics", endpoint_name, "stream_first_message_ms", "p99"],
+    )
+    stream_first_message_avg_values = _collect_metric_values(
+        reports,
+        ["summary", "perf_metrics", endpoint_name, "stream_first_message_ms", "avg"],
+    )
     return {
         "pass_rate": _avg(_collect_metric_values(reports, base_path + ["pass_rate"])),
         "error_rate": _avg(_collect_metric_values(reports, base_path + ["error_rate"])),
@@ -155,6 +198,39 @@ def _build_endpoint_baseline(
             "avg_min": _min(first_token_avg_values),
             "avg_max": _max(first_token_avg_values),
         },
+        "stream_first_message_ms": {
+            "p50": _avg(stream_first_message_p50_values),
+            "p50_min": _min(stream_first_message_p50_values),
+            "p50_max": _max(stream_first_message_p50_values),
+            "p95": _avg(stream_first_message_p95_values),
+            "p95_min": _min(stream_first_message_p95_values),
+            "p95_max": _max(stream_first_message_p95_values),
+            "p99": _avg(stream_first_message_p99_values),
+            "p99_min": _min(stream_first_message_p99_values),
+            "p99_max": _max(stream_first_message_p99_values),
+            "avg": _avg(stream_first_message_avg_values),
+            "avg_min": _min(stream_first_message_avg_values),
+            "avg_max": _max(stream_first_message_avg_values),
+        },
+    }
+
+
+def _build_memory_baseline(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    peak_values = _collect_metric_values(reports, ["summary", "memory_metrics", "peak_mb"])
+    return {
+        "count": len(peak_values),
+        "p50": _percentile(peak_values, 0.50),
+        "p50_min": _min(peak_values),
+        "p50_max": _max(peak_values),
+        "p95": _percentile(peak_values, 0.95),
+        "p95_min": _min(peak_values),
+        "p95_max": _max(peak_values),
+        "p99": _percentile(peak_values, 0.99),
+        "p99_min": _min(peak_values),
+        "p99_max": _max(peak_values),
+        "avg": _avg(peak_values),
+        "avg_min": _min(peak_values),
+        "avg_max": _max(peak_values),
     }
 
 
@@ -201,6 +277,7 @@ def main() -> int:
             "overall_timeout_rate": _avg(
                 _collect_metric_values(reports, ["summary", "overall_timeout_rate"])
             ),
+            "memory_mb": _build_memory_baseline(reports),
             "completion": _build_endpoint_baseline(reports, "completion_metrics"),
             "stream": _build_endpoint_baseline(reports, "stream_metrics"),
         },

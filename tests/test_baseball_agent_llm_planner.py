@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.agents.baseball_agent import BaseballStatisticsAgent, SERIAL_DB_TOOL_NAMES
+from app.agents.chat_intent_router import ChatIntent
 from app.agents.tool_caller import ToolCall, ToolResult
 from app.core.entity_extractor import extract_entities_from_query, extract_player_names
 
@@ -23,6 +24,8 @@ def _build_agent() -> BaseballStatisticsAgent:
     agent.chat_tool_parallel_split_batch_enabled = True
     agent.chat_tool_parallel_serial_tools = set(SERIAL_DB_TOOL_NAMES)
     agent.chat_tool_parallel_max_concurrency = 2
+    agent.chat_planner_cache_ttl_seconds = 60
+    agent.chat_planner_cache_max_entries = 512
     agent._is_team_analysis_query = (
         lambda query, entity_filter: bool(getattr(entity_filter, "team_id", None))
         and "분석" in query
@@ -93,6 +96,18 @@ def test_extract_player_names_preserves_multi_player_query_order() -> None:
     query = "김도영, 문보경, 노시환을 묶어서 보면 타석 접근법을 각각 어떻게 설명할 수 있어?"
 
     assert extract_player_names(query, limit=3) == ["김도영", "문보경", "노시환"]
+
+
+def test_extract_llm_planner_player_names_normalizes_suffixes_and_order() -> None:
+    agent = _build_agent()
+    query = "안현민, 윤도현, 김도영처럼 젊은 타자를 볼 때 성장 신호 순서를 설명해줘"
+    entity_filter = extract_entities_from_query(query)
+
+    assert agent._extract_llm_planner_player_names(query, entity_filter) == [
+        "안현민",
+        "윤도현",
+        "김도영",
+    ]
 
 
 def test_select_llm_planner_prompt_includes_multi_player_scope() -> None:
@@ -289,6 +304,102 @@ def test_soft_filter_llm_tool_calls_applies_reference_year_to_missing_player_yea
     assert filtered[0].parameters["year"] == 2025
 
 
+def test_analyze_query_and_plan_tools_uses_player_fast_path_for_multi_player_explainer() -> (
+    None
+):
+    agent = _build_agent()
+    agent._resolve_chat_intent = lambda query, entity_filter: SimpleNamespace(
+        intent=ChatIntent.UNKNOWN
+    )
+    agent._resolve_reference_year = lambda query, entity_filter: 2025
+
+    llm_calls = {"count": 0}
+
+    async def _fake_llm(query, context):
+        llm_calls["count"] += 1
+        return {
+            "analysis": "llm plan",
+            "tool_calls": [],
+            "planner_mode": "player_llm_planner",
+            "error": None,
+        }
+
+    agent._analyze_query_with_llm = _fake_llm
+
+    async def _run():
+        return await agent._analyze_query_and_plan_tools(
+            "박동원, 양의지, 유강남을 타격형 포수 묶음으로 볼 때 경기 전개 속에서 각자의 가치가 커지는 장면을 풀어줘.",
+            {},
+        )
+
+    plan = asyncio.run(_run())
+
+    assert llm_calls["count"] == 0
+    assert plan["planner_mode"] == "player_fast_path"
+    assert [call.tool_name for call in plan["tool_calls"]] == [
+        "get_player_stats",
+        "get_player_stats",
+        "get_player_stats",
+    ]
+    assert [call.parameters["player_name"] for call in plan["tool_calls"]] == [
+        "박동원",
+        "양의지",
+        "유강남",
+    ]
+    assert all(call.parameters["year"] == 2025 for call in plan["tool_calls"])
+
+
+def test_analyze_query_and_plan_tools_uses_player_fast_path_when_ranking_phrase_is_negated() -> None:
+    agent = _build_agent()
+    agent._resolve_chat_intent = lambda query, entity_filter: SimpleNamespace(
+        intent=ChatIntent.UNKNOWN
+    )
+    agent._resolve_reference_year = lambda query, entity_filter: 2025
+
+    llm_calls = {"count": 0}
+
+    async def _fake_llm(query, context):
+        del query, context
+        llm_calls["count"] += 1
+        return {
+            "analysis": "llm plan",
+            "tool_calls": [],
+            "planner_mode": "player_llm_planner",
+            "error": None,
+        }
+
+    agent._analyze_query_with_llm = _fake_llm
+
+    async def _run():
+        return await agent._analyze_query_and_plan_tools(
+            "김도영, 문보경, 노시환을 묶어서 보면 타석 접근법을 각각 어떤 유형의 타자로 설명할 수 있어? 단순 순위나 랭킹 말고 서사적으로 풀어줘.",
+            {},
+        )
+
+    plan = asyncio.run(_run())
+
+    assert llm_calls["count"] == 0
+    assert plan["planner_mode"] == "player_fast_path"
+    assert all(call.parameters["position"] == "batting" for call in plan["tool_calls"])
+
+
+def test_build_reference_fast_path_plan_skips_player_fast_path_for_multi_player_ranking_query() -> None:
+    agent = _build_agent()
+    agent._resolve_chat_intent = lambda query, entity_filter: SimpleNamespace(
+        intent=ChatIntent.UNKNOWN
+    )
+    agent._resolve_reference_year = lambda query, entity_filter: 2025
+    query = "김도영, 문보경, 노시환 홈런 순위와 리더보드 판도를 설명해줘"
+
+    plan = agent._build_reference_fast_path_plan(
+        query,
+        extract_entities_from_query(query),
+    )
+
+    assert plan is not None
+    assert plan["planner_mode"] != "player_fast_path"
+
+
 def test_analyze_query_and_plan_tools_uses_cached_llm_plan(monkeypatch) -> None:
     agent = _build_agent()
     agent.chat_planner_cache_ttl_seconds = 30
@@ -331,6 +442,52 @@ def test_analyze_query_and_plan_tools_uses_cached_llm_plan(monkeypatch) -> None:
     assert first_plan["tool_calls"][0].tool_name == "get_leaderboard"
     assert second_plan["planner_cache_hit"] is True
     assert second_plan["tool_calls"][0].tool_name == "get_leaderboard"
+
+
+def test_analyze_query_and_plan_tools_keeps_cache_alive_for_completion_stream_gap(
+    monkeypatch,
+) -> None:
+    agent = _build_agent()
+    agent.chat_planner_cache_ttl_seconds = 60
+    agent.chat_planner_cache_max_entries = 16
+    agent._build_fast_path_plan = lambda query, entity_filter, context=None: None
+
+    llm_calls = {"count": 0}
+    monotonic_now = {"value": 100.0}
+
+    async def _fake_llm(query, context):
+        llm_calls["count"] += 1
+        return {
+            "analysis": "llm plan",
+            "tool_calls": [
+                ToolCall(
+                    tool_name="get_player_stats",
+                    parameters={"player_name": "강민호", "year": 2025},
+                )
+            ],
+            "planner_mode": "player_llm_planner",
+            "error": None,
+        }
+
+    monkeypatch.setattr("app.agents.baseball_agent.time.monotonic", lambda: monotonic_now["value"])
+    agent._analyze_query_with_llm = _fake_llm
+
+    async def _run():
+        first = await agent._analyze_query_and_plan_tools(
+            "강민호, 양의지, 박동원 비교해줘", {}
+        )
+        monotonic_now["value"] = 124.0
+        second = await agent._analyze_query_and_plan_tools(
+            "강민호, 양의지, 박동원 비교해줘", {}
+        )
+        return first, second
+
+    first_plan, second_plan = asyncio.run(_run())
+
+    assert llm_calls["count"] == 1
+    assert first_plan["planner_mode"] == "player_llm_planner"
+    assert second_plan["planner_cache_hit"] is True
+    assert second_plan["planner_cache_age_ms"] == 24000.0
 
 
 def test_process_query_stream_preserves_attempted_planner_mode_on_analysis_error(
@@ -510,6 +667,75 @@ def test_process_query_stream_preserves_metadata_before_answer_for_completion_fa
     assert event_types.index("metadata") < event_types.index("answer_chunk")
 
 
+def test_process_query_stream_emits_player_fast_path_answer_before_metadata_for_stream(
+    monkeypatch,
+) -> None:
+    agent = _build_agent()
+    agent._is_chitchat = lambda query: False
+    agent.fast_path_fallback_on_empty = False
+    agent._generate_visualizations = lambda tool_results: []
+    agent._resolve_tool_execution_mode = lambda tool_calls: "sequential"
+    agent._build_stats_lookup_followup_tool_call = (
+        lambda query, analysis_result, tool_results: None
+    )
+    agent._build_low_grounding_fallback_plan = (
+        lambda query, analysis_result, tool_results: []
+    )
+    agent._resolve_grounding_mode = (
+        lambda intent, analysis_result, tool_results: "structured_kbo"
+    )
+    agent._source_tier_from_tool_results = (
+        lambda tool_results, default_tier=None: default_tier or "database"
+    )
+    agent._build_answer_sources = lambda tool_results: []
+    agent._resolve_as_of_date = lambda tool_results: None
+    agent._resolve_perf_model_name = lambda: "test-model"
+
+    async def _player_fast_path_plan():
+        return {
+            "analysis": "ok",
+            "tool_calls": [],
+            "expected_result": "",
+            "error": None,
+            "planner_mode": "player_fast_path",
+            "intent": "freeform",
+            "source_tier": "database",
+            "grounding_mode": "structured_kbo",
+        }
+
+    async def _empty_results():
+        return []
+
+    async def _fast_answer(query, tool_results, context):
+        del query, tool_results, context
+        return {
+            "answer": "빠른 선수 응답",
+            "verified": True,
+            "data_sources": [{"tool": "database", "verified": True}],
+            "error": None,
+        }
+
+    agent._analyze_query_and_plan_tools = lambda query, context: _player_fast_path_plan()
+    agent._execute_tool_batch_async = lambda tool_calls: _empty_results()
+    agent._generate_verified_answer = _fast_answer
+
+    monkeypatch.setattr("app.ml.intent_router.predict_intent", lambda query: "freeform")
+
+    async def _run():
+        return [
+            event
+            async for event in agent.process_query_stream(
+                "박동원, 양의지, 유강남 해석해줘",
+                {"request_mode": "stream"},
+            )
+        ]
+
+    events = asyncio.run(_run())
+    event_types = [event["type"] for event in events]
+
+    assert event_types.index("answer_chunk") < event_types.index("metadata")
+
+
 def test_resolve_llm_planner_max_tokens_caps_compact_player_and_team_modes() -> None:
     agent = _build_agent()
 
@@ -628,6 +854,329 @@ def test_execute_tool_batch_async_mixed_mode_preserves_original_order() -> None:
         "parallel",
     ]
     assert agent._execute_tool_call_async.await_count == 1
+
+
+def test_execute_tool_batch_async_uses_batched_player_stats_lookup() -> None:
+    agent = _build_agent()
+    agent.db_query_tool = SimpleNamespace(
+        get_player_season_stats_batch=lambda player_names, year, position: [
+            {
+                "requested_player_name": "안현민",
+                "player_name": "안현민",
+                "resolved_player_name": "안현민",
+                "year": year,
+                "batting_stats": {
+                    "player_name": "안현민",
+                    "team_name": "KT",
+                    "obp": 0.392,
+                    "slg": 0.522,
+                    "home_runs": 16,
+                },
+                "pitching_stats": None,
+                "found": True,
+                "error": None,
+                "batch_lookup": True,
+            },
+            {
+                "requested_player_name": "윤도현",
+                "player_name": "윤도현",
+                "resolved_player_name": "윤도현",
+                "year": year,
+                "batting_stats": {
+                    "player_name": "윤도현",
+                    "team_name": "KIA",
+                    "obp": 0.355,
+                    "slg": 0.441,
+                    "home_runs": 8,
+                },
+                "pitching_stats": None,
+                "found": True,
+                "error": None,
+                "batch_lookup": True,
+            },
+            {
+                "requested_player_name": "김도영",
+                "player_name": "김도영",
+                "resolved_player_name": None,
+                "year": year,
+                "batting_stats": None,
+                "pitching_stats": None,
+                "found": False,
+                "error": None,
+                "batch_lookup": True,
+            },
+        ]
+    )
+    agent._execute_tool_call_async = AsyncMock(
+        side_effect=AssertionError("individual tool execution should not run")
+    )
+
+    results = asyncio.run(
+        agent._execute_tool_batch_async(
+            [
+                ToolCall(
+                    "get_player_stats",
+                    {"player_name": "안현민", "year": 2025, "position": "batting"},
+                ),
+                ToolCall(
+                    "get_player_stats",
+                    {"player_name": "윤도현", "year": 2025, "position": "batting"},
+                ),
+                ToolCall(
+                    "get_player_stats",
+                    {"player_name": "김도영", "year": 2025, "position": "batting"},
+                ),
+            ]
+        )
+    )
+
+    assert [result.success for result in results] == [True, True, True]
+    assert results[0].data["resolved_player_name"] == "안현민"
+    assert results[1].data["resolved_player_name"] == "윤도현"
+    assert results[2].data["found"] is False
+    assert "찾을 수 없습니다" in results[2].message
+
+
+def test_build_player_fast_path_tool_calls_infers_pitching_from_query() -> None:
+    agent = _build_agent()
+
+    tool_calls = agent._build_player_fast_path_tool_calls(
+        "문동주, 김택연, 곽빈을 강한 구위 축으로 묶었을 때 어떤 하위 유형으로 나뉘는지 설명해줘.",
+        ["문동주", "김택연", "곽빈"],
+        2025,
+        SimpleNamespace(position_type=None),
+    )
+
+    assert [call.parameters["position"] for call in tool_calls] == [
+        "pitching",
+        "pitching",
+        "pitching",
+    ]
+
+
+def test_build_structured_deterministic_answer_for_multi_player_batter_narrative() -> None:
+    agent = _build_agent()
+
+    answer = agent._build_structured_deterministic_answer(
+        "안현민, 윤도현, 김도영처럼 젊은 타자를 볼 때 표본이 적어도 먼저 읽어야 할 성장 신호의 순서를 설명해줘.",
+        [
+            ToolResult(
+                success=True,
+                data={
+                    "requested_player_name": "안현민",
+                    "player_name": "안현민",
+                    "resolved_player_name": "안현민",
+                    "year": 2025,
+                    "batting_stats": {
+                        "player_name": "안현민",
+                        "team_name": "KT",
+                        "plate_appearances": 210,
+                        "avg": 0.311,
+                        "obp": 0.392,
+                        "slg": 0.551,
+                        "ops": 0.943,
+                        "home_runs": 13,
+                        "doubles": 12,
+                        "walks": 24,
+                        "strikeouts": 39,
+                    },
+                    "pitching_stats": None,
+                    "found": True,
+                    "error": None,
+                    "batch_lookup": True,
+                },
+                message="ok",
+            ),
+            ToolResult(
+                success=True,
+                data={
+                    "requested_player_name": "윤도현",
+                    "player_name": "윤도현",
+                    "resolved_player_name": "윤도현",
+                    "year": 2025,
+                    "batting_stats": {
+                        "player_name": "윤도현",
+                        "team_name": "KIA",
+                        "plate_appearances": 188,
+                        "avg": 0.287,
+                        "obp": 0.349,
+                        "slg": 0.448,
+                        "ops": 0.797,
+                        "home_runs": 7,
+                        "doubles": 14,
+                        "walks": 18,
+                        "strikeouts": 41,
+                    },
+                    "pitching_stats": None,
+                    "found": True,
+                    "error": None,
+                    "batch_lookup": True,
+                },
+                message="ok",
+            ),
+            ToolResult(
+                success=True,
+                data={
+                    "requested_player_name": "김도영",
+                    "player_name": "김도영",
+                    "resolved_player_name": "김도영",
+                    "year": 2025,
+                    "batting_stats": {
+                        "player_name": "김도영",
+                        "team_name": "KIA",
+                        "plate_appearances": 240,
+                        "avg": 0.334,
+                        "obp": 0.409,
+                        "slg": 0.603,
+                        "ops": 1.012,
+                        "home_runs": 18,
+                        "doubles": 16,
+                        "walks": 30,
+                        "strikeouts": 35,
+                    },
+                    "pitching_stats": None,
+                    "found": True,
+                    "error": None,
+                    "batch_lookup": True,
+                },
+                message="ok",
+            ),
+        ],
+    )
+
+    assert answer is not None
+    assert "타석 접근 안정감" in answer
+    assert "안현민" in answer
+    assert "윤도현" in answer
+    assert "김도영" in answer
+    assert "출처: DB 조회 결과" in answer
+
+
+def test_build_chat_reference_answer_for_multi_player_pitcher_narrative_mentions_missing_player() -> None:
+    agent = _build_agent()
+
+    answer = agent._build_chat_reference_answer(
+        "문동주, 김택연, 곽빈을 강한 구위 축으로 묶었을 때 파워형 투수 안에서도 어떤 하위 유형으로 나눠볼 수 있어?",
+        [
+            ToolResult(
+                success=True,
+                data={
+                    "requested_player_name": "문동주",
+                    "player_name": "문동주",
+                    "resolved_player_name": "문동주",
+                    "year": 2025,
+                    "batting_stats": None,
+                    "pitching_stats": {
+                        "player_name": "문동주",
+                        "team_name": "한화",
+                        "games_started": 18,
+                        "innings_pitched": 112.2,
+                        "strikeouts": 128,
+                        "era": 3.41,
+                        "whip": 1.18,
+                    },
+                    "found": True,
+                    "error": None,
+                    "batch_lookup": True,
+                },
+                message="ok",
+            ),
+            ToolResult(
+                success=True,
+                data={
+                    "requested_player_name": "김택연",
+                    "player_name": "김택연",
+                    "resolved_player_name": "김택연",
+                    "year": 2025,
+                    "batting_stats": None,
+                    "pitching_stats": {
+                        "player_name": "김택연",
+                        "team_name": "두산",
+                        "games_started": 0,
+                        "innings_pitched": 58.1,
+                        "strikeouts": 76,
+                        "saves": 12,
+                        "holds": 10,
+                        "era": 2.91,
+                        "whip": 1.05,
+                    },
+                    "found": True,
+                    "error": None,
+                    "batch_lookup": True,
+                },
+                message="ok",
+            ),
+            ToolResult(
+                success=True,
+                data={
+                    "requested_player_name": "곽빈",
+                    "player_name": "곽빈",
+                    "resolved_player_name": None,
+                    "year": 2025,
+                    "batting_stats": None,
+                    "pitching_stats": None,
+                    "found": False,
+                    "error": None,
+                    "batch_lookup": True,
+                },
+                message="miss",
+            ),
+        ],
+    )
+
+    assert answer is not None
+    assert "문동주" in answer
+    assert "김택연" in answer
+    assert "곽빈" in answer
+    assert "제외" in answer or "빠진 선수" in answer
+
+
+def test_build_structured_deterministic_answer_returns_none_when_multi_player_usable_count_is_low() -> None:
+    agent = _build_agent()
+
+    answer = agent._build_structured_deterministic_answer(
+        "안현민, 윤도현, 김도영처럼 젊은 타자를 볼 때 성장 신호 순서를 설명해줘",
+        [
+            ToolResult(
+                success=True,
+                data={
+                    "requested_player_name": "안현민",
+                    "player_name": "안현민",
+                    "resolved_player_name": "안현민",
+                    "year": 2025,
+                    "batting_stats": {
+                        "player_name": "안현민",
+                        "team_name": "KT",
+                        "obp": 0.392,
+                        "slg": 0.522,
+                        "home_runs": 16,
+                    },
+                    "pitching_stats": None,
+                    "found": True,
+                    "error": None,
+                    "batch_lookup": True,
+                },
+                message="ok",
+            ),
+            ToolResult(
+                success=True,
+                data={
+                    "requested_player_name": "윤도현",
+                    "player_name": "윤도현",
+                    "resolved_player_name": None,
+                    "year": 2025,
+                    "batting_stats": None,
+                    "pitching_stats": None,
+                    "found": False,
+                    "error": None,
+                    "batch_lookup": True,
+                },
+                message="miss",
+            ),
+        ],
+    )
+
+    assert answer is None
 
 
 def test_analyze_query_with_llm_uses_compact_player_planner_token_cap() -> None:

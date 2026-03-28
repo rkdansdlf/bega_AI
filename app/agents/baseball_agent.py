@@ -11,7 +11,10 @@ import logging
 import asyncio
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
+from dataclasses import dataclass
 from threading import RLock
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 import psycopg
@@ -31,11 +34,30 @@ from ..core.tools.datetime_tool import (
 )  # 신규 도구 임포트
 from .chat_intent_router import ChatIntent, ChatIntentRouter, IntentDecision
 from .chat_renderers import ChatRendererRegistry
-from .tool_caller import ToolCaller, ToolCall, ToolResult
+from .tool_caller import ToolCaller, ToolCall, ToolDefinition, ToolResult
 
 logger = logging.getLogger(__name__)
 _PLANNER_CACHE_LOCK = RLock()
 _PLANNER_CACHE: "OrderedDict[str, tuple[float, Dict[str, Any]]]" = OrderedDict()
+_AGENT_RUNTIME_LOCK = RLock()
+_AGENT_RUNTIME_COUNTER = 0
+_TOOL_DEFINITION_LOCK = RLock()
+_DEFAULT_TOOL_DEFINITIONS: tuple["ToolDefinition", ...] | None = None
+_REQUEST_CONTEXT: ContextVar["AgentRequestContext | None"] = ContextVar(
+    "baseball_agent_request_context",
+    default=None,
+)
+_REQUEST_RESOURCE_ATTRS = frozenset(
+    {
+        "connection",
+        "db_query_tool",
+        "regulation_query_tool",
+        "game_query_tool",
+        "document_query_tool",
+        "game_strategist",
+        "match_predictor",
+    }
+)
 
 from ..core.prompts import (
     SYSTEM_PROMPT,
@@ -53,6 +75,307 @@ from ..core.entity_extractor import (
 from ..config import Settings
 
 
+@dataclass(slots=True)
+class AgentRequestContext:
+    runtime_id: int
+    connection: psycopg.Connection
+    db_query_tool: DatabaseQueryTool
+    regulation_query_tool: RegulationQueryTool
+    game_query_tool: GameQueryTool
+    document_query_tool: DocumentQueryTool
+    game_strategist: Any
+    match_predictor: Any
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        runtime_id: int,
+        connection: psycopg.Connection,
+        settings: Optional[Settings],
+    ) -> "AgentRequestContext":
+        from ..core.game_strategist import GameStrategist
+        from ..core.match_predictor import MatchPredictor
+
+        return cls(
+            runtime_id=runtime_id,
+            connection=connection,
+            db_query_tool=DatabaseQueryTool(connection),
+            regulation_query_tool=RegulationQueryTool(connection),
+            game_query_tool=GameQueryTool(connection),
+            document_query_tool=DocumentQueryTool(
+                connection,
+                settings=settings,
+            ),
+            game_strategist=GameStrategist(connection),
+            match_predictor=MatchPredictor(connection),
+        )
+
+
+@dataclass(slots=True)
+class AgentRequestContextHandle:
+    request_context: AgentRequestContext
+    previous_request_context: AgentRequestContext | None
+    context_count: int
+
+
+class BaseballAgentRuntime:
+    """Shared runtime for a singleton baseball agent plus request-bound contexts."""
+
+    def __init__(
+        self,
+        *,
+        llm_generator,
+        settings: Optional[Settings] = None,
+        latest_baseball_tool: LatestBaseballSearchTool | None = None,
+        fast_path_enabled: bool = True,
+        fast_path_scope: str = "team",
+        fast_path_min_messages: int = 1,
+        fast_path_tool_cap: int = 2,
+        fast_path_fallback_on_empty: bool = True,
+        chat_dynamic_token_enabled: bool = True,
+        chat_analysis_max_tokens: int = 350,
+        chat_answer_max_tokens_short: int = 1400,
+        chat_answer_max_tokens_long: int = 2600,
+        chat_answer_max_tokens_team: int = 900,
+        chat_tool_result_max_chars: int = 2200,
+        chat_tool_result_max_items: int = 8,
+        chat_first_token_watchdog_seconds: float = 20.0,
+        chat_first_token_retry_max_attempts: int = 1,
+        chat_stream_first_token_watchdog_seconds: float = 10.0,
+        chat_stream_first_token_retry_max_attempts: int = 0,
+        tool_definitions: tuple[ToolDefinition, ...] | None = None,
+        tool_description_text: str | None = None,
+    ) -> None:
+        global _AGENT_RUNTIME_COUNTER
+
+        with _AGENT_RUNTIME_LOCK:
+            _AGENT_RUNTIME_COUNTER += 1
+            self.runtime_id = _AGENT_RUNTIME_COUNTER
+
+        self._lock = RLock()
+        self._request_context_count = 0
+        self._team_name_cache: Dict[str, str] | None = None
+        self.llm_generator = llm_generator
+        self.settings = settings
+        self.latest_baseball_tool = latest_baseball_tool or LatestBaseballSearchTool()
+        self.fast_path_enabled = fast_path_enabled
+        self.fast_path_scope = fast_path_scope
+        self.fast_path_min_messages = max(0, int(fast_path_min_messages))
+        self.fast_path_tool_cap = max(1, int(fast_path_tool_cap))
+        self.fast_path_fallback_on_empty = fast_path_fallback_on_empty
+        self.chat_dynamic_token_enabled = chat_dynamic_token_enabled
+        self.chat_analysis_max_tokens = max(64, int(chat_analysis_max_tokens))
+        self.chat_answer_max_tokens_short = max(256, int(chat_answer_max_tokens_short))
+        self.chat_answer_max_tokens_long = max(
+            self.chat_answer_max_tokens_short, int(chat_answer_max_tokens_long)
+        )
+        requested_team_tokens = int(chat_answer_max_tokens_team)
+        self.chat_answer_max_tokens_team = max(
+            256,
+            min(self.chat_answer_max_tokens_short, requested_team_tokens),
+        )
+        self.chat_tool_result_max_chars = max(400, int(chat_tool_result_max_chars))
+        self.chat_tool_result_max_items = max(1, int(chat_tool_result_max_items))
+        self.chat_planner_timeout_seconds = max(
+            0.1,
+            float(
+                getattr(
+                    self.settings,
+                    "chat_planner_timeout_seconds",
+                    DEFAULT_LLM_PLANNER_TIMEOUT_SECONDS,
+                )
+            ),
+        )
+        self.chat_compact_planner_timeout_seconds = max(
+            0.1,
+            float(
+                getattr(
+                    self.settings,
+                    "chat_compact_planner_timeout_seconds",
+                    COMPACT_LLM_PLANNER_TIMEOUT_SECONDS,
+                )
+            ),
+        )
+        self.chat_first_token_watchdog_seconds = max(
+            1.0, float(chat_first_token_watchdog_seconds)
+        )
+        self.chat_first_token_retry_max_attempts = max(
+            0, int(chat_first_token_retry_max_attempts)
+        )
+        self.chat_stream_first_token_watchdog_seconds = max(
+            1.0, float(chat_stream_first_token_watchdog_seconds)
+        )
+        self.chat_stream_first_token_retry_max_attempts = max(
+            0, int(chat_stream_first_token_retry_max_attempts)
+        )
+        self.chat_tool_parallel_enabled = bool(
+            getattr(self.settings, "chat_tool_parallel_enabled", True)
+        )
+        self.chat_tool_parallel_split_batch_enabled = bool(
+            getattr(self.settings, "chat_tool_parallel_split_batch_enabled", True)
+        )
+        configured_serial_tools = list(
+            getattr(self.settings, "chat_tool_parallel_serial_tools", [])
+        )
+        if configured_serial_tools:
+            self.chat_tool_parallel_serial_tools = {
+                str(tool_name).strip()
+                for tool_name in configured_serial_tools
+                if str(tool_name).strip()
+            }
+        else:
+            self.chat_tool_parallel_serial_tools = set(SERIAL_DB_TOOL_NAMES)
+        self.chat_tool_parallel_max_concurrency = max(
+            1, int(getattr(self.settings, "chat_tool_parallel_max_concurrency", 2))
+        )
+        self.chat_planner_cache_ttl_seconds = max(
+            0, int(getattr(self.settings, "chat_planner_cache_ttl_seconds", 60))
+        )
+        self.chat_planner_cache_max_entries = max(
+            32, int(getattr(self.settings, "chat_planner_cache_max_entries", 512))
+        )
+        self.tool_definitions = tool_definitions or _get_default_tool_definitions()
+        self.tool_description_text = (
+            tool_description_text
+            if tool_description_text is not None
+            else ToolCaller.describe_definitions(self.tool_definitions)
+        )
+        self.chat_intent_router = ChatIntentRouter(
+            fast_path_enabled=self.fast_path_enabled,
+            fast_path_scope=self.fast_path_scope,
+        )
+        self.chat_renderer_registry = ChatRendererRegistry()
+        self.tool_caller_factory = ToolCaller.from_definitions(
+            self.tool_definitions,
+            tool_descriptions=self.tool_description_text,
+        )
+        self.shared_agent = BaseballStatisticsAgent.__new__(BaseballStatisticsAgent)
+        self.shared_agent._apply_shared_runtime(self)
+
+        logger.info(
+            "[AgentRuntime] event=created runtime_id=%d provider=%s model=%s",
+            self.runtime_id,
+            getattr(self.settings, "llm_provider", "unknown"),
+            self._resolve_perf_model_name(),
+        )
+        if self.chat_answer_max_tokens_team != requested_team_tokens:
+            logger.info(
+                "[AnswerConfig] team_tokens_requested=%d clamped_to=%d short_cap=%d",
+                requested_team_tokens,
+                self.chat_answer_max_tokens_team,
+                self.chat_answer_max_tokens_short,
+            )
+        logger.info(
+            "[PlannerConfig] fast_path_enabled=%s scope=%s min_messages=%d tool_cap=%d fallback_on_empty=%s",
+            self.fast_path_enabled,
+            self.fast_path_scope,
+            self.fast_path_min_messages,
+            self.fast_path_tool_cap,
+            self.fast_path_fallback_on_empty,
+        )
+        logger.info(
+            "[AnswerConfig] dynamic_token=%s analysis_max=%d answer_short=%d answer_team=%d answer_long=%d tool_chars=%d tool_items=%d",
+            self.chat_dynamic_token_enabled,
+            self.chat_analysis_max_tokens,
+            self.chat_answer_max_tokens_short,
+            self.chat_answer_max_tokens_team,
+            self.chat_answer_max_tokens_long,
+            self.chat_tool_result_max_chars,
+            self.chat_tool_result_max_items,
+        )
+        logger.info(
+            "[AnswerWatchdog] default_watchdog_seconds=%.1f default_retry_max_attempts=%d stream_watchdog_seconds=%.1f stream_retry_max_attempts=%d",
+            self.chat_first_token_watchdog_seconds,
+            self.chat_first_token_retry_max_attempts,
+            self.chat_stream_first_token_watchdog_seconds,
+            self.chat_stream_first_token_retry_max_attempts,
+        )
+        logger.info(
+            "[ExecutionConfig] tool_parallel_enabled=%s split_batch=%s tool_parallel_max_concurrency=%d serial_tool_count=%d planner_cache_ttl_seconds=%d planner_cache_max_entries=%d",
+            self.chat_tool_parallel_enabled,
+            self.chat_tool_parallel_split_batch_enabled,
+            self.chat_tool_parallel_max_concurrency,
+            len(self.chat_tool_parallel_serial_tools),
+            self.chat_planner_cache_ttl_seconds,
+            self.chat_planner_cache_max_entries,
+        )
+        logger.info(
+            "[ToolRegistry] runtime_id=%d tool_count=%d shared_description_chars=%d",
+            self.runtime_id,
+            len(self.tool_definitions),
+            len(self.tool_description_text),
+        )
+        logger.info(
+            "[PlannerTimeoutConfig] default_timeout=%.1fs compact_timeout=%.1fs",
+            self.chat_planner_timeout_seconds,
+            self.chat_compact_planner_timeout_seconds,
+        )
+
+    def _resolve_perf_model_name(self) -> str:
+        if self.settings is None:
+            return "unknown"
+        if getattr(self.settings, "llm_provider", None) == "gemini":
+            return getattr(self.settings, "gemini_model", "unknown")
+        return getattr(self.settings, "openrouter_model", "unknown")
+
+    def get_team_name_cache(self) -> Dict[str, str] | None:
+        with self._lock:
+            return self._team_name_cache
+
+    def set_team_name_cache(self, mapping: Dict[str, str]) -> None:
+        with self._lock:
+            self._team_name_cache = dict(mapping)
+
+    def enter_request_context(
+        self, connection: psycopg.Connection
+    ) -> AgentRequestContextHandle:
+        with self._lock:
+            self._request_context_count += 1
+            request_context_count = self._request_context_count
+
+        request_context = AgentRequestContext.create(
+            runtime_id=self.runtime_id,
+            connection=connection,
+            settings=self.settings,
+        )
+        previous_request_context = _REQUEST_CONTEXT.get()
+        _REQUEST_CONTEXT.set(request_context)
+        logger.info(
+            "[AgentRuntime] event=request_context runtime_id=%d context_count=%d conn_id=%s tool_registry_reused=true tool_count=%d",
+            self.runtime_id,
+            request_context_count,
+            id(connection),
+            len(self.tool_definitions),
+        )
+        return AgentRequestContextHandle(
+            request_context=request_context,
+            previous_request_context=previous_request_context,
+            context_count=request_context_count,
+        )
+
+    def exit_request_context(self, handle: AgentRequestContextHandle) -> None:
+        current_request_context = _REQUEST_CONTEXT.get()
+        if current_request_context is handle.request_context:
+            _REQUEST_CONTEXT.set(handle.previous_request_context)
+            return
+
+        logger.warning(
+            "[AgentRuntime] event=request_context_cleanup_mismatch runtime_id=%d context_count=%d current_runtime_id=%s restore_skipped=true",
+            self.runtime_id,
+            handle.context_count,
+            getattr(current_request_context, "runtime_id", None),
+        )
+
+    @contextmanager
+    def request_context(self, connection: psycopg.Connection):
+        handle = self.enter_request_context(connection)
+        try:
+            yield handle.request_context
+        finally:
+            self.exit_request_context(handle)
+
+
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (date, datetime)):
@@ -60,6 +383,38 @@ class DateTimeEncoder(json.JSONEncoder):
         if isinstance(obj, Decimal):
             return float(obj)
         return super().default(obj)
+
+
+class _ToolDefinitionRecorder:
+    def __init__(self) -> None:
+        self.definitions: list[ToolDefinition] = []
+
+    def register_tool(
+        self,
+        tool_name: str,
+        description: str,
+        parameters_schema: Dict[str, str],
+        function,
+    ) -> None:
+        handler_attr = getattr(function, "__name__", "")
+        if not handler_attr:
+            raise RuntimeError(f"Unable to resolve handler attribute for {tool_name}")
+        self.definitions.append(
+            ToolDefinition(
+                tool_name=tool_name,
+                description=description,
+                parameters_schema=parameters_schema,
+                handler_attr=handler_attr,
+            )
+        )
+
+
+def _get_default_tool_definitions() -> tuple[ToolDefinition, ...]:
+    global _DEFAULT_TOOL_DEFINITIONS
+    with _TOOL_DEFINITION_LOCK:
+        if _DEFAULT_TOOL_DEFINITIONS is None:
+            _DEFAULT_TOOL_DEFINITIONS = BaseballStatisticsAgent.build_tool_definitions()
+    return _DEFAULT_TOOL_DEFINITIONS
 
 
 def clean_json_response(response: str) -> str:
@@ -129,7 +484,42 @@ INVALID_PLAYER_NAME_TOKENS = {
     "분석",
     "시즌",
     "최근",
+    "젊은",
 }
+
+PLAYER_NAME_NORMALIZATION_SUFFIXES = (
+    "묶음으로",
+    "묶음은",
+    "묶음을",
+    "라인으로",
+    "라인은",
+    "라인을",
+    "축으로",
+    "축에서",
+    "축은",
+    "축을",
+    "처럼",
+    "같은",
+    "같이",
+    "으로는",
+    "으로",
+    "이라고",
+    "이라",
+    "라고",
+    "에게는",
+    "에게",
+    "에서",
+    "과",
+    "와",
+    "을",
+    "를",
+    "은",
+    "는",
+    "이",
+    "가",
+    "도",
+    "만",
+)
 
 TEAM_LLM_ALLOWED_TOOLS = {
     "get_team_summary",
@@ -159,7 +549,7 @@ MULTI_PLAYER_EXPANDABLE_TOOLS = {
 COMPACT_LLM_PLANNER_TOKEN_CAP = 128
 COMPACT_LLM_PLANNER_TIMEOUT_SECONDS = 24.0
 DEFAULT_LLM_PLANNER_TIMEOUT_SECONDS = 30.0
-PLAYER_LLM_MULTI_NAME_CAP = 3
+PLAYER_LLM_MULTI_NAME_CAP = 4
 REFERENCE_YEAR_DEFAULT_TOOLS = {
     "get_advanced_stats",
     "get_award_winners",
@@ -215,6 +605,14 @@ class BaseballStatisticsAgent:
     4. 검증된 데이터만 사용하여 답변 생성
     """
 
+    @classmethod
+    def build_tool_definitions(cls) -> tuple[ToolDefinition, ...]:
+        agent = cls.__new__(cls)
+        recorder = _ToolDefinitionRecorder()
+        agent.tool_caller = recorder
+        agent._register_tools()
+        return tuple(recorder.definitions)
+
     def __init__(
         self,
         connection: psycopg.Connection,
@@ -238,157 +636,106 @@ class BaseballStatisticsAgent:
         chat_stream_first_token_watchdog_seconds: float = 10.0,
         chat_stream_first_token_retry_max_attempts: int = 0,
     ):
-        self.connection = connection
-        self.llm_generator = llm_generator
-        self.settings = settings
-        self.db_query_tool = DatabaseQueryTool(connection)
-        self.regulation_query_tool = RegulationQueryTool(connection)
-        self.game_query_tool = GameQueryTool(connection)
-        self.document_query_tool = DocumentQueryTool(
+        del (
             connection,
-            settings=settings,
-        )  # 신규 도구 인스턴스 생성
-        self.latest_baseball_tool = latest_baseball_tool or LatestBaseballSearchTool()
-        self.tool_caller = ToolCaller()
-
-        # 팀명 매핑 캐시 초기화
-        self._team_name_cache = None
-
-        # Fast-path 설정
-        self.fast_path_enabled = fast_path_enabled
-        self.fast_path_scope = fast_path_scope
-        self.fast_path_min_messages = max(0, int(fast_path_min_messages))
-        self.fast_path_tool_cap = max(1, int(fast_path_tool_cap))
-        self.fast_path_fallback_on_empty = fast_path_fallback_on_empty
-        self.chat_dynamic_token_enabled = chat_dynamic_token_enabled
-        self.chat_analysis_max_tokens = max(64, int(chat_analysis_max_tokens))
-        self.chat_answer_max_tokens_short = max(256, int(chat_answer_max_tokens_short))
-        self.chat_answer_max_tokens_long = max(
-            self.chat_answer_max_tokens_short, int(chat_answer_max_tokens_long)
+            llm_generator,
+            settings,
+            latest_baseball_tool,
+            fast_path_enabled,
+            fast_path_scope,
+            fast_path_min_messages,
+            fast_path_tool_cap,
+            fast_path_fallback_on_empty,
+            chat_dynamic_token_enabled,
+            chat_analysis_max_tokens,
+            chat_answer_max_tokens_short,
+            chat_answer_max_tokens_long,
+            chat_answer_max_tokens_team,
+            chat_tool_result_max_chars,
+            chat_tool_result_max_items,
+            chat_first_token_watchdog_seconds,
+            chat_first_token_retry_max_attempts,
+            chat_stream_first_token_watchdog_seconds,
+            chat_stream_first_token_retry_max_attempts,
         )
-        requested_team_tokens = int(chat_answer_max_tokens_team)
-        self.chat_answer_max_tokens_team = max(
-            256,
-            min(self.chat_answer_max_tokens_short, requested_team_tokens),
+        raise RuntimeError(
+            "BaseballStatisticsAgent is runtime-managed. Use BaseballAgentRuntime.shared_agent inside runtime.request_context(...)."
         )
-        if self.chat_answer_max_tokens_team != requested_team_tokens:
-            logger.info(
-                "[AnswerConfig] team_tokens_requested=%d clamped_to=%d short_cap=%d",
-                requested_team_tokens,
-                self.chat_answer_max_tokens_team,
-                self.chat_answer_max_tokens_short,
+
+    def _apply_shared_runtime(self, runtime: BaseballAgentRuntime) -> None:
+        self._runtime = runtime
+        self.runtime_id = runtime.runtime_id
+        self.llm_generator = runtime.llm_generator
+        self.settings = runtime.settings
+        self.latest_baseball_tool = runtime.latest_baseball_tool
+        self.fast_path_enabled = runtime.fast_path_enabled
+        self.fast_path_scope = runtime.fast_path_scope
+        self.fast_path_min_messages = runtime.fast_path_min_messages
+        self.fast_path_tool_cap = runtime.fast_path_tool_cap
+        self.fast_path_fallback_on_empty = runtime.fast_path_fallback_on_empty
+        self.chat_dynamic_token_enabled = runtime.chat_dynamic_token_enabled
+        self.chat_analysis_max_tokens = runtime.chat_analysis_max_tokens
+        self.chat_answer_max_tokens_short = runtime.chat_answer_max_tokens_short
+        self.chat_answer_max_tokens_long = runtime.chat_answer_max_tokens_long
+        self.chat_answer_max_tokens_team = runtime.chat_answer_max_tokens_team
+        self.chat_tool_result_max_chars = runtime.chat_tool_result_max_chars
+        self.chat_tool_result_max_items = runtime.chat_tool_result_max_items
+        self.chat_planner_timeout_seconds = runtime.chat_planner_timeout_seconds
+        self.chat_compact_planner_timeout_seconds = (
+            runtime.chat_compact_planner_timeout_seconds
+        )
+        self.chat_first_token_watchdog_seconds = (
+            runtime.chat_first_token_watchdog_seconds
+        )
+        self.chat_first_token_retry_max_attempts = (
+            runtime.chat_first_token_retry_max_attempts
+        )
+        self.chat_stream_first_token_watchdog_seconds = (
+            runtime.chat_stream_first_token_watchdog_seconds
+        )
+        self.chat_stream_first_token_retry_max_attempts = (
+            runtime.chat_stream_first_token_retry_max_attempts
+        )
+        self.chat_tool_parallel_enabled = runtime.chat_tool_parallel_enabled
+        self.chat_tool_parallel_split_batch_enabled = (
+            runtime.chat_tool_parallel_split_batch_enabled
+        )
+        self.chat_tool_parallel_serial_tools = set(
+            runtime.chat_tool_parallel_serial_tools
+        )
+        self.chat_tool_parallel_max_concurrency = (
+            runtime.chat_tool_parallel_max_concurrency
+        )
+        self.chat_planner_cache_ttl_seconds = runtime.chat_planner_cache_ttl_seconds
+        self.chat_planner_cache_max_entries = runtime.chat_planner_cache_max_entries
+        self.tool_definitions = runtime.tool_definitions
+        self.tool_description_text = runtime.tool_description_text
+        self.tool_caller_factory = runtime.tool_caller_factory
+        self.tool_caller = runtime.tool_caller_factory.bind(self)
+        self._team_name_cache = runtime.get_team_name_cache()
+        self.chat_intent_router = runtime.chat_intent_router.bind(self)
+        self.chat_renderer_registry = runtime.chat_renderer_registry.bind(self)
+
+    def _maybe_current_request_context(self) -> AgentRequestContext | None:
+        request_context = _REQUEST_CONTEXT.get()
+        if request_context is not None and request_context.runtime_id == self.runtime_id:
+            return request_context
+        return None
+
+    def _current_request_context(self) -> AgentRequestContext:
+        request_context = self._maybe_current_request_context()
+        if request_context is None:
+            raise RuntimeError(
+                "AgentRequestContext is not active. Ensure the runtime request context is entered."
             )
-        self.chat_tool_result_max_chars = max(400, int(chat_tool_result_max_chars))
-        self.chat_tool_result_max_items = max(1, int(chat_tool_result_max_items))
-        self.chat_planner_timeout_seconds = max(
-            0.1,
-            float(
-                getattr(
-                    self.settings,
-                    "chat_planner_timeout_seconds",
-                    DEFAULT_LLM_PLANNER_TIMEOUT_SECONDS,
-                )
-            ),
-        )
-        self.chat_compact_planner_timeout_seconds = max(
-            0.1,
-            float(
-                getattr(
-                    self.settings,
-                    "chat_compact_planner_timeout_seconds",
-                    COMPACT_LLM_PLANNER_TIMEOUT_SECONDS,
-                )
-            ),
-        )
-        self.chat_first_token_watchdog_seconds = max(
-            1.0, float(chat_first_token_watchdog_seconds)
-        )
-        self.chat_first_token_retry_max_attempts = max(
-            0, int(chat_first_token_retry_max_attempts)
-        )
-        self.chat_stream_first_token_watchdog_seconds = max(
-            1.0, float(chat_stream_first_token_watchdog_seconds)
-        )
-        self.chat_stream_first_token_retry_max_attempts = max(
-            0, int(chat_stream_first_token_retry_max_attempts)
-        )
-        self.chat_tool_parallel_enabled = bool(
-            getattr(self.settings, "chat_tool_parallel_enabled", True)
-        )
-        self.chat_tool_parallel_split_batch_enabled = bool(
-            getattr(self.settings, "chat_tool_parallel_split_batch_enabled", True)
-        )
-        configured_serial_tools = list(
-            getattr(self.settings, "chat_tool_parallel_serial_tools", [])
-        )
-        if configured_serial_tools:
-            self.chat_tool_parallel_serial_tools = {
-                str(tool_name).strip()
-                for tool_name in configured_serial_tools
-                if str(tool_name).strip()
-            }
-        else:
-            self.chat_tool_parallel_serial_tools = set(SERIAL_DB_TOOL_NAMES)
-        self.chat_tool_parallel_max_concurrency = max(
-            1, int(getattr(self.settings, "chat_tool_parallel_max_concurrency", 2))
-        )
-        self.chat_planner_cache_ttl_seconds = max(
-            0, int(getattr(self.settings, "chat_planner_cache_ttl_seconds", 15))
-        )
-        self.chat_planner_cache_max_entries = max(
-            32, int(getattr(self.settings, "chat_planner_cache_max_entries", 512))
-        )
-        logger.info(
-            "[PlannerConfig] fast_path_enabled=%s scope=%s min_messages=%d tool_cap=%d fallback_on_empty=%s",
-            self.fast_path_enabled,
-            self.fast_path_scope,
-            self.fast_path_min_messages,
-            self.fast_path_tool_cap,
-            self.fast_path_fallback_on_empty,
-        )
-        logger.info(
-            "[AnswerConfig] dynamic_token=%s analysis_max=%d answer_short=%d answer_team=%d answer_long=%d tool_chars=%d tool_items=%d",
-            self.chat_dynamic_token_enabled,
-            self.chat_analysis_max_tokens,
-            self.chat_answer_max_tokens_short,
-            self.chat_answer_max_tokens_team,
-            self.chat_answer_max_tokens_long,
-            self.chat_tool_result_max_chars,
-            self.chat_tool_result_max_items,
-        )
-        logger.info(
-            "[AnswerWatchdog] default_watchdog_seconds=%.1f default_retry_max_attempts=%d stream_watchdog_seconds=%.1f stream_retry_max_attempts=%d",
-            self.chat_first_token_watchdog_seconds,
-            self.chat_first_token_retry_max_attempts,
-            self.chat_stream_first_token_watchdog_seconds,
-            self.chat_stream_first_token_retry_max_attempts,
-        )
-        logger.info(
-            "[ExecutionConfig] tool_parallel_enabled=%s split_batch=%s tool_parallel_max_concurrency=%d serial_tool_count=%d planner_cache_ttl_seconds=%d planner_cache_max_entries=%d",
-            self.chat_tool_parallel_enabled,
-            self.chat_tool_parallel_split_batch_enabled,
-            self.chat_tool_parallel_max_concurrency,
-            len(self.chat_tool_parallel_serial_tools),
-            self.chat_planner_cache_ttl_seconds,
-            self.chat_planner_cache_max_entries,
-        )
-        logger.info(
-            "[PlannerTimeoutConfig] default_timeout=%.1fs compact_timeout=%.1fs",
-            self.chat_planner_timeout_seconds,
-            self.chat_compact_planner_timeout_seconds,
-        )
-        self.chat_intent_router = ChatIntentRouter(
-            resolve_reference_year=self._resolve_reference_year,
-            detect_team_alias=self._detect_team_alias_from_query,
-            resolve_award_query_type=self._resolve_award_query_type,
-            build_team_tool_calls=self._build_team_fast_path_tool_calls,
-            fast_path_enabled=self.fast_path_enabled,
-            fast_path_scope=self.fast_path_scope,
-        )
-        self.chat_renderer_registry = ChatRendererRegistry(self)
+        return request_context
 
-        # 등록 가능한 도구들
-        self._register_tools()
+    def __getattr__(self, attr_name: str) -> Any:
+        if attr_name in _REQUEST_RESOURCE_ATTRS:
+            request_context = self._maybe_current_request_context()
+            if request_context is not None:
+                return getattr(request_context, attr_name)
+        raise AttributeError(attr_name)
 
     def _settings_int(self, attr_name: str, default: int) -> int:
         if self.settings is None:
@@ -488,6 +835,145 @@ class BaseballStatisticsAgent:
                 return True
         return False
 
+    def _normalize_player_name_candidate(self, raw_name: Any) -> str:
+        name = str(raw_name or "").strip()
+        if not name:
+            return ""
+
+        name = re.sub(r"^[\s\"'“”‘’\[\]\(\),./]+|[\s\"'“”‘’\[\]\(\),./]+$", "", name)
+        if not name:
+            return ""
+
+        normalized = name
+        for suffix in PLAYER_NAME_NORMALIZATION_SUFFIXES:
+            if normalized.endswith(suffix):
+                candidate = normalized[: -len(suffix)].strip()
+                if len(candidate) >= 2:
+                    normalized = candidate
+                    break
+
+        normalized = re.sub(
+            r"^[\s\"'“”‘’\[\]\(\),./]+|[\s\"'“”‘’\[\]\(\),./]+$",
+            "",
+            normalized,
+        )
+        if len(normalized) >= 2:
+            return normalized
+        return name
+
+    def _eligible_player_stats_batch_spec(
+        self, tool_calls: List[ToolCall]
+    ) -> Optional[Dict[str, Any]]:
+        if not 2 <= len(tool_calls) <= PLAYER_LLM_MULTI_NAME_CAP:
+            return None
+        if any(call.tool_name != "get_player_stats" for call in tool_calls):
+            return None
+
+        player_names: List[str] = []
+        years: set[int] = set()
+        positions: set[str] = set()
+
+        for call in tool_calls:
+            player_name = self._normalize_player_name_candidate(
+                call.parameters.get("player_name")
+            )
+            year = call.parameters.get("year")
+            position = str(call.parameters.get("position") or "both").strip() or "both"
+            if len(player_name) < 2 or not isinstance(year, int):
+                return None
+            player_names.append(player_name)
+            years.add(year)
+            positions.add(position)
+
+        if len(years) != 1 or len(positions) != 1:
+            return None
+
+        return {
+            "player_names": player_names,
+            "year": next(iter(years)),
+            "position": next(iter(positions)),
+        }
+
+    async def _execute_batched_player_stats_tool_calls_async(
+        self, tool_calls: List[ToolCall]
+    ) -> Optional[List[ToolResult]]:
+        batch_spec = self._eligible_player_stats_batch_spec(tool_calls)
+        db_query_tool = getattr(self, "db_query_tool", None)
+        if batch_spec is None or not hasattr(db_query_tool, "get_player_season_stats_batch"):
+            return None
+
+        try:
+            raw_results = await asyncio.to_thread(
+                db_query_tool.get_player_season_stats_batch,
+                batch_spec["player_names"],
+                batch_spec["year"],
+                batch_spec["position"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "[PlayerBatchLookup] used=false reason=execution_error error=%s",
+                exc,
+            )
+            return None
+
+        if not isinstance(raw_results, list) or len(raw_results) != len(tool_calls):
+            logger.warning(
+                "[PlayerBatchLookup] used=false reason=invalid_result_shape count=%s expected=%d",
+                len(raw_results) if isinstance(raw_results, list) else "n/a",
+                len(tool_calls),
+            )
+            return None
+
+        logger.info(
+            "[PlayerBatchLookup] used=true count=%d year=%s position=%s",
+            len(tool_calls),
+            batch_spec["year"],
+            batch_spec["position"],
+        )
+
+        tool_results: List[ToolResult] = []
+        for tool_call, raw_result in zip(tool_calls, raw_results):
+            if not isinstance(raw_result, dict):
+                return None
+
+            requested_name = self._normalize_player_name_candidate(
+                tool_call.parameters.get("player_name")
+            ) or str(tool_call.parameters.get("player_name") or "").strip()
+            if raw_result.get("error"):
+                tool_results.append(
+                    ToolResult(
+                        success=False,
+                        data=raw_result,
+                        message=f"DB 조회 오류: {raw_result['error']}",
+                    )
+                )
+                continue
+
+            if not raw_result.get("found"):
+                tool_results.append(
+                    ToolResult(
+                        success=True,
+                        data=raw_result,
+                        message=(
+                            f"{batch_spec['year']}년 '{requested_name}' 선수의 기록을 찾을 수 없습니다. "
+                            "선수명 확인이나 다른 연도를 시도해보세요."
+                        ),
+                    )
+                )
+                continue
+
+            tool_results.append(
+                ToolResult(
+                    success=True,
+                    data=raw_result,
+                    message=(
+                        f"{batch_spec['year']}년 {requested_name} 선수 통계를 성공적으로 조회했습니다."
+                    ),
+                )
+            )
+
+        return tool_results
+
     async def _execute_tool_call_async(self, tool_call: ToolCall) -> ToolResult:
         if self._has_hallucinated_tool_parameters(tool_call.parameters):
             return ToolResult(
@@ -502,6 +988,12 @@ class BaseballStatisticsAgent:
     ) -> List[ToolResult]:
         if not tool_calls:
             return []
+
+        batched_player_results = await self._execute_batched_player_stats_tool_calls_async(
+            tool_calls
+        )
+        if batched_player_results is not None:
+            return batched_player_results
 
         execution_mode = self._resolve_tool_execution_mode(tool_calls)
         if execution_mode == "sequential":
@@ -1026,10 +1518,8 @@ class BaseballStatisticsAgent:
 
     def _tool_check_bullpen(self, team_name: str, date: str = None) -> ToolResult:
         """불펜 가용성 확인 도구"""
-        from ..core.game_strategist import GameStrategist
-
         try:
-            strategist = GameStrategist(self.connection)
+            strategist = self._current_request_context().game_strategist
             result = strategist.check_bullpen_availability(team_name, date)
 
             if "error" in result:
@@ -1061,10 +1551,8 @@ class BaseballStatisticsAgent:
 
     def _tool_recommend_pitcher(self, team_name: str, situation: str) -> ToolResult:
         """투수 추천 도구"""
-        from ..core.game_strategist import GameStrategist
-
         try:
-            strategist = GameStrategist(self.connection)
+            strategist = self._current_request_context().game_strategist
             result = strategist.recommend_pitcher(team_name, situation)
 
             if "error" in result:
@@ -1086,13 +1574,11 @@ class BaseballStatisticsAgent:
         self, pitcher_name: str, batter_name: str, year: int = None
     ) -> ToolResult:
         """투타 맞대결 예측 도구"""
-        from ..core.match_predictor import MatchPredictor
-
         if year is None:
             year = date.today().year
 
         try:
-            predictor = MatchPredictor(self.connection)
+            predictor = self._current_request_context().match_predictor
             result = predictor.predict(pitcher_name, batter_name, year)
 
             if "error" in result:
@@ -1268,6 +1754,13 @@ class BaseballStatisticsAgent:
 
     def _load_team_name_mapping(self) -> Dict[str, str]:
         """팀 ID와 팀명 매핑을 로드합니다."""
+        runtime = getattr(self, "_runtime", None)
+        if runtime is not None:
+            shared_cache = runtime.get_team_name_cache()
+            if shared_cache is not None:
+                self._team_name_cache = shared_cache
+                return shared_cache
+
         if self._team_name_cache is not None:
             return self._team_name_cache
 
@@ -1289,6 +1782,8 @@ class BaseballStatisticsAgent:
                     mapping[alias] = display_name
 
         self._team_name_cache = mapping
+        if runtime is not None:
+            runtime.set_team_name_cache(mapping)
         return mapping
 
     def _convert_team_id_to_name(self, team_id: str) -> str:
@@ -2228,7 +2723,8 @@ class BaseballStatisticsAgent:
     def _tool_get_team_rank(self, team_name: str, year: int) -> ToolResult:
         """팀 순위 조회 도구"""
         try:
-            with self.connection.cursor() as cursor:
+            request_context = self._current_request_context()
+            with request_context.connection.cursor() as cursor:
                 # 팀명을 team_id로 매핑
                 from ..core.entity_extractor import TEAM_MAPPING
 
@@ -2927,7 +3423,9 @@ class BaseballStatisticsAgent:
         for attr_name in ("player_name", "person_name", "name"):
             value = getattr(entity_filter, attr_name, None)
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                normalized = self._normalize_player_name_candidate(value)
+                if normalized:
+                    return normalized
         return None
 
     def _extract_llm_planner_player_names(
@@ -2936,9 +3434,30 @@ class BaseballStatisticsAgent:
         player_names: List[str] = []
         seen: set[str] = set()
 
+        delimited_names: List[str] = []
+        query_segments = [segment.strip() for segment in re.split(r"[,/]", query) if segment.strip()]
+        if len(query_segments) >= 2:
+            for segment in query_segments[: PLAYER_LLM_MULTI_NAME_CAP * 2]:
+                first_token = re.split(r"\s+", segment, maxsplit=1)[0]
+                normalized_name = self._normalize_player_name_candidate(first_token)
+                if (
+                    len(normalized_name) < 2
+                    or normalized_name in INVALID_PLAYER_NAME_TOKENS
+                    or normalized_name in delimited_names
+                ):
+                    continue
+                delimited_names.append(normalized_name)
+                if len(delimited_names) >= PLAYER_LLM_MULTI_NAME_CAP:
+                    break
+
         explicit_player_name = self._extract_llm_planner_player_name(entity_filter)
-        for raw_name in [explicit_player_name, *extract_player_names(query, limit=PLAYER_LLM_MULTI_NAME_CAP)]:
-            name = str(raw_name or "").strip()
+        extracted_names = (
+            delimited_names
+            if len(delimited_names) >= 2
+            else extract_player_names(query, limit=PLAYER_LLM_MULTI_NAME_CAP)
+        )
+        for raw_name in [explicit_player_name, *extracted_names]:
+            name = self._normalize_player_name_candidate(raw_name)
             if (
                 len(name) < 2
                 or name in INVALID_PLAYER_NAME_TOKENS
@@ -3158,11 +3677,13 @@ class BaseballStatisticsAgent:
         normalized: List[str] = []
         seen: set[str] = set()
         for value in raw_names:
-            name = str(value or "").strip()
+            name = self._normalize_player_name_candidate(value)
             if len(name) < 2 or name in INVALID_PLAYER_NAME_TOKENS or name in seen:
                 continue
             normalized.append(name)
             seen.add(name)
+            if len(normalized) >= PLAYER_LLM_MULTI_NAME_CAP:
+                break
         return normalized
 
     def _coerce_tool_calls(self, raw_call: Any) -> List[ToolCall]:
@@ -3409,6 +3930,466 @@ class BaseballStatisticsAgent:
             )
         return self._prioritize_and_cap_tool_calls(tool_calls)
 
+    def _build_player_fast_path_tool_calls(
+        self,
+        query: str,
+        player_names: List[str],
+        year: int,
+        entity_filter: Any,
+    ) -> List[ToolCall]:
+        query_lower = query.lower()
+        position = getattr(entity_filter, "position_type", None) or "both"
+        if any(
+            token in query_lower
+            for token in ["투수", "선발", "불펜", "마무리", "로테이션", "구위", "에이스"]
+        ):
+            position = "pitching"
+        elif any(
+            token in query_lower
+            for token in ["타자", "타선", "장타", "포수", "내야", "클린업", "출루", "컨택", "홈런"]
+        ):
+            position = "batting"
+        tool_calls = [
+            ToolCall(
+                tool_name="get_player_stats",
+                parameters={
+                    "player_name": self._normalize_player_name_candidate(player_name),
+                    "year": year,
+                    "position": position,
+                },
+            )
+            for player_name in player_names
+            if self._normalize_player_name_candidate(player_name)
+        ]
+        return self._prioritize_and_cap_tool_calls(
+            tool_calls,
+            limit=max(2, len(tool_calls)),
+            preserve_input_order=True,
+        )
+
+    def _is_player_fast_path_blocked_keyword(
+        self, query_lower: str, keyword: str
+    ) -> bool:
+        start_index = query_lower.find(keyword)
+        while start_index != -1:
+            trailing_window = query_lower[start_index : start_index + len(keyword) + 18]
+            if "말고" not in trailing_window and "제외" not in trailing_window:
+                return True
+            start_index = query_lower.find(keyword, start_index + len(keyword))
+        return False
+
+    def _collect_multi_player_stats_payloads(
+        self, tool_results: List[ToolResult]
+    ) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        seen_requested: set[str] = set()
+
+        for result in tool_results:
+            if not result.success or not isinstance(result.data, dict):
+                continue
+            data = result.data
+            is_player_stats_payload = (
+                "batting_stats" in data
+                or "pitching_stats" in data
+                or data.get("batch_lookup") is True
+                or (
+                    "found" in data
+                    and "year" in data
+                    and "player_name" in data
+                    and "found_players" not in data
+                )
+            )
+            if not is_player_stats_payload:
+                continue
+
+            requested_name = self._normalize_player_name_candidate(
+                data.get("requested_player_name") or data.get("player_name")
+            )
+            if len(requested_name) < 2 or requested_name in seen_requested:
+                continue
+
+            batting_stats = (
+                data.get("batting_stats")
+                if isinstance(data.get("batting_stats"), dict)
+                else None
+            )
+            pitching_stats = (
+                data.get("pitching_stats")
+                if isinstance(data.get("pitching_stats"), dict)
+                else None
+            )
+            resolved_name = self._normalize_player_name_candidate(
+                data.get("resolved_player_name")
+                or (batting_stats or {}).get("player_name")
+                or (pitching_stats or {}).get("player_name")
+                or requested_name
+            )
+            team_name = (
+                (batting_stats or {}).get("team_name")
+                or (pitching_stats or {}).get("team_name")
+            )
+
+            entries.append(
+                {
+                    "requested_name": requested_name,
+                    "player_name": resolved_name or requested_name,
+                    "team_name": team_name,
+                    "found": bool(data.get("found")),
+                    "batting_stats": batting_stats,
+                    "pitching_stats": pitching_stats,
+                }
+            )
+            seen_requested.add(requested_name)
+
+        return entries
+
+    def _classify_multi_player_narrative_query(
+        self, query: str, *, pitcher_mode: bool
+    ) -> str:
+        query_lower = query.lower()
+        if any(token in query_lower for token in ["성장 신호", "성장", "젊은", "표본"]):
+            return "growth_signals"
+        if any(token in query_lower for token in ["안정감", "폭발력", "균형"]):
+            return "stability_vs_explosiveness"
+        if pitcher_mode and any(
+            token in query_lower
+            for token in ["로테이션", "구위", "압박", "하위 유형", "유형", "선발 운영"]
+        ):
+            return "pitcher_archetype"
+        if any(token in query_lower for token in ["장타", "파워", "홈런", "장타 생산"]):
+            return "power_profile"
+        if any(
+            token in query_lower
+            for token in ["흐름", "연결축", "리더", "포수", "리드", "역할", "가치"]
+        ):
+            return "game_context_role"
+        return "generic_grouping"
+
+    def _multi_player_entry_metric(self, entry: Dict[str, Any], keys: List[str]) -> Optional[Any]:
+        batting = entry.get("batting_stats") or {}
+        pitching = entry.get("pitching_stats") or {}
+        for source in (batting, pitching):
+            value = self._pick_metric_value(source, keys)
+            if value is not None:
+                return value
+        return None
+
+    def _multi_player_batter_style_line(self, entry: Dict[str, Any]) -> str:
+        batting = entry.get("batting_stats") or {}
+        player_name = entry.get("player_name") or entry.get("requested_name") or "선수"
+        avg = self._pick_metric_value(batting, ["avg", "batting_avg"])
+        obp = self._pick_metric_value(batting, ["obp"])
+        slg = self._pick_metric_value(batting, ["slg"])
+        ops = self._pick_metric_value(batting, ["ops"])
+        home_runs = self._pick_metric_value(batting, ["home_runs", "hr"])
+        doubles = self._pick_metric_value(batting, ["doubles"])
+        walks = self._pick_metric_value(batting, ["walks"])
+        strikeouts = self._pick_metric_value(batting, ["strikeouts"])
+        plate_appearances = self._pick_metric_value(
+            batting, ["plate_appearances", "pa"]
+        )
+
+        try:
+            obp_value = float(obp) if obp is not None else None
+        except (TypeError, ValueError):
+            obp_value = None
+        try:
+            slg_value = float(slg) if slg is not None else None
+        except (TypeError, ValueError):
+            slg_value = None
+        try:
+            avg_value = float(avg) if avg is not None else None
+        except (TypeError, ValueError):
+            avg_value = None
+
+        traits: List[str] = []
+        if obp_value is not None and obp_value >= 0.37:
+            traits.append("출루 안정감")
+        if slg_value is not None and slg_value >= 0.5:
+            traits.append("장타 폭발력")
+        if avg_value is not None and avg_value >= 0.3:
+            traits.append("정교한 컨택")
+        if doubles not in (None, "", 0):
+            traits.append("갭파워")
+        if not traits:
+            traits.append("균형형")
+
+        metrics: List[str] = []
+        for label, value in (
+            ("AVG", avg),
+            ("OBP", obp),
+            ("SLG", slg),
+            ("OPS", ops),
+            ("HR", home_runs),
+            ("2루타", doubles),
+            ("BB", walks),
+            ("K", strikeouts),
+            ("PA", plate_appearances),
+        ):
+            if value not in (None, ""):
+                metrics.append(f"{label} {self._format_deterministic_metric(value)}")
+            if len(metrics) >= 4:
+                break
+
+        metrics_text = ", ".join(metrics) if metrics else "표면 지표 확인"
+        team_name = self._format_deterministic_metric(entry.get("team_name"))
+        team_prefix = "" if team_name == "확인 불가" else f"{team_name} "
+        return (
+            f"{team_prefix}{player_name}은 {', '.join(traits[:2])} 쪽이 먼저 읽히고, "
+            f"확인된 수치는 {metrics_text}입니다."
+        )
+
+    def _multi_player_pitcher_style_line(self, entry: Dict[str, Any]) -> str:
+        pitching = entry.get("pitching_stats") or {}
+        player_name = entry.get("player_name") or entry.get("requested_name") or "선수"
+        era = self._pick_metric_value(pitching, ["era"])
+        whip = self._pick_metric_value(pitching, ["whip"])
+        strikeouts = self._pick_metric_value(pitching, ["strikeouts", "so", "k"])
+        innings = self._pick_metric_value(
+            pitching, ["innings_pitched", "ip", "innings"]
+        )
+        games_started = self._pick_metric_value(pitching, ["games_started", "gs"])
+        saves = self._pick_metric_value(pitching, ["saves", "save"])
+        holds = self._pick_metric_value(pitching, ["holds", "hold"])
+
+        try:
+            innings_value = float(innings) if innings is not None else None
+            strikeout_value = float(strikeouts) if strikeouts is not None else None
+            games_started_value = (
+                float(games_started) if games_started is not None else None
+            )
+            saves_value = float(saves) if saves is not None else 0.0
+            holds_value = float(holds) if holds is not None else 0.0
+        except (TypeError, ValueError):
+            innings_value = strikeout_value = games_started_value = None
+            saves_value = holds_value = 0.0
+
+        traits: List[str] = []
+        if saves_value + holds_value >= 8 and (games_started_value or 0) < 5:
+            traits.append("불펜 압박형")
+        if (
+            innings_value is not None
+            and innings_value >= 100
+            or games_started_value is not None
+            and games_started_value >= 16
+        ):
+            traits.append("선발 소화형")
+        if (
+            strikeout_value is not None
+            and innings_value not in (None, 0)
+            and strikeout_value / innings_value >= 1.0
+        ):
+            traits.append("구위 압박형")
+        if not traits:
+            traits.append("운영형")
+        traits = list(dict.fromkeys(traits))
+
+        metrics: List[str] = []
+        for label, value in (
+            ("ERA", era),
+            ("WHIP", whip),
+            ("K", strikeouts),
+            ("IP", innings),
+            ("GS", games_started),
+            ("SV", saves),
+            ("HLD", holds),
+        ):
+            if value not in (None, ""):
+                metrics.append(f"{label} {self._format_deterministic_metric(value)}")
+            if len(metrics) >= 4:
+                break
+
+        metrics_text = ", ".join(metrics) if metrics else "표면 지표 확인"
+        team_name = self._format_deterministic_metric(entry.get("team_name"))
+        team_prefix = "" if team_name == "확인 불가" else f"{team_name} "
+        return (
+            f"{team_prefix}{player_name}은 {', '.join(traits[:2])} 쪽으로 읽히고, "
+            f"확인된 수치는 {metrics_text}입니다."
+        )
+
+    def _build_multi_player_narrative_answer(
+        self,
+        query: str,
+        tool_results: List[ToolResult],
+        *,
+        chat_mode: bool,
+    ) -> Optional[str]:
+        entries = self._collect_multi_player_stats_payloads(tool_results)
+        if len(entries) < 2:
+            return None
+
+        usable_entries = [
+            entry
+            for entry in entries
+            if entry.get("found")
+            and (entry.get("batting_stats") or entry.get("pitching_stats"))
+        ]
+        if len(usable_entries) < 2:
+            return None
+
+        query_entities = extract_entities_from_query(query)
+        query_player_names = self._extract_llm_planner_player_names(query, query_entities)
+        missing_names = [
+            name
+            for name in query_player_names
+            if not any(entry.get("requested_name") == name and entry.get("found") for entry in entries)
+        ]
+
+        batting_entries = [entry for entry in usable_entries if entry.get("batting_stats")]
+        pitching_entries = [entry for entry in usable_entries if entry.get("pitching_stats")]
+        query_lower = query.lower()
+        pitcher_mode = bool(
+            any(token in query_lower for token in ["투수", "구위", "로테이션", "선발", "불펜"])
+            or (len(pitching_entries) >= 2 and len(pitching_entries) >= len(batting_entries))
+        )
+        selected_entries = pitching_entries if pitcher_mode else batting_entries
+        if len(selected_entries) < 2:
+            return None
+
+        narrative_kind = self._classify_multi_player_narrative_query(
+            query, pitcher_mode=pitcher_mode
+        )
+        display_names = [entry.get("player_name") or entry.get("requested_name") for entry in selected_entries]
+        player_group = ", ".join(display_names)
+
+        if pitcher_mode:
+            intro_map = {
+                "pitcher_archetype": (
+                    f"{player_group}처럼 강한 구위를 공유하는 투수 묶음도 실제 역할은 다릅니다. "
+                    "선발 이닝 소화, 높은 레버리지 불펜 압박, 실점 억제 안정감 중 어디가 먼저 보이는지로 나누는 편이 빠릅니다."
+                ),
+                "game_context_role": (
+                    f"{player_group}은 같은 파워형 투수라도 경기 운영에서 가치가 커지는 장면이 다릅니다."
+                ),
+                "generic_grouping": (
+                    f"{player_group}은 같은 파워 축으로 보여도 이닝 소화형, 압박형, 불펜형으로 결이 갈립니다."
+                ),
+            }
+            intro = intro_map.get(narrative_kind, intro_map["generic_grouping"])
+            detail_lines = [
+                self._multi_player_pitcher_style_line(entry)
+                for entry in selected_entries[:PLAYER_LLM_MULTI_NAME_CAP]
+            ]
+            insight_lines = [
+                "- 투수 묶음은 ERA 하나보다 WHIP, 탈삼진, 이닝/보직을 같이 봐야 유형 분리가 안정적입니다.",
+                "- 같은 구위형이라도 선발과 불펜은 가치가 커지는 타이밍이 달라서 역할 축을 함께 보는 편이 안전합니다.",
+            ]
+        else:
+            intro_map = {
+                "growth_signals": (
+                    f"{player_group}처럼 젊은 타자를 볼 때는 결과값보다 먼저 "
+                    "1) 타석 접근 안정감, 2) 장타 신호, 3) 최종 생산성 순서로 읽는 편이 안전합니다."
+                ),
+                "stability_vs_explosiveness": (
+                    f"{player_group}을 한 묶음으로 보면 안정감은 출루/삼진 관리에서, 폭발력은 장타율과 홈런 생산에서 갈립니다."
+                ),
+                "power_profile": (
+                    f"{player_group}의 장타 생산은 같은 홈런 수보다 장타율, 2루타, 출루 동반 여부까지 함께 봐야 결이 분명해집니다."
+                ),
+                "game_context_role": (
+                    f"{player_group}은 같은 타자 묶음이어도 경기 흐름을 잇는 출루 축, 장면을 뒤집는 장타 축, 높은 레버리지 대응 축으로 역할이 갈립니다."
+                ),
+                "generic_grouping": (
+                    f"{player_group}은 같은 묶음으로 보여도 출루 안정감, 장타 폭발력, 변동성 관리에서 차이가 납니다."
+                ),
+            }
+            intro = intro_map.get(narrative_kind, intro_map["generic_grouping"])
+            detail_lines = [
+                self._multi_player_batter_style_line(entry)
+                for entry in selected_entries[:PLAYER_LLM_MULTI_NAME_CAP]
+            ]
+            insight_lines = [
+                "- 타자 묶음은 타율보다 OBP/SLG, 홈런/2루타, 삼진/볼넷 방향을 같이 봐야 과장 없이 해석할 수 있습니다.",
+                "- 표본이 짧을수록 타점 같은 결과값보다 접근 안정감과 장타 신호를 먼저 읽는 편이 안전합니다.",
+            ]
+
+        if missing_names:
+            detail_lines.append(
+                f"현재 시즌 매칭이 안 된 선수는 {', '.join(missing_names)}이라 이번 정리에서는 제외했습니다."
+            )
+
+        table_rows: List[str] = []
+        for entry in selected_entries[:PLAYER_LLM_MULTI_NAME_CAP]:
+            player_name = entry.get("player_name") or entry.get("requested_name") or "선수"
+            if pitcher_mode:
+                era = self._format_deterministic_metric(
+                    self._multi_player_entry_metric(entry, ["era"])
+                )
+                whip = self._format_deterministic_metric(
+                    self._multi_player_entry_metric(entry, ["whip"])
+                )
+                strikeouts = self._format_deterministic_metric(
+                    self._multi_player_entry_metric(entry, ["strikeouts", "so", "k"])
+                )
+                table_rows.append(
+                    f"| {player_name} | {era} | {whip} | {strikeouts} |"
+                )
+            else:
+                obp = self._format_deterministic_metric(
+                    self._multi_player_entry_metric(entry, ["obp"])
+                )
+                slg = self._format_deterministic_metric(
+                    self._multi_player_entry_metric(entry, ["slg"])
+                )
+                home_runs = self._format_deterministic_metric(
+                    self._multi_player_entry_metric(entry, ["home_runs", "hr"])
+                )
+                table_rows.append(
+                    f"| {player_name} | {obp} | {slg} | {home_runs} |"
+                )
+
+        if chat_mode:
+            lines = [intro, *detail_lines[:3]]
+            if missing_names:
+                lines.append(
+                    f"빠진 선수는 {', '.join(missing_names)}이고, 확인된 선수 기준으로만 정리했습니다."
+                )
+            return "\n\n".join(lines[:5])
+
+        if pitcher_mode:
+            table_header = (
+                "| 선수 | ERA | WHIP | 탈삼진 |\n"
+                "| --- | --- | --- | --- |\n"
+            )
+        else:
+            table_header = (
+                "| 선수 | OBP | SLG | 홈런 |\n"
+                "| --- | --- | --- | --- |\n"
+            )
+
+        return (
+            "## 요약\n"
+            f"{intro}\n\n"
+            "## 상세 내역\n"
+            f"{chr(10).join('- ' + line for line in detail_lines[:4])}\n\n"
+            "## 핵심 지표\n"
+            f"{table_header}{chr(10).join(table_rows[:4])}\n\n"
+            "## 인사이트\n"
+            f"{chr(10).join(insight_lines[:2])}\n"
+            "출처: DB 조회 결과"
+        )
+
+    def _should_defer_incomplete_multi_player_answer(
+        self, query: str, tool_results: List[ToolResult]
+    ) -> bool:
+        query_player_names = self._extract_llm_planner_player_names(
+            query, extract_entities_from_query(query)
+        )
+        if len(query_player_names) < 2:
+            return False
+
+        entries = self._collect_multi_player_stats_payloads(tool_results)
+        if not entries:
+            return False
+
+        usable_entries = [
+            entry
+            for entry in entries
+            if entry.get("found")
+            and (entry.get("batting_stats") or entry.get("pitching_stats"))
+        ]
+        return len(usable_entries) < 2
+
     def _build_reference_fast_path_plan(
         self, query: str, entity_filter: Any
     ) -> Optional[Dict[str, Any]]:
@@ -3423,6 +4404,7 @@ class BaseballStatisticsAgent:
             or extract_team(query)
             or self._detect_team_alias_from_query(query)
         )
+        query_player_names = self._extract_llm_planner_player_names(query, entity_filter)
         player_name = (
             getattr(entity_filter, "player_name", None)
             or getattr(entity_filter, "person_name", None)
@@ -3678,6 +4660,45 @@ class BaseballStatisticsAgent:
                     "confidence": 0.93,
                     "intent": "team_last_game_lookup",
                     "planner_mode": "fast_path",
+                    "search_keywords": [],
+                    "error": None,
+                }
+
+        player_fast_path_block_keywords = [
+            "맞대결",
+            "상대전적",
+            "승부",
+            "예측",
+            "누가 이길",
+            "누가 유리",
+            "수상",
+            "순위",
+            "랭킹",
+            "리더보드",
+            "규정",
+            "판정",
+            "일정",
+            "박스스코어",
+        ]
+        if len(query_player_names) >= 2 and not any(
+            self._is_player_fast_path_blocked_keyword(query_lower, keyword)
+            for keyword in player_fast_path_block_keywords
+        ):
+            player_tool_calls = self._build_player_fast_path_tool_calls(
+                query,
+                query_player_names,
+                year,
+                entity_filter,
+            )
+            if player_tool_calls:
+                return {
+                    "analysis": "복수 선수 설명형 질문으로 판단되어 선수 fast-path를 사용합니다.",
+                    "tool_calls": player_tool_calls,
+                    "confidence": 0.94,
+                    "intent": "freeform",
+                    "planner_mode": "player_fast_path",
+                    "grounding_mode": "structured_kbo",
+                    "source_tier": "database",
                     "search_keywords": [],
                     "error": None,
                 }
@@ -5108,7 +6129,7 @@ class BaseballStatisticsAgent:
 
         emit_answer_before_metadata = (
             request_mode == "stream"
-            and planner_mode == "fast_path"
+            and planner_mode in {"fast_path", "player_fast_path"}
             and any(bool(chunk) for chunk in prefetched_chunks)
         )
 
@@ -7227,7 +8248,9 @@ class BaseballStatisticsAgent:
         fast_path_plan = self._build_fast_path_plan(query, entity_filter, context)
         if fast_path_plan:
             logger.info(
-                "[PlannerDecision] mode=fast_path team_query=true tool_count=%d",
+                "[PlannerDecision] mode=%s team_query=%s tool_count=%d",
+                fast_path_plan.get("planner_mode", "fast_path"),
+                self._is_team_analysis_query(query, entity_filter),
                 len(fast_path_plan.get("tool_calls", [])),
             )
             return fast_path_plan
@@ -8852,6 +9875,20 @@ class BaseballStatisticsAgent:
         if comparison_answer:
             return comparison_answer
 
+        multi_player_answer = self._build_multi_player_narrative_answer(
+            query,
+            tool_results,
+            chat_mode=True,
+        )
+        if multi_player_answer:
+            logger.info(
+                "[BaseballAgent] Using multi-player narrative renderer query=%s",
+                query[:120],
+            )
+            return multi_player_answer
+        if self._should_defer_incomplete_multi_player_answer(query, tool_results):
+            return None
+
         decision = self._resolve_chat_intent(query, extract_entities_from_query(query))
         registry_answer = self.chat_renderer_registry.render_reference(
             query, tool_results, decision
@@ -8938,6 +9975,16 @@ class BaseballStatisticsAgent:
         )
         if comparison_answer:
             return comparison_answer
+
+        multi_player_answer = self._build_multi_player_narrative_answer(
+            query,
+            tool_results,
+            chat_mode=False,
+        )
+        if multi_player_answer:
+            return multi_player_answer
+        if self._should_defer_incomplete_multi_player_answer(query, tool_results):
+            return None
 
         for result in tool_results:
             if not result.success or not isinstance(result.data, dict):

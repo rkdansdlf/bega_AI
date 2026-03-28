@@ -8,11 +8,14 @@ Runs 100 sequential chatbot questions (or a provided question list) against
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import subprocess
+from threading import Event, Lock, Thread
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,6 +68,9 @@ OFFICIAL_QUESTION_LISTS = {
     "llm_canary_20": DEFAULT_LLM_CANARY_PATH,
 }
 CONSOLE_FAILED_CASE_PREVIEW_LIMIT = 3
+LATENCY_DIAGNOSTIC_PREVIEW_LIMIT = 5
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_COMPOSE_ENV_FILE = PROJECT_ROOT / ".env.prod"
 
 
 def parse_args() -> argparse.Namespace:
@@ -187,6 +193,21 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.40,
         help="Maximum allowed fallback ratio for stream endpoint (default: 0.40).",
+    )
+    parser.add_argument(
+        "--docker-compose-service",
+        type=str,
+        default=None,
+        help=(
+            "Optional docker compose service name to sample memory from during the run. "
+            "Example: ai-chatbot."
+        ),
+    )
+    parser.add_argument(
+        "--memory-sample-interval-ms",
+        type=int,
+        default=1000,
+        help="Sampling interval in milliseconds for docker compose memory collection.",
     )
     return parser.parse_args()
 
@@ -759,6 +780,191 @@ def _percentile(sorted_values: List[float], percentile: float) -> Optional[float
     return round(value, 2)
 
 
+def _run_command(
+    command: List[str], *, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"failed to run command {' '.join(command)}: {exc}") from exc
+
+
+def _docker_compose_command_prefix() -> List[str]:
+    command = ["docker", "compose"]
+    if DEFAULT_COMPOSE_ENV_FILE.exists():
+        command.extend(["--env-file", str(DEFAULT_COMPOSE_ENV_FILE)])
+    return command
+
+
+def _resolve_docker_compose_container_id(service: str) -> str:
+    completed = _run_command(
+        _docker_compose_command_prefix() + ["ps", "-q", service],
+        cwd=PROJECT_ROOT,
+    )
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        raise RuntimeError(
+            f"failed to resolve docker compose service {service}: {stderr or completed.returncode}"
+        )
+
+    container_ids = [
+        line.strip() for line in (completed.stdout or "").splitlines() if line.strip()
+    ]
+    if not container_ids:
+        raise RuntimeError(f"docker compose service is not running: {service}")
+    if len(container_ids) > 1:
+        raise RuntimeError(
+            f"multiple docker compose containers found for service {service}: {container_ids}"
+        )
+    return container_ids[0]
+
+
+def _parse_memory_usage_mb(raw_usage: str) -> float:
+    usage_text = (raw_usage or "").split("/", 1)[0].strip()
+    match = re.match(r"^(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[A-Za-z]+)$", usage_text)
+    if not match:
+        raise RuntimeError(f"unable to parse docker memory usage: {raw_usage}")
+
+    value = float(match.group("value"))
+    unit = match.group("unit")
+    unit_scale = {
+        "B": 1.0 / (1024 * 1024),
+        "KiB": 1.0 / 1024,
+        "MiB": 1.0,
+        "GiB": 1024.0,
+        "TiB": 1024.0 * 1024.0,
+        "kB": 1.0 / 1000,
+        "MB": 1.0,
+        "GB": 1000.0,
+        "TB": 1000.0 * 1000.0,
+    }
+    if unit not in unit_scale:
+        raise RuntimeError(f"unsupported docker memory unit: {unit}")
+    return round(value * unit_scale[unit], 2)
+
+
+def _read_container_memory_mb(container_id: str) -> float:
+    completed = _run_command(
+        [
+            "docker",
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.MemUsage}}",
+            container_id,
+        ],
+        cwd=PROJECT_ROOT,
+    )
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        raise RuntimeError(
+            f"failed to read docker memory for container {container_id}: {stderr or completed.returncode}"
+        )
+
+    raw_usage = (completed.stdout or "").strip()
+    if not raw_usage:
+        raise RuntimeError(
+            f"docker stats returned empty memory usage for container {container_id}"
+        )
+    return _parse_memory_usage_mb(raw_usage)
+
+
+def _build_memory_metrics(
+    *,
+    service: str,
+    container_id: str,
+    samples_mb: List[float],
+    started_at: str | None,
+    ended_at: str | None,
+) -> Dict[str, Any]:
+    sorted_samples = sorted(float(sample) for sample in samples_mb)
+    return {
+        "service": service,
+        "container_id": container_id,
+        "sample_count": len(sorted_samples),
+        "peak_mb": round(max(sorted_samples), 2) if sorted_samples else None,
+        "avg_mb": (
+            round(sum(sorted_samples) / len(sorted_samples), 2)
+            if sorted_samples
+            else None
+        ),
+        "p95_mb": _percentile(sorted_samples, 0.95),
+        "started_at": started_at,
+        "ended_at": ended_at,
+    }
+
+
+@dataclass
+class ComposeMemoryMonitor:
+    service: str
+    sample_interval_ms: int = 1000
+    container_id: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    _samples_mb: List[float] = field(default_factory=list, init=False, repr=False)
+    _stop_event: Event = field(default_factory=Event, init=False, repr=False)
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _thread: Thread | None = field(default=None, init=False, repr=False)
+    _error: RuntimeError | None = field(default=None, init=False, repr=False)
+
+    def start(self) -> None:
+        self.container_id = _resolve_docker_compose_container_id(self.service)
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        self._record_sample()
+        self._thread = Thread(
+            target=self._run,
+            name=f"compose-memory-monitor-{self.service}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _record_sample(self) -> None:
+        if not self.container_id:
+            raise RuntimeError(
+                f"docker compose container id is not resolved for service {self.service}"
+            )
+        sample_mb = _read_container_memory_mb(self.container_id)
+        with self._lock:
+            self._samples_mb.append(sample_mb)
+
+    def _run(self) -> None:
+        interval_seconds = max(0.1, float(self.sample_interval_ms) / 1000.0)
+        while not self._stop_event.wait(interval_seconds):
+            try:
+                self._record_sample()
+            except RuntimeError as exc:
+                self._error = exc
+                self._stop_event.set()
+                return
+
+    def snapshot_summary(self) -> Dict[str, Any]:
+        ended_at = self.ended_at or datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            samples = list(self._samples_mb)
+        return _build_memory_metrics(
+            service=self.service,
+            container_id=self.container_id or "",
+            samples_mb=samples,
+            started_at=self.started_at,
+            ended_at=ended_at,
+        )
+
+    def stop(self) -> Dict[str, Any]:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, float(self.sample_interval_ms) / 1000.0 + 1.0))
+        self.ended_at = datetime.now(timezone.utc).isoformat()
+        if self._error is not None:
+            raise self._error
+        return self.snapshot_summary()
+
+
 def _is_timeout_result(item: Dict[str, Any]) -> bool:
     status_code = item.get("status_code")
     if status_code in (408, 504):
@@ -1060,6 +1266,81 @@ def _build_failed_cases(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return failed_cases
 
 
+def _build_top_metric_cases(
+    items: List[Dict[str, Any]],
+    *,
+    metric_key: str,
+    limit: int = LATENCY_DIAGNOSTIC_PREVIEW_LIMIT,
+) -> List[Dict[str, Any]]:
+    ranked_cases: List[Dict[str, Any]] = []
+    for item in items:
+        if metric_key == "latency_ms":
+            raw_metric = item.get("latency_ms")
+        else:
+            raw_metric = _extract_perf_payload(item).get(metric_key)
+
+        if not isinstance(raw_metric, (int, float)):
+            continue
+
+        ranked_cases.append(
+            {
+                "question": item.get("question"),
+                "endpoint": item.get("endpoint"),
+                "metric_ms": round(float(raw_metric), 2),
+                "latency_ms": (
+                    round(float(item["latency_ms"]), 2)
+                    if isinstance(item.get("latency_ms"), (int, float))
+                    else None
+                ),
+                "planner_mode": _extract_planner_mode(item),
+                "planner_bucket": _categorize_planner_mode(
+                    _extract_planner_mode(item)
+                ),
+                "tool_execution_mode": _extract_tool_execution_mode(item),
+                "cached": bool(item.get("cached", False)),
+                "status_code": item.get("status_code"),
+                "quality_pass": bool(item.get("quality_pass", False)),
+                "error": item.get("error"),
+            }
+        )
+
+    ranked_cases.sort(
+        key=lambda case: (
+            -float(case["metric_ms"]),
+            str(case.get("question") or ""),
+        )
+    )
+    return ranked_cases[: max(0, limit)]
+
+
+def _build_latency_diagnostics(
+    completion: List[Dict[str, Any]],
+    stream: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "completion": {
+            "top_latency_cases": _build_top_metric_cases(
+                completion,
+                metric_key="latency_ms",
+            ),
+        },
+        "stream": {
+            "top_latency_cases": _build_top_metric_cases(
+                stream,
+                metric_key="latency_ms",
+            ),
+            "top_first_token_cases": _build_top_metric_cases(
+                stream,
+                metric_key="first_token_ms",
+            ),
+            "top_stream_first_message_cases": _build_top_metric_cases(
+                stream,
+                metric_key="stream_first_message_ms",
+            ),
+        },
+    }
+
+
 def _planner_mode_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for item in items:
@@ -1088,7 +1369,10 @@ def _perf_metric_summary(items: List[Dict[str, Any]], key: str) -> Dict[str, Any
 
 
 def _summarize_results(
-    results: List[Dict[str, Any]], *, stream_fallback_ratio_max: float
+    results: List[Dict[str, Any]],
+    *,
+    stream_fallback_ratio_max: float,
+    memory_metrics: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     total = len(results)
     passed = sum(1 for item in results if item.get("ok"))
@@ -1154,14 +1438,23 @@ def _summarize_results(
         "perf_metrics": {
             "overall": {
                 "first_token_ms": _perf_metric_summary(results, "first_token_ms"),
+                "stream_first_message_ms": _perf_metric_summary(
+                    results, "stream_first_message_ms"
+                ),
                 "total_ms": _perf_metric_summary(results, "total_ms"),
             },
             "completion": {
                 "first_token_ms": _perf_metric_summary(completion, "first_token_ms"),
+                "stream_first_message_ms": _perf_metric_summary(
+                    completion, "stream_first_message_ms"
+                ),
                 "total_ms": _perf_metric_summary(completion, "total_ms"),
             },
             "stream": {
                 "first_token_ms": _perf_metric_summary(stream, "first_token_ms"),
+                "stream_first_message_ms": _perf_metric_summary(
+                    stream, "stream_first_message_ms"
+                ),
                 "total_ms": _perf_metric_summary(stream, "total_ms"),
             },
         },
@@ -1170,6 +1463,7 @@ def _summarize_results(
             "completion": _tool_execution_mode_distribution(completion),
             "stream": _tool_execution_mode_distribution(stream),
         },
+        "latency_diagnostics": _build_latency_diagnostics(completion, stream),
         "completion_fallback_metrics": completion_fallback_metrics,
         "stream_fallback_metrics": stream_fallback_metrics,
         "failed_cases": _build_failed_cases(results),
@@ -1181,6 +1475,8 @@ def _summarize_results(
             total,
         ),
     }
+    if memory_metrics is not None:
+        summary["memory_metrics"] = memory_metrics
     return summary
 
 
@@ -1195,9 +1491,14 @@ def _build_report_payload(
     lock_file: str,
     stream_fallback_ratio_max: float,
     results: List[Dict[str, Any]],
+    docker_compose_service: str | None = None,
+    memory_sample_interval_ms: int | None = None,
+    memory_metrics: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     summary = _summarize_results(
-        results, stream_fallback_ratio_max=stream_fallback_ratio_max
+        results,
+        stream_fallback_ratio_max=stream_fallback_ratio_max,
+        memory_metrics=memory_metrics,
     )
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1210,6 +1511,8 @@ def _build_report_payload(
             "pid": pid,
             "lock_file": lock_file,
             "stream_fallback_ratio_max": stream_fallback_ratio_max,
+            "docker_compose_service": docker_compose_service,
+            "memory_sample_interval_ms": memory_sample_interval_ms,
         },
         "summary": summary,
         "results": results,
@@ -1242,6 +1545,9 @@ def _write_output_report(
     lock_file: str,
     stream_fallback_ratio_max: float,
     results: List[Dict[str, Any]],
+    docker_compose_service: str | None = None,
+    memory_sample_interval_ms: int | None = None,
+    memory_metrics: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     report = _build_report_payload(
         base_url=base_url,
@@ -1253,6 +1559,9 @@ def _write_output_report(
         lock_file=lock_file,
         stream_fallback_ratio_max=stream_fallback_ratio_max,
         results=results,
+        docker_compose_service=docker_compose_service,
+        memory_sample_interval_ms=memory_sample_interval_ms,
+        memory_metrics=memory_metrics,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -1317,49 +1626,74 @@ def main() -> int:
         if args.disable_cache:
             print("cache bypass enabled: history payload attached")
 
-        with httpx.Client(timeout=timeout) as client:
-            for idx, question in enumerate(
-                questions[completed_questions:], start=completed_questions + 1
-            ):
-                completion_result = _check_completion(
-                    client,
-                    base_url,
-                    question,
-                    history_payload=history_payload,
-                    headers=headers,
-                    rate_limit_retries=args.rate_limit_max_retries,
-                    rate_limit_base_delay=args.rate_limit_base_delay,
-                )
-                stream_result = _check_stream(
-                    client,
-                    base_url,
-                    question,
-                    history_payload=history_payload,
-                    headers={
-                        "X-Internal-Api-Key": headers.get("X-Internal-Api-Key", "")
-                    },
-                    rate_limit_retries=args.rate_limit_max_retries,
-                    rate_limit_base_delay=args.rate_limit_base_delay,
-                    stream_style=args.stream_style,
-                )
+        memory_monitor = (
+            ComposeMemoryMonitor(
+                service=args.docker_compose_service,
+                sample_interval_ms=args.memory_sample_interval_ms,
+            )
+            if args.docker_compose_service
+            else None
+        )
+        memory_metrics: Dict[str, Any] | None = None
 
-                results.append(completion_result)
-                results.append(stream_result)
-                _print_progress(idx, len(questions), completion_result, stream_result)
+        try:
+            if memory_monitor is not None:
+                memory_monitor.start()
 
-                if output_path is not None:
-                    _write_output_report(
-                        output_path,
-                        base_url=base_url,
-                        total_questions=len(questions),
-                        strict=args.strict,
-                        chat_batch_size=args.chat_batch_size,
-                        run_id=run_id,
-                        pid=os.getpid(),
-                        lock_file=str(lock_path),
-                        stream_fallback_ratio_max=args.stream_fallback_ratio_max,
-                        results=results,
+            with httpx.Client(timeout=timeout) as client:
+                for idx, question in enumerate(
+                    questions[completed_questions:], start=completed_questions + 1
+                ):
+                    completion_result = _check_completion(
+                        client,
+                        base_url,
+                        question,
+                        history_payload=history_payload,
+                        headers=headers,
+                        rate_limit_retries=args.rate_limit_max_retries,
+                        rate_limit_base_delay=args.rate_limit_base_delay,
                     )
+                    stream_result = _check_stream(
+                        client,
+                        base_url,
+                        question,
+                        history_payload=history_payload,
+                        headers={
+                            "X-Internal-Api-Key": headers.get("X-Internal-Api-Key", "")
+                        },
+                        rate_limit_retries=args.rate_limit_max_retries,
+                        rate_limit_base_delay=args.rate_limit_base_delay,
+                        stream_style=args.stream_style,
+                    )
+
+                    results.append(completion_result)
+                    results.append(stream_result)
+                    _print_progress(idx, len(questions), completion_result, stream_result)
+
+                    if output_path is not None:
+                        incremental_memory_metrics = (
+                            memory_monitor.snapshot_summary()
+                            if memory_monitor is not None
+                            else None
+                        )
+                        _write_output_report(
+                            output_path,
+                            base_url=base_url,
+                            total_questions=len(questions),
+                            strict=args.strict,
+                            chat_batch_size=args.chat_batch_size,
+                            run_id=run_id,
+                            pid=os.getpid(),
+                            lock_file=str(lock_path),
+                            stream_fallback_ratio_max=args.stream_fallback_ratio_max,
+                            results=results,
+                            docker_compose_service=args.docker_compose_service,
+                            memory_sample_interval_ms=args.memory_sample_interval_ms,
+                            memory_metrics=incremental_memory_metrics,
+                        )
+        finally:
+            if memory_monitor is not None:
+                memory_metrics = memory_monitor.stop()
 
         report = _build_report_payload(
             base_url=base_url,
@@ -1371,6 +1705,9 @@ def main() -> int:
             lock_file=str(lock_path),
             stream_fallback_ratio_max=args.stream_fallback_ratio_max,
             results=results,
+            docker_compose_service=args.docker_compose_service,
+            memory_sample_interval_ms=args.memory_sample_interval_ms,
+            memory_metrics=memory_metrics,
         )
         summary = report["summary"]
 
@@ -1386,6 +1723,9 @@ def main() -> int:
                 lock_file=str(lock_path),
                 stream_fallback_ratio_max=args.stream_fallback_ratio_max,
                 results=results,
+                docker_compose_service=args.docker_compose_service,
+                memory_sample_interval_ms=args.memory_sample_interval_ms,
+                memory_metrics=memory_metrics,
             )
 
         if args.summary_output:

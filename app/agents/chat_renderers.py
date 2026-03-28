@@ -47,15 +47,30 @@ GAME_FLOW_NARRATIVE_KEYWORDS = (
 
 
 class ChatRendererRegistry:
-    def __init__(self, agent: "BaseballStatisticsAgent") -> None:
-        self.agent = agent
+    def __init__(self, agent: "BaseballStatisticsAgent" | None = None) -> None:
+        self._default_agent = agent
+
+    def bind(self, agent: "BaseballStatisticsAgent") -> "_BoundChatRendererRegistry":
+        return _BoundChatRendererRegistry(registry=self, agent=agent)
+
+    def _resolve_agent(
+        self,
+        agent: "BaseballStatisticsAgent" | None,
+    ) -> "BaseballStatisticsAgent":
+        resolved_agent = agent or self._default_agent
+        if resolved_agent is None:
+            raise RuntimeError("ChatRendererRegistry requires a bound agent.")
+        return resolved_agent
 
     def render_reference(
         self,
         query: str,
         tool_results: list[ToolResult],
         decision: IntentDecision,
+        *,
+        agent: "BaseballStatisticsAgent" | None = None,
     ) -> Optional[str]:
+        resolved_agent = self._resolve_agent(agent)
         for result in tool_results:
             if not result.success or not isinstance(result.data, dict):
                 continue
@@ -63,44 +78,56 @@ class ChatRendererRegistry:
             if data.get("found") is False:
                 continue
             if "metrics" in data and "team_name" in data:
-                answer = self.render_team_metric(query, data)
+                answer = self.render_team_metric(query, data, agent=resolved_agent)
                 if answer:
                     return answer
             if "leaderboard" in data:
-                answer = self.render_leaderboard(query, data, decision)
+                answer = self.render_leaderboard(
+                    query,
+                    data,
+                    decision,
+                    agent=resolved_agent,
+                )
                 if answer:
                     return answer
             if "batting_stats" in data or "pitching_stats" in data:
-                answer = self.agent._build_player_stats_chat_answer(data)
+                answer = resolved_agent._build_player_stats_chat_answer(data)
                 if answer:
                     return answer
             if "awards" in data:
-                answer = self.agent._build_award_chat_answer(data)
+                answer = resolved_agent._build_award_chat_answer(data)
                 if answer:
                     return answer
             if "regulations" in data:
-                answer = self.agent._build_regulation_chat_answer(query, data)
+                answer = resolved_agent._build_regulation_chat_answer(query, data)
                 if answer:
                     return answer
             if "games" in data:
-                answer = self.render_game_flow(query, data)
+                answer = self.render_game_flow(query, data, agent=resolved_agent)
                 if answer:
                     return answer
             if "games" in data and "date" in data:
-                answer = self.agent._build_games_by_date_chat_answer(data)
+                answer = resolved_agent._build_games_by_date_chat_answer(data)
                 if answer:
                     return answer
             if "winner_team_name" in data and "series_type" in data:
-                answer = self.agent._build_korean_series_winner_chat_answer(data)
+                answer = resolved_agent._build_korean_series_winner_chat_answer(data)
                 if answer:
                     return answer
             if "last_game_date" in data or "final_date" in data:
-                answer = self.agent._build_team_last_game_date_chat_answer(data)
+                answer = resolved_agent._build_team_last_game_date_chat_answer(data)
                 if answer:
                     return answer
         return None
 
-    def render_team_metric(self, query: str, data: dict[str, Any]) -> Optional[str]:
+    def render_team_metric(
+        self,
+        query: str,
+        data: dict[str, Any],
+        *,
+        agent: "BaseballStatisticsAgent" | None = None,
+    ) -> Optional[str]:
+        resolved_agent = self._resolve_agent(agent)
         query_lower = query.lower()
         if not any(token in query_lower for token in ["팀", "구단"]):
             return None
@@ -124,7 +151,7 @@ class ChatRendererRegistry:
         batting = metrics.get("batting") or {}
         pitching = metrics.get("pitching") or {}
         rankings = data.get("rankings") or {}
-        return self.agent._build_team_metric_fast_path_answer(
+        return resolved_agent._build_team_metric_fast_path_answer(
             query,
             data.get("team_name"),
             data.get("year"),
@@ -138,37 +165,53 @@ class ChatRendererRegistry:
         query: str,
         data: dict[str, Any],
         decision: Optional[IntentDecision] = None,
+        *,
+        agent: "BaseballStatisticsAgent" | None = None,
     ) -> Optional[str]:
+        resolved_agent = self._resolve_agent(agent)
         leaderboard = data.get("leaderboard") or data.get("leaders") or []
         if not leaderboard:
             return None
-        year = self.agent._format_deterministic_metric(data.get("year"))
-        raw_stat_name = self.agent._format_deterministic_metric(data.get("stat_name"))
+        year = resolved_agent._format_deterministic_metric(data.get("year"))
+        raw_stat_name = resolved_agent._format_deterministic_metric(data.get("stat_name"))
         stat_name = self._metric_label(raw_stat_name)
         season_label = f"{year}년" if year != "확인 불가" else "해당 시즌"
         top_entry = leaderboard[0]
-        top_player = self._player_label(top_entry)
+        top_player = self._player_label(top_entry, agent=resolved_agent)
         if decision and decision.intent == ChatIntent.AMBIGUOUS_SUPERLATIVE:
             if decision.subject_type == "pitcher":
                 return self._render_pitcher_superlative(
-                    season_label, top_player, top_entry
+                    season_label,
+                    top_player,
+                    top_entry,
+                    agent=resolved_agent,
                 )
             if decision.subject_type == "batter":
                 return self._render_batter_superlative(
-                    season_label, top_player, top_entry
+                    season_label,
+                    top_player,
+                    top_entry,
+                    agent=resolved_agent,
                 )
         lines = [f"{season_label} {stat_name} 기준으로 보면 상위권은 이렇게 보입니다."]
         for index, entry in enumerate(leaderboard[:3], start=1):
-            player_name = self._player_label(entry)
-            stat_value = self.agent._format_deterministic_metric(
-                self.agent._extract_leaderboard_value(entry, raw_stat_name)
+            player_name = self._player_label(entry, agent=resolved_agent)
+            stat_value = resolved_agent._format_deterministic_metric(
+                resolved_agent._extract_leaderboard_value(entry, raw_stat_name)
             )
             lines.append(
                 f"{index}위는 {player_name}이고, {stat_name}은 {stat_value}입니다."
             )
         return "\n\n".join(lines[:4])
 
-    def render_game_flow(self, query: str, data: dict[str, Any]) -> Optional[str]:
+    def render_game_flow(
+        self,
+        query: str,
+        data: dict[str, Any],
+        *,
+        agent: "BaseballStatisticsAgent" | None = None,
+    ) -> Optional[str]:
+        resolved_agent = self._resolve_agent(agent)
         query_lower = query.lower()
         if not any(keyword in query_lower for keyword in GAME_FLOW_NARRATIVE_KEYWORDS):
             return None
@@ -185,7 +228,7 @@ class ChatRendererRegistry:
         if not box_score_games:
             return None
 
-        team_code = self.agent._detect_team_alias_from_query(query)
+        team_code = resolved_agent._detect_team_alias_from_query(query)
         if team_code:
             filtered_games = [
                 game
@@ -204,27 +247,27 @@ class ChatRendererRegistry:
         if len(box_score_games) != 1:
             game_summaries = []
             for game in box_score_games[:3]:
-                away_team = self.agent._format_team_display_name(
+                away_team = resolved_agent._format_team_display_name(
                     game.get("away_team_code")
                     or game.get("away_team")
                     or game.get("away_team_name")
                 )
-                home_team = self.agent._format_team_display_name(
+                home_team = resolved_agent._format_team_display_name(
                     game.get("home_team_code")
                     or game.get("home_team")
                     or game.get("home_team_name")
                 )
-                away_score = self.agent._format_deterministic_metric(
+                away_score = resolved_agent._format_deterministic_metric(
                     game.get("away_score")
                 )
-                home_score = self.agent._format_deterministic_metric(
+                home_score = resolved_agent._format_deterministic_metric(
                     game.get("home_score")
                 )
                 game_summaries.append(
                     f"{away_team} {away_score}-{home_score} {home_team}"
                 )
 
-            date_label = self.agent._format_deterministic_metric(
+            date_label = resolved_agent._format_deterministic_metric(
                 data.get("date") or (data.get("query_params") or {}).get("date")
             )
             if date_label == "확인 불가":
@@ -234,19 +277,25 @@ class ChatRendererRegistry:
                 f"{', '.join(game_summaries)} 중 어떤 경기를 볼지 팀명이나 game_id를 같이 알려주세요."
             )
 
-        row = self._build_game_flow_row_from_box_score(box_score_games[0])
+        row = self._build_game_flow_row_from_box_score(
+            box_score_games[0],
+            agent=resolved_agent,
+        )
         if row is None:
             return None
 
         rendered = render_game_flow_summary(row, today_str=row.get("game_date"))
-        return self._normalize_game_flow_answer(rendered)
+        return self._normalize_game_flow_answer(rendered, agent=resolved_agent)
 
     def render_low_data(
         self,
         query: str,
         tool_results: list[ToolResult],
         decision: IntentDecision,
+        *,
+        agent: "BaseballStatisticsAgent" | None = None,
     ) -> str:
+        resolved_agent = self._resolve_agent(agent)
         del tool_results
         if decision.intent == ChatIntent.REGULATION_LOOKUP:
             return (
@@ -303,9 +352,9 @@ class ChatRendererRegistry:
                 metric_label = "팀 타점"
 
             if metric_label:
-                team_name = self.agent._detect_team_alias_from_query(query)
+                team_name = resolved_agent._detect_team_alias_from_query(query)
                 team_label = (
-                    self.agent._format_team_display_name(team_name)
+                    resolved_agent._format_team_display_name(team_name)
                     if team_name
                     else "해당 팀"
                 )
@@ -334,9 +383,9 @@ class ChatRendererRegistry:
             metric_label = "팀 타점"
 
         if metric_label and any(token in query_lower for token in ["팀", "구단"]):
-            team_name = self.agent._detect_team_alias_from_query(query)
+            team_name = resolved_agent._detect_team_alias_from_query(query)
             team_label = (
-                self.agent._format_team_display_name(team_name)
+                resolved_agent._format_team_display_name(team_name)
                 if team_name
                 else "해당 팀"
             )
@@ -349,11 +398,16 @@ class ChatRendererRegistry:
             "추정하지 않고 확인된 범위에서만 말씀드리겠습니다."
         )
 
-    def _player_label(self, entry: dict[str, Any]) -> str:
-        player_name = self.agent._format_deterministic_metric(
+    def _player_label(
+        self,
+        entry: dict[str, Any],
+        *,
+        agent: "BaseballStatisticsAgent",
+    ) -> str:
+        player_name = agent._format_deterministic_metric(
             entry.get("player_name") or entry.get("name")
         )
-        team_name = self.agent._format_team_display_name(
+        team_name = agent._format_team_display_name(
             entry.get("team_name") or entry.get("team")
         )
         if team_name != "확인 불가":
@@ -365,7 +419,10 @@ class ChatRendererRegistry:
         return METRIC_LABELS.get(stat_key, str(raw_name))
 
     def _build_game_flow_row_from_box_score(
-        self, game: dict[str, Any]
+        self,
+        game: dict[str, Any],
+        *,
+        agent: "BaseballStatisticsAgent",
     ) -> Optional[dict[str, Any]]:
         box_score = game.get("box_score")
         if not isinstance(box_score, dict):
@@ -391,12 +448,12 @@ class ChatRendererRegistry:
             "game_date": game.get("game_date"),
             "home_team": game.get("home_team_code") or game.get("home_team"),
             "away_team": game.get("away_team_code") or game.get("away_team"),
-            "home_team_name": self.agent._format_team_display_name(
+            "home_team_name": agent._format_team_display_name(
                 game.get("home_team_code")
                 or game.get("home_team")
                 or game.get("home_team_name")
             ),
-            "away_team_name": self.agent._format_team_display_name(
+            "away_team_name": agent._format_team_display_name(
                 game.get("away_team_code")
                 or game.get("away_team")
                 or game.get("away_team_name")
@@ -411,7 +468,12 @@ class ChatRendererRegistry:
             ),
         }
 
-    def _normalize_game_flow_answer(self, rendered: str) -> str:
+    def _normalize_game_flow_answer(
+        self,
+        rendered: str,
+        *,
+        agent: "BaseballStatisticsAgent",
+    ) -> str:
         paragraphs = []
         for raw_line in rendered.splitlines():
             stripped = raw_line.strip()
@@ -427,21 +489,21 @@ class ChatRendererRegistry:
                 stripped = stripped[2:].strip()
             if stripped:
                 paragraphs.append(stripped)
-        return self.agent._normalize_chatbot_answer_text("\n\n".join(paragraphs))
+        return agent._normalize_chatbot_answer_text("\n\n".join(paragraphs))
 
     def _render_pitcher_superlative(
         self,
         season_label: str,
         top_player: str,
         top_entry: dict[str, Any],
+        *,
+        agent: "BaseballStatisticsAgent",
     ) -> str:
         basis_parts = []
-        era = self.agent._format_deterministic_metric(top_entry.get("era"))
-        whip = self.agent._format_deterministic_metric(top_entry.get("whip"))
-        strikeouts = self.agent._format_deterministic_metric(
-            top_entry.get("strikeouts")
-        )
-        innings_pitched = self.agent._format_deterministic_metric(
+        era = agent._format_deterministic_metric(top_entry.get("era"))
+        whip = agent._format_deterministic_metric(top_entry.get("whip"))
+        strikeouts = agent._format_deterministic_metric(top_entry.get("strikeouts"))
+        innings_pitched = agent._format_deterministic_metric(
             top_entry.get("innings_pitched")
         )
         if era != "확인 불가":
@@ -467,12 +529,14 @@ class ChatRendererRegistry:
         season_label: str,
         top_player: str,
         top_entry: dict[str, Any],
+        *,
+        agent: "BaseballStatisticsAgent",
     ) -> str:
         basis_parts = []
-        ops = self.agent._format_deterministic_metric(top_entry.get("ops"))
-        home_runs = self.agent._format_deterministic_metric(top_entry.get("home_runs"))
-        rbi = self.agent._format_deterministic_metric(top_entry.get("rbi"))
-        avg = self.agent._format_deterministic_metric(top_entry.get("avg"))
+        ops = agent._format_deterministic_metric(top_entry.get("ops"))
+        home_runs = agent._format_deterministic_metric(top_entry.get("home_runs"))
+        rbi = agent._format_deterministic_metric(top_entry.get("rbi"))
+        avg = agent._format_deterministic_metric(top_entry.get("avg"))
         if ops != "확인 불가":
             basis_parts.append(f"OPS {ops}")
         if home_runs != "확인 불가":
@@ -486,4 +550,54 @@ class ChatRendererRegistry:
             f"{season_label} 최고 타자를 빠르게 한 명만 꼽자면 {top_player}입니다.\n\n"
             f"지금 답은 {basis_text}를 같이 본 1차 판단입니다.\n\n"
             "WAR이나 득점 생산력을 더 강하게 보면 순서는 달라질 수 있지만, 빠르게 답하면 지금은 이 선수가 가장 먼저 올라옵니다."
+        )
+
+
+class _BoundChatRendererRegistry:
+    def __init__(
+        self,
+        *,
+        registry: ChatRendererRegistry,
+        agent: "BaseballStatisticsAgent",
+    ) -> None:
+        self._registry = registry
+        self._agent = agent
+
+    def render_reference(
+        self,
+        query: str,
+        tool_results: list[ToolResult],
+        decision: IntentDecision,
+    ) -> Optional[str]:
+        return self._registry.render_reference(
+            query,
+            tool_results,
+            decision,
+            agent=self._agent,
+        )
+
+    def render_leaderboard(
+        self,
+        query: str,
+        data: dict[str, Any],
+        decision: Optional[IntentDecision] = None,
+    ) -> Optional[str]:
+        return self._registry.render_leaderboard(
+            query,
+            data,
+            decision,
+            agent=self._agent,
+        )
+
+    def render_low_data(
+        self,
+        query: str,
+        tool_results: list[ToolResult],
+        decision: IntentDecision,
+    ) -> str:
+        return self._registry.render_low_data(
+            query,
+            tool_results,
+            decision,
+            agent=self._agent,
         )
