@@ -6,6 +6,7 @@ Query Transformation과 Multi-query Retrieval을 위한 모듈입니다.
 """
 
 import asyncio
+import inspect
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -37,12 +38,17 @@ class QueryTransformer:
         self.llm_generate = llm_generate_func
 
     def expand_query_with_rules(
-        self, original_query: str, entity_filter
+        self,
+        original_query: str,
+        entity_filter,
+        *,
+        max_variations: int = 5,
     ) -> List[QueryVariation]:
         """
         규칙 기반으로 쿼리를 확장합니다.
         빠르고 예측 가능한 방법으로 다양한 쿼리 변형을 생성합니다.
         """
+        safe_max_variations = max(1, int(max_variations))
         variations = [QueryVariation(original_query, "original", 1.0)]
 
         # 1. 통계 지표 확장
@@ -64,8 +70,29 @@ class QueryTransformer:
             )
             variations.extend(ranking_expansions)
 
-        logger.info(f"[QueryTransformer] Generated {len(variations)} query variations")
-        return variations[:5]  # 최대 5개로 제한
+        deduped_variations: List[QueryVariation] = []
+        seen_queries: set[str] = set()
+        for variation in variations:
+            normalized_query = variation.query.strip()
+            if not normalized_query or normalized_query in seen_queries:
+                continue
+            seen_queries.add(normalized_query)
+            deduped_variations.append(
+                QueryVariation(
+                    normalized_query,
+                    variation.variation_type,
+                    variation.weight,
+                )
+            )
+            if len(deduped_variations) >= safe_max_variations:
+                break
+
+        logger.info(
+            "[QueryTransformer] Generated %d query variations (cap=%d)",
+            len(deduped_variations),
+            safe_max_variations,
+        )
+        return deduped_variations
 
     def _expand_stat_queries(self, query: str, entity_filter) -> List[QueryVariation]:
         """통계 지표 관련 쿼리를 확장합니다."""
@@ -253,6 +280,7 @@ async def multi_query_retrieval(
     filters: Dict[str, Any],
     entity_filter: Optional[Any] = None,
     limit_per_query: int = 5,
+    limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     여러 쿼리 변형으로 병렬 검색을 수행하고 결과를 결합합니다.
@@ -269,6 +297,8 @@ async def multi_query_retrieval(
     logger.info(
         f"[MultiQuery] Starting retrieval with {len(query_variations)} variations"
     )
+    retrieve_signature = inspect.signature(retrieve_func)
+    supports_use_hyde = "use_hyde" in retrieve_signature.parameters
 
     # 모든 쿼리 변형에 대한 코루틴 생성 (아직 실행 안 됨)
     coroutines = [
@@ -277,6 +307,11 @@ async def multi_query_retrieval(
             filters=filters,
             limit=limit_per_query,
             entity_filter=entity_filter,
+            **(
+                {"use_hyde": variation.variation_type == "original"}
+                if supports_use_hyde
+                else {}
+            ),
         )
         for variation in query_variations
     ]
@@ -339,4 +374,6 @@ async def multi_query_retrieval(
     logger.info(
         f"[MultiQuery] Combined {len(all_results)} results into {len(final_docs)} unique docs"
     )
+    if limit is not None and limit > 0:
+        return final_docs[:limit]
     return final_docs

@@ -13,6 +13,7 @@ from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 from app.tools.team_display import resolve_team_display_name
 from app.tools.team_mapping_loader import (
     fetch_team_mapping_rows,
+    load_cached_team_mapping_rows,
     load_team_mappings_with_retry,
 )
 from app.tools.team_resolution_metrics import get_team_resolution_metrics
@@ -44,8 +45,12 @@ class GameQueryTool:
         self.mapping_dependency_degraded = False
         self.mapping_dependency_reason: str | None = None
 
-        # DB에서 최신 매핑 로드
-        self._load_team_mappings()
+        cached_rows = load_cached_team_mapping_rows()
+        if cached_rows:
+            self.team_resolver.sync_from_team_rows(cached_rows)
+            self.mapping_dependency_reason = "shared_cache"
+        else:
+            self._load_team_mappings()
 
     def _fetch_team_mapping_rows(
         self, connection: psycopg.Connection
@@ -395,7 +400,9 @@ class GameQueryTool:
             games = cursor.fetchall()
 
             if games:
-                result["games"] = [dict(game) for game in games]
+                result["games"] = [
+                    self._format_game_response(dict(game)) for game in games
+                ]
                 result["found"] = True
                 result["total_games"] = len(games)
                 logger.info(f"[GameQuery] Found {len(games)} games on {date}")
@@ -405,6 +412,107 @@ class GameQueryTool:
         except Exception as e:
             logger.error(f"[GameQuery] Date query error: {e}")
             result["error"] = f"날짜별 경기 조회 오류: {e}"
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return result
+
+    def get_team_recent_games(
+        self,
+        team_name: str,
+        limit: int = 5,
+        year: int | None = None,
+    ) -> Dict[str, Any]:
+        """특정 팀의 최근 종료 경기 목록을 조회합니다."""
+        logger.info(
+            "[GameQuery] Recent games query: team=%s, year=%s, limit=%s",
+            team_name,
+            year,
+            limit,
+        )
+
+        resolved_team_code = self._normalize_team_name(team_name, year)
+        resolved_team_name = self.get_team_name(resolved_team_code)
+        team_variants = self.get_team_variants(team_name, year)
+        result = {
+            "team_name": resolved_team_name,
+            "team_code": resolved_team_code,
+            "year": year,
+            "limit": limit,
+            "games": [],
+            "found": False,
+            "error": None,
+        }
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            where_conditions = [
+                "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))",
+                "g.game_status = 'COMPLETED'",
+            ]
+            query_params: list[Any] = [team_variants, team_variants]
+
+            if year is not None:
+                where_conditions.append("EXTRACT(YEAR FROM g.game_date) = %s")
+                query_params.append(year)
+
+            query_params.append(max(1, limit))
+            query = f"""
+                SELECT
+                    g.game_id,
+                    g.game_date,
+                    g.home_team,
+                    g.away_team,
+                    g.home_score,
+                    g.away_score,
+                    g.game_status,
+                    g.stadium,
+                    g.winning_team
+                FROM game g
+                WHERE {" AND ".join(where_conditions)}
+                ORDER BY g.game_date DESC, g.game_id DESC
+                LIMIT %s;
+            """
+            cursor.execute(query, query_params)
+            rows = cursor.fetchall()
+
+            if rows:
+                normalized_variants = set(team_variants)
+                for row in rows:
+                    game = self._format_game_response(dict(row))
+                    winning_team = game.get("winning_team")
+                    if winning_team in normalized_variants:
+                        team_result = "win"
+                    elif game.get("home_score") == game.get("away_score"):
+                        team_result = "draw"
+                    else:
+                        team_result = "loss"
+
+                    opponent_team_code = (
+                        game.get("away_team")
+                        if game.get("home_team") in normalized_variants
+                        else game.get("home_team")
+                    )
+                    game["team_result"] = team_result
+                    game["opponent_team"] = self.get_team_name(opponent_team_code)
+                    result["games"].append(game)
+
+                result["found"] = True
+                logger.info(
+                    "[GameQuery] Found %d recent games for team=%s",
+                    len(result["games"]),
+                    resolved_team_name,
+                )
+            else:
+                logger.warning(
+                    "[GameQuery] No recent games found for team=%s",
+                    resolved_team_name,
+                )
+
+        except Exception as e:
+            logger.error(f"[GameQuery] Recent games query error: {e}")
+            result["error"] = f"최근 경기 조회 오류: {e}"
         finally:
             if "cursor" in locals():
                 cursor.close()
