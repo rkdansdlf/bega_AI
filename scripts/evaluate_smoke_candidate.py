@@ -11,9 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 REPORTS_DIR = Path(
-    os.environ.get(
-        "REPORTS_DIR", str(Path(__file__).resolve().parents[2] / "reports")
-    )
+    os.environ.get("REPORTS_DIR", str(Path(__file__).resolve().parents[2] / "reports"))
 )
 PRESET_BASELINES = {
     "regmix_100": REPORTS_DIR / "smoke_latency_baseline_regmix_100.json",
@@ -165,8 +163,8 @@ def _extract_candidate_endpoint(
         .get(endpoint, {})
         .get("stream_first_message_ms", {})
     )
-    fallback_metrics = (
-        candidate.get("summary", {}).get(f"{endpoint}_fallback_metrics", {})
+    fallback_metrics = candidate.get("summary", {}).get(
+        f"{endpoint}_fallback_metrics", {}
     )
     return {
         "p95": latency.get("p95"),
@@ -392,8 +390,7 @@ def evaluate_candidate(
                 and candidate_metrics["first_token_p95"] is not None
                 and first_token_regression_anchor is not None
                 and (
-                    candidate_metrics["first_token_p95"]
-                    - first_token_regression_anchor
+                    candidate_metrics["first_token_p95"] - first_token_regression_anchor
                 )
                 > TTFE_ABSOLUTE_REGRESSION_MS
             ):
@@ -427,8 +424,9 @@ def evaluate_candidate(
             failures.append(f"{endpoint}:fallback_ratio_increase")
 
         if endpoint == "stream":
-            stream_latency_improved = p95_delta_ratio is not None and p95_delta_ratio <= (
-                -1.0 * p95_improve_threshold
+            stream_latency_improved = (
+                p95_delta_ratio is not None
+                and p95_delta_ratio <= (-1.0 * p95_improve_threshold)
             )
             stream_ttfe_improved = (
                 first_token_delta_ratio is not None

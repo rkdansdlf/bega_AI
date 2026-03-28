@@ -61,7 +61,9 @@ async def test_get_agent_uses_request_context_and_shared_agent(monkeypatch):
             finally:
                 request_context_calls.append(("exit", connection))
 
-    monkeypatch.setattr(deps, "get_shared_baseball_agent_runtime", lambda: _FakeRuntime())
+    monkeypatch.setattr(
+        deps, "get_shared_baseball_agent_runtime", lambda: _FakeRuntime()
+    )
 
     conn_one = object()
     agent_dependency = deps.get_agent(conn_one)

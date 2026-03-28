@@ -294,9 +294,7 @@ def similarity_search(
             bool(keyword),
             exc,
         )
-        raise DBRetrievalError(
-            "pgvector query timed out", cause=exc
-        ) from exc
+        raise DBRetrievalError("pgvector query timed out", cause=exc) from exc
     except (PsycopgOperationalError, PsycopgInterfaceError, TimeoutError) as exc:
         logger.error("[Search] DB unreachable during similarity_search: %s", exc)
         raise DBRetrievalError(

@@ -70,9 +70,7 @@ class TestTeamMappingRobustness:
         assert "WO" in variants
         assert "NX" in variants
 
-    def test_game_tool_uses_shared_mapping_cache(
-        self, monkeypatch, mock_db_connection
-    ):
+    def test_game_tool_uses_shared_mapping_cache(self, monkeypatch, mock_db_connection):
         cached_rows = [
             {
                 "team_id": "HT",

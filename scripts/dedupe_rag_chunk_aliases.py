@@ -406,7 +406,9 @@ def write_report(path_str: str, report: Dict[str, Any]) -> Optional[Path]:
     if not path.is_absolute():
         path = (PROJECT_ROOT / path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     return path
 
 

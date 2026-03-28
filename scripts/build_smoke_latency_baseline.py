@@ -11,9 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 REPORTS_DIR = Path(
-    os.environ.get(
-        "REPORTS_DIR", str(Path(__file__).resolve().parents[2] / "reports")
-    )
+    os.environ.get("REPORTS_DIR", str(Path(__file__).resolve().parents[2] / "reports"))
 )
 PRESET_INPUTS = {
     "regmix_100": [
@@ -216,7 +214,9 @@ def _build_endpoint_baseline(
 
 
 def _build_memory_baseline(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
-    peak_values = _collect_metric_values(reports, ["summary", "memory_metrics", "peak_mb"])
+    peak_values = _collect_metric_values(
+        reports, ["summary", "memory_metrics", "peak_mb"]
+    )
     return {
         "count": len(peak_values),
         "p50": _percentile(peak_values, 0.50),

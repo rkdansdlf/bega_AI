@@ -174,9 +174,7 @@ def build_baseball_llm_generator(settings: Any):
         )
 
         last_exception = None
-        empty_chunk_retries = max(
-            0, int(settings.chat_openrouter_empty_chunk_retries)
-        )
+        empty_chunk_retries = max(0, int(settings.chat_openrouter_empty_chunk_retries))
         empty_chunk_backoff_ms = max(
             50, int(settings.chat_openrouter_empty_chunk_backoff_ms)
         )
@@ -255,7 +253,9 @@ def build_baseball_llm_generator(settings: Any):
                         await asyncio.sleep(empty_chunk_backoff_ms / 1000.0)
                         continue
 
-                    llm_logger.info("[LLM] Success: %d chunks from %s", chunk_count, model)
+                    llm_logger.info(
+                        "[LLM] Success: %d chunks from %s", chunk_count, model
+                    )
                     return
 
                 except Exception as exc:  # noqa: BLE001

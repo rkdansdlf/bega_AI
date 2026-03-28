@@ -718,7 +718,10 @@ class BaseballStatisticsAgent:
 
     def _maybe_current_request_context(self) -> AgentRequestContext | None:
         request_context = _REQUEST_CONTEXT.get()
-        if request_context is not None and request_context.runtime_id == self.runtime_id:
+        if (
+            request_context is not None
+            and request_context.runtime_id == self.runtime_id
+        ):
             return request_context
         return None
 
@@ -829,8 +832,7 @@ class BaseballStatisticsAgent:
         ]
         for param_val in parameters.values():
             if isinstance(param_val, str) and any(
-                indicator in param_val.upper()
-                for indicator in hallucination_indicators
+                indicator in param_val.upper() for indicator in hallucination_indicators
             ):
                 return True
         return False
@@ -899,7 +901,9 @@ class BaseballStatisticsAgent:
     ) -> Optional[List[ToolResult]]:
         batch_spec = self._eligible_player_stats_batch_spec(tool_calls)
         db_query_tool = getattr(self, "db_query_tool", None)
-        if batch_spec is None or not hasattr(db_query_tool, "get_player_season_stats_batch"):
+        if batch_spec is None or not hasattr(
+            db_query_tool, "get_player_season_stats_batch"
+        ):
             return None
 
         try:
@@ -936,9 +940,12 @@ class BaseballStatisticsAgent:
             if not isinstance(raw_result, dict):
                 return None
 
-            requested_name = self._normalize_player_name_candidate(
-                tool_call.parameters.get("player_name")
-            ) or str(tool_call.parameters.get("player_name") or "").strip()
+            requested_name = (
+                self._normalize_player_name_candidate(
+                    tool_call.parameters.get("player_name")
+                )
+                or str(tool_call.parameters.get("player_name") or "").strip()
+            )
             if raw_result.get("error"):
                 tool_results.append(
                     ToolResult(
@@ -989,15 +996,18 @@ class BaseballStatisticsAgent:
         if not tool_calls:
             return []
 
-        batched_player_results = await self._execute_batched_player_stats_tool_calls_async(
-            tool_calls
+        batched_player_results = (
+            await self._execute_batched_player_stats_tool_calls_async(tool_calls)
         )
         if batched_player_results is not None:
             return batched_player_results
 
         execution_mode = self._resolve_tool_execution_mode(tool_calls)
         if execution_mode == "sequential":
-            return [await self._execute_tool_call_async(tool_call) for tool_call in tool_calls]
+            return [
+                await self._execute_tool_call_async(tool_call)
+                for tool_call in tool_calls
+            ]
         if execution_mode == "mixed":
             return await self._execute_tool_batch_mixed_async(tool_calls)
 
@@ -1029,9 +1039,11 @@ class BaseballStatisticsAgent:
             results[index] = result
 
         return [
-            result
-            if result is not None
-            else ToolResult(success=False, data={}, message="도구 실행 중 오류")
+            (
+                result
+                if result is not None
+                else ToolResult(success=False, data={}, message="도구 실행 중 오류")
+            )
             for result in results
         ]
 
@@ -1067,9 +1079,11 @@ class BaseballStatisticsAgent:
                 results[index] = result
 
         return [
-            result
-            if result is not None
-            else ToolResult(success=False, data={}, message="도구 실행 중 오류")
+            (
+                result
+                if result is not None
+                else ToolResult(success=False, data={}, message="도구 실행 중 오류")
+            )
             for result in results
         ]
 
@@ -3435,7 +3449,9 @@ class BaseballStatisticsAgent:
         seen: set[str] = set()
 
         delimited_names: List[str] = []
-        query_segments = [segment.strip() for segment in re.split(r"[,/]", query) if segment.strip()]
+        query_segments = [
+            segment.strip() for segment in re.split(r"[,/]", query) if segment.strip()
+        ]
         if len(query_segments) >= 2:
             for segment in query_segments[: PLAYER_LLM_MULTI_NAME_CAP * 2]:
                 first_token = re.split(r"\s+", segment, maxsplit=1)[0]
@@ -3458,11 +3474,7 @@ class BaseballStatisticsAgent:
         )
         for raw_name in [explicit_player_name, *extracted_names]:
             name = self._normalize_player_name_candidate(raw_name)
-            if (
-                len(name) < 2
-                or name in INVALID_PLAYER_NAME_TOKENS
-                or name in seen
-            ):
+            if len(name) < 2 or name in INVALID_PLAYER_NAME_TOKENS or name in seen:
                 continue
             player_names.append(name)
             seen.add(name)
@@ -3623,7 +3635,10 @@ class BaseballStatisticsAgent:
                 "team_llm_planner",
             )
 
-        if self._has_explicit_player_name(entity_filter) or len(query_player_names) >= 2:
+        if (
+            self._has_explicit_player_name(entity_filter)
+            or len(query_player_names) >= 2
+        ):
             player_name = (
                 query_player_names[0]
                 if query_player_names
@@ -3941,12 +3956,30 @@ class BaseballStatisticsAgent:
         position = getattr(entity_filter, "position_type", None) or "both"
         if any(
             token in query_lower
-            for token in ["투수", "선발", "불펜", "마무리", "로테이션", "구위", "에이스"]
+            for token in [
+                "투수",
+                "선발",
+                "불펜",
+                "마무리",
+                "로테이션",
+                "구위",
+                "에이스",
+            ]
         ):
             position = "pitching"
         elif any(
             token in query_lower
-            for token in ["타자", "타선", "장타", "포수", "내야", "클린업", "출루", "컨택", "홈런"]
+            for token in [
+                "타자",
+                "타선",
+                "장타",
+                "포수",
+                "내야",
+                "클린업",
+                "출루",
+                "컨택",
+                "홈런",
+            ]
         ):
             position = "batting"
         tool_calls = [
@@ -4024,10 +4057,9 @@ class BaseballStatisticsAgent:
                 or (pitching_stats or {}).get("player_name")
                 or requested_name
             )
-            team_name = (
-                (batting_stats or {}).get("team_name")
-                or (pitching_stats or {}).get("team_name")
-            )
+            team_name = (batting_stats or {}).get("team_name") or (
+                pitching_stats or {}
+            ).get("team_name")
 
             entries.append(
                 {
@@ -4065,7 +4097,9 @@ class BaseballStatisticsAgent:
             return "game_context_role"
         return "generic_grouping"
 
-    def _multi_player_entry_metric(self, entry: Dict[str, Any], keys: List[str]) -> Optional[Any]:
+    def _multi_player_entry_metric(
+        self, entry: Dict[str, Any], keys: List[str]
+    ) -> Optional[Any]:
         batting = entry.get("batting_stats") or {}
         pitching = entry.get("pitching_stats") or {}
         for source in (batting, pitching):
@@ -4228,19 +4262,34 @@ class BaseballStatisticsAgent:
             return None
 
         query_entities = extract_entities_from_query(query)
-        query_player_names = self._extract_llm_planner_player_names(query, query_entities)
+        query_player_names = self._extract_llm_planner_player_names(
+            query, query_entities
+        )
         missing_names = [
             name
             for name in query_player_names
-            if not any(entry.get("requested_name") == name and entry.get("found") for entry in entries)
+            if not any(
+                entry.get("requested_name") == name and entry.get("found")
+                for entry in entries
+            )
         ]
 
-        batting_entries = [entry for entry in usable_entries if entry.get("batting_stats")]
-        pitching_entries = [entry for entry in usable_entries if entry.get("pitching_stats")]
+        batting_entries = [
+            entry for entry in usable_entries if entry.get("batting_stats")
+        ]
+        pitching_entries = [
+            entry for entry in usable_entries if entry.get("pitching_stats")
+        ]
         query_lower = query.lower()
         pitcher_mode = bool(
-            any(token in query_lower for token in ["투수", "구위", "로테이션", "선발", "불펜"])
-            or (len(pitching_entries) >= 2 and len(pitching_entries) >= len(batting_entries))
+            any(
+                token in query_lower
+                for token in ["투수", "구위", "로테이션", "선발", "불펜"]
+            )
+            or (
+                len(pitching_entries) >= 2
+                and len(pitching_entries) >= len(batting_entries)
+            )
         )
         selected_entries = pitching_entries if pitcher_mode else batting_entries
         if len(selected_entries) < 2:
@@ -4249,7 +4298,10 @@ class BaseballStatisticsAgent:
         narrative_kind = self._classify_multi_player_narrative_query(
             query, pitcher_mode=pitcher_mode
         )
-        display_names = [entry.get("player_name") or entry.get("requested_name") for entry in selected_entries]
+        display_names = [
+            entry.get("player_name") or entry.get("requested_name")
+            for entry in selected_entries
+        ]
         player_group = ", ".join(display_names)
 
         if pitcher_mode:
@@ -4310,7 +4362,9 @@ class BaseballStatisticsAgent:
 
         table_rows: List[str] = []
         for entry in selected_entries[:PLAYER_LLM_MULTI_NAME_CAP]:
-            player_name = entry.get("player_name") or entry.get("requested_name") or "선수"
+            player_name = (
+                entry.get("player_name") or entry.get("requested_name") or "선수"
+            )
             if pitcher_mode:
                 era = self._format_deterministic_metric(
                     self._multi_player_entry_metric(entry, ["era"])
@@ -4321,9 +4375,7 @@ class BaseballStatisticsAgent:
                 strikeouts = self._format_deterministic_metric(
                     self._multi_player_entry_metric(entry, ["strikeouts", "so", "k"])
                 )
-                table_rows.append(
-                    f"| {player_name} | {era} | {whip} | {strikeouts} |"
-                )
+                table_rows.append(f"| {player_name} | {era} | {whip} | {strikeouts} |")
             else:
                 obp = self._format_deterministic_metric(
                     self._multi_player_entry_metric(entry, ["obp"])
@@ -4334,9 +4386,7 @@ class BaseballStatisticsAgent:
                 home_runs = self._format_deterministic_metric(
                     self._multi_player_entry_metric(entry, ["home_runs", "hr"])
                 )
-                table_rows.append(
-                    f"| {player_name} | {obp} | {slg} | {home_runs} |"
-                )
+                table_rows.append(f"| {player_name} | {obp} | {slg} | {home_runs} |")
 
         if chat_mode:
             lines = [intro, *detail_lines[:3]]
@@ -4348,14 +4398,10 @@ class BaseballStatisticsAgent:
 
         if pitcher_mode:
             table_header = (
-                "| 선수 | ERA | WHIP | 탈삼진 |\n"
-                "| --- | --- | --- | --- |\n"
+                "| 선수 | ERA | WHIP | 탈삼진 |\n" "| --- | --- | --- | --- |\n"
             )
         else:
-            table_header = (
-                "| 선수 | OBP | SLG | 홈런 |\n"
-                "| --- | --- | --- | --- |\n"
-            )
+            table_header = "| 선수 | OBP | SLG | 홈런 |\n" "| --- | --- | --- | --- |\n"
 
         return (
             "## 요약\n"
@@ -4404,7 +4450,9 @@ class BaseballStatisticsAgent:
             or extract_team(query)
             or self._detect_team_alias_from_query(query)
         )
-        query_player_names = self._extract_llm_planner_player_names(query, entity_filter)
+        query_player_names = self._extract_llm_planner_player_names(
+            query, entity_filter
+        )
         player_name = (
             getattr(entity_filter, "player_name", None)
             or getattr(entity_filter, "person_name", None)
@@ -4826,7 +4874,9 @@ class BaseballStatisticsAgent:
             "get_team_rank",
             "get_team_last_game",
         }
-        query_player_names = self._extract_llm_planner_player_names(query, entity_filter)
+        query_player_names = self._extract_llm_planner_player_names(
+            query, entity_filter
+        )
         player_name = (
             query_player_names[0]
             if query_player_names
@@ -4975,8 +5025,7 @@ class BaseballStatisticsAgent:
             for fallback_name in fallback_names:
                 fallback_parameters: Dict[str, Any] = {
                     "player_name": fallback_name,
-                    "position": getattr(entity_filter, "position_type", None)
-                    or "both",
+                    "position": getattr(entity_filter, "position_type", None) or "both",
                 }
                 if fallback_tool_name == "get_player_stats":
                     fallback_parameters["year"] = self._resolve_reference_year(
@@ -5160,7 +5209,9 @@ class BaseballStatisticsAgent:
         for tool_call in analysis_result.get("tool_calls") or []:
             tool_name = getattr(tool_call, "tool_name", "")
             if not tool_name and isinstance(tool_call, dict):
-                tool_name = str(tool_call.get("tool_name") or tool_call.get("name") or "")
+                tool_name = str(
+                    tool_call.get("tool_name") or tool_call.get("name") or ""
+                )
             tool_name = str(tool_name or "").strip()
             if tool_name:
                 tool_names.append(tool_name)
@@ -5235,10 +5286,9 @@ class BaseballStatisticsAgent:
             "get_korean_series_winner",
         }
         analysis_tool_names = self._analysis_tool_names(analysis_result)
-        if (
-            any(tool_name in structured_lookup_tools for tool_name in analysis_tool_names)
-            and not any(token in query_lower for token in explicit_document_tokens)
-        ):
+        if any(
+            tool_name in structured_lookup_tools for tool_name in analysis_tool_names
+        ) and not any(token in query_lower for token in explicit_document_tokens):
             return False
 
         document_fallback_tokens = [
@@ -5967,9 +6017,7 @@ class BaseballStatisticsAgent:
                                 "[AnswerWatchdog] timeout_recovered query=%s",
                                 query[:120],
                             )
-                            first_token_timeout_reason = (
-                                "first_token_timeout_recovered"
-                            )
+                            first_token_timeout_reason = "first_token_timeout_recovered"
                             answer_error = None
                             answer_verified = bool(recovery.get("verified", False))
                             answer_iterator = None
@@ -7165,7 +7213,9 @@ class BaseballStatisticsAgent:
                 "팀명이나 game_id를 같이 주시면 일정, 선발 라인업, 박스스코어를 한 번에 이어서 정리해드리겠습니다."
             )
 
-        lines = [f"{date_label} 경기 기준으로 확인된 일정과 상세 정보는 이렇게 보입니다."]
+        lines = [
+            f"{date_label} 경기 기준으로 확인된 일정과 상세 정보는 이렇게 보입니다."
+        ]
         if schedule_games:
             first_game = schedule_games[0]
             away_team = self._format_team_display_name(first_game.get("away_team"))
@@ -7287,9 +7337,7 @@ class BaseballStatisticsAgent:
             metric_value = self._format_deterministic_metric(
                 self._extract_leaderboard_value(entry, metric_key)
             )
-            rank_line = (
-                f"리그 {metric_label} 리더보드에서는 현재 {rank}위이고, 값은 {metric_value}입니다."
-            )
+            rank_line = f"리그 {metric_label} 리더보드에서는 현재 {rank}위이고, 값은 {metric_value}입니다."
         else:
             rank_line = (
                 f"리그 {metric_label} 상위 {len(leaderboard)}명 리더보드에는 "
@@ -7308,7 +7356,9 @@ class BaseballStatisticsAgent:
                     [
                         stats_answer,
                         rank_line,
-                        "검증 단계에서는 " + ", ".join(teams) + " 소속 후보까지 함께 확인했습니다.",
+                        "검증 단계에서는 "
+                        + ", ".join(teams)
+                        + " 소속 후보까지 함께 확인했습니다.",
                     ]
                 )
 
@@ -7420,12 +7470,8 @@ class BaseballStatisticsAgent:
             )
             pa1 = _safe_float(_pick(batting1, ["plate_appearances", "total_pa"]))
             pa2 = _safe_float(_pick(batting2, ["plate_appearances", "total_pa"]))
-            home_runs1 = _safe_float(
-                _pick(batting1, ["home_runs", "total_home_runs"])
-            )
-            home_runs2 = _safe_float(
-                _pick(batting2, ["home_runs", "total_home_runs"])
-            )
+            home_runs1 = _safe_float(_pick(batting1, ["home_runs", "total_home_runs"]))
+            home_runs2 = _safe_float(_pick(batting2, ["home_runs", "total_home_runs"]))
             doubles1 = _safe_float(_pick(batting1, ["doubles", "total_doubles"]))
             doubles2 = _safe_float(_pick(batting2, ["doubles", "total_doubles"]))
 
@@ -7842,7 +7888,9 @@ class BaseballStatisticsAgent:
                     f"가장 가까운 경기들은 {recent_form['recent_preview']} 쪽입니다."
                 )
                 if recent_form.get("streak_text"):
-                    recent_line += f" 지금은 {recent_form['streak_text']} 흐름으로도 읽힙니다."
+                    recent_line += (
+                        f" 지금은 {recent_form['streak_text']} 흐름으로도 읽힙니다."
+                    )
                 chat_lines.append(recent_line)
             if unavailable_topics:
                 chat_lines.append(

@@ -138,8 +138,7 @@ def test_summarize_results_includes_planner_distribution_and_failed_cases() -> N
     )
     assert summary["planner_cache_metrics"]["overall"]["hit_count"] == 1
     assert (
-        summary["tool_execution_mode_distribution"]["overall"]["parallel"]["count"]
-        == 1
+        summary["tool_execution_mode_distribution"]["overall"]["parallel"]["count"] == 1
     )
     assert len(summary["failed_cases"]) == 1
     failed_case = summary["failed_cases"][0]
@@ -213,8 +212,12 @@ def test_summarize_results_includes_latency_diagnostics() -> None:
 
     summary = smoke._summarize_results(results, stream_fallback_ratio_max=0.40)
 
-    completion_case = summary["latency_diagnostics"]["completion"]["top_latency_cases"][0]
-    stream_ttfe_case = summary["latency_diagnostics"]["stream"]["top_first_token_cases"][0]
+    completion_case = summary["latency_diagnostics"]["completion"]["top_latency_cases"][
+        0
+    ]
+    stream_ttfe_case = summary["latency_diagnostics"]["stream"][
+        "top_first_token_cases"
+    ][0]
     stream_first_message_case = summary["latency_diagnostics"]["stream"][
         "top_stream_first_message_cases"
     ][0]
@@ -264,12 +267,12 @@ def test_summarize_results_parses_stream_meta_from_sse_sample_response() -> None
             },
             "sample_response": "\\n".join(
                 [
-                    'event: status',
+                    "event: status",
                     'data: {"message":"⚡"}',
-                    'event: meta',
+                    "event: meta",
                     f"data: {json.dumps(stream_meta, ensure_ascii=False)}",
-                    'event: done',
-                    'data: [DONE]',
+                    "event: done",
+                    "data: [DONE]",
                 ]
             ),
         }
@@ -455,8 +458,10 @@ def test_main_writes_summary_output_before_console_summary_print(
     real_print = builtins.print
 
     def _raising_print(*args, **kwargs):  # noqa: ANN002, ANN003
-        if args and isinstance(args[0], str) and args[0].lstrip().startswith(
-            '{\n  "summary"'
+        if (
+            args
+            and isinstance(args[0], str)
+            and args[0].lstrip().startswith('{\n  "summary"')
         ):
             raise RuntimeError("stop-after-console-summary")
         return real_print(*args, **kwargs)
@@ -621,8 +626,10 @@ def test_main_includes_memory_metrics_in_summary_output(tmp_path, monkeypatch) -
         real_print = builtins.print
 
         def _raising_print(*args, **kwargs):  # noqa: ANN002, ANN003
-            if args and isinstance(args[0], str) and args[0].lstrip().startswith(
-                '{\n  "summary"'
+            if (
+                args
+                and isinstance(args[0], str)
+                and args[0].lstrip().startswith('{\n  "summary"')
             ):
                 raise RuntimeError("stop-after-console-summary")
             return real_print(*args, **kwargs)

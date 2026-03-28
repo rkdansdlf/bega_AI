@@ -144,7 +144,9 @@ def resolve_db_urls(args: argparse.Namespace) -> tuple[str, str]:
 
     if not source_db_url:
         if args.source_env_file.strip():
-            source_db_url = _load_settings_from_env_file(args.source_env_file).database_url
+            source_db_url = _load_settings_from_env_file(
+                args.source_env_file
+            ).database_url
         else:
             source_db_url = settings.database_url
 
@@ -597,7 +599,9 @@ def main() -> int:
     exit_code = 0
     try:
         for idx, target in enumerate(targets, start=1):
-            print(f"[{idx}/{len(targets)}] verifying table={target.table} year={target.year}")
+            print(
+                f"[{idx}/{len(targets)}] verifying table={target.table} year={target.year}"
+            )
             source_conn = psycopg.connect(source_db_url, autocommit=True)
             dest_conn = psycopg.connect(dest_db_url)
             try:

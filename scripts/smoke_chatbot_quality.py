@@ -958,7 +958,9 @@ class ComposeMemoryMonitor:
     def stop(self) -> Dict[str, Any]:
         self._stop_event.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(1.0, float(self.sample_interval_ms) / 1000.0 + 1.0))
+            self._thread.join(
+                timeout=max(1.0, float(self.sample_interval_ms) / 1000.0 + 1.0)
+            )
         self.ended_at = datetime.now(timezone.utc).isoformat()
         if self._error is not None:
             raise self._error
@@ -1155,7 +1157,9 @@ def _distribution_summary(values: List[str]) -> Dict[str, Dict[str, Any]]:
     }
 
 
-def _planner_mode_distribution(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _planner_mode_distribution(
+    items: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
     return _distribution_summary([_extract_planner_mode(item) for item in items])
 
 
@@ -1250,9 +1254,7 @@ def _build_failed_cases(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "endpoint": item.get("endpoint"),
                 "question": item.get("question"),
                 "planner_mode": _extract_planner_mode(item),
-                "planner_bucket": _categorize_planner_mode(
-                    _extract_planner_mode(item)
-                ),
+                "planner_bucket": _categorize_planner_mode(_extract_planner_mode(item)),
                 "planner_cache_hit": _extract_planner_cache_hit(item),
                 "tool_execution_mode": _extract_tool_execution_mode(item),
                 "status_code": item.get("status_code"),
@@ -1293,9 +1295,7 @@ def _build_top_metric_cases(
                     else None
                 ),
                 "planner_mode": _extract_planner_mode(item),
-                "planner_bucket": _categorize_planner_mode(
-                    _extract_planner_mode(item)
-                ),
+                "planner_bucket": _categorize_planner_mode(_extract_planner_mode(item)),
                 "tool_execution_mode": _extract_tool_execution_mode(item),
                 "cached": bool(item.get("cached", False)),
                 "status_code": item.get("status_code"),
@@ -1520,7 +1520,9 @@ def _build_report_payload(
 
 
 def _build_console_summary(
-    summary: Dict[str, Any], *, failed_case_limit: int = CONSOLE_FAILED_CASE_PREVIEW_LIMIT
+    summary: Dict[str, Any],
+    *,
+    failed_case_limit: int = CONSOLE_FAILED_CASE_PREVIEW_LIMIT,
 ) -> Dict[str, Any]:
     compact_summary = dict(summary)
     failed_cases = compact_summary.pop("failed_cases", None)
@@ -1668,7 +1670,9 @@ def main() -> int:
 
                     results.append(completion_result)
                     results.append(stream_result)
-                    _print_progress(idx, len(questions), completion_result, stream_result)
+                    _print_progress(
+                        idx, len(questions), completion_result, stream_result
+                    )
 
                     if output_path is not None:
                         incremental_memory_metrics = (

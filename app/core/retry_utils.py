@@ -10,6 +10,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
+
 def is_retryable_llm_error(exc: Exception) -> bool:
     """Return True for transient LLM failures that are worth retrying."""
     if isinstance(exc, httpx.HTTPStatusError):

@@ -173,7 +173,9 @@ class ChatRendererRegistry:
         if not leaderboard:
             return None
         year = resolved_agent._format_deterministic_metric(data.get("year"))
-        raw_stat_name = resolved_agent._format_deterministic_metric(data.get("stat_name"))
+        raw_stat_name = resolved_agent._format_deterministic_metric(
+            data.get("stat_name")
+        )
         stat_name = self._metric_label(raw_stat_name)
         season_label = f"{year}년" if year != "확인 불가" else "해당 시즌"
         top_entry = leaderboard[0]

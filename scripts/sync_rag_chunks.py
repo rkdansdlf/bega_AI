@@ -24,7 +24,6 @@ except ModuleNotFoundError as exc:
 from app.config import Settings
 from scripts.ingest_from_kbo import UPSERT_SQL
 
-
 SELECT_COLUMNS = """
 SELECT
     meta,
@@ -295,9 +294,11 @@ def _build_upsert_rows(rows: Sequence[Dict[str, Any]]) -> List[tuple[Any, ...]]:
         meta = row.get("meta")
         payload.append(
             (
-                json.dumps(meta, ensure_ascii=False, default=str)
-                if meta is not None
-                else None,
+                (
+                    json.dumps(meta, ensure_ascii=False, default=str)
+                    if meta is not None
+                    else None
+                ),
                 row.get("season_year"),
                 row.get("season_id"),
                 row.get("league_type_code"),
@@ -326,8 +327,7 @@ def _batched_fetch(
 
 
 def _prepare_stage_table(dest_cur: Any) -> None:
-    dest_cur.execute(
-        f"""
+    dest_cur.execute(f"""
         CREATE TEMP TABLE IF NOT EXISTS {STAGE_TABLE_NAME} (
             meta_json text,
             season_year integer,
@@ -341,16 +341,13 @@ def _prepare_stage_table(dest_cur: Any) -> None:
             content text,
             embedding_text text
         ) ON COMMIT PRESERVE ROWS
-        """
-    )
+        """)
     dest_cur.execute(f"TRUNCATE TABLE {STAGE_TABLE_NAME}")
 
 
 def _stage_batch_with_copy(dest_cur: Any, payload: Sequence[tuple[Any, ...]]) -> None:
     column_list = ", ".join(STAGE_COLUMNS)
-    with dest_cur.copy(
-        f"COPY {STAGE_TABLE_NAME} ({column_list}) FROM STDIN"
-    ) as copy:
+    with dest_cur.copy(f"COPY {STAGE_TABLE_NAME} ({column_list}) FROM STDIN") as copy:
         for row in payload:
             copy.write_row(row)
 
@@ -433,7 +430,9 @@ def sync_rag_chunks(
         )
 
         with (
-            source_conn.cursor(name="rag_chunk_sync_cursor", row_factory=dict_row) as source_cur,
+            source_conn.cursor(
+                name="rag_chunk_sync_cursor", row_factory=dict_row
+            ) as source_cur,
             dest_conn.cursor() as dest_cur,
         ):
             source_cur.execute(query, params)
@@ -459,7 +458,11 @@ def sync_rag_chunks(
                     flush=True,
                 )
 
-                if use_copy_pipeline and commit_interval > 0 and pending_stage_rows >= commit_interval:
+                if (
+                    use_copy_pipeline
+                    and commit_interval > 0
+                    and pending_stage_rows >= commit_interval
+                ):
                     synced_rows += _merge_staged_rows(dest_cur)
                     pending_stage_rows = 0
                     dest_conn.commit()

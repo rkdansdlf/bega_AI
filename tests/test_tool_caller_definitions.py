@@ -45,7 +45,9 @@ def test_tool_caller_from_definitions_resolves_bound_handlers() -> None:
     assert result.success is True
     assert result.data == {"value": "hello"}
     assert handlers.calls == [("alpha", "hello")]
-    assert caller.get_tool_descriptions() == ToolCaller.describe_definitions(definitions)
+    assert caller.get_tool_descriptions() == ToolCaller.describe_definitions(
+        definitions
+    )
 
 
 def test_tool_caller_from_definitions_keeps_parallel_execution_behavior() -> None:

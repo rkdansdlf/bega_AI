@@ -76,8 +76,10 @@ def test_main_writes_summary_output_before_console_print(tmp_path, monkeypatch) 
     real_print = builtins.print
 
     def _raising_print(*args, **kwargs):  # noqa: ANN002, ANN003
-        if args and isinstance(args[0], str) and args[0].lstrip().startswith(
-            '{\n  "summary"'
+        if (
+            args
+            and isinstance(args[0], str)
+            and args[0].lstrip().startswith('{\n  "summary"')
         ):
             raise RuntimeError("stop-after-console-summary")
         return real_print(*args, **kwargs)

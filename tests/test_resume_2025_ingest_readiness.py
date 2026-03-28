@@ -82,7 +82,9 @@ def test_run_resume_runs_full_readiness_after_successful_probe(
         del cwd, capture_output, text, check
         calls.append(list(command))
         if command[1].endswith("/scripts/sync_kbo_data.py"):
-            return subprocess.CompletedProcess(command, 0, stdout="probe ok\n", stderr="")
+            return subprocess.CompletedProcess(
+                command, 0, stdout="probe ok\n", stderr=""
+            )
         return subprocess.CompletedProcess(
             command,
             0,
@@ -123,12 +125,18 @@ def test_run_resume_retries_probe_until_success(
         if command[1].endswith("/scripts/sync_kbo_data.py"):
             probe_calls["count"] += 1
             if probe_calls["count"] == 1:
-                return subprocess.CompletedProcess(command, 1, stdout="blocked\n", stderr="")
-            return subprocess.CompletedProcess(command, 0, stdout="probe ok\n", stderr="")
+                return subprocess.CompletedProcess(
+                    command, 1, stdout="blocked\n", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                command, 0, stdout="probe ok\n", stderr=""
+            )
         return subprocess.CompletedProcess(command, 0, stdout="ready\n", stderr="")
 
     monkeypatch.setattr(resume_readiness.subprocess, "run", _fake_run)
-    monkeypatch.setattr(resume_readiness.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(
+        resume_readiness.time, "sleep", lambda seconds: sleep_calls.append(seconds)
+    )
 
     exit_code = resume_readiness.main(
         [

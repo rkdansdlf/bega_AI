@@ -213,7 +213,9 @@ def test_evaluate_candidate_uses_p95_max_as_regression_anchor() -> None:
 
     assert report["status"] == "PASS_NO_REGRESSION"
     assert report["failure_codes"] == []
-    assert report["endpoints"]["completion"]["baseline"]["p95_regression_anchor"] == 120.0
+    assert (
+        report["endpoints"]["completion"]["baseline"]["p95_regression_anchor"] == 120.0
+    )
 
 
 def test_evaluate_candidate_fail_error_rate_increase() -> None:
@@ -316,9 +318,7 @@ def test_evaluate_candidate_warns_on_stream_first_message_regression_only() -> N
     assert report["status"] == "PASS_NO_REGRESSION"
     assert report["failure_codes"] == []
     assert "stream:stream_first_message_p95_regression" in report["warnings"]
-    assert (
-        report["endpoints"]["stream"]["delta"]["stream_first_message_p95_ratio"] > 0
-    )
+    assert report["endpoints"]["stream"]["delta"]["stream_first_message_p95_ratio"] > 0
 
 
 def test_evaluate_candidate_ignores_small_stream_first_message_jitter() -> None:

@@ -7,6 +7,7 @@ Usage:
     source .venv/bin/activate
     python scripts/populate_stat_rankings.py
 """
+
 from __future__ import annotations
 
 import os
@@ -23,7 +24,6 @@ from app.config import get_settings
 
 import psycopg
 from psycopg.rows import dict_row
-
 
 # ── 메트릭 정의 ──────────────────────────────────────────────
 

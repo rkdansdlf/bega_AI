@@ -52,7 +52,10 @@ def test_ingest_document_keeps_single_chunk_identity(monkeypatch) -> None:
 
     result = asyncio.run(ingest.ingest_document(payload, conn, None, None))
 
-    assert conn.cursor_obj.calls[0][0] == "SET search_path TO public, extensions, security;"
+    assert (
+        conn.cursor_obj.calls[0][0]
+        == "SET search_path TO public, extensions, security;"
+    )
     params = conn.cursor_obj.calls[1][1]
     assert params[4] == "rule-1"
     assert params[5] == "Single Doc"
@@ -81,7 +84,10 @@ def test_ingest_document_suffixes_multi_chunk_source_rows(monkeypatch) -> None:
 
     result = asyncio.run(ingest.ingest_document(payload, conn, None, None))
 
-    assert conn.cursor_obj.calls[0][0] == "SET search_path TO public, extensions, security;"
+    assert (
+        conn.cursor_obj.calls[0][0]
+        == "SET search_path TO public, extensions, security;"
+    )
     params = [call[1] for call in conn.cursor_obj.calls[1:]]
     assert [item[4] for item in params] == ["rule-2#part1", "rule-2#part2"]
     assert [item[5] for item in params] == [

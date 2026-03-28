@@ -155,7 +155,10 @@ def test_reembed_static_target_does_not_query_source_db(monkeypatch: Any) -> Non
     assert captured
     assert all(source_row_id.startswith(prefix) for source_row_id in captured)
     executed_sql = [str(query) for query, _params in dest_conn.cursors[0].executed]
-    assert any("SET search_path TO public, extensions, security;" in query for query in executed_sql)
+    assert any(
+        "SET search_path TO public, extensions, security;" in query
+        for query in executed_sql
+    )
     assert any("SET statement_timeout TO 0;" in query for query in executed_sql)
 
 
@@ -215,14 +218,21 @@ def test_reembed_row_target_keeps_canonical_source_row_id(monkeypatch: Any) -> N
     assert result["matched_rows"] == 1
     assert captured == ["id=123"]
     executed_sql = [str(query) for query, _params in dest_conn.cursors[0].executed]
-    assert any("SET search_path TO public, extensions, security;" in query for query in executed_sql)
+    assert any(
+        "SET search_path TO public, extensions, security;" in query
+        for query in executed_sql
+    )
     assert any("SET statement_timeout TO 0;" in query for query in executed_sql)
 
 
-def test_main_keeps_dest_connection_open_during_target_loop(monkeypatch: Any, tmp_path) -> None:
+def test_main_keeps_dest_connection_open_during_target_loop(
+    monkeypatch: Any, tmp_path
+) -> None:
     report_path = tmp_path / "coverage.json"
     report_path.write_text('{"rows":[]}', encoding="utf-8")
-    target = CoverageTarget(table="game_batting_stats", year=2018, source_table="game_batting_stats")
+    target = CoverageTarget(
+        table="game_batting_stats", year=2018, source_table="game_batting_stats"
+    )
 
     class _Parser:
         def parse_args(self) -> Any:
@@ -278,7 +288,9 @@ def test_main_keeps_dest_connection_open_during_target_loop(monkeypatch: Any, tm
         captured.append("reembed")
         return {"matched_rows": 1, "flushed_chunks": 1, "missing_ids": 1}
 
-    monkeypatch.setattr(reembed_script, "collect_missing_ids", _fake_collect_missing_ids)
+    monkeypatch.setattr(
+        reembed_script, "collect_missing_ids", _fake_collect_missing_ids
+    )
     monkeypatch.setattr(
         reembed_script,
         "reembed_target_missing_rows",

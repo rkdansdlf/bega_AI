@@ -429,9 +429,10 @@ def canonicalize_target(
                     skipped_groups.append(
                         {
                             "canonical_id": canonical_id,
-                            "alias_raw_ids": [primary_alias_raw_id, *secondary_alias_raw_ids][
-                                :sample_limit
-                            ],
+                            "alias_raw_ids": [
+                                primary_alias_raw_id,
+                                *secondary_alias_raw_ids,
+                            ][:sample_limit],
                             "reason": "rebuilt_content_is_multipart",
                         }
                     )
@@ -483,8 +484,16 @@ def canonicalize_target(
                                     season_year_value,
                                     season_id,
                                     league_type_code,
-                                    str(team_id_raw) if team_id_raw is not None else None,
-                                    str(player_id_raw) if player_id_raw is not None else None,
+                                    (
+                                        str(team_id_raw)
+                                        if team_id_raw is not None
+                                        else None
+                                    ),
+                                    (
+                                        str(player_id_raw)
+                                        if player_id_raw is not None
+                                        else None
+                                    ),
                                     target.source_table,
                                     canonical_id,
                                 ),
@@ -512,8 +521,16 @@ def canonicalize_target(
                                     season_year_value,
                                     season_id,
                                     league_type_code,
-                                    str(team_id_raw) if team_id_raw is not None else None,
-                                    str(player_id_raw) if player_id_raw is not None else None,
+                                    (
+                                        str(team_id_raw)
+                                        if team_id_raw is not None
+                                        else None
+                                    ),
+                                    (
+                                        str(player_id_raw)
+                                        if player_id_raw is not None
+                                        else None
+                                    ),
                                     target.source_table,
                                     canonical_id,
                                 ),
@@ -544,7 +561,11 @@ def canonicalize_target(
                                 season_id,
                                 league_type_code,
                                 str(team_id_raw) if team_id_raw is not None else None,
-                                str(player_id_raw) if player_id_raw is not None else None,
+                                (
+                                    str(player_id_raw)
+                                    if player_id_raw is not None
+                                    else None
+                                ),
                                 target.source_table,
                                 primary_alias_raw_id,
                             ),
@@ -698,7 +719,9 @@ def write_report(path_str: str, report: Dict[str, Any]) -> Optional[Path]:
     if not path.is_absolute():
         path = (PROJECT_ROOT / path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     return path
 
 

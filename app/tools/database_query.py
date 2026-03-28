@@ -914,7 +914,9 @@ class DatabaseQueryTool:
                 "batch_lookup": True,
             }
 
-        normalized_names = [str(name or "").strip() for name in player_names if str(name or "").strip()]
+        normalized_names = [
+            str(name or "").strip() for name in player_names if str(name or "").strip()
+        ]
         if not normalized_names:
             return []
 
@@ -1050,7 +1052,9 @@ class DatabaseQueryTool:
                         continue
                     result["batting_stats"] = row_dict
                     result["resolved_player_name"] = row_dict.get("player_name")
-                    result["player_name"] = row_dict.get("player_name") or requested_name
+                    result["player_name"] = (
+                        row_dict.get("player_name") or requested_name
+                    )
                     result["found"] = True
 
             if position in ["pitching", "both"]:
