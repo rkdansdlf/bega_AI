@@ -1,3 +1,4 @@
+from scripts.ingest_from_kbo import TABLE_PROFILES, build_static_source_row_prefix
 from scripts.verify_embedding_coverage import normalize_actual_source_row_id
 
 
@@ -62,3 +63,16 @@ def test_normalize_actual_source_row_id_legacy_alias_maps_to_canonical() -> None
 def test_normalize_actual_source_row_id_legacy_alias_not_found_keeps_legacy() -> None:
     raw = "game_id=20251031LGHH0"
     assert normalize_actual_source_row_id(raw, "game") == "game_id=20251031LGHH0"
+
+
+def test_normalize_actual_source_row_id_static_source_file_keeps_part_suffix() -> None:
+    prefix = build_static_source_row_prefix(
+        "markdown_docs_rules_terms",
+        TABLE_PROFILES["markdown_docs_rules_terms"],
+    )
+    raw = f"{prefix}#part2"
+
+    assert (
+        normalize_actual_source_row_id(raw, "markdown_docs_rules_terms")
+        == f"{prefix}#part2"
+    )

@@ -120,8 +120,9 @@ def test_rag_run_skips_agent_first_for_game_flow_and_drops_team_filter(
         *,
         filters=None,
         use_llm_expansion=False,
+        limit=None,
     ):
-        del use_llm_expansion
+        del use_llm_expansion, limit
         captured["filters"] = dict(filters or {})
         return [
             {
@@ -193,28 +194,24 @@ def test_rag_run_skips_agent_first_for_game_flow_and_drops_team_filter(
     assert result["answer"] == "answer"
 
 
-def test_benchmark_cases_include_game_flow_narrative_bucket() -> None:
-    narrative_cases = [
-        case for case in DEFAULT_CASES if case.category == "game_flow_narrative"
-    ]
+def test_benchmark_cases_include_document_quality_buckets() -> None:
+    categories = {case.category for case in DEFAULT_CASES}
 
-    assert len(narrative_cases) == 3
-    assert all(case.expected_tool is None for case in narrative_cases)
-    assert all(
-        case.expected_top_table == "game_flow_summary" for case in narrative_cases
-    )
+    assert categories == {
+        "markdown_docs",
+        "kbo_regulations",
+        "kbo_definitions",
+    }
+    assert any(case.expected_top_table == "kbo_definitions" for case in DEFAULT_CASES)
 
 
-def test_benchmark_variant_filters_force_game_flow_summary_for_narrative() -> None:
+def test_benchmark_variant_filters_keep_exclusion_list() -> None:
     filters = _build_variant_filters(
         BenchmarkCase(
-            category="game_flow_narrative",
-            query="2025년 5월 1일 경기 흐름 요약해줘",
-            filters={"season_year": 2025},
-            expected_top_table="game_flow_summary",
+            category="markdown_docs",
+            query="플래툰 전략이 뭐야?",
         ),
-        exclude_source_tables=("game_flow_summary",),
+        exclude_source_tables=("kbo_regulations",),
     )
 
-    assert filters["source_table"] == "game_flow_summary"
-    assert filters["_exclude_source_tables"] == ["game_flow_summary"]
+    assert filters["_exclude_source_tables"] == ["kbo_regulations"]

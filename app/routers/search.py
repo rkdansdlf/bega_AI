@@ -44,6 +44,7 @@ async def debug_search(
     # 1. 엔티티 추출 및 검색 전략 분석
     search_strategy = enhance_search_strategy(q)
     entity_filter = search_strategy["entity_filter"]
+    effective_limit = max(limit, int(search_strategy.get("search_limit") or limit))
 
     # 사용자 제공 필터 적용
     filters = search_strategy["db_filters"].copy()
@@ -55,11 +56,11 @@ async def debug_search(
     # 2. 검색 수행
     if use_multi_query:
         docs = await pipeline.retrieve_with_multi_query(
-            q, entity_filter, filters=filters
+            q, entity_filter, filters=filters, limit=effective_limit
         )
         search_method = "multi_query_retrieval"
     else:
-        docs = await pipeline.retrieve(q, filters=filters, limit=limit)
+        docs = await pipeline.retrieve(q, filters=filters, limit=effective_limit)
         search_method = "single_query_retrieval"
 
     # 3. 성능 메트릭 계산
@@ -163,16 +164,20 @@ async def compare_search_methods(
     search_strategy = enhance_search_strategy(q)
     entity_filter = search_strategy["entity_filter"]
     filters = search_strategy["db_filters"]
+    effective_limit = max(limit, int(search_strategy.get("search_limit") or limit))
 
     # 단일 쿼리 검색
     start_single = time.time()
-    docs_single = await pipeline.retrieve(q, filters=filters, limit=limit)
+    docs_single = await pipeline.retrieve(q, filters=filters, limit=effective_limit)
     time_single = (time.time() - start_single) * 1000
 
     # 다중 쿼리 검색
     start_multi = time.time()
     docs_multi = await pipeline.retrieve_with_multi_query(
-        q, entity_filter, filters=filters
+        q,
+        entity_filter,
+        filters=filters,
+        limit=effective_limit,
     )
     time_multi = (time.time() - start_multi) * 1000
 

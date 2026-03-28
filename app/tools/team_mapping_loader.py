@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any, Callable, Dict, List
 
 from psycopg import Connection as PgConnection
@@ -26,11 +28,38 @@ TEAM_MAPPING_ROWS_QUERY = """
         t.team_id ASC;
 """
 
+_TEAM_MAPPING_CACHE_TTL_SECONDS = 300.0
+_team_mapping_cache_lock = RLock()
+_team_mapping_cache_rows: List[Dict[str, Any]] | None = None
+_team_mapping_cache_loaded_at = 0.0
+
 
 @dataclass(frozen=True)
 class TeamMappingLoadResult:
     degraded: bool
     reason: str | None
+
+
+def update_cached_team_mapping_rows(rows: List[Dict[str, Any]]) -> None:
+    copied_rows = [dict(row) for row in rows]
+    with _team_mapping_cache_lock:
+        global _team_mapping_cache_rows
+        global _team_mapping_cache_loaded_at
+        _team_mapping_cache_rows = copied_rows
+        _team_mapping_cache_loaded_at = time.monotonic()
+
+
+def load_cached_team_mapping_rows(
+    max_age_seconds: float = _TEAM_MAPPING_CACHE_TTL_SECONDS,
+) -> List[Dict[str, Any]] | None:
+    with _team_mapping_cache_lock:
+        if _team_mapping_cache_rows is None:
+            return None
+        if max_age_seconds > 0:
+            age = time.monotonic() - _team_mapping_cache_loaded_at
+            if age > max_age_seconds:
+                return None
+        return [dict(row) for row in _team_mapping_cache_rows]
 
 
 def fetch_team_mapping_rows(connection: PgConnection) -> List[Dict[str, Any]]:
@@ -61,6 +90,7 @@ def load_team_mappings_with_retry(
         rows = fetch_rows(connection)
         if rows:
             apply_rows(rows, primary_source)
+            update_cached_team_mapping_rows(rows)
         return TeamMappingLoadResult(degraded=False, reason=None)
     except Exception as exc:
         logger.warning(primary_failure_message, exc)
@@ -72,6 +102,7 @@ def load_team_mappings_with_retry(
             rows = fetch_rows(retry_conn)
         if rows:
             apply_rows(rows, retry_source)
+            update_cached_team_mapping_rows(rows)
             return TeamMappingLoadResult(
                 degraded=True,
                 reason="oci_retry_recovered",

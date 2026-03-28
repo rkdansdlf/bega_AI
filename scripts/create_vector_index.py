@@ -3,14 +3,13 @@ PostgreSQL 데이터베이스에 HNSW 벡터 인덱스를 생성하는 스크립
 이 인덱스는 벡터 유사도 검색 속도를 크게 향상시킵니다.
 """
 
-import os
 import time
 import psycopg
-from dotenv import load_dotenv
 
-load_dotenv("AI/.env")
+from app.config import get_settings
 
-dsn = os.getenv("POSTGRES_DB_URL")
+settings = get_settings()
+dsn = settings.database_url
 print(f"Connecting to database...")
 
 try:
@@ -55,7 +54,7 @@ try:
 
         # 3. Test query performance
         print("\nTesting vector search performance...")
-        vector_str = "[" + ",".join("0.0" for _ in range(1536)) + "]"
+        vector_str = "[" + ",".join("0.0" for _ in range(settings.embed_dim)) + "]"
 
         cur.execute(
             "EXPLAIN ANALYZE SELECT id, (1 - (embedding <=> %s::vector)) as similarity FROM rag_chunks LIMIT 5",

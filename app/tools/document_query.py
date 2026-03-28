@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import OrderedDict
 from contextlib import contextmanager
+from threading import RLock
 from typing import Any, Dict, List
 
 import psycopg
@@ -12,6 +14,7 @@ from psycopg.rows import dict_row
 
 from ..config import Settings
 from ..core.embeddings import embed_texts
+from ..core.exceptions import DBRetrievalError
 from ..core.retrieval import similarity_search
 from .query_logging import (
     ACTION_SEARCH_DOCUMENTS,
@@ -28,6 +31,7 @@ from .query_result import apply_error, apply_list_results, build_search_result
 logger = logging.getLogger(__name__)
 
 DOCUMENT_SOURCE_TABLES = ("markdown_docs", "kbo_definitions", "kbo_regulations")
+_DOCUMENT_SOURCE_TABLE_SET = set(DOCUMENT_SOURCE_TABLES)
 TEMPORAL_KEYWORDS = ("오늘", "지금", "현재", "최신", "최근", "요즘")
 RULE_TERMS_KEYWORDS = ("규정", "규칙", "fa", "abs", "룰", "용어", "뜻", "의미")
 STRATEGY_METRIC_KEYWORDS = (
@@ -60,6 +64,10 @@ CULTURE_HISTORY_KEYWORDS = (
     "홈구장",
     "구장",
 )
+_QUERY_EMBED_CACHE_MAX = 256
+_QUERY_EMBED_CACHE: "OrderedDict[str, List[float]]" = OrderedDict()
+_QUERY_EMBED_CACHE_LOCK = RLock()
+_QUERY_WHITESPACE_RE = re.compile(r"\s+")
 
 
 class DocumentQueryTool:
@@ -67,9 +75,13 @@ class DocumentQueryTool:
 
     COMPONENT = DOCUMENT_QUERY_COMPONENT
 
-    def __init__(self, connection: psycopg.Connection):
+    def __init__(
+        self,
+        connection: psycopg.Connection,
+        settings: Settings | None = None,
+    ):
         self.connection = connection
-        self.settings = Settings()
+        self.settings = settings or Settings()
 
     @contextmanager
     def _connection_scope(self, force_fresh: bool = False):
@@ -309,40 +321,95 @@ class DocumentQueryTool:
         normalized["_score"] = self._score_document(query_lower, normalized)
         return normalized
 
-    def _search_documents_once(
-        self, conn: psycopg.Connection, query: str, limit: int
-    ) -> list[Dict[str, Any]]:
+    def _embed_query(self, query: str) -> list[float]:
+        normalized_query = _QUERY_WHITESPACE_RE.sub(" ", query).strip().casefold()
+        cache_key = f"{self.settings.embed_provider}:{normalized_query}"
+
+        with _QUERY_EMBED_CACHE_LOCK:
+            cached = _QUERY_EMBED_CACHE.get(cache_key)
+            if cached is not None:
+                _QUERY_EMBED_CACHE.move_to_end(cache_key)
+                return list(cached)
+
         embeddings = embed_texts([query], self.settings)
         if not embeddings:
             raise RuntimeError("질문을 임베딩하는 데 실패했습니다.")
 
-        query_lower = query.lower()
-        per_source_limit = max(limit * 2, 5)
-        collected: List[Dict[str, Any]] = []
-        for source_table in DOCUMENT_SOURCE_TABLES:
-            docs = similarity_search(
-                conn,
-                embeddings[0],
-                limit=per_source_limit,
-                filters={"source_table": source_table},
-                keyword=query,
-            )
-            if not docs:
-                docs = similarity_search(
+        embedding = list(embeddings[0])
+        with _QUERY_EMBED_CACHE_LOCK:
+            _QUERY_EMBED_CACHE[cache_key] = embedding
+            _QUERY_EMBED_CACHE.move_to_end(cache_key)
+            while len(_QUERY_EMBED_CACHE) > _QUERY_EMBED_CACHE_MAX:
+                _QUERY_EMBED_CACHE.popitem(last=False)
+        return embedding
+
+    @staticmethod
+    def _filter_document_sources(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            doc
+            for doc in docs
+            if str(doc.get("source_table", "")) in _DOCUMENT_SOURCE_TABLE_SET
+        ]
+
+    @staticmethod
+    def _is_similarity_timeout(exc: DBRetrievalError) -> bool:
+        cause = getattr(exc, "cause", exc)
+        return cause.__class__.__name__ == "QueryCanceled"
+
+    def _search_similarity_documents(
+        self,
+        conn: psycopg.Connection,
+        embedding: list[float],
+        *,
+        query: str,
+        limit: int,
+        keyword: str | None,
+    ) -> list[Dict[str, Any]]:
+        try:
+            return self._filter_document_sources(
+                similarity_search(
                     conn,
-                    embeddings[0],
-                    limit=per_source_limit,
-                    filters={"source_table": source_table},
+                    embedding,
+                    limit=limit,
+                    keyword=keyword,
+                    settings=self.settings,
+                )
+            )
+        except DBRetrievalError as exc:
+            if not self._is_similarity_timeout(exc):
+                raise
+            logger.warning(
+                "[DocumentQuery] similarity search timed out; query=%s hybrid=%s",
+                query,
+                bool(keyword),
+            )
+            return []
+
+    def _search_documents_once(
+        self, conn: psycopg.Connection, query: str, limit: int
+    ) -> list[Dict[str, Any]]:
+        embedding = self._embed_query(query)
+        query_lower = query.lower()
+        candidate_limit = max(limit * 4, 12)
+        collected: List[Dict[str, Any]] = self._search_similarity_documents(
+            conn,
+            embedding,
+            query=query,
+            limit=candidate_limit,
+            keyword=query,
+        )
+        if len(collected) < limit:
+            collected.extend(
+                self._search_similarity_documents(
+                    conn,
+                    embedding,
+                    query=query,
+                    limit=candidate_limit,
                     keyword=None,
                 )
-            collected.extend(docs)
-
-        collected.extend(
-            self._search_exact_term_documents(
-                conn,
-                query_lower,
-                limit=per_source_limit,
             )
+        collected.extend(
+            self._search_exact_term_documents(conn, query_lower, limit=candidate_limit)
         )
 
         deduped: List[Dict[str, Any]] = []

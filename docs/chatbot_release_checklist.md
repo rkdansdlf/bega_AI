@@ -20,6 +20,21 @@
 - full 180: `360 / 360`
   - `/Users/mac/project/KBO_platform/reports/baseball_180_accuracy_20260309_final2_summary.json`
 
+## 2-2. Compose Smoke 기준선
+- compose smoke canonical QA summary:
+  - `/Users/mac/project/KBO_platform/reports/smoke_chatbot_quality_20260327T160439Z_qa.md`
+- canonical baseline inputs:
+  - `regulations_20`: `baseline_summary`, `v1_summary`, `v2_summary`
+  - `llm_canary_20`: `baseline_summary`, `v1_summary`, `v2_summary`, `v3_summary`
+  - `regmix_100`: `baseline_summary`, `v3_summary`, `v4_summary`
+- `llm_canary_20` 규칙:
+  - planner LLM ratio gate는 그대로 유지한다.
+  - latency-only failure일 때만 1회 재측정한다.
+  - stream first-token p95는 비율 기준 외에 `2.0ms` absolute slack을 둔다.
+- preflight:
+  - local dev listener `18001`, `8085`, `18080`, `18081` 가 살아 있으면 smoke를 시작하지 않는다.
+  - local `5432` client pressure가 높으면 smoke를 시작하지 않는다.
+
 ## 3. 최소 검증 순서
 1. 설명형 canary
 ```bash
@@ -69,6 +84,12 @@
 - 팀 지표 질문에서 선수 리더보드 답변이 나오지 않는지 확인한다.
 - stream 응답에서 `##`, `분석 결과`, `출처:` 같은 브리핑형 라인이 남지 않는지 확인한다.
 - latest 질문이 내부 DB 부족 시 `기준 시점`을 포함해 답하는지 확인한다.
+
+## 5-1. Compose Smoke 실행 규칙
+- 기본 실행은 `SMOKE_WARM_CACHE=0 bash bega_AI/scripts/run_smoke_regression.sh` 를 사용한다.
+- compose smoke는 `http://127.0.0.1:8001`의 `ai-chatbot` 직접 경로를 기준으로 본다.
+- coach smoke는 informational PASS/FAIL로만 본다.
+- preflight를 우회해야 하는 특수 상황이 아니면 `SMOKE_ALLOW_EXTRA_LOCAL_DEV_PORTS=1`, `SMOKE_ALLOW_DB_CLIENT_PRESSURE=1`는 쓰지 않는다.
 
 ## 6. 롤백 기준
 - team metric 질문이 다시 선수 상위권 리더보드로 답하면 즉시 롤백 검토

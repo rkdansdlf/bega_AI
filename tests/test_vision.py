@@ -87,13 +87,13 @@ def test_analyze_ticket_openrouter_success(client, mock_settings):
     mock_settings.openrouter_api_key = "test_router_key"
     mock_settings.vision_model = "google/gemini-2.0-flash-001"
 
-    # Mock httpx.AsyncClient
-    with patch("app.routers.vision.httpx.AsyncClient") as mock_client:
+    # Mock shared OpenRouter client
+    with patch("app.routers.vision.get_shared_httpx_client") as mock_get_client:
         mock_instance = AsyncMock()
-        mock_client.return_value.__aenter__.return_value = mock_instance
-
+        mock_get_client.return_value = mock_instance
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
             "choices": [
                 {

@@ -7,8 +7,10 @@
 
 import logging
 import re
+import asyncio
 from datetime import datetime
-from typing import Dict, List, Any, Callable, Optional
+from types import MappingProxyType
+from typing import Dict, List, Any, Callable, Optional, Iterable, Mapping
 from dataclasses import dataclass
 import inspect
 
@@ -46,6 +48,23 @@ class ToolResult:
         return {"success": self.success, "data": self.data, "message": self.message}
 
 
+@dataclass(frozen=True)
+class ToolDefinition:
+    """공유 가능한 불변 도구 정의."""
+
+    tool_name: str
+    description: str
+    parameters_schema: Mapping[str, str]
+    handler_attr: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "parameters_schema",
+            MappingProxyType(dict(self.parameters_schema)),
+        )
+
+
 class ToolCaller:
     """
     도구 호출을 관리하는 클래스
@@ -57,8 +76,80 @@ class ToolCaller:
     4. 오류 처리 및 로깅
     """
 
-    def __init__(self):
-        self.tools: Dict[str, Dict[str, Any]] = {}
+    def __init__(
+        self,
+        *,
+        tools: Optional[Dict[str, Dict[str, Any]]] = None,
+        tool_functions: Optional[Dict[str, Callable]] = None,
+        handler_attrs: Optional[Mapping[str, str]] = None,
+        bound_target: Any = None,
+        tool_descriptions: Optional[str] = None,
+    ):
+        self.tools: Dict[str, Dict[str, Any]] = tools or {}
+        self._tool_functions: Dict[str, Callable] = tool_functions or {}
+        self._handler_attrs: Dict[str, str] = dict(handler_attrs or {})
+        self._bound_target = bound_target
+        self._tool_descriptions = tool_descriptions
+        if not self._tool_functions and not self._handler_attrs:
+            for tool_name, tool_info in self.tools.items():
+                function = tool_info.get("function")
+                if callable(function):
+                    self._tool_functions[tool_name] = function
+
+    @classmethod
+    def from_definitions(
+        cls,
+        definitions: Iterable[ToolDefinition],
+        handler_resolver: Callable[[str], Callable] | None = None,
+        *,
+        bound_target: Any = None,
+        tool_descriptions: Optional[str] = None,
+    ) -> "ToolCaller":
+        definition_items = tuple(definitions)
+        shared_tools: Dict[str, Dict[str, Any]] = {}
+        tool_functions: Dict[str, Callable] = {}
+        handler_attrs: Dict[str, str] = {}
+
+        for definition in definition_items:
+            shared_tools[definition.tool_name] = {
+                "description": definition.description,
+                "parameters_schema": definition.parameters_schema,
+            }
+            handler_attrs[definition.tool_name] = definition.handler_attr
+            if handler_resolver is not None:
+                tool_functions[definition.tool_name] = handler_resolver(
+                    definition.handler_attr
+                )
+
+        return cls(
+            tools=shared_tools,
+            tool_functions=tool_functions or None,
+            handler_attrs=handler_attrs,
+            bound_target=bound_target,
+            tool_descriptions=tool_descriptions
+            or cls.describe_definitions(definition_items),
+        )
+
+    def bind(self, bound_target: Any) -> "ToolCaller":
+        return ToolCaller(
+            tools=self.tools,
+            handler_attrs=self._handler_attrs,
+            bound_target=bound_target,
+            tool_descriptions=self._tool_descriptions,
+        )
+
+    @staticmethod
+    def describe_definitions(definitions: Iterable[ToolDefinition]) -> str:
+        descriptions = []
+        for definition in definitions:
+            descriptions.append(f"**{definition.tool_name}**: {definition.description}")
+            if definition.parameters_schema:
+                param_lines = []
+                for param_name, param_desc in definition.parameters_schema.items():
+                    param_lines.append(f"  - {param_name}: {param_desc}")
+                descriptions.append("\n".join(param_lines))
+            descriptions.append("")
+        return "\n".join(descriptions)
 
     @staticmethod
     def _coerce_year(value: Any) -> int | None:
@@ -167,23 +258,38 @@ class ToolCaller:
             "parameters_schema": parameters_schema,
             "function": function,
         }
+        self._tool_functions[tool_name] = function
+        self._handler_attrs[tool_name] = getattr(function, "__name__", tool_name)
+        self._tool_descriptions = None
         logger.debug(f"[ToolCaller] Registered tool: {tool_name}")
+
+    def _resolve_tool_function(self, tool_name: str) -> Optional[Callable]:
+        tool_function = self._tool_functions.get(tool_name)
+        if tool_function is not None:
+            return tool_function
+
+        handler_attr = self._handler_attrs.get(tool_name)
+        if handler_attr and self._bound_target is not None:
+            return getattr(self._bound_target, handler_attr, None)
+
+        return None
 
     def get_tool_descriptions(self) -> str:
         """등록된 모든 도구들의 설명을 반환합니다."""
-        descriptions = []
-        for tool_name, tool_info in self.tools.items():
-            descriptions.append(f"**{tool_name}**: {tool_info['description']}")
-
-            # 매개변수 정보 추가
-            if tool_info["parameters_schema"]:
-                param_lines = []
-                for param_name, param_desc in tool_info["parameters_schema"].items():
-                    param_lines.append(f"  - {param_name}: {param_desc}")
-                descriptions.append("\n".join(param_lines))
-            descriptions.append("")  # 빈 줄 추가
-
-        return "\n".join(descriptions)
+        if self._tool_descriptions is None:
+            descriptions = []
+            for tool_name, tool_info in self.tools.items():
+                descriptions.append(f"**{tool_name}**: {tool_info['description']}")
+                if tool_info["parameters_schema"]:
+                    param_lines = []
+                    for param_name, param_desc in tool_info[
+                        "parameters_schema"
+                    ].items():
+                        param_lines.append(f"  - {param_name}: {param_desc}")
+                    descriptions.append("\n".join(param_lines))
+                descriptions.append("")
+            self._tool_descriptions = "\n".join(descriptions)
+        return self._tool_descriptions
 
     def execute_tool(self, tool_call: ToolCall) -> ToolResult:
         """
@@ -204,7 +310,11 @@ class ToolCaller:
             return ToolResult(success=False, data={}, message=error_msg)
 
         tool_info = self.tools[tool_call.tool_name]
-        tool_function = tool_info["function"]
+        tool_function = self._resolve_tool_function(tool_call.tool_name)
+        if tool_function is None:
+            error_msg = f"실행 함수가 연결되지 않았습니다: {tool_call.tool_name}"
+            logger.error(f"[ToolCaller] {error_msg}")
+            return ToolResult(success=False, data={}, message=error_msg)
 
         try:
             normalized_parameters, missing_required, dropped_params = (
@@ -286,6 +396,10 @@ class ToolCaller:
 
         return results
 
+    async def execute_tool_async(self, tool_call: ToolCall) -> ToolResult:
+        """단일 도구를 event loop 밖에서 실행합니다."""
+        return await asyncio.to_thread(self.execute_tool, tool_call)
+
     async def execute_multiple_tools_parallel(
         self, tool_calls: List[ToolCall], max_concurrency: int | None = None
     ) -> List[ToolResult]:
@@ -301,8 +415,6 @@ class ToolCaller:
         Returns:
             각 도구의 실행 결과 목록 (입력 순서 유지)
         """
-        import asyncio
-
         logger.info(
             "[ToolCaller] Executing %d tools in parallel (max_concurrency=%s)",
             len(tool_calls),
@@ -317,12 +429,11 @@ class ToolCaller:
 
         async def execute_single_async(tool_call: ToolCall) -> ToolResult:
             """단일 도구를 비동기적으로 실행합니다."""
-            loop = asyncio.get_event_loop()
             if semaphore is None:
-                return await loop.run_in_executor(None, self.execute_tool, tool_call)
+                return await self.execute_tool_async(tool_call)
 
             async with semaphore:
-                return await loop.run_in_executor(None, self.execute_tool, tool_call)
+                return await self.execute_tool_async(tool_call)
 
         # 병렬 실행
         tasks = [execute_single_async(tc) for tc in tool_calls]
@@ -362,5 +473,5 @@ class ToolCaller:
         return {
             "name": tool_name,
             "description": self.tools[tool_name]["description"],
-            "parameters_schema": self.tools[tool_name]["parameters_schema"],
+            "parameters_schema": dict(self.tools[tool_name]["parameters_schema"]),
         }

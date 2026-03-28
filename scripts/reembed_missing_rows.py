@@ -32,6 +32,9 @@ from app.core.chunking import smart_chunks
 from scripts.ingest_from_kbo import (
     ChunkPayload,
     TABLE_PROFILES,
+    UPSERT_SQL,
+    build_static_profile_chunk_payloads,
+    build_static_source_row_prefix,
     build_content,
     build_select_query,
     build_title,
@@ -40,6 +43,7 @@ from scripts.ingest_from_kbo import (
     flush_chunks,
     get_primary_key_columns,
 )
+from scripts.sync_rag_chunks import _load_settings_from_env_file
 
 if TYPE_CHECKING:
     from scripts.verify_embedding_coverage import CoverageTarget
@@ -67,6 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--read-batch-size", type=int, default=500)
     parser.add_argument("--max-concurrency", type=int, default=1)
     parser.add_argument("--commit-interval", type=int, default=500)
+    parser.add_argument(
+        "--source-env-file",
+        default="",
+        help="Env file used to resolve source DB config when --source-db-url is omitted.",
+    )
+    parser.add_argument(
+        "--dest-env-file",
+        default="",
+        help="Env file used to resolve destination DB config when settings.database_url should be overridden.",
+    )
     parser.add_argument(
         "--source-db-url",
         default="",
@@ -135,6 +149,7 @@ def collect_missing_ids(
 def _append_chunks(
     *,
     buffer: List[ChunkPayload],
+    settings: Any,
     source_table: str,
     source_row_id: str,
     title: str,
@@ -146,7 +161,7 @@ def _append_chunks(
     player_id: Optional[str],
     meta: Dict[str, Any],
 ) -> None:
-    chunks = smart_chunks(content)
+    chunks = smart_chunks(content, settings=settings)
     if not chunks:
         return
     if len(chunks) == 1:
@@ -183,6 +198,96 @@ def _append_chunks(
         )
 
 
+def _prepare_dest_cursor(write_cur: Any) -> None:
+    write_cur.execute("SET search_path TO public, extensions, security;")
+    write_cur.execute("SET statement_timeout TO 0;")
+
+
+def _copy_existing_chunk_rows(
+    *,
+    source_conn: psycopg.Connection,
+    dest_conn: psycopg.Connection,
+    target: CoverageTarget,
+    missing_ids: Set[str],
+) -> Set[str]:
+    if not missing_ids:
+        return set()
+
+    with source_conn.cursor(row_factory=dict_row) as source_cur:
+        source_cur.execute(
+            """
+            SELECT
+                meta,
+                season_year,
+                season_id,
+                league_type_code,
+                team_id,
+                player_id,
+                source_table,
+                source_row_id,
+                title,
+                content,
+                embedding::text AS embedding_text
+            FROM rag_chunks
+            WHERE source_table = %s
+              AND source_row_id = ANY(%s)
+            """,
+            (target.source_table, list(missing_ids)),
+        )
+        rows = [dict(row) for row in source_cur.fetchall()]
+
+    if not rows:
+        return set()
+
+    payload: List[tuple[Any, ...]] = []
+    copied_ids: Set[str] = set()
+    for row in rows:
+        copied_ids.add(str(row["source_row_id"]))
+        meta = row.get("meta")
+        payload.append(
+            (
+                (
+                    json.dumps(meta, ensure_ascii=False, default=str)
+                    if meta is not None
+                    else None
+                ),
+                row.get("season_year"),
+                row.get("season_id"),
+                row.get("league_type_code"),
+                row.get("team_id"),
+                row.get("player_id"),
+                row.get("source_table"),
+                row.get("source_row_id"),
+                row.get("title"),
+                row.get("content"),
+                row.get("embedding_text"),
+            )
+        )
+
+    with dest_conn.cursor() as write_cur:
+        _prepare_dest_cursor(write_cur)
+        write_cur.executemany(UPSERT_SQL, payload)
+    dest_conn.commit()
+    return copied_ids
+
+
+def build_static_target_payloads(
+    target: CoverageTarget,
+    *,
+    settings: Any,
+) -> List[ChunkPayload]:
+    profile = TABLE_PROFILES.get(target.table, {})
+    if not profile.get("source_file"):
+        raise ValueError(
+            f"Coverage target '{target.table}' is not a static source_file profile"
+        )
+    return build_static_profile_chunk_payloads(
+        target.table,
+        profile,
+        settings=settings,
+    )
+
+
 def reembed_target_missing_rows(
     *,
     source_conn: psycopg.Connection,
@@ -198,6 +303,57 @@ def reembed_target_missing_rows(
 
     table = target.table
     profile = TABLE_PROFILES.get(table, {})
+    settings = get_settings()
+    copied_ids: Set[str] = set()
+    if not profile.get("source_file"):
+        copied_ids = _copy_existing_chunk_rows(
+            source_conn=source_conn,
+            dest_conn=dest_conn,
+            target=target,
+            missing_ids=missing_ids,
+        )
+    remaining_missing_ids = set(missing_ids) - copied_ids
+    if not remaining_missing_ids:
+        return {
+            "missing_ids": len(missing_ids),
+            "matched_rows": len(copied_ids),
+            "flushed_chunks": len(copied_ids),
+        }
+
+    if profile.get("source_file"):
+        payloads = build_static_target_payloads(target, settings=settings)
+        static_prefix = build_static_source_row_prefix(table, profile)
+        with dest_conn.cursor() as write_cur:
+            _prepare_dest_cursor(write_cur)
+            write_cur.execute(
+                """
+                DELETE FROM rag_chunks
+                WHERE source_table = %s
+                  AND (source_row_id = %s OR source_row_id LIKE %s)
+                """,
+                (
+                    target.source_table,
+                    static_prefix,
+                    f"{static_prefix}#part%",
+                ),
+            )
+            buffer = list(payloads)
+            flushed_chunks = flush_chunks(
+                write_cur,
+                settings,
+                buffer,
+                max_concurrency=max_concurrency,
+                commit_interval=commit_interval,
+                stats={"since_commit": 0},
+                skip_embedding=False,
+            )
+        dest_conn.commit()
+        return {
+            "missing_ids": len(missing_ids),
+            "matched_rows": 1 if payloads else 0,
+            "flushed_chunks": flushed_chunks,
+        }
+
     pk_columns = get_primary_key_columns(source_conn, table)
     pk_hint: Sequence[str] = profile.get("pk_hint", [])
     season_year_filter = target.year if target.year != 0 else None
@@ -210,7 +366,6 @@ def reembed_target_missing_rows(
         since=None,
     )
     source_table = target.source_table
-    settings = get_settings()
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     buffer: List[ChunkPayload] = []
     stats: Dict[str, Any] = {"since_commit": 0}
@@ -222,7 +377,7 @@ def reembed_target_missing_rows(
         source_conn.cursor(row_factory=dict_row) as read_cur,
         dest_conn.cursor() as write_cur,
     ):
-        write_cur.execute("SET statement_timeout TO 0;")
+        _prepare_dest_cursor(write_cur)
         read_cur.execute(query, params)
 
         while True:
@@ -237,7 +392,7 @@ def reembed_target_missing_rows(
                     pk_columns=pk_columns,
                     pk_hint=pk_hint,
                 )
-                if source_row_id not in missing_ids:
+                if source_row_id not in remaining_missing_ids:
                     continue
                 if source_row_id in seen_source_row_ids:
                     continue
@@ -281,6 +436,7 @@ def reembed_target_missing_rows(
 
                 _append_chunks(
                     buffer=buffer,
+                    settings=settings,
                     source_table=source_table,
                     source_row_id=source_row_id,
                     title=title,
@@ -319,8 +475,8 @@ def reembed_target_missing_rows(
 
     return {
         "missing_ids": len(missing_ids),
-        "matched_rows": matched_rows,
-        "flushed_chunks": flushed_chunks,
+        "matched_rows": matched_rows + len(copied_ids),
+        "flushed_chunks": flushed_chunks + len(copied_ids),
     }
 
 
@@ -343,12 +499,21 @@ def main() -> int:
         print("[WARN] --supabase-url is deprecated. Use --source-db-url instead.")
         source_db_url = args.supabase_url.strip()
     if not source_db_url:
-        source_db_url = settings.source_db_url
+        if args.source_env_file.strip():
+            source_db_url = _load_settings_from_env_file(
+                args.source_env_file
+            ).database_url
+        else:
+            source_db_url = settings.source_db_url
+
+    dest_db_url = settings.database_url
+    if args.dest_env_file.strip():
+        dest_db_url = _load_settings_from_env_file(args.dest_env_file).database_url
 
     with psycopg.connect(source_db_url, autocommit=True) as source_conn:
-        with psycopg.connect(settings.database_url) as dest_conn:
+        with psycopg.connect(dest_db_url) as dest_conn:
             with dest_conn.cursor() as cur:
-                cur.execute("SET statement_timeout TO 0;")
+                _prepare_dest_cursor(cur)
 
             for idx, target in enumerate(targets, start=1):
                 print(

@@ -85,6 +85,14 @@ class TestSimilaritySearchExceptions:
                 similarity_search(conn, [0.1] * 768, limit=5)
         assert isinstance(exc_info.value.cause, psycopg.InterfaceError)
 
+    def test_query_canceled_raises_db_retrieval_error(self):
+        """QueryCanceled → DBRetrievalError로 변환되어야 한다."""
+        conn = _make_dummy_conn(psycopg.errors.QueryCanceled)
+        with patch("app.core.retrieval._rag_chunks_exists", return_value=True):
+            with pytest.raises(DBRetrievalError) as exc_info:
+                similarity_search(conn, [0.1] * 768, limit=5)
+        assert isinstance(exc_info.value.cause, psycopg.errors.QueryCanceled)
+
     def test_undefined_table_returns_empty_list(self):
         """UndefinedTable은 기존처럼 예외 없이 [] 반환이어야 한다."""
         conn = _make_dummy_conn(psycopg.errors.UndefinedTable)
@@ -155,6 +163,64 @@ class TestRetrieveFlag:
         result = asyncio.run(run())
         assert result == [fake_doc]
         assert pipeline._retrieval_error is None
+
+    def test_retrieve_skips_hyde_by_default(self):
+        """retrieve() 기본 경로는 HyDE를 사용하지 않아야 한다."""
+        pipeline = self._make_pipeline()
+        fake_doc = {"id": 2, "title": "기본", "content": "기본 내용", "meta": {}}
+
+        async def run():
+            with patch(
+                "app.core.rag.async_embed_query",
+                new_callable=AsyncMock,
+                return_value=[0.1] * 768,
+            ):
+                with patch(
+                    "app.core.rag.similarity_search",
+                    return_value=[fake_doc],
+                ):
+                    with patch.object(
+                        pipeline,
+                        "_generate",
+                        new_callable=AsyncMock,
+                        return_value="가설 문서",
+                    ) as mock_generate:
+                        result = await pipeline.retrieve("테스트 쿼리")
+                        mock_generate.assert_not_called()
+            return result
+
+        result = asyncio.run(run())
+        assert result == [fake_doc]
+
+    def test_retrieve_enables_hyde_only_when_requested(self):
+        """use_hyde=True일 때만 가설 문서 생성이 호출되어야 한다."""
+        pipeline = self._make_pipeline()
+        fake_doc = {"id": 3, "title": "HyDE", "content": "HyDE 내용", "meta": {}}
+
+        async def run():
+            with patch.object(
+                pipeline,
+                "_generate",
+                new_callable=AsyncMock,
+                return_value="가설 문서 결과",
+            ) as mock_generate:
+                with patch(
+                    "app.core.rag.async_embed_query",
+                    new_callable=AsyncMock,
+                    return_value=[0.1] * 768,
+                ) as mock_embed:
+                    with patch(
+                        "app.core.rag.similarity_search",
+                        return_value=[fake_doc],
+                    ):
+                        result = await pipeline.retrieve("테스트 쿼리", use_hyde=True)
+            return result, mock_generate, mock_embed
+
+        result, mock_generate, mock_embed = asyncio.run(run())
+        assert result == [fake_doc]
+        mock_generate.assert_awaited_once()
+        mock_embed.assert_awaited_once()
+        assert mock_embed.await_args.args[0] == "가설 문서 결과"
 
 
 # ---------------------------------------------------------------------------
