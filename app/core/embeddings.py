@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import httpx
 
 from ..config import Settings
+from .http_clients import get_shared_httpx_client
 
 logger = logging.getLogger(__name__)
 
@@ -53,37 +54,42 @@ def _normalize_query(text: str) -> str:
 
 
 def _embed_signature(settings: Settings) -> str:
-    provider = settings.embed_provider or "unknown"
-    env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
-    embed_dim = str(env_dim) if env_dim else ""
+    provider = getattr(settings, "embed_provider", None) or "unknown"
+    embed_dim_value = getattr(settings, "embed_dim", None)
+    embed_dim = str(embed_dim_value) if embed_dim_value else ""
 
     if provider == "openai":
         model = (
-            settings.openai_embed_model
-            or settings.embed_model
+            getattr(settings, "openai_embed_model", None)
+            or getattr(settings, "embed_model", None)
             or "text-embedding-3-small"
         )
         return f"{provider}:{model}:{embed_dim}"
     if provider == "openrouter":
         model = (
-            settings.openrouter_embed_model
-            or settings.embed_model
+            getattr(settings, "openrouter_embed_model", None)
+            or getattr(settings, "embed_model", None)
             or "openai/text-embedding-3-small"
         )
         return f"{provider}:{model}:{embed_dim}"
     if provider == "gemini":
-        model = settings.gemini_embed_model or settings.embed_model or ""
+        model = (
+            getattr(settings, "gemini_embed_model", None)
+            or getattr(settings, "embed_model", None)
+            or ""
+        )
         return f"{provider}:{model}:{embed_dim}"
     if provider == "hf":
-        env_model = getattr(settings, "hf_embed_model", None) or os.getenv(
-            "HF_EMBED_MODEL"
+        model = getattr(settings, "embed_model", None) or getattr(
+            settings,
+            "hf_embed_model",
+            None,
         )
-        model = settings.embed_model or env_model or "intfloat/multilingual-e5-large"
         return f"{provider}:{model}"
     if provider == "local":
         return f"{provider}:local"
 
-    model = settings.embed_model or ""
+    model = getattr(settings, "embed_model", None) or ""
     return f"{provider}:{model}:{embed_dim}"
 
 
@@ -126,8 +132,7 @@ def _ensure_dimension(
 
 async def _embed_local(texts: Sequence[str], settings: Settings) -> List[List[float]]:
     """로컬 테스트를 위해 결정론적인 사인파 기반 벡터를 생성합니다."""
-    env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
-    dim = int(env_dim) if env_dim else 1536
+    dim = max(1, int(settings.embed_dim))
 
     vectors: List[List[float]] = []
     for text in texts:
@@ -153,10 +158,8 @@ async def _embed_hf(
         ) from exc
 
     # 설정 또는 환경 변수에서 모델 이름과 배치 크기를 가져옵니다.
-    env_model = getattr(settings, "hf_embed_model", None) or os.getenv("HF_EMBED_MODEL")
-    model_name = settings.embed_model or env_model or "intfloat/multilingual-e5-large"
-    env_batch = getattr(settings, "hf_embed_batch", None) or os.getenv("HF_BATCH")
-    batch_size = int(env_batch) if env_batch else 16
+    model_name = settings.embed_model or settings.hf_embed_model
+    batch_size = max(1, int(settings.hf_embed_batch))
     if batch_size <= 0:
         batch_size = len(texts) or 1
 
@@ -190,17 +193,12 @@ async def _embed_gemini(
     if not raw_model:
         raise EmbeddingError("GEMINI_EMBED_MODEL이 설정되어 있지 않습니다.")
     model_path = raw_model if raw_model.startswith("models/") else f"models/{raw_model}"
-    env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
-    embed_dim = int(env_dim) if env_dim else 1536
-    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv(
-        "EMBED_BATCH_SIZE"
-    )
-    batch_size = int(env_batch) if env_batch else 32
+    embed_dim = max(1, int(settings.embed_dim))
+    batch_size = max(1, int(settings.embed_batch_size))
     if batch_size <= 0:
         batch_size = len(texts) or 1
-    env_token_limit = os.getenv("GEMINI_MAX_TOKENS")
-    max_tokens = int(env_token_limit) if env_token_limit else 3072
-    rpm = int(os.getenv("GEMINI_RPM") or 60)  # 분당 요청 수 제한
+    max_tokens = max(1, int(settings.gemini_embed_max_tokens))
+    rpm = max(1, int(settings.gemini_embed_rpm))
     min_delay = 60.0 / rpm if rpm > 0 else 0.0
     max_retries = 5
 
@@ -213,14 +211,16 @@ async def _embed_gemini(
         "X-Goog-Api-Key": settings.gemini_api_key,
     }
 
-    # 동시성 제어를 위한 HTTP 클라이언트 설정을 구성합니다.
     effective_concurrency = max(max_concurrency, 1)
-    limits = httpx.Limits(
-        max_connections=effective_concurrency,
-        max_keepalive_connections=1,
+    client = get_shared_httpx_client(
+        "embeddings-gemini",
+        timeout=httpx.Timeout(30.0, connect=10.0, read=30.0, pool=10.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
 
-    async def post_chunk(chunk: Sequence[str]) -> List[List[float]]:
+    async def post_chunk(
+        chunk: Sequence[str], client: httpx.AsyncClient
+    ) -> List[List[float]]:
         """텍스트 청크를 API에 전송하고 임베딩 결과를 받습니다."""
         prepared_texts: List[str] = []
         for text in chunk:
@@ -245,13 +245,12 @@ async def _embed_gemini(
                 for text in prepared_texts
             ],
         }
-        async with httpx.AsyncClient(timeout=30.0, limits=limits) as client:
-            response = await client.post(
-                url,
-                params=params,
-                headers=headers,
-                content=json.dumps(payload, ensure_ascii=False),
-            )
+        response = await client.post(
+            url,
+            params=params,
+            headers=headers,
+            content=json.dumps(payload, ensure_ascii=False),
+        )
         try:
             response.raise_for_status()
             data = response.json()
@@ -296,7 +295,7 @@ async def _embed_gemini(
             backoff = 1.0
             while True:
                 try:
-                    chunk_vectors = await post_chunk(chunk)
+                    chunk_vectors = await post_chunk(chunk, client)
                     results_map[idx] = chunk_vectors
                     break
                 except (EmbeddingError, httpx.HTTPError) as exc:
@@ -358,21 +357,18 @@ async def _embed_openai(
         "Content-Type": "application/json",
     }
 
-    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv(
-        "EMBED_BATCH_SIZE"
-    )
-    batch_size = int(env_batch) if env_batch else 32
+    batch_size = max(1, int(settings.embed_batch_size))
     if batch_size <= 0:
         batch_size = len(texts) or 1
 
     max_retries = 5
 
     effective_concurrency = max(max_concurrency, 1)
-    limits = httpx.Limits(
-        max_connections=effective_concurrency,
-        max_keepalive_connections=1,
+    client = get_shared_httpx_client(
+        "embeddings-openai",
+        timeout=httpx.Timeout(60.0, connect=10.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
-    timeout = httpx.Timeout(60.0, connect=10.0)
 
     async def post_chunk(
         chunk: Sequence[str], client: httpx.AsyncClient
@@ -450,10 +446,9 @@ async def _embed_openai(
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, 30.0)
 
-    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
-        await asyncio.gather(
-            *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
-        )
+    await asyncio.gather(
+        *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
+    )
 
     # 순서대로 결과 취합
     results: List[List[float]] = []
@@ -465,8 +460,7 @@ async def _embed_openai(
             f"OpenAI 응답 수가 입력 수와 일치하지 않습니다. 입력={len(texts)}, 출력={len(results)}"
         )
 
-    env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
-    expected_dim = int(env_dim) if env_dim else None
+    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
     _ensure_dimension(results, expected_dim)
     return results
 
@@ -500,10 +494,7 @@ async def _embed_openrouter(
     else:
         headers.setdefault("X-Title", "KBO-Embedding")
 
-    env_batch = getattr(settings, "embed_batch_size", None) or os.getenv(
-        "EMBED_BATCH_SIZE"
-    )
-    batch_size = int(env_batch) if env_batch else 100
+    batch_size = max(1, int(settings.embed_batch_size))
     if batch_size <= 0:
         batch_size = 100
 
@@ -516,11 +507,11 @@ async def _embed_openrouter(
     effective_concurrency = max(max_concurrency, 1)
     semaphore = asyncio.Semaphore(effective_concurrency)
 
-    limits = httpx.Limits(
-        max_connections=effective_concurrency,
-        max_keepalive_connections=1,
+    client = get_shared_httpx_client(
+        "embeddings-openrouter",
+        timeout=httpx.Timeout(60.0, connect=10.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
-    timeout = httpx.Timeout(60.0, connect=10.0)
 
     async def post_chunk(
         chunk: Sequence[str], client: httpx.AsyncClient
@@ -591,22 +582,16 @@ async def _embed_openrouter(
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, 30.0)
 
-    async with httpx.AsyncClient(
-        timeout=timeout,
-        limits=limits,
-        follow_redirects=False,
-    ) as client:
-        await asyncio.gather(
-            *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
-        )
+    await asyncio.gather(
+        *(post_with_limit(i, chunk, client) for i, chunk in enumerate(batches))
+    )
 
     # 순서대로 결과 취합
     results: List[List[float]] = []
     for i in range(len(batches)):
         results.extend(results_map[i])
 
-    env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
-    expected_dim = int(env_dim) if env_dim else None
+    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
     _ensure_dimension(results, expected_dim)
     return results
 
@@ -625,8 +610,7 @@ async def async_embed_texts(
         return await _embed_local(texts, settings)
     if provider == "hf":
         vectors = await _embed_hf(texts, settings, max_concurrency=max_concurrency)
-        env_dim = getattr(settings, "embed_dim", None) or os.getenv("EMBED_DIM")
-        expected_dim = int(env_dim) if env_dim else None
+        expected_dim = int(settings.embed_dim) if settings.embed_dim else None
         _ensure_dimension(vectors, expected_dim)
         return vectors
     if provider == "gemini":

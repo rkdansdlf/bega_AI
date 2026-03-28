@@ -7,6 +7,7 @@ import logging
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import get_settings
+from app.agents.runtime_factory import create_baseball_agent_runtime
 from app.core.rag import RAGPipeline
 import psycopg
 
@@ -23,7 +24,12 @@ async def verify_retrieval(query: str):
     try:
         # RAGPipeline expects a sync connection
         with psycopg.connect(db_url) as conn:
-            pipeline = RAGPipeline(settings=settings, connection=conn)
+            runtime = create_baseball_agent_runtime(settings)
+            pipeline = RAGPipeline(
+                settings=settings,
+                connection=conn,
+                agent_runtime=runtime,
+            )
 
             print(f"Querying: {query}")
             docs = await pipeline.retrieve(query, limit=5)

@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from ..core.entity_extractor import extract_entities_from_query, extract_team
 from .tool_caller import ToolCall
@@ -50,10 +50,10 @@ class ChatIntentRouter:
     def __init__(
         self,
         *,
-        resolve_reference_year: Callable[[str, Any], int],
-        detect_team_alias: Callable[[str], Optional[str]],
-        resolve_award_query_type: Callable[[str, Any], Optional[str]],
-        build_team_tool_calls: Callable[[str, str, int], list[ToolCall]],
+        resolve_reference_year=None,
+        detect_team_alias=None,
+        resolve_award_query_type=None,
+        build_team_tool_calls=None,
         fast_path_enabled: bool,
         fast_path_scope: str,
     ) -> None:
@@ -64,14 +64,40 @@ class ChatIntentRouter:
         self._fast_path_enabled = fast_path_enabled
         self._fast_path_scope = fast_path_scope
 
+    def bind(self, agent: Any) -> "_BoundChatIntentRouter":
+        return _BoundChatIntentRouter(router=self, agent=agent)
+
     def resolve(
         self,
         query: str,
         entity_filter: Any,
         context: Optional[dict[str, Any]] = None,
+        *,
+        agent: Any = None,
     ) -> IntentDecision:
+        resolve_reference_year = (
+            agent._resolve_reference_year
+            if agent is not None
+            else self._resolve_reference_year
+        )
+        detect_team_alias = (
+            agent._detect_team_alias_from_query
+            if agent is not None
+            else self._detect_team_alias
+        )
+        resolve_award_query_type = (
+            agent._resolve_award_query_type
+            if agent is not None
+            else self._resolve_award_query_type
+        )
+        build_team_tool_calls = (
+            agent._build_team_fast_path_tool_calls
+            if agent is not None
+            else self._build_team_tool_calls
+        )
+
         query_lower = query.lower()
-        season_year = self._resolve_reference_year(query, entity_filter)
+        season_year = resolve_reference_year(query, entity_filter)
         if self._is_vague_followup_query(query_lower):
             previous_query = self._find_previous_user_question(context, query)
             if previous_query:
@@ -80,6 +106,7 @@ class ChatIntentRouter:
                     previous_query,
                     previous_entity_filter,
                     None,
+                    agent=agent,
                 )
                 delegated_intent = delegated.resolved_intent or delegated.intent
                 if delegated_intent != ChatIntent.UNKNOWN:
@@ -117,7 +144,7 @@ class ChatIntentRouter:
         team_name = (
             getattr(entity_filter, "team_id", None)
             or extract_team(query)
-            or self._detect_team_alias(query)
+            or detect_team_alias(query)
         )
         player_name = (
             getattr(entity_filter, "player_name", None)
@@ -126,6 +153,86 @@ class ChatIntentRouter:
         )
         game_id_match = re.search(r"\b\d{8}[A-Z]{4}\d\b", query)
         extracted_date = self._extract_date(query, query_lower)
+        explicit_metric = self._resolve_leaderboard_spec(query_lower)
+
+        comparison_tool_calls = self._build_player_comparison_tool_calls(
+            query=query,
+            query_lower=query_lower,
+            season_year=season_year,
+        )
+        if comparison_tool_calls:
+            comparison_type = str(
+                comparison_tool_calls[0].parameters.get("comparison_type") or "season"
+            )
+            metric_policy = (
+                "player_comparison_career"
+                if comparison_type == "career"
+                else "player_comparison_season"
+            )
+            return IntentDecision(
+                intent=ChatIntent.PLAYER_LOOKUP,
+                planner_mode="fast_path",
+                tool_calls=comparison_tool_calls,
+                subject_type="player_comparison",
+                season_year=season_year,
+                metric_policy=metric_policy,
+                confidence=0.97,
+                analysis="두 선수 비교 질의로 판단되어 compare_players fast-path를 사용합니다.",
+            )
+
+        schedule_bundle_tool_calls = self._build_schedule_bundle_tool_calls(
+            query_lower=query_lower,
+            extracted_date=extracted_date,
+            game_id=game_id_match.group(0) if game_id_match else None,
+            team_name=team_name,
+        )
+        if schedule_bundle_tool_calls:
+            return IntentDecision(
+                intent=ChatIntent.SCHEDULE_LOOKUP,
+                planner_mode="fast_path_bundle",
+                tool_calls=schedule_bundle_tool_calls,
+                subject_type="schedule_bundle",
+                season_year=season_year,
+                metric_policy="schedule_lineup_box_score_bundle",
+                confidence=0.97,
+                analysis="일정/라인업/박스스코어 복합 질의로 판단되어 deterministic bundle fast-path를 사용합니다.",
+            )
+
+        team_bundle_tool_calls = self._build_team_analysis_bundle_tool_calls(
+            query_lower=query_lower,
+            team_name=team_name,
+            season_year=season_year,
+        )
+        if team_bundle_tool_calls:
+            return IntentDecision(
+                intent=ChatIntent.TEAM_ANALYSIS,
+                planner_mode="fast_path_bundle",
+                tool_calls=team_bundle_tool_calls,
+                subject_type="team_bundle",
+                season_year=season_year,
+                metric_policy="team_recent_bullpen_bundle",
+                confidence=0.97,
+                analysis=f"{team_name} 팀의 최근 흐름/불펜 복합 질의로 판단되어 deterministic bundle fast-path를 사용합니다.",
+            )
+
+        player_bundle_tool_calls = self._build_player_validation_bundle_tool_calls(
+            query_lower=query_lower,
+            player_name=player_name,
+            season_year=season_year,
+            explicit_metric=explicit_metric,
+        )
+        if player_bundle_tool_calls:
+            position = self._resolve_player_lookup_position(query_lower)
+            return IntentDecision(
+                intent=ChatIntent.PLAYER_LOOKUP,
+                planner_mode="fast_path_bundle",
+                tool_calls=player_bundle_tool_calls,
+                subject_type="player_bundle",
+                season_year=season_year,
+                metric_policy=f"player_validation_bundle_{position}",
+                confidence=0.96,
+                analysis="선수 검증/기록/리더보드가 함께 필요한 복합 질의로 판단되어 deterministic bundle fast-path를 사용합니다.",
+            )
 
         if self._is_game_flow_narrative_query(query_lower) and (
             game_id_match or extracted_date
@@ -150,7 +257,11 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.TEAM_ANALYSIS,
                 planner_mode="fast_path",
-                tool_calls=self._build_team_tool_calls(query, team_name, season_year),
+                tool_calls=build_team_tool_calls(
+                    query,
+                    team_name,
+                    season_year,
+                ),
                 subject_type="team",
                 season_year=season_year,
                 metric_policy="team_fast_path",
@@ -170,7 +281,7 @@ class ChatIntentRouter:
                 analysis="규정성 질문으로 판단되어 규정 검색 fast-path를 사용합니다.",
             )
 
-        award_type = self._resolve_award_query_type(query, entity_filter)
+        award_type = resolve_award_query_type(query, entity_filter)
         if award_type:
             parameters: dict[str, Any] = {"year": season_year}
             if award_type != "any":
@@ -241,7 +352,11 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.TEAM_ANALYSIS,
                 planner_mode="fast_path",
-                tool_calls=self._build_team_tool_calls(query, team_name, season_year),
+                tool_calls=build_team_tool_calls(
+                    query,
+                    team_name,
+                    season_year,
+                ),
                 subject_type="team_metric",
                 season_year=season_year,
                 metric_policy="team_metric_lookup",
@@ -249,7 +364,6 @@ class ChatIntentRouter:
                 analysis=f"{team_name} 팀 지표 질문으로 판단되어 team fast-path를 사용합니다.",
             )
 
-        explicit_metric = self._resolve_leaderboard_spec(query_lower)
         if explicit_metric and not player_name:
             position, stat_name = explicit_metric
             return IntentDecision(
@@ -429,38 +543,7 @@ class ChatIntentRouter:
             )
 
         if player_name and self._is_player_lookup_query(query_lower):
-            position = "both"
-            pitching_stat_tokens = [
-                "투수",
-                "평균자책",
-                "평균 자책",
-                "평균자책점",
-                "방어율",
-                "era",
-                "whip",
-                "세이브",
-                "save",
-                "홀드",
-                "hold",
-                "탈삼진",
-                "삼진",
-                "다승",
-                "wins",
-            ]
-            batting_stat_tokens = [
-                "타자",
-                "타율",
-                "ops",
-                "홈런",
-                "타점",
-                "출루율",
-                "장타율",
-                "안타",
-            ]
-            if any(token in query_lower for token in pitching_stat_tokens):
-                position = "pitching"
-            elif any(token in query_lower for token in batting_stat_tokens):
-                position = "batting"
+            position = self._resolve_player_lookup_position(query_lower)
             return IntentDecision(
                 intent=ChatIntent.PLAYER_LOOKUP,
                 planner_mode="fast_path",
@@ -720,6 +803,250 @@ class ChatIntentRouter:
         for tokens, spec in stat_specs:
             if any(token in query_lower for token in tokens):
                 return spec
+        return None
+
+    def _resolve_player_lookup_position(self, query_lower: str) -> str:
+        pitching_stat_tokens = [
+            "투수",
+            "평균자책",
+            "평균 자책",
+            "평균자책점",
+            "방어율",
+            "era",
+            "whip",
+            "세이브",
+            "save",
+            "홀드",
+            "hold",
+            "탈삼진",
+            "삼진",
+            "다승",
+            "wins",
+        ]
+        batting_stat_tokens = [
+            "타자",
+            "타율",
+            "ops",
+            "홈런",
+            "타점",
+            "타석",
+            "장타",
+            "출루",
+            "볼넷",
+            "출루율",
+            "장타율",
+            "안타",
+        ]
+        if any(token in query_lower for token in pitching_stat_tokens):
+            return "pitching"
+        if any(token in query_lower for token in batting_stat_tokens):
+            return "batting"
+        return "both"
+
+    def _build_team_analysis_bundle_tool_calls(
+        self,
+        *,
+        query_lower: str,
+        team_name: Optional[str],
+        season_year: int,
+    ) -> list[ToolCall]:
+        if not team_name:
+            return []
+        if not self._is_team_analysis_query(query_lower, team_name):
+            return []
+
+        has_recent_scope = any(
+            token in query_lower
+            for token in [
+                "최근",
+                "5경기",
+                "10경기",
+                "흐름",
+                "페이스",
+                "폼",
+                "요즘",
+                "살아난",
+                "식은",
+                "올라오는",
+                "내려가는",
+            ]
+        )
+        has_bullpen_scope = any(
+            token in query_lower for token in ["불펜", "필승조", "갈아", "퍼진"]
+        )
+        if not (has_recent_scope and has_bullpen_scope):
+            return []
+
+        recent_limit = 10 if "10경기" in query_lower else 5
+        return [
+            ToolCall(
+                "get_team_summary",
+                {"team_name": team_name, "year": season_year},
+            ),
+            ToolCall(
+                "get_team_advanced_metrics",
+                {"team_name": team_name, "year": season_year},
+            ),
+            ToolCall(
+                "get_recent_games_by_team",
+                {
+                    "team_name": team_name,
+                    "year": season_year,
+                    "limit": recent_limit,
+                },
+            ),
+        ]
+
+    def _build_schedule_bundle_tool_calls(
+        self,
+        *,
+        query_lower: str,
+        extracted_date: Optional[str],
+        game_id: Optional[str],
+        team_name: Optional[str],
+    ) -> list[ToolCall]:
+        if not extracted_date and not game_id:
+            return []
+
+        wants_schedule = any(
+            token in query_lower for token in ["경기", "일정", "몇 시", "몇시"]
+        )
+        wants_lineup = any(
+            token in query_lower for token in ["라인업", "선발", "스타팅", "타순"]
+        )
+        wants_box_score = (
+            self._is_box_score_query(query_lower)
+            or self._is_game_flow_narrative_query(query_lower)
+            or any(token in query_lower for token in ["스코어", "점수", "결과"])
+        )
+
+        if not wants_lineup or not (wants_schedule or wants_box_score):
+            return []
+
+        tool_calls: list[ToolCall] = []
+        if extracted_date:
+            schedule_params: dict[str, Any] = {"date": extracted_date}
+            if team_name:
+                schedule_params["team"] = team_name
+            tool_calls.append(ToolCall("get_games_by_date", schedule_params))
+
+        lineup_params: dict[str, Any] = {}
+        if game_id:
+            lineup_params["game_id"] = game_id
+        elif extracted_date:
+            lineup_params["date"] = extracted_date
+            if team_name:
+                lineup_params["team_name"] = team_name
+        tool_calls.append(ToolCall("get_game_lineup", lineup_params))
+
+        box_score_params: dict[str, Any] = {}
+        if game_id:
+            box_score_params["game_id"] = game_id
+        elif extracted_date:
+            box_score_params["date"] = extracted_date
+        tool_calls.append(ToolCall("get_game_box_score", box_score_params))
+        return tool_calls
+
+    def _build_player_validation_bundle_tool_calls(
+        self,
+        *,
+        query_lower: str,
+        player_name: Optional[str],
+        season_year: int,
+        explicit_metric: Optional[tuple[str, str]],
+    ) -> list[ToolCall]:
+        if not player_name or not explicit_metric:
+            return []
+        if not self._is_player_lookup_query(query_lower):
+            return []
+        if not any(
+            token in query_lower
+            for token in ["순위", "몇 위", "몇위", "랭킹", "리더보드"]
+        ):
+            return []
+
+        position, stat_name = explicit_metric
+        return [
+            ToolCall(
+                "validate_player",
+                {"player_name": player_name, "year": season_year},
+            ),
+            ToolCall(
+                "get_player_stats",
+                {
+                    "player_name": player_name,
+                    "year": season_year,
+                    "position": position,
+                },
+            ),
+            ToolCall(
+                "get_leaderboard",
+                {
+                    "stat_name": stat_name,
+                    "year": season_year,
+                    "position": position,
+                    "limit": 5,
+                },
+            ),
+        ]
+
+    def _build_player_comparison_tool_calls(
+        self,
+        *,
+        query: str,
+        query_lower: str,
+        season_year: int,
+    ) -> list[ToolCall]:
+        if not self._is_player_comparison_query(query_lower):
+            return []
+
+        compared_players = self._extract_player_comparison_names(query)
+        if not compared_players:
+            return []
+
+        player1, player2 = compared_players
+        comparison_type = (
+            "career"
+            if any(token in query_lower for token in ["통산", "커리어", "career"])
+            else "season"
+        )
+        parameters: dict[str, Any] = {
+            "player1": player1,
+            "player2": player2,
+            "comparison_type": comparison_type,
+            "position": self._resolve_player_lookup_position(query_lower),
+        }
+        if comparison_type == "season":
+            parameters["year"] = season_year
+        return [ToolCall("compare_players", parameters)]
+
+    def _normalize_player_candidate(self, raw_name: str) -> str:
+        cleaned = re.sub(r"\s+", "", str(raw_name or "").strip())
+        cleaned = re.sub(r"(선수|타자|투수)$", "", cleaned)
+        cleaned = re.sub(r"(은|는|이|가|을|를)$", "", cleaned)
+        return cleaned
+
+    def _extract_player_comparison_names(self, query: str) -> Optional[tuple[str, str]]:
+        normalized_query = query.replace("VS", "vs").replace("Vs", "vs")
+        patterns = [
+            r"([가-힣A-Za-z]{2,20})\s*(?:선수)?\s*(?:와|과|랑|이랑)\s*([가-힣A-Za-z]{2,20})(?:선수)?",
+            r"([가-힣A-Za-z]{2,20})\s*vs\.?\s*([가-힣A-Za-z]{2,20})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized_query, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate1 = self._normalize_player_candidate(match.group(1))
+            candidate2 = self._normalize_player_candidate(match.group(2))
+            if (
+                len(candidate1) < 2
+                or len(candidate2) < 2
+                or candidate1 == candidate2
+                or extract_team(candidate1)
+                or extract_team(candidate2)
+            ):
+                continue
+            return candidate1, candidate2
         return None
 
     def _is_team_metric_query(
@@ -1003,6 +1330,25 @@ class ChatIntentRouter:
             for keyword in ["마지막 경기", "최근 경기 언제", "최종전"]
         )
 
+    def _is_player_comparison_query(self, query_lower: str) -> bool:
+        if any(
+            keyword in query_lower
+            for keyword in ["승부", "이길까", "맞대결", "대결", "상대전적"]
+        ):
+            return False
+        return any(
+            keyword in query_lower
+            for keyword in [
+                "비교",
+                "차이",
+                "우위",
+                "누가 더",
+                "더 낫",
+                "더 잘",
+                "vs",
+            ]
+        )
+
     def _is_player_lookup_query(self, query_lower: str) -> bool:
         return any(
             keyword in query_lower
@@ -1025,4 +1371,23 @@ class ChatIntentRouter:
                 "다승",
                 "war",
             ]
+        )
+
+
+class _BoundChatIntentRouter:
+    def __init__(self, *, router: ChatIntentRouter, agent: Any) -> None:
+        self._router = router
+        self._agent = agent
+
+    def resolve(
+        self,
+        query: str,
+        entity_filter: Any,
+        context: Optional[dict[str, Any]] = None,
+    ) -> IntentDecision:
+        return self._router.resolve(
+            query,
+            entity_filter,
+            context,
+            agent=self._agent,
         )

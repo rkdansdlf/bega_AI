@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 from scripts import ingest_from_kbo as ingest_script
@@ -86,3 +87,103 @@ def test_resolve_primary_key_columns_prefers_profile_override(monkeypatch: Any) 
     )
 
     assert pk_columns == ["game_id"]
+
+
+def test_static_profile_source_row_ids_do_not_collide() -> None:
+    rules_profile = ingest_script.TABLE_PROFILES["markdown_docs_rules_terms"]
+    metrics_profile = ingest_script.TABLE_PROFILES["markdown_docs_strategy_metrics"]
+
+    rules_prefix = ingest_script.build_static_source_row_prefix(
+        "markdown_docs_rules_terms",
+        rules_profile,
+    )
+    metrics_prefix = ingest_script.build_static_source_row_prefix(
+        "markdown_docs_strategy_metrics",
+        metrics_profile,
+    )
+
+    assert rules_prefix != metrics_prefix
+    assert rules_prefix.startswith("markdown_docs:")
+    assert metrics_prefix.startswith("markdown_docs:")
+    assert (
+        ingest_script.build_static_source_row_id(
+            "markdown_docs_rules_terms",
+            rules_profile,
+            chunk_index=2,
+            total_chunks=3,
+        )
+        == f"{rules_prefix}#part2"
+    )
+
+
+def test_ingest_sets_pgvector_search_path_on_destination_connection(
+    monkeypatch: Any,
+) -> None:
+    class _FakeCursor:
+        def __init__(self, executed: List[str]) -> None:
+            self._executed = executed
+
+        def execute(self, query: str) -> None:
+            self._executed.append(query)
+
+        def __enter__(self) -> "_FakeCursor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _FakeConnection:
+        def __init__(self) -> None:
+            self.autocommit = False
+            self.executed: List[str] = []
+            self.closed = False
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor(self.executed)
+
+        def close(self) -> None:
+            self.closed = True
+
+    source_conn = _FakeConnection()
+    dest_conn = _FakeConnection()
+    connections = [source_conn, dest_conn]
+
+    monkeypatch.setattr(
+        ingest_script,
+        "psycopg",
+        SimpleNamespace(connect=lambda _dsn: connections.pop(0)),
+    )
+    monkeypatch.setattr(
+        ingest_script,
+        "get_settings",
+        lambda: SimpleNamespace(database_url="postgresql://target"),
+    )
+    monkeypatch.setattr(
+        ingest_script,
+        "ingest_table",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    ingest_script.ingest(
+        source_db_url="postgresql://source",
+        tables=["teams"],
+        limit=10,
+        embed_batch_size=8,
+        read_batch_size=50,
+        season_year=2025,
+        use_legacy_renderer=False,
+        since=None,
+        skip_embedding=True,
+        max_concurrency=1,
+        commit_interval=100,
+        parallel_engine="thread",
+        workers=2,
+    )
+
+    assert "SET statement_timeout TO 0;" in dest_conn.executed
+    assert (
+        f"SET search_path TO {ingest_script.PGVECTOR_SEARCH_PATH};"
+        in dest_conn.executed
+    )
+    assert source_conn.closed is True
+    assert dest_conn.closed is True

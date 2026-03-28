@@ -15,8 +15,9 @@ import os
 import re
 import secrets
 import tempfile
+import time
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 from dotenv import load_dotenv
 
 
@@ -166,6 +167,15 @@ def _build_completion_fallback_answer(reason: str) -> str:
         "방금 답변이 중간에 끊겼습니다. 같은 질문을 한 번 더 보내주시면 "
         "바로 다시 이어서 답하겠습니다."
     )
+
+
+def _remaining_timeout_seconds(deadline: Optional[float]) -> Optional[float]:
+    if deadline is None:
+        return None
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        return 0.0
+    return remaining
 
 
 def _format_chatbot_table_row(cells: List[str]) -> Optional[str]:
@@ -387,6 +397,7 @@ def _make_cached_sse_response(
 
     async def cached_generator():
         response_text = _ensure_quality_answer_text(cached["response_text"])
+        settings = get_settings()
 
         # status 이벤트: 캐시 히트 표시 (번개 이모지로 빠른 응답임을 암시)
         yield {
@@ -395,7 +406,7 @@ def _make_cached_sse_response(
         }
 
         # message 이벤트: 200자 청크로 나눠 전송 (프론트엔드 타이핑 효과 유지)
-        chunk_size = 200
+        chunk_size = max(1, int(settings.chat_cached_stream_chunk_size))
         for i in range(0, len(response_text), chunk_size):
             chunk = response_text[i : i + chunk_size]
             yield {
@@ -416,11 +427,16 @@ def _make_cached_sse_response(
                     "style": style,
                     "cached": True,
                     "intent": cached.get("intent"),
+                    "planner_mode": "cache",
+                    "planner_cache_hit": False,
+                    "tool_execution_mode": "none",
                     "grounding_mode": "cache",
                     "source_tier": "cache",
                     "answer_sources": [],
                     "as_of_date": None,
                     "fallback_reason": None,
+                    "finish_reason": "completed",
+                    "cancelled": False,
                     "cache_key_prefix": cache_key[:8],
                     "perf": {
                         "total_ms": 0.0,
@@ -428,7 +444,11 @@ def _make_cached_sse_response(
                         "tool_ms": 0.0,
                         "answer_ms": 0.0,
                         "first_token_ms": 0.0,
+                        "stream_first_message_ms": 0.0,
                         "tool_count": 0,
+                        "tool_execution_mode": "none",
+                        "planner_cache_hit": False,
+                        "planner_mode": "cache",
                         "model": "cache",
                     },
                 },
@@ -444,8 +464,536 @@ def _make_cached_sse_response(
             "X-Accel-Buffering": "no",
             "X-Cache": "HIT",
         },
-        ping=15,
+        ping=max(1, int(get_settings().chat_sse_ping_seconds)),
     )
+
+
+async def _request_is_disconnected(request: Optional[Request]) -> bool:
+    if request is None:
+        return False
+
+    try:
+        return await request.is_disconnected()
+    except RuntimeError:
+        return False
+
+
+def _log_cancelled_stream(question: str, source: str) -> None:
+    logger.info("chat_stream cancelled source=%s question=%s", source, question[:120])
+
+
+def _clone_perf_payload(raw_perf: Any) -> Dict[str, Any]:
+    if isinstance(raw_perf, dict):
+        return dict(raw_perf)
+    return {}
+
+
+def _finalize_stream_perf_payload(
+    raw_perf: Any,
+    *,
+    first_message_ms: Optional[float],
+) -> Dict[str, Any]:
+    perf_payload = _clone_perf_payload(raw_perf)
+    raw_first_token_ms = perf_payload.get("first_token_ms")
+    if not isinstance(raw_first_token_ms, (int, float)):
+        perf_payload["first_token_ms"] = first_message_ms
+    perf_payload["stream_first_message_ms"] = first_message_ms
+    return perf_payload
+
+
+async def _chat_event_generator(
+    *,
+    request: Optional[Request],
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    style: str,
+    result: Optional[Dict[str, Any]],
+    error_payload: Optional[Dict[str, Any]],
+    cache_key: Optional[str],
+) -> AsyncGenerator[Dict[str, str], None]:
+    """Build the SSE event stream while respecting downstream disconnects."""
+    stream_started_at = time.perf_counter()
+    first_message_ms: Optional[float] = None
+
+    def _mark_first_message() -> None:
+        nonlocal first_message_ms
+        if first_message_ms is None:
+            first_message_ms = round(
+                (time.perf_counter() - stream_started_at) * 1000,
+                2,
+            )
+
+    if error_payload:
+        if await _request_is_disconnected(request):
+            _log_cancelled_stream(question, "before-error-status")
+            return
+        yield {
+            "event": "status",
+            "data": json.dumps({"message": "⚠️"}, ensure_ascii=False),
+        }
+        if await _request_is_disconnected(request):
+            _log_cancelled_stream(question, "after-error-status")
+            return
+        yield {
+            "event": "error",
+            "data": json.dumps(error_payload, ensure_ascii=False),
+        }
+        if await _request_is_disconnected(request):
+            _log_cancelled_stream(question, "after-error")
+            return
+        yield {"event": "done", "data": "[DONE]"}
+        return
+
+    if not result:
+        if not await _request_is_disconnected(request):
+            yield {"event": "done", "data": "[DONE]"}
+        return
+
+    if await _request_is_disconnected(request):
+        _log_cancelled_stream(question, "before-status")
+        return
+
+    yield {
+        "event": "status",
+        "data": json.dumps({"message": "⏺️"}, ensure_ascii=False),
+    }
+
+    answer = result.get("answer")
+    full_response_chunks: List[str] = []
+    answer_stream_error: Optional[str] = None
+    stream_cancelled = False
+
+    if hasattr(answer, "__aiter__"):
+        try:
+            async for delta in answer:
+                if await _request_is_disconnected(request):
+                    stream_cancelled = True
+                    _log_cancelled_stream(question, "downstream-disconnect")
+                    break
+                if not delta:
+                    continue
+                full_response_chunks.append(delta)
+                _mark_first_message()
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"delta": delta}, ensure_ascii=False),
+                }
+        except asyncio.CancelledError:
+            stream_cancelled = True
+            _log_cancelled_stream(question, "answer-iterator-cancelled")
+        except Exception as exc:  # noqa: BLE001
+            answer_stream_error = str(exc)
+            logger.exception("chat_stream answer iteration failed.")
+            fallback_text = (
+                "지금 답변이 중간에 잠깐 끊겼습니다. "
+                "같은 질문을 한 번 더 보내주시면 바로 다시 이어서 볼게요."
+            )
+            full_response_chunks.append(fallback_text)
+            _mark_first_message()
+            yield {
+                "event": "message",
+                "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
+            }
+            yield {
+                "event": "error",
+                "data": json.dumps(
+                    {
+                        "message": "temporary_generation_issue",
+                        "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+    else:
+        if await _request_is_disconnected(request):
+            stream_cancelled = True
+            _log_cancelled_stream(question, "before-single-message")
+        else:
+            rendered = await _render_answer(result, style)
+            full_response_chunks.append(_ensure_quality_answer_text(rendered))
+            full_response_text = "".join(full_response_chunks)
+            _mark_first_message()
+            yield {
+                "event": "message",
+                "data": json.dumps({"delta": full_response_text}, ensure_ascii=False),
+            }
+
+    full_response_text = "".join(full_response_chunks)
+    if not stream_cancelled and await _request_is_disconnected(request):
+        stream_cancelled = True
+        _log_cancelled_stream(question, "before-meta")
+
+    tool_results_raw = result.get("tool_results", [])
+    tool_results_serialized = _safe_serialize(tool_results_raw)
+    tool_calls_raw = result.get("tool_calls", [])
+    tool_calls_serialized = [
+        tc.to_dict() if hasattr(tc, "to_dict") else tc for tc in tool_calls_raw
+    ]
+
+    intent = result.get("intent")
+    public_error = None
+    internal_result_error = result.get("error")
+    if internal_result_error:
+        logger.warning(
+            "chat_stream user_error_hidden result_error=%s",
+            internal_result_error,
+        )
+        public_error = "temporary_generation_issue"
+    if answer_stream_error:
+        logger.warning(
+            "chat_stream user_error_hidden stream_error=%s",
+            answer_stream_error,
+        )
+        public_error = "temporary_generation_issue"
+
+    finish_reason = (
+        "cancelled" if stream_cancelled else ("error" if public_error else "completed")
+    )
+    meta_payload_raw = {
+        "tool_calls": tool_calls_serialized,
+        "tool_results": tool_results_serialized,
+        "data_sources": result.get("data_sources", []),
+        "verified": bool(result.get("verified", False))
+        and not bool(answer_stream_error),
+        "visualizations": result.get("visualizations", []),
+        "style": style,
+        "cached": False,
+        "intent": intent,
+        "strategy": result.get("strategy"),
+        "planner_mode": result.get("planner_mode"),
+        "planner_cache_hit": bool(result.get("planner_cache_hit", False)),
+        "tool_execution_mode": result.get("tool_execution_mode"),
+        "grounding_mode": result.get("grounding_mode"),
+        "source_tier": result.get("source_tier"),
+        "answer_sources": result.get("answer_sources", []),
+        "as_of_date": result.get("as_of_date"),
+        "fallback_reason": result.get("fallback_reason"),
+        "fallback_answer_used": bool(result.get("fallback_answer_used", False))
+        or bool(answer_stream_error),
+        "perf": _finalize_stream_perf_payload(
+            result.get("perf"),
+            first_message_ms=first_message_ms,
+        ),
+        "error": public_error,
+        "finish_reason": finish_reason,
+        "cancelled": stream_cancelled,
+    }
+
+    if stream_cancelled:
+        if cache_key and full_response_text:
+            logger.info(
+                "[ChatCache] SKIP save key=%s... reason=cancelled",
+                cache_key[:8],
+            )
+
+        if not await _request_is_disconnected(request):
+            meta_payload = _safe_serialize(meta_payload_raw)
+            yield {
+                "event": "meta",
+                "data": json.dumps(meta_payload, ensure_ascii=False),
+            }
+            yield {"event": "done", "data": "[DONE]"}
+        return
+    meta_payload = _safe_serialize(meta_payload_raw)
+    yield {
+        "event": "meta",
+        "data": json.dumps(meta_payload, ensure_ascii=False),
+    }
+
+    result_error = result.get("error") if isinstance(result, dict) else None
+    if (
+        cache_key
+        and full_response_text
+        and not result_error
+        and not public_error
+        and not bool(answer_stream_error)
+        and not _is_non_cacheable_response(full_response_text)
+    ):
+        from ..config import get_settings as _get_settings
+
+        _settings = _get_settings()
+        model_name = (
+            getattr(_settings, "coach_openrouter_model", None)
+            or getattr(_settings, "openrouter_model", None)
+            or getattr(_settings, "gemini_model", None)
+            or "unknown"
+        )
+        try:
+            pool = get_connection_pool()
+            with pool.connection() as conn:
+                await save_to_cache(
+                    conn,
+                    cache_key=cache_key,
+                    question_text=question,
+                    filters_json=filters,
+                    intent=intent,
+                    response_text=full_response_text,
+                    model_name=model_name,
+                )
+            logger.info(
+                "[ChatCache] SAVED key=%s... intent=%s",
+                cache_key[:8],
+                intent,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ChatCache] save failed: %s", exc)
+    elif cache_key and full_response_text:
+        if result_error:
+            reason = "result_error"
+        elif public_error or answer_stream_error:
+            reason = "public_or_stream_error"
+        else:
+            reason = "non_cacheable_response"
+        logger.info(
+            "[ChatCache] SKIP save key=%s... reason=%s",
+            cache_key[:8],
+            reason,
+        )
+
+    yield {"event": "done", "data": "[DONE]"}
+
+
+async def _chat_live_event_generator(
+    *,
+    request: Optional[Request],
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    style: str,
+    cache_key: Optional[str],
+    stream,
+) -> AsyncGenerator[Dict[str, str], None]:
+    settings = get_settings()
+    stream_started_at = time.perf_counter()
+    first_message_ms: Optional[float] = None
+    full_response_chunks: List[str] = []
+    buffered_meta: Dict[str, Any] = {}
+    answer_stream_error: Optional[str] = None
+    stream_cancelled = False
+
+    if await _request_is_disconnected(request):
+        _log_cancelled_stream(question, "before-live-status")
+        return
+
+    yield {
+        "event": "status",
+        "data": json.dumps({"message": "⏺️"}, ensure_ascii=False),
+    }
+
+    def _mark_first_message() -> None:
+        nonlocal first_message_ms
+        if first_message_ms is None:
+            first_message_ms = round(
+                (time.perf_counter() - stream_started_at) * 1000,
+                2,
+            )
+
+    try:
+        async for event in stream:
+            if await _request_is_disconnected(request):
+                stream_cancelled = True
+                _log_cancelled_stream(question, "downstream-disconnect-live")
+                break
+
+            event_type = event.get("type")
+            if event_type == "status":
+                status_message = str(event.get("message", "")).strip()
+                if status_message:
+                    yield {
+                        "event": "status",
+                        "data": json.dumps(
+                            {"message": status_message}, ensure_ascii=False
+                        ),
+                    }
+            elif event_type == "tool_start":
+                tool_name = str(event.get("tool", "")).strip()
+                if tool_name:
+                    yield {
+                        "event": "status",
+                        "data": json.dumps(
+                            {"message": f"{tool_name} 조회 중"}, ensure_ascii=False
+                        ),
+                    }
+            elif event_type == "tool_result":
+                tool_message = str(event.get("message", "")).strip()
+                if tool_message:
+                    yield {
+                        "event": "status",
+                        "data": json.dumps(
+                            {"message": tool_message}, ensure_ascii=False
+                        ),
+                    }
+            elif event_type == "answer_chunk":
+                delta = event.get("content")
+                if not delta:
+                    continue
+                full_response_chunks.append(delta)
+                _mark_first_message()
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"delta": delta}, ensure_ascii=False),
+                }
+            elif event_type == "metadata":
+                raw_meta = event.get("data")
+                if isinstance(raw_meta, dict):
+                    buffered_meta = raw_meta
+    except asyncio.CancelledError:
+        stream_cancelled = True
+        _log_cancelled_stream(question, "live-stream-cancelled")
+    except Exception as exc:  # noqa: BLE001
+        answer_stream_error = str(exc)
+        logger.exception("chat_stream process_query_stream iteration failed.")
+        fallback_text = (
+            "지금 답변이 중간에 잠깐 끊겼습니다. "
+            "같은 질문을 한 번 더 보내주시면 바로 다시 이어서 볼게요."
+        )
+        full_response_chunks.append(fallback_text)
+        _mark_first_message()
+        yield {
+            "event": "message",
+            "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
+        }
+        yield {
+            "event": "error",
+            "data": json.dumps(
+                {
+                    "message": "temporary_generation_issue",
+                    "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+    full_response_text = "".join(full_response_chunks)
+    if not stream_cancelled and await _request_is_disconnected(request):
+        stream_cancelled = True
+        _log_cancelled_stream(question, "before-live-meta")
+
+    tool_results_raw = buffered_meta.get("tool_results", [])
+    tool_results_serialized = _safe_serialize(tool_results_raw)
+    tool_calls_raw = buffered_meta.get("tool_calls", [])
+    tool_calls_serialized = [
+        tc.to_dict() if hasattr(tc, "to_dict") else tc for tc in tool_calls_raw
+    ]
+
+    public_error = None
+    internal_result_error = buffered_meta.get("error")
+    if internal_result_error:
+        logger.warning(
+            "chat_stream user_error_hidden result_error=%s",
+            internal_result_error,
+        )
+        public_error = "temporary_generation_issue"
+    if answer_stream_error:
+        logger.warning(
+            "chat_stream user_error_hidden stream_error=%s",
+            answer_stream_error,
+        )
+        public_error = "temporary_generation_issue"
+
+    intent = buffered_meta.get("intent")
+    finish_reason = (
+        "cancelled" if stream_cancelled else ("error" if public_error else "completed")
+    )
+    meta_payload_raw = {
+        "tool_calls": tool_calls_serialized,
+        "tool_results": tool_results_serialized,
+        "data_sources": buffered_meta.get("data_sources", []),
+        "verified": bool(buffered_meta.get("verified", False))
+        and not bool(answer_stream_error),
+        "visualizations": buffered_meta.get("visualizations", []),
+        "style": style,
+        "cached": False,
+        "intent": intent,
+        "strategy": buffered_meta.get("strategy"),
+        "planner_mode": buffered_meta.get("planner_mode"),
+        "planner_cache_hit": bool(buffered_meta.get("planner_cache_hit", False)),
+        "tool_execution_mode": buffered_meta.get("tool_execution_mode"),
+        "grounding_mode": buffered_meta.get("grounding_mode"),
+        "source_tier": buffered_meta.get("source_tier"),
+        "answer_sources": buffered_meta.get("answer_sources", []),
+        "as_of_date": buffered_meta.get("as_of_date"),
+        "fallback_reason": buffered_meta.get("fallback_reason"),
+        "fallback_answer_used": bool(buffered_meta.get("fallback_answer_used", False))
+        or bool(answer_stream_error),
+        "perf": _finalize_stream_perf_payload(
+            buffered_meta.get("perf"),
+            first_message_ms=first_message_ms,
+        ),
+        "error": public_error,
+        "finish_reason": finish_reason,
+        "cancelled": stream_cancelled,
+    }
+
+    if stream_cancelled:
+        if cache_key and full_response_text:
+            logger.info(
+                "[ChatCache] SKIP save key=%s... reason=cancelled",
+                cache_key[:8],
+            )
+
+        if not await _request_is_disconnected(request):
+            meta_payload = _safe_serialize(meta_payload_raw)
+            yield {
+                "event": "meta",
+                "data": json.dumps(meta_payload, ensure_ascii=False),
+            }
+            yield {"event": "done", "data": "[DONE]"}
+        return
+    meta_payload = _safe_serialize(meta_payload_raw)
+    yield {
+        "event": "meta",
+        "data": json.dumps(meta_payload, ensure_ascii=False),
+    }
+
+    result_error = buffered_meta.get("error")
+    intent = buffered_meta.get("intent")
+    if (
+        cache_key
+        and full_response_text
+        and not result_error
+        and not public_error
+        and not bool(answer_stream_error)
+        and not _is_non_cacheable_response(full_response_text)
+    ):
+        model_name = (
+            getattr(settings, "coach_openrouter_model", None)
+            or getattr(settings, "openrouter_model", None)
+            or getattr(settings, "gemini_model", None)
+            or "unknown"
+        )
+        try:
+            pool = get_connection_pool()
+            with pool.connection() as conn:
+                await save_to_cache(
+                    conn,
+                    cache_key=cache_key,
+                    question_text=question,
+                    filters_json=filters,
+                    intent=intent,
+                    response_text=full_response_text,
+                    model_name=model_name,
+                )
+            logger.info(
+                "[ChatCache] SAVED key=%s... intent=%s",
+                cache_key[:8],
+                intent,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ChatCache] save failed: %s", exc)
+    elif cache_key and full_response_text:
+        if result_error:
+            reason = "result_error"
+        elif public_error or answer_stream_error:
+            reason = "public_or_stream_error"
+        else:
+            reason = "non_cacheable_response"
+        logger.info(
+            "[ChatCache] SKIP save key=%s... reason=%s",
+            cache_key[:8],
+            reason,
+        )
+
+    yield {"event": "done", "data": "[DONE]"}
 
 
 async def _stream_response(
@@ -466,222 +1014,74 @@ async def _stream_response(
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
+    settings = get_settings()
     context_messages = history if history else [{"role": "user", "content": question}]
+    agent_context = {
+        "filters": filters,
+        "history": history,
+        "messages": context_messages,
+        "request_mode": "stream",
+        "persona": "chat",
+    }
+
+    if hasattr(agent, "process_query_stream"):
+        try:
+            live_stream = agent.process_query_stream(question, context=agent_context)
+        except Exception:  # noqa: BLE001
+            logger.exception("chat_stream live stream initialization failed.")
+            live_stream = None
+        else:
+            return EventSourceResponse(
+                _chat_live_event_generator(
+                    request=request,
+                    question=question,
+                    filters=filters,
+                    style=style,
+                    cache_key=cache_key,
+                    stream=live_stream,
+                ),
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+                ping=max(1, int(settings.chat_sse_ping_seconds)),
+            )
 
     result: Optional[Dict[str, Any]] = None
     error_payload: Optional[Dict[str, Any]] = None
     try:
-        # 에이전트를 실행하여 결과를 생성합니다.
         result = await agent.process_query(
             question,
-            context={
-                "filters": filters,
-                "history": history,
-                "messages": context_messages,
-                "request_mode": "stream",
-                "persona": "chat",
-            },
+            context=agent_context,
         )
-    except Exception as exc:  # noqa: BLE001
+    except asyncio.CancelledError:
+        logger.info(
+            "chat_stream cancelled before response could start. question=%s",
+            question[:120],
+        )
+        raise
+    except Exception:  # noqa: BLE001
         logger.exception("chat_stream에서 오류가 발생했습니다.")
         error_payload = {
             "message": "temporary_issue",
             "detail": "지금은 응답 템포가 잠깐 흔들리고 있어요. 같은 질문을 다시 보내주세요.",
         }
 
-    async def event_generator():
-        """SSE 이벤트 스트림을 생성하는 비동기 제너레이터입니다."""
-        # 1. 오류 발생 시 오류 이벤트 전송
-        if error_payload:
-            yield {
-                "event": "status",
-                "data": json.dumps({"message": "⚠️"}, ensure_ascii=False),
-            }
-            yield {
-                "event": "error",
-                "data": json.dumps(error_payload, ensure_ascii=False),
-            }
-        # 2. 성공 시 메시지와 메타데이터 이벤트 전송
-        elif result:
-            yield {
-                "event": "status",
-                "data": json.dumps({"message": "⏺️"}, ensure_ascii=False),
-            }
-            answer = result.get("answer")
-
-            # answer가 비동기 제너레이터인 경우 (스트리밍)
-            # 캐시 저장을 위해 전체 텍스트를 누적합니다.
-            full_response_chunks: List[str] = []
-            answer_stream_error = None
-
-            if hasattr(answer, "__aiter__"):
-                try:
-                    async for delta in answer:
-                        if delta:
-                            full_response_chunks.append(delta)
-                            yield {
-                                "event": "message",
-                                "data": json.dumps(
-                                    {"delta": delta}, ensure_ascii=False
-                                ),
-                            }
-                except Exception as exc:
-                    answer_stream_error = str(exc)
-                    logger.exception("chat_stream answer iteration failed.")
-                    fallback_text = (
-                        "지금 답변이 중간에 잠깐 끊겼습니다. "
-                        "같은 질문을 한 번 더 보내주시면 바로 다시 이어서 볼게요."
-                    )
-                    full_response_chunks.append(fallback_text)
-                    yield {
-                        "event": "message",
-                        "data": json.dumps(
-                            {"delta": fallback_text}, ensure_ascii=False
-                        ),
-                    }
-                    yield {
-                        "event": "error",
-                        "data": json.dumps(
-                            {
-                                "message": "temporary_generation_issue",
-                                "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
-                            },
-                            ensure_ascii=False,
-                        ),
-                    }
-
-            # answer가 일반 문자열인 경우 (비스트리밍/일상대화)
-            else:
-                rendered = await _render_answer(result, style)
-                full_response_chunks.append(_ensure_quality_answer_text(rendered))
-                full_response_text = "".join(full_response_chunks)
-                yield {
-                    "event": "message",
-                    "data": json.dumps(
-                        {"delta": full_response_text}, ensure_ascii=False
-                    ),
-                }
-
-            full_response_text = "".join(full_response_chunks)
-
-            # 도구 호출 등 추가 정보를 meta 이벤트로 전송
-            tool_results_raw = result.get("tool_results", [])
-            tool_results_serialized = _safe_serialize(tool_results_raw)
-            tool_calls_raw = result.get("tool_calls", [])
-            tool_calls_serialized = [
-                tc.to_dict() if hasattr(tc, "to_dict") else tc for tc in tool_calls_raw
-            ]
-
-            intent = result.get("intent")
-            public_error = None
-            internal_result_error = result.get("error")
-            if internal_result_error:
-                logger.warning(
-                    "chat_stream user_error_hidden result_error=%s",
-                    internal_result_error,
-                )
-                public_error = "temporary_generation_issue"
-            if answer_stream_error:
-                logger.warning(
-                    "chat_stream user_error_hidden stream_error=%s",
-                    answer_stream_error,
-                )
-                public_error = "temporary_generation_issue"
-
-            meta_payload_raw = {
-                "tool_calls": tool_calls_serialized,
-                "tool_results": tool_results_serialized,
-                "data_sources": result.get("data_sources", []),
-                "verified": bool(result.get("verified", False))
-                and not bool(answer_stream_error),
-                "visualizations": result.get(
-                    "visualizations", []
-                ),  # 시각화 데이터 전달
-                "style": style,
-                "cached": False,
-                "intent": intent,
-                "strategy": result.get(
-                    "strategy"
-                ),  # RAG 경로 식별자 (rag_v3_enhanced, llm_knowledge_db_unavailable 등)
-                "planner_mode": result.get("planner_mode"),
-                "grounding_mode": result.get("grounding_mode"),
-                "source_tier": result.get("source_tier"),
-                "answer_sources": result.get("answer_sources", []),
-                "as_of_date": result.get("as_of_date"),
-                "fallback_reason": result.get("fallback_reason"),
-                "fallback_answer_used": bool(result.get("fallback_answer_used", False))
-                or bool(answer_stream_error),
-                "perf": result.get("perf"),
-                "error": public_error,
-            }
-            # 전체 payload를 안전하게 직렬화
-            meta_payload = _safe_serialize(meta_payload_raw)
-            yield {
-                "event": "meta",
-                "data": json.dumps(meta_payload, ensure_ascii=False),
-            }
-
-            # 캐시 저장: 정상 응답만 저장 (오류 문구/에러 결과는 캐시 금지)
-            result_error = result.get("error") if isinstance(result, dict) else None
-            if (
-                cache_key
-                and full_response_text
-                and not result_error
-                and not public_error
-                and not bool(answer_stream_error)
-                and not _is_non_cacheable_response(full_response_text)
-            ):
-                from ..config import get_settings as _get_settings
-
-                _settings = _get_settings()
-                model_name = (
-                    getattr(_settings, "coach_openrouter_model", None)
-                    or getattr(_settings, "openrouter_model", None)
-                    or getattr(_settings, "gemini_model", None)
-                    or "unknown"
-                )
-                try:
-                    pool = get_connection_pool()
-                    with pool.connection() as conn:
-                        await save_to_cache(
-                            conn,
-                            cache_key=cache_key,
-                            question_text=question,
-                            filters_json=filters,
-                            intent=intent,
-                            response_text=full_response_text,
-                            model_name=model_name,
-                        )
-                    logger.info(
-                        "[ChatCache] SAVED key=%s... intent=%s",
-                        cache_key[:8],
-                        intent,
-                    )
-                except Exception as exc:
-                    logger.warning("[ChatCache] save failed: %s", exc)
-            elif cache_key and full_response_text:
-                if result_error:
-                    reason = "result_error"
-                elif public_error or answer_stream_error:
-                    reason = "public_or_stream_error"
-                else:
-                    reason = "non_cacheable_response"
-                logger.info(
-                    "[ChatCache] SKIP save key=%s... reason=%s",
-                    cache_key[:8],
-                    reason,
-                )
-
-        # 3. 스트림 종료를 알리는 done 이벤트 전송
-        yield {"event": "done", "data": "[DONE]"}
-
     return EventSourceResponse(
-        event_generator(),
+        _chat_event_generator(
+            request=request,
+            question=question,
+            filters=filters,
+            style=style,
+            result=result,
+            error_payload=error_payload,
+            cache_key=cache_key,
+        ),
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",  # Nginx 등 프록시에서 버퍼링 방지
         },
-        ping=15,  # 15초마다 ping을 보내 연결 유지
+        ping=max(1, int(settings.chat_sse_ping_seconds)),
     )
 
 
@@ -795,6 +1195,9 @@ async def chat_completion(
                         "visualizations": [],
                         "intent": cached.get("intent"),
                         "cached": True,
+                        "planner_mode": "cache",
+                        "planner_cache_hit": False,
+                        "tool_execution_mode": "none",
                         "grounding_mode": "cache",
                         "source_tier": "cache",
                         "answer_sources": [],
@@ -808,46 +1211,42 @@ async def chat_completion(
                             "answer_ms": 0.0,
                             "first_token_ms": 0.0,
                             "tool_count": 0,
+                            "tool_execution_mode": "none",
+                            "planner_cache_hit": False,
+                            "planner_mode": "cache",
                             "model": "cache",
                         },
                     }
                 )
 
-    timeout_raw = os.getenv("CHAT_COMPLETION_TIMEOUT_SECONDS", "0").strip()
-    try:
-        completion_timeout_seconds = float(timeout_raw) if timeout_raw else 0.0
-    except ValueError:
-        completion_timeout_seconds = 0.0
+    settings = get_settings()
+    completion_timeout_seconds = max(
+        0.0, float(settings.chat_completion_timeout_seconds)
+    )
+    timeout_deadline: Optional[float] = None
+    if completion_timeout_seconds > 0:
+        timeout_deadline = (
+            asyncio.get_running_loop().time() + completion_timeout_seconds
+        )
 
     try:
         context_messages = (
             history if history else [{"role": "user", "content": question}]
         )
+        context = {
+            "filters": filters,
+            "history": history,
+            "messages": context_messages,
+            "request_mode": "completion",
+            "persona": "chat",
+        }
         if completion_timeout_seconds > 0:
             result = await asyncio.wait_for(
-                agent.process_query(
-                    question,
-                    context={
-                        "filters": filters,
-                        "history": history,
-                        "messages": context_messages,
-                        "request_mode": "completion",
-                        "persona": "chat",
-                    },
-                ),
+                agent.process_query(question, context=context),
                 timeout=completion_timeout_seconds,
             )
         else:
-            result = await agent.process_query(
-                question,
-                context={
-                    "filters": filters,
-                    "history": history,
-                    "messages": context_messages,
-                    "request_mode": "completion",
-                    "persona": "chat",
-                },
-            )
+            result = await agent.process_query(question, context=context)
     except asyncio.TimeoutError as exc:
         logger.warning(
             "chat_completion timeout before answer stream: question=%s timeout=%.1fs",
@@ -868,7 +1267,10 @@ async def chat_completion(
         public_error: Optional[str] = None
         try:
             if completion_timeout_seconds > 0:
-                async with asyncio.timeout(completion_timeout_seconds):
+                remaining_timeout = _remaining_timeout_seconds(timeout_deadline)
+                if remaining_timeout is not None and remaining_timeout <= 0:
+                    raise TimeoutError
+                async with asyncio.timeout(remaining_timeout):
                     async for chunk in answer_obj:
                         if chunk:
                             full_answer_chunks.append(chunk)

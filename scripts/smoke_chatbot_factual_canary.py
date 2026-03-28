@@ -239,6 +239,10 @@ def _summarize(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _build_console_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    return {"summary": dict(summary)}
+
+
 def main() -> int:
     args = parse_args()
     cases = _load_cases(args.case_file)
@@ -307,15 +311,12 @@ def main() -> int:
         "results": records,
     }
 
-    print(json.dumps({"summary": summary}, ensure_ascii=False, indent=2))
-
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        print(f"report saved: {output_path}")
 
     if args.summary_output:
         summary_path = Path(args.summary_output)
@@ -323,6 +324,13 @@ def main() -> int:
         summary_path.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    print(json.dumps(_build_console_summary(summary), ensure_ascii=False, indent=2))
+
+    if args.output:
+        print(f"report saved: {output_path}")
+
+    if args.summary_output:
         print(f"summary saved: {summary_path}")
 
     return 0 if (summary["failed"] == 0 or not args.strict) else 1

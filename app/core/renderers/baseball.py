@@ -1029,6 +1029,215 @@ if __name__ == "__main__":  # pragma: no cover - simple manual sanity check
         "batting_average": 0.500,
     }
 
+    # ── Team season / stat ranking renderers ──────────────────
+
+
+def render_team_batting_season(
+    row: Dict[str, Any],
+    *,
+    league_avg: Optional[Dict[str, Any]] = None,
+    percentiles: Optional[Dict[str, Any]] = None,
+    today_str: Optional[str],
+) -> str:
+    today = _today_fallback(today_str)
+    season = row.get("season")
+    team = row.get("team_name") or row.get("team_id")
+    header = f"{season}년 {team}" if season and team else "KBO 팀"
+
+    games = _format_count(row.get("games"), "경기")
+    avg = _format_float(row.get("avg"), 3)
+    ops = _format_float(row.get("ops"), 3)
+    obp = _format_float(row.get("obp"), 3)
+    slg = _format_float(row.get("slg"), 3)
+    hr = _format_count(row.get("home_runs"))
+    rbi = _format_count(row.get("rbi"))
+    sb = _format_count(row.get("stolen_bases"))
+    hits = _format_count(row.get("hits"))
+
+    main = []
+    if games:
+        main.append(games)
+    if avg:
+        main.append(f"팀타율 {avg}")
+    if ops:
+        main.append(f"OPS {ops}")
+    if hr:
+        main.append(f"홈런 {hr}개")
+    if rbi:
+        main.append(f"타점 {rbi}")
+    tl_dr = _tl_dr(main if main else [f"{header} 팀 타격 기록"])
+
+    core_parts = [header]
+    if main:
+        core_parts.append(" ".join(main) + "을 기록했습니다.")
+    else:
+        core_parts.append("팀 타격 기록이 등록되어 있습니다.")
+    core = "[핵심 문장] " + " ".join(core_parts)
+
+    detailed = []
+    if hits:
+        detailed.append(f"안타 {hits}개")
+    if obp:
+        detailed.append(f"출루율 {obp}")
+    if slg:
+        detailed.append(f"장타율 {slg}")
+    if sb:
+        detailed.append(f"도루 {sb}개")
+    so = _format_count(row.get("strikeouts"))
+    if so:
+        detailed.append(f"삼진 {so}개")
+    detail_block = _detailed_lines(detailed)
+
+    aliases = [team, row.get("team_id")]
+    meta = make_meta(
+        row,
+        kind="team_batting_season",
+        aliases=[a for a in aliases if a],
+        extra_stats={
+            "avg": float(row.get("avg") or 0),
+            "ops": float(row.get("ops") or 0),
+            "home_runs": int(row.get("home_runs") or 0),
+        },
+    )
+    source_line = f"[출처] KBO 공식 팀 타격 기록 (team_season_batting#{row.get('id','')}) / 기준일 {today}"
+
+    return "\n".join([tl_dr, core, detail_block, f"[META] {meta}", source_line])
+
+
+def render_team_pitching_season(
+    row: Dict[str, Any],
+    *,
+    league_avg: Optional[Dict[str, Any]] = None,
+    percentiles: Optional[Dict[str, Any]] = None,
+    today_str: Optional[str],
+) -> str:
+    today = _today_fallback(today_str)
+    season = row.get("season")
+    team = row.get("team_name") or row.get("team_id")
+    header = f"{season}년 {team}" if season and team else "KBO 팀"
+
+    games = _format_count(row.get("games"), "경기")
+    wins = _format_count(row.get("wins"))
+    losses = _format_count(row.get("losses"))
+    era = _format_float(row.get("era"), 2)
+    whip = _format_float(row.get("whip"), 2)
+    so = _format_count(row.get("strikeouts"))
+    sv = _format_count(row.get("saves"))
+    ip = _format_ip(row.get("innings_pitched"))
+
+    main = []
+    if games:
+        main.append(games)
+    if wins and losses:
+        main.append(f"{wins}승 {losses}패")
+    if era:
+        main.append(f"팀ERA {era}")
+    if whip:
+        main.append(f"WHIP {whip}")
+    tl_dr = _tl_dr(main if main else [f"{header} 팀 투수 기록"])
+
+    core_parts = [header]
+    if main:
+        core_parts.append(" ".join(main) + "을 기록했습니다.")
+    else:
+        core_parts.append("팀 투수 기록이 등록되어 있습니다.")
+    core = "[핵심 문장] " + " ".join(core_parts)
+
+    detailed = []
+    if ip:
+        detailed.append(f"투구 {ip}")
+    if so:
+        detailed.append(f"탈삼진 {so}개")
+    if sv:
+        detailed.append(f"세이브 {sv}개")
+    avg_against = _format_float(row.get("avg_against"), 3)
+    if avg_against:
+        detailed.append(f"피안타율 {avg_against}")
+    detail_block = _detailed_lines(detailed)
+
+    aliases = [team, row.get("team_id")]
+    meta = make_meta(
+        row,
+        kind="team_pitching_season",
+        aliases=[a for a in aliases if a],
+        extra_stats={
+            "era": float(row.get("era") or 0),
+            "whip": float(row.get("whip") or 0),
+        },
+    )
+    source_line = f"[출처] KBO 공식 팀 투수 기록 (team_season_pitching#{row.get('id','')}) / 기준일 {today}"
+
+    return "\n".join([tl_dr, core, detail_block, f"[META] {meta}", source_line])
+
+
+METRIC_LABELS = {
+    "batting_avg": "타율",
+    "home_runs": "홈런",
+    "rbi": "타점",
+    "stolen_bases": "도루",
+    "hits": "안타",
+    "ops": "OPS",
+    "runs": "득점",
+    "era": "방어율",
+    "wins": "승리",
+    "saves": "세이브",
+    "pitching_strikeouts": "탈삼진",
+    "holds": "홀드",
+}
+
+
+def render_stat_ranking(
+    row: Dict[str, Any],
+    *,
+    league_avg: Optional[Dict[str, Any]] = None,
+    percentiles: Optional[Dict[str, Any]] = None,
+    today_str: Optional[str],
+) -> str:
+    today = _today_fallback(today_str)
+    season = row.get("season")
+    metric = row.get("metric", "")
+    metric_kr = METRIC_LABELS.get(metric, metric)
+    rank = row.get("rank", "?")
+    player = row.get("entity_label") or row.get("entity_id")
+    team = row.get("team_name") or row.get("team_id")
+    value = row.get("value")
+
+    # Format value based on metric type
+    if metric in ("batting_avg", "ops", "era"):
+        val_str = _format_float(value, 3) or str(value)
+    elif metric in ("era",):
+        val_str = _format_float(value, 2) or str(value)
+    else:
+        val_str = _format_count(value) or str(value)
+
+    header = f"{season}년 KBO {metric_kr} 부문" if season else f"KBO {metric_kr} 부문"
+    team_str = f"({team})" if team else ""
+
+    tl_dr = _tl_dr([f"{header} {rank}위 {player} {team_str} {val_str}"])
+    core = f"[핵심 문장] {header} {rank}위는 {player}{team_str}로 {val_str}을 기록했습니다."
+
+    detailed = []
+    if row.get("is_tie"):
+        detailed.append("동률 순위입니다.")
+    detail_block = _detailed_lines(detailed) if detailed else ""
+
+    aliases = [player, team, row.get("team_id"), row.get("entity_id")]
+    meta = make_meta(
+        row,
+        kind="stat_ranking",
+        aliases=[str(a) for a in aliases if a],
+        extra_stats={"metric": metric, "rank": rank, "value": value},
+    )
+    source_line = (
+        f"[출처] KBO 공식 기록 (stat_rankings#{row.get('id','')}) / 기준일 {today}"
+    )
+
+    parts = [tl_dr, core]
+    if detail_block:
+        parts.append(detail_block)
+    parts.extend([f"[META] {meta}", source_line])
+    return "\n".join(parts)
+
     sample_pitcher1 = {
         "game_id": "20250501HHLT0",
         "player_name": "양현종",
