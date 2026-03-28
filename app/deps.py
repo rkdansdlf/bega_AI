@@ -1,28 +1,84 @@
 """FastAPI 의존성 주입을 위한 공통 헬퍼를 정의하는 모듈."""
 
 import asyncio
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
+import json
 import logging
 import secrets
 from typing import Any, Optional
 
 import psycopg
+import httpx
 from psycopg_pool import ConnectionPool, PoolTimeout
 from fastapi import Depends, Header, HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
 
 from .config import get_settings
+from .core.http_clients import close_shared_httpx_clients, get_shared_httpx_client
 from .core.rag import RAGPipeline
 from .ml.intent_router import predict_intent, load_clf
-from .agents.baseball_agent import BaseballStatisticsAgent
+from .agents.baseball_agent import BaseballAgentRuntime, BaseballStatisticsAgent
+from .agents.shared_runtime import (
+    get_shared_baseball_agent_runtime as _get_shared_baseball_agent_runtime,
+    initialize_shared_baseball_agent_runtime as _initialize_cached_baseball_agent_runtime,
+    reset_shared_baseball_agent_runtime,
+)
+from .agents.runtime_factory import create_baseball_agent_runtime
 from .core.chat_cache import CREATE_TABLE_SQL as CHAT_CACHE_DDL
 from .core.chat_cache import cleanup_expired as _cleanup_expired_cache
 from .core.security_metrics import record_security_event
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성)
 _connection_pool: Optional[ConnectionPool] = None
+DB_POOL_MIN_SIZE = 1
+DB_POOL_MAX_SIZE = 30
+
+# 전역 싱글톤: stateless 컴포넌트 (앱 수명 동안 재사용)
+_shared_context_formatter = None
+_shared_wpa_calculator = None
+
+
+def _get_shared_context_formatter():
+    """ContextFormatter 싱글톤 반환."""
+    global _shared_context_formatter
+    if _shared_context_formatter is None:
+        from .core.rag import ContextFormatter
+
+        _shared_context_formatter = ContextFormatter()
+    return _shared_context_formatter
+
+
+def _get_shared_wpa_calculator():
+    """WPACalculator 싱글톤 반환."""
+    global _shared_wpa_calculator
+    if _shared_wpa_calculator is None:
+        from .core.rag import WPACalculator
+
+        _shared_wpa_calculator = WPACalculator()
+    return _shared_wpa_calculator
+
+
+def _create_baseball_agent_runtime(
+    settings: Optional[Any] = None,
+) -> BaseballAgentRuntime:
+    return create_baseball_agent_runtime(settings)
+
+
+def _initialize_shared_baseball_agent_runtime() -> BaseballAgentRuntime:
+    runtime = _initialize_cached_baseball_agent_runtime()
+    logger.info(
+        "[Lifespan] baseball_agent_runtime initialized runtime_id=%d",
+        runtime.runtime_id,
+    )
+    return runtime
+
+
+def get_shared_baseball_agent_runtime() -> BaseballAgentRuntime:
+    return _get_shared_baseball_agent_runtime()
+
+
 COACH_OPENROUTER_BLOCKED_MODELS = {
     "openrouter/auto",
     "upstage/solar-pro-3:free",
@@ -149,8 +205,8 @@ def get_connection_pool() -> ConnectionPool:
         settings = get_settings()
         _connection_pool = ConnectionPool(
             conninfo=settings.database_url,
-            min_size=1,
-            max_size=30,
+            min_size=DB_POOL_MIN_SIZE,
+            max_size=DB_POOL_MAX_SIZE,
             # TCP keepalive 옵션 및 기타 설정
             kwargs={
                 "keepalives": 1,
@@ -161,8 +217,49 @@ def get_connection_pool() -> ConnectionPool:
                 "target_session_attrs": "read-write",  # standby/recovery 서버 연결 거부
             },
         )
+        logger.info(
+            "[DB] Connection pool initialized pool_stats=%s",
+            _format_connection_pool_stats(_connection_pool),
+        )
 
     return _connection_pool
+
+
+def _snapshot_connection_pool_stats(
+    pool_instance: Optional[Any] = None,
+) -> dict[str, Any]:
+    pool = pool_instance or _connection_pool
+    snapshot: dict[str, Any] = {
+        "min_size": DB_POOL_MIN_SIZE,
+        "max_size": DB_POOL_MAX_SIZE,
+        "pool_available": pool is not None,
+    }
+    if pool is None:
+        return snapshot
+
+    pool_name = getattr(pool, "name", None)
+    if isinstance(pool_name, str) and pool_name:
+        snapshot["name"] = pool_name
+
+    get_stats = getattr(pool, "get_stats", None)
+    if callable(get_stats):
+        try:
+            stats = get_stats()
+        except Exception as exc:  # noqa: BLE001
+            snapshot["stats_error"] = str(exc)
+        else:
+            if isinstance(stats, dict):
+                snapshot["stats"] = stats
+
+    return snapshot
+
+
+def _format_connection_pool_stats(pool_instance: Optional[Any] = None) -> str:
+    return json.dumps(
+        _snapshot_connection_pool_stats(pool_instance),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def close_connection_pool():
@@ -197,6 +294,7 @@ async def lifespan(app):
     # 시작 시
     load_clf()
     pool = get_connection_pool()  # 커넥션 풀 초기화
+    _initialize_shared_baseball_agent_runtime()
 
     # [Coach Caching] 캐시 테이블 자동 생성 (편의성)
     try:
@@ -253,12 +351,17 @@ async def lifespan(app):
 
     yield
 
-    # 종료 시: cleanup 태스크 취소 후 커넥션 풀 정리
+    # 종료 시: cleanup 태스크 취소 후 리소스 정리
     cleanup_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
+
+    # httpx 클라이언트 정리
+    await close_shared_httpx_clients()
+
+    reset_shared_baseball_agent_runtime()
     close_connection_pool()  # 모든 커넥션 정리
 
 
@@ -273,13 +376,21 @@ def get_db_connection() -> Generator[psycopg.Connection, None, None]:
             # 명시적인 확인이 필요한 경우 execute("SELECT 1") 등을 사용 가능
             yield conn
     except PoolTimeout as exc:
-        logger.error("[DB] Pool timeout while acquiring connection: %s", exc)
+        logger.error(
+            "[DB] Pool timeout while acquiring connection: %s pool_stats=%s",
+            exc,
+            _format_connection_pool_stats(pool_instance),
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="데이터베이스 연결이 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.",
         ) from exc
     except psycopg.OperationalError as exc:
-        logger.error("[DB] Operational error while acquiring connection: %s", exc)
+        logger.error(
+            "[DB] Operational error while acquiring connection: %s pool_stats=%s",
+            exc,
+            _format_connection_pool_stats(pool_instance),
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="데이터베이스 연결이 복구 중입니다. 잠시 후 다시 시도해주세요.",
@@ -290,303 +401,22 @@ def get_rag_pipeline(
     conn: psycopg.Connection = Depends(get_db_connection),
 ) -> RAGPipeline:
     settings = get_settings()
-    return RAGPipeline(settings=settings, connection=conn)
-
-
-def get_agent(
-    conn: psycopg.Connection = Depends(get_db_connection),
-) -> BaseballStatisticsAgent:
-    """Dependency to get an instance of the BaseballStatisticsAgent."""
-    # Note: depends handles the context manager yield for us.
-    settings = get_settings()
-
-    # tenacity settings
-    from tenacity import (
-        retry,
-        stop_after_attempt,
-        wait_exponential,
-        retry_if_exception,
-        before_sleep_log,
-    )
-    import httpx
-    import logging
-    import json
-
-    logger = logging.getLogger("BaseballAgent")
-
-    def is_server_error(exception):
-        """Return True if exception is a 5xx server error."""
-        return (
-            isinstance(exception, httpx.HTTPStatusError)
-            and exception.response.status_code >= 500
-        )
-
-    def _resolve_model_candidates(
-        primary_model: str, fallback_models: list[str]
-    ) -> list[str]:
-        blocked = {"openrouter/auto"}
-        candidates: list[str] = []
-        for model in [primary_model] + list(fallback_models):
-            if not model:
-                continue
-            if model in blocked:
-                logger.warning(f"[LLM] Skipping blocked model: {model}")
-                continue
-            if model not in candidates:
-                candidates.append(model)
-
-        if candidates:
-            return candidates
-
-        if primary_model:
-            logger.warning(
-                f"[LLM] All configured models are blocked; fallback to primary: {primary_model}"
-            )
-            return [primary_model]
-
-        return [m for m in fallback_models if m]
-
-    @retry(
-        stop=stop_after_attempt(2),  # 5 -> 2: 빠른 실패
-        wait=wait_exponential(multiplier=1, min=1, max=5),
-        retry=retry_if_exception(is_server_error),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-    )
-    async def fetch_completion_stream(payload, headers):
-        """Helper function to fetch stream with retry logic."""
-        # Timeout: allow longer streaming windows before marking model as failed.
-        timeout_config = httpx.Timeout(30.0, connect=5.0, read=30.0, pool=5.0)
-        async with httpx.AsyncClient(timeout=timeout_config) as client:
-            async with client.stream(
-                "POST",
-                f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                json=payload,
-                headers=headers,
-            ) as response:
-                # Log error response body for 4xx errors before raising
-                if response.status_code >= 400 and response.status_code < 500:
-                    error_body = await response.aread()
-                    logger.error(
-                        f"[OpenRouter 4xx] Status: {response.status_code}, Body: {error_body.decode('utf-8', errors='replace')}"
-                    )
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    yield line
-
-    async def openrouter_generator(messages, max_tokens=None):
-        """OpenRouter LLM generator with optional max_tokens override."""
-        if not settings.openrouter_api_key:
-            raise RuntimeError("OpenRouter API key is required.")
-
-        # max_tokens 오버라이드 지원
-        effective_max_tokens = max_tokens or settings.max_output_tokens
-
-        headers = {
-            "Authorization": f"Bearer {settings.openrouter_api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": settings.openrouter_referer or "",
-            "X-Title": settings.openrouter_app_title or "",
-        }
-
-        # Build model list to try (블록된 모델은 건너뛰고, 없으면 primary로 복귀)
-        primary_model = settings.openrouter_model
-        fallback_models = settings.openrouter_fallback_models
-        models_to_try = _resolve_model_candidates(primary_model, fallback_models)
-        logger.info(
-            f"[LLM] Models to try (filtered): {models_to_try}, max_tokens={effective_max_tokens}"
-        )
-
-        last_exception = None
-        empty_chunk_retries = max(0, int(settings.chat_openrouter_empty_chunk_retries))
-        empty_chunk_backoff_ms = max(
-            50, int(settings.chat_openrouter_empty_chunk_backoff_ms)
-        )
-
-        for i, model in enumerate(models_to_try):
-            is_fallback = i > 0
-            if is_fallback:
-                logger.warning(
-                    f"[LLM Fallback] Trying model {i+1}/{len(models_to_try)}: {model}"
-                )
-            else:
-                logger.info(
-                    f"[LLM] Primary: {model}, Fallbacks available: {fallback_models}"
-                )
-
-            for retry_index in range(empty_chunk_retries + 1):
-                payload = {
-                    "model": model,
-                    "messages": messages,
-                    "stream": True,
-                    "temperature": 0.1,
-                    "max_tokens": effective_max_tokens,
-                }
-
-                try:
-                    chunk_count = 0
-                    empty_choice_count = 0
-                    malformed_chunk_count = 0
-
-                    async for line in fetch_completion_stream(payload, headers):
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        if line.startswith("data: "):
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(data_str)
-                                delta, parse_reason = _parse_openrouter_stream_delta(
-                                    data
-                                )
-                                if parse_reason in {"missing_choices", "empty_choices"}:
-                                    empty_choice_count += 1
-                                elif parse_reason in {
-                                    "non_object_payload",
-                                    "malformed_choice",
-                                }:
-                                    malformed_chunk_count += 1
-                                if delta:
-                                    chunk_count += 1
-                                    yield delta
-                            except json.JSONDecodeError:
-                                malformed_chunk_count += 1
-                                continue
-                        else:
-                            # Log non-data lines (might be errors or metadata)
-                            if line and not line.startswith(":"):
-                                logger.info(f"[OpenRouter Raw] {model}: {line}")
-                                if "error" in line.lower():
-                                    logger.error(f"[OpenRouter Error Detail] {line}")
-
-                    if chunk_count == 0:
-                        if malformed_chunk_count > 0:
-                            empty_chunk_reason = "malformed_stream_payload"
-                        elif empty_choice_count > 0:
-                            empty_chunk_reason = "empty_choices"
-                        else:
-                            empty_chunk_reason = "empty_chunk"
-                        error_msg = (
-                            f"Empty response (0 chunks) from {model}. "
-                            "Check filters or token limits."
-                        )
-                        logger.warning(
-                            "[LLM EmptyChunk] model=%s retry_index=%d max_retries=%d max_tokens=%s reason=%s empty_choices=%d malformed_chunks=%d",
-                            model,
-                            retry_index,
-                            empty_chunk_retries,
-                            effective_max_tokens,
-                            empty_chunk_reason,
-                            empty_choice_count,
-                            malformed_chunk_count,
-                        )
-                        last_exception = RuntimeError(error_msg)
-                        if retry_index < empty_chunk_retries:
-                            backoff_seconds = (empty_chunk_backoff_ms / 1000.0) * (
-                                2**retry_index
-                            )
-                            await asyncio.sleep(backoff_seconds)
-                            continue
-                        break
-
-                    if empty_choice_count > 0 or malformed_chunk_count > 0:
-                        logger.info(
-                            "[LLM StreamParse] model=%s chunk_count=%d empty_choices=%d malformed_chunks=%d",
-                            model,
-                            chunk_count,
-                            empty_choice_count,
-                            malformed_chunk_count,
-                        )
-                    logger.info(f"[LLM] Success: {chunk_count} chunks from {model}")
-                    return  # Success, exit the loop
-
-                except Exception as e:
-                    logger.error(f"[LLM] Model {model} failed: {e}")
-                    last_exception = e
-                    break  # Try next model
-
-        # All models failed
-        logger.error(
-            f"[LLM] All {len(models_to_try)} models failed. Last error: {last_exception}"
-        )
-        raise last_exception or RuntimeError("All models failed")
-
-    async def gemini_generator(messages, max_tokens=None):
-        """Gemini LLM generator with optional max_tokens override."""
-        import google.generativeai as genai
-        from google.generativeai.types import GenerationConfig
-
-        if not settings.gemini_api_key:
-            raise RuntimeError("Gemini API key is required.")
-
-        # max_tokens 오버라이드 지원
-        effective_max_tokens = max_tokens or settings.max_output_tokens
-
-        genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel(settings.gemini_model)
-
-        # Convert messages to Gemini format
-        gemini_messages = []
-        system_instruction = ""
-
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            if role == "system":
-                system_instruction = content
-            else:
-                gemini_role = "user" if role == "user" else "model"
-                gemini_messages.append({"role": gemini_role, "parts": [content]})
-
-        if system_instruction:
-            model = genai.GenerativeModel(
-                model_name=settings.gemini_model, system_instruction=system_instruction
-            )
-
-        try:
-            response = await model.generate_content_async(
-                gemini_messages,
-                generation_config=GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=effective_max_tokens,
-                ),
-                stream=True,
-            )
-            async for chunk in response:
-                if chunk.text:
-                    yield chunk.text
-        except Exception as e:
-            logger.error(f"Gemini generation failed: {e}")
-            raise e
-
-    # Select generator based on provider
-    if settings.llm_provider == "gemini":
-        llm_generator = gemini_generator
-    else:
-        llm_generator = openrouter_generator
-
-    return BaseballStatisticsAgent(
+    return RAGPipeline(
+        settings=settings,
         connection=conn,
-        llm_generator=llm_generator,
-        fast_path_enabled=settings.chat_fast_path_enabled,
-        fast_path_scope=settings.chat_fast_path_scope,
-        fast_path_min_messages=settings.chat_fast_path_min_messages,
-        fast_path_tool_cap=settings.chat_fast_path_tool_cap,
-        fast_path_fallback_on_empty=settings.chat_fast_path_fallback_on_empty,
-        chat_dynamic_token_enabled=settings.chat_dynamic_token_enabled,
-        chat_analysis_max_tokens=settings.chat_analysis_max_tokens,
-        chat_answer_max_tokens_short=settings.chat_answer_max_tokens_short,
-        chat_answer_max_tokens_long=settings.chat_answer_max_tokens_long,
-        chat_answer_max_tokens_team=settings.chat_answer_max_tokens_team,
-        chat_tool_result_max_chars=settings.chat_tool_result_max_chars,
-        chat_tool_result_max_items=settings.chat_tool_result_max_items,
-        chat_first_token_watchdog_seconds=settings.chat_first_token_watchdog_seconds,
-        chat_first_token_retry_max_attempts=settings.chat_first_token_retry_max_attempts,
-        chat_stream_first_token_watchdog_seconds=settings.chat_stream_first_token_watchdog_seconds,
-        chat_stream_first_token_retry_max_attempts=settings.chat_stream_first_token_retry_max_attempts,
+        agent_runtime=get_shared_baseball_agent_runtime(),
+        context_formatter=_get_shared_context_formatter(),
+        wpa_calculator=_get_shared_wpa_calculator(),
     )
+
+
+async def get_agent(
+    conn: psycopg.Connection = Depends(get_db_connection),
+) -> AsyncGenerator[BaseballStatisticsAgent, None]:
+    """Dependency to get an instance of the BaseballStatisticsAgent."""
+    runtime = get_shared_baseball_agent_runtime()
+    with runtime.request_context(conn):
+        yield runtime.shared_agent
 
 
 def get_coach_llm_generator():
@@ -658,69 +488,67 @@ def get_coach_llm_generator():
                     chunk_count = 0
                     empty_choice_count = 0
                     malformed_chunk_count = 0
-                    timeout_config = httpx.Timeout(
-                        settings.coach_llm_read_timeout,
-                        connect=5.0,
-                        read=settings.coach_llm_read_timeout,
-                        pool=5.0,
+                    client = get_shared_httpx_client(
+                        "openrouter",
+                        timeout=120.0,
+                        limits=httpx.Limits(
+                            max_connections=20,
+                            max_keepalive_connections=10,
+                        ),
                     )
-                    async with httpx.AsyncClient(timeout=timeout_config) as client:
-                        async with client.stream(
-                            "POST",
-                            f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
-                            json=payload,
-                            headers=headers,
-                        ) as response:
-                            if (
-                                response.status_code >= 400
-                                and response.status_code < 500
-                            ):
-                                error_body = await response.aread()
-                                logger.error(
-                                    "[Coach OpenRouter 4xx] Status: %s, Body: %s",
-                                    response.status_code,
-                                    error_body.decode("utf-8", errors="replace"),
-                                )
-                            response.raise_for_status()
-                            async for line in response.aiter_lines():
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                if line.startswith("data: "):
-                                    data_str = line[6:].strip()
-                                    if data_str == "[DONE]":
-                                        break
-                                    try:
-                                        data = json.loads(data_str)
-                                        delta, parse_reason = (
-                                            _parse_openrouter_stream_delta(data)
-                                        )
-                                        if parse_reason in {
-                                            "missing_choices",
-                                            "empty_choices",
-                                        }:
-                                            empty_choice_count += 1
-                                        elif parse_reason in {
-                                            "non_object_payload",
-                                            "malformed_choice",
-                                        }:
-                                            malformed_chunk_count += 1
-                                        if delta:
-                                            chunk_count += 1
-                                            yield delta
-                                    except json.JSONDecodeError:
+                    async with client.stream(
+                        "POST",
+                        f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                    ) as response:
+                        if response.status_code >= 400 and response.status_code < 500:
+                            error_body = await response.aread()
+                            logger.error(
+                                "[Coach OpenRouter 4xx] Status: %s, Body: %s",
+                                response.status_code,
+                                error_body.decode("utf-8", errors="replace"),
+                            )
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    data = json.loads(data_str)
+                                    delta, parse_reason = (
+                                        _parse_openrouter_stream_delta(data)
+                                    )
+                                    if parse_reason in {
+                                        "missing_choices",
+                                        "empty_choices",
+                                    }:
+                                        empty_choice_count += 1
+                                    elif parse_reason in {
+                                        "non_object_payload",
+                                        "malformed_choice",
+                                    }:
                                         malformed_chunk_count += 1
-                                        continue
-                                else:
-                                    if line and not line.startswith(":"):
-                                        logger.info(
-                                            "[Coach OpenRouter Raw] %s: %s", model, line
+                                    if delta:
+                                        chunk_count += 1
+                                        yield delta
+                                except json.JSONDecodeError:
+                                    malformed_chunk_count += 1
+                                    continue
+                            else:
+                                if line and not line.startswith(":"):
+                                    logger.info(
+                                        "[Coach OpenRouter Raw] %s: %s", model, line
+                                    )
+                                    if "error" in line.lower():
+                                        logger.error(
+                                            "[Coach OpenRouter Error Detail] %s",
+                                            line,
                                         )
-                                        if "error" in line.lower():
-                                            logger.error(
-                                                "[Coach OpenRouter Error Detail] %s",
-                                                line,
-                                            )
 
                     if chunk_count == 0:
                         if malformed_chunk_count > 0:

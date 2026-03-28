@@ -626,6 +626,242 @@ _FOREIGN_PLAYERS: frozenset = frozenset(
 )
 # 긴 이름부터 매칭해야 부분 매칭 오류를 방지할 수 있으므로 길이 내림차순 정렬
 _FOREIGN_PLAYERS_SORTED: list = sorted(_FOREIGN_PLAYERS, key=len, reverse=True)
+_KOREAN_PARTICLES = [
+    "의",
+    "가",
+    "은",
+    "는",
+    "을",
+    "를",
+    "이",
+    "에",
+    "에서",
+    "로",
+    "으로",
+    "와",
+    "과",
+]
+_PLAYER_NAME_PATTERNS = [
+    r"([가-힣]{2,4})(?:의|가|은|는|을|를|이|에|에서|로|으로|와|과)",
+    r"([가-힣]{2,4})(?=\s|$|[^가-힣])",
+]
+_PLAYER_NAME_COMMON_TERMS = {
+    "선수",
+    "타자",
+    "투수",
+    "순위",
+    "랭킹",
+    "기록",
+    "성적",
+    "경기",
+    "시즌",
+    "이닝",
+    "타율",
+    "방어율",
+    "최고",
+    "최저",
+    "가장",
+    "제일",
+    "상위",
+    "하위",
+    "리그",
+    "야구",
+    "올해",
+    "작년",
+    "금년",
+    "월드",
+    "베이스",
+    "볼넷",
+    "평균",
+    "통산",
+    "개수",
+    "몇개",
+    "몇점",
+    "몇승",
+    "몇패",
+    "시절",
+    "때문",
+    "대표내년",
+    "재작년",
+    "지난해",
+    "어제",
+    "오늘",
+    "내일",
+    "최근",
+    "현재",
+    "마지막",
+    "최종",
+    "결승",
+    "우승",
+    "준우승",
+    "시합",
+    "대결",
+    "승리",
+    "패배",
+    "무승부",
+    "연장",
+    "취소",
+    "종료",
+    "시작",
+    "우승팀",
+    "챔피언",
+    "등수",
+    "순위표",
+    "주요",
+    "선수단",
+    "로스터",
+    "라인업",
+    "명단",
+    "구단",
+    "감독",
+    "코치",
+    "홈런",
+    "안타",
+    "득점",
+    "실점",
+    "승률",
+    "세이브",
+    "타점",
+    "출루율",
+    "장타율",
+    "도루",
+    "삼진",
+    "타수",
+    "타석",
+    "등판",
+    "완투",
+    "조건",
+    "자격",
+    "규정",
+    "규칙",
+    "제도",
+    "방법",
+    "방식",
+    "기준",
+    "정보",
+    "내용",
+    "결과",
+    "현황",
+    "상황",
+    "전망",
+    "예상",
+    "분석",
+    "소식",
+    "뉴스",
+    "발표",
+    "공식",
+    "확정",
+    "변경",
+    "연기",
+    "어디",
+    "누구",
+    "언제",
+    "어떻게",
+    "왜",
+    "무엇",
+    "얼마",
+    "몇",
+    "어떤",
+    "무슨",
+    "포수",
+    "내야수",
+    "외야수",
+    "유격수",
+    "중견수",
+    "좌익수",
+    "우익수",
+    "올스타",
+    "신인왕",
+    "골든글러브",
+    "베스트",
+    "엠브이피",
+    "타이틀",
+    "트레이드",
+    "이적",
+    "영입",
+    "방출",
+    "등록",
+    "말소",
+    "계약",
+    "연봉",
+    "알려줘",
+    "설명해줘",
+    "분석해줘",
+    "비교해줘",
+    "정리해줘",
+    "평가해줘",
+    "보여줘",
+    "부탁해",
+    "어딨어",
+    "누구야",
+    "정규시즌",
+    "평균자책",
+    "평균자책점",
+    "포스트시즌",
+    "준플레이오프",
+    "플레이오프",
+    "한국시리즈",
+    "와일드카드",
+    "얼마나",
+    "어떠니",
+    "궁금해",
+    "그려줘",
+    "표",
+    "상대",
+    "특정",
+    "승부",
+    "위가",
+    "묶어서",
+    "각각",
+    "같이",
+    "보면",
+    "유형",
+}
+_PLAYER_NAME_INVALID_SUFFIXES = ("해줘", "해주세요", "해봐", "일까", "인가")
+
+
+def extract_player_names(query: str, limit: int = 4) -> List[str]:
+    """질문에서 여러 선수명을 순서대로 추출합니다."""
+    if not query or limit <= 0:
+        return []
+
+    query_normalized = query
+    for particle in _KOREAN_PARTICLES:
+        query_normalized = query_normalized.replace(particle, "")
+
+    ordered_matches: List[Tuple[int, str]] = []
+    for player in _FOREIGN_PLAYERS_SORTED:
+        query_index = query.find(player)
+        if query_index >= 0:
+            ordered_matches.append((query_index, player))
+            continue
+        normalized_index = query_normalized.find(player)
+        if normalized_index >= 0:
+            ordered_matches.append((normalized_index, player))
+
+    for pattern in _PLAYER_NAME_PATTERNS:
+        for match in re.finditer(pattern, query):
+            ordered_matches.append((match.start(1), match.group(1)))
+
+    ordered_matches.sort(key=lambda item: item[0])
+
+    player_names: List[str] = []
+    seen: set[str] = set()
+    for _, match in ordered_matches:
+        if (
+            match in seen
+            or match in TEAM_MAPPING
+            or match in STAT_MAPPING
+            or match in _PLAYER_NAME_COMMON_TERMS
+            or match.endswith(_PLAYER_NAME_INVALID_SUFFIXES)
+        ):
+            continue
+        player_names.append(match)
+        seen.add(match)
+        if len(player_names) >= limit:
+            break
+
+    return player_names
 
 
 def extract_player_name(query: str) -> Optional[str]:
@@ -633,249 +869,8 @@ def extract_player_name(query: str) -> Optional[str]:
     질문에서 선수명을 추출합니다.
     한국어 이름과 외국인 선수명을 모두 인식합니다.
     """
-    # 1. 외국인 선수명 우선 검색 (긴 이름부터 매칭하여 부분 매칭 문제 방지)
-    for player in _FOREIGN_PLAYERS_SORTED:
-        if player in query:
-            return player
-
-    # 2. 한국어 조사 제거 후 외국인 선수명 재검색
-    query_normalized = query
-    korean_particles = [
-        "의",
-        "가",
-        "은",
-        "는",
-        "을",
-        "를",
-        "이",
-        "에",
-        "에서",
-        "로",
-        "으로",
-        "와",
-        "과",
-    ]
-    for particle in korean_particles:
-        query_normalized = query_normalized.replace(particle, "")
-
-    for player in _FOREIGN_PLAYERS_SORTED:
-        if player in query_normalized:
-            return player
-
-    # 3. 한글 이름 패턴 검색 (2-4글자 한글) - 조사가 붙은 경우 고려
-    # 조사가 붙기 전의 순수한 이름 추출
-    name_patterns = [
-        r"([가-힣]{2,4})(?:의|가|은|는|을|를|이|에|에서|로|으로|와|과)",  # 조사가 붙은 이름
-        r"([가-힣]{2,4})(?=\s|$|[^가-힣])",  # 조사가 없는 이름
-    ]
-
-    matches = []
-    for pattern in name_patterns:
-        found = re.findall(pattern, query)
-        matches.extend(found)
-
-    # 중복 제거하면서 순서 유지
-    unique_matches = []
-    for match in matches:
-        if match not in unique_matches:
-            unique_matches.append(match)
-
-    # 팀명이나 통계 용어가 아닌 것 중 첫 번째를 선수명으로 간주
-    for match in unique_matches:
-        if match not in TEAM_MAPPING and match not in STAT_MAPPING:
-            # 일반적인 야구 용어들도 제외
-            common_terms = {
-                "선수",
-                "타자",
-                "투수",
-                "순위",
-                "랭킹",
-                "기록",
-                "성적",
-                "경기",
-                "시즌",
-                "이닝",
-                "타율",
-                "방어율",
-                "최고",
-                "최저",
-                "가장",
-                "제일",
-                "상위",
-                "하위",
-                "리그",
-                "야구",
-                "올해",
-                "작년",
-                "금년",
-                "시즌",
-                "월드",
-                "베이스",
-                "볼넷",
-                "평균",
-                "통산",
-                "개수",
-                "몇개",
-                "몇점",
-                "몇승",
-                "몇패",
-                "시절",
-                "때문",
-                "대표내년",
-                "재작년",
-                "지난해",
-                "어제",
-                "오늘",
-                "내일",
-                "최근",
-                "현재",
-                "마지막",
-                "최종",
-                "결승",
-                "우승",
-                "준우승",
-                "시합",
-                "대결",
-                "승리",
-                "패배",
-                "무승부",
-                "연장",
-                "취소",
-                "종료",
-                "시작",
-                "우승팀",
-                "챔피언",
-                "등수",
-                "순위표",
-                "주요",
-                "선수단",
-                "로스터",
-                "라인업",
-                "명단",
-                "구단",
-                "감독",
-                "코치",
-                "홈런",
-                "안타",
-                "득점",
-                "실점",
-                "승률",
-                "세이브",
-                "타점",
-                "출루율",
-                "장타율",
-                "도루",
-                "삼진",
-                "볼넷",
-                "타수",
-                "타석",
-                "등판",
-                "완투",
-                "조건",
-                "자격",
-                "규정",
-                "규칙",
-                "제도",
-                "방법",
-                "방식",
-                "기준",
-                "정보",
-                "내용",
-                "결과",
-                "현황",
-                "상황",
-                "전망",
-                "예상",
-                "분석",
-                "소식",
-                "뉴스",
-                "발표",
-                "공식",
-                "확정",
-                "변경",
-                "연기",
-                "어디",
-                "누구",
-                "언제",
-                "어떻게",
-                "왜",
-                "무엇",
-                "얼마",
-                "몇",
-                "어떤",
-                "무슨",
-                "포수",
-                "내야수",
-                "외야수",
-                "유격수",
-                "중견수",
-                "좌익수",
-                "우익수",
-                "올스타",
-                "신인왕",
-                "골든글러브",
-                "베스트",
-                "엠브이피",
-                "타이틀",
-                "트레이드",
-                "이적",
-                "영입",
-                "방출",
-                "등록",
-                "말소",
-                "계약",
-                "연봉",
-                "알려줘",
-                "설명해줘",
-                "보여줘",
-                "부탁해",
-                "어딨어",
-                "누구야",
-                "작년",
-                "올해",
-                "재작년",
-                "내년",
-                "순위",
-                "성적",
-                "기록",
-                "랭킹",
-                "정규시즌",
-                "승률",
-                "몇승",
-                "몇패",
-                "방어율",
-                "평균자책",
-                "평균자책점",
-                "타율",
-                "홈런",
-                "타점",
-                "도루",
-                "포스트시즌",
-                "준플레이오프",
-                "플레이오프",
-                "한국시리즈",
-                "와일드카드",
-                "누구",
-                "어디",
-                "언제",
-                "어떻게",
-                "얼마나",
-                "어떠니",
-                "궁금해",
-                "그려줘",
-                "표",
-                "상대",
-                "특정",
-                "결과",
-                "대결",
-                "승부",
-                "위가",
-                "경기",
-            }
-            if match not in common_terms:
-                return match
-
-    return None
+    player_names = extract_player_names(query, limit=1)
+    return player_names[0] if player_names else None
 
 
 def normalize_player_name(name: str) -> str:

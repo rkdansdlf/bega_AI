@@ -73,9 +73,12 @@ def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() -> Non
 
     assert result == rows
     assert conn.last_cursor is not None
-    assert len(conn.last_cursor.executed) == 2
+    assert len(conn.last_cursor.executed) == 3
 
-    sql, params = conn.last_cursor.executed[1]
+    timeout_sql, _ = conn.last_cursor.executed[1]
+    assert "SET LOCAL statement_timeout = 8000;" in timeout_sql
+
+    sql, params = conn.last_cursor.executed[2]
     expected_vector = "[0.10000000,0.20000000,0.30000000]"
     assert "keyword_query AS" in sql
     assert "candidates AS" in sql
@@ -125,9 +128,12 @@ def test_similarity_search_without_keyword_keeps_vector_path() -> None:
 
     assert result == rows
     assert conn.last_cursor is not None
-    assert len(conn.last_cursor.executed) == 2
+    assert len(conn.last_cursor.executed) == 3
 
-    sql, params = conn.last_cursor.executed[1]
+    timeout_sql, _ = conn.last_cursor.executed[1]
+    assert "SET LOCAL statement_timeout = 8000;" in timeout_sql
+
+    sql, params = conn.last_cursor.executed[2]
     expected_vector = "[0.40000000,0.50000000,0.60000000]"
     assert "keyword_query AS" not in sql
     assert "candidates AS" not in sql
@@ -162,7 +168,10 @@ def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> None:
     assert result == rows
     assert conn.last_cursor is not None
 
-    sql, params = conn.last_cursor.executed[1]
+    timeout_sql, _ = conn.last_cursor.executed[1]
+    assert "SET LOCAL statement_timeout = 8000;" in timeout_sql
+
+    sql, params = conn.last_cursor.executed[2]
     expected_vector = "[0.70000000,0.80000000,0.90000000]"
     assert "source_table <> %s" not in sql
     assert params == [expected_vector, 2025, expected_vector, 2]
@@ -197,7 +206,10 @@ def test_similarity_search_internal_exclude_source_tables_appends_filters() -> N
     assert result == rows
     assert conn.last_cursor is not None
 
-    sql, params = conn.last_cursor.executed[1]
+    timeout_sql, _ = conn.last_cursor.executed[1]
+    assert "SET LOCAL statement_timeout = 8000;" in timeout_sql
+
+    sql, params = conn.last_cursor.executed[2]
     expected_vector = "[0.90000000,0.10000000,0.20000000]"
     assert sql.count("source_table <> %s") == 2
     assert params == [

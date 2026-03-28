@@ -5,6 +5,7 @@ from typing import Optional
 import logging
 
 from ..config import get_settings
+from ..core.http_clients import get_shared_httpx_client
 from ..core.ratelimit import rate_limit_vision_dependency
 from ..deps import require_ai_internal_token
 import httpx
@@ -133,38 +134,41 @@ async def analyze_ticket_image(
             # OpenRouter Implementation
             base64_image = base64.b64encode(contents).decode("utf-8")
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {settings.openrouter_api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://kbo-platform.com",
-                        "X-Title": "KBO Platform Ticket OCR",
-                    },
-                    json={
-                        "model": settings.vision_model,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt},
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:{content_type};base64,{base64_image}"
-                                        },
+            client = get_shared_httpx_client(
+                "openrouter",
+                timeout=httpx.Timeout(120.0, connect=10.0, read=60.0, pool=10.0),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+            response = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://kbo-platform.com",
+                    "X-Title": "KBO Platform Ticket OCR",
+                },
+                json={
+                    "model": settings.vision_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{content_type};base64,{base64_image}"
                                     },
-                                ],
-                            }
-                        ],
-                        "max_tokens": 1000,
-                    },
-                )
-
-                response.raise_for_status()
-                result = response.json()
-                response_text = result["choices"][0]["message"]["content"].strip()
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 1000,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            response_text = result["choices"][0]["message"]["content"].strip()
 
         # Clean up response text (remove markdown code blocks if present)
         if response_text.startswith("```json"):
@@ -246,38 +250,41 @@ async def classify_seat_view_image(
         else:
             base64_image = base64.b64encode(contents).decode("utf-8")
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {settings.openrouter_api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://kbo-platform.com",
-                        "X-Title": "KBO Platform Seat View Classification",
-                    },
-                    json={
-                        "model": settings.vision_model,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt},
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:{content_type};base64,{base64_image}"
-                                        },
+            client = get_shared_httpx_client(
+                "openrouter",
+                timeout=httpx.Timeout(120.0, connect=10.0, read=60.0, pool=10.0),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+            response = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://kbo-platform.com",
+                    "X-Title": "KBO Platform Seat View Classification",
+                },
+                json={
+                    "model": settings.vision_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{content_type};base64,{base64_image}"
                                     },
-                                ],
-                            }
-                        ],
-                        "max_tokens": 500,
-                    },
-                )
-
-                response.raise_for_status()
-                result = response.json()
-                response_text = result["choices"][0]["message"]["content"].strip()
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 500,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            response_text = result["choices"][0]["message"]["content"].strip()
 
         if response_text.startswith("```json"):
             response_text = response_text[7:-3]

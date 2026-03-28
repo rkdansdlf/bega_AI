@@ -28,11 +28,14 @@ from app.config import get_settings
 from scripts.ingest_from_kbo import (
     CANONICAL_SOURCE_ROW_KEYS,
     TABLE_PROFILES,
+    build_static_profile_chunk_payloads,
+    build_static_source_row_prefix,
     build_canonical_source_row_id,
     build_select_query,
     build_source_row_id,
     resolve_primary_key_columns,
 )
+from scripts.sync_rag_chunks import _load_settings_from_env_file
 
 SEASONAL_TABLES: List[str] = [
     "kbo_seasons",
@@ -56,6 +59,11 @@ STATIC_TABLES: List[str] = [
     "stadiums",
     "player_basic",
     "player_movements",
+]
+STATIC_FILE_PROFILES: List[str] = [
+    table_name
+    for table_name, profile in TABLE_PROFILES.items()
+    if profile.get("source_file")
 ]
 
 # 과거 source_row_id 규칙(legacy)에서 canonical 규칙으로 매핑할 때 사용하는 키.
@@ -112,18 +120,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Source DB URL override. Defaults to settings.database_url.",
     )
     parser.add_argument(
+        "--source-env-file",
+        default="",
+        help="Env file used to resolve source DB config when --source-db-url is omitted.",
+    )
+    parser.add_argument(
         "--dest-db-url",
         default="",
         help="Destination DB URL override. Defaults to settings.database_url.",
+    )
+    parser.add_argument(
+        "--dest-env-file",
+        default="",
+        help="Env file used to resolve destination DB config when --dest-db-url is omitted.",
     )
     return parser
 
 
 def resolve_db_urls(args: argparse.Namespace) -> tuple[str, str]:
     settings = get_settings()
-    source_db_url = args.source_db_url.strip() or settings.database_url
-    dest_db_url = args.dest_db_url.strip() or settings.database_url
+    source_db_url = args.source_db_url.strip()
+    dest_db_url = args.dest_db_url.strip()
+
+    if not source_db_url:
+        if args.source_env_file.strip():
+            source_db_url = _load_settings_from_env_file(
+                args.source_env_file
+            ).database_url
+        else:
+            source_db_url = settings.database_url
+
+    if not dest_db_url:
+        if args.dest_env_file.strip():
+            dest_db_url = _load_settings_from_env_file(args.dest_env_file).database_url
+        else:
+            dest_db_url = settings.database_url
     return source_db_url, dest_db_url
+
+
+def _safe_close_connection(conn: Any) -> None:
+    close = getattr(conn, "close", None)
+    if close is None:
+        return
+    error_cls = getattr(psycopg, "OperationalError", Exception)
+    try:
+        close()
+    except error_cls:
+        pass
 
 
 def build_targets(mode: str, start_year: int, end_year: int) -> List[CoverageTarget]:
@@ -138,6 +181,12 @@ def build_targets(mode: str, start_year: int, end_year: int) -> List[CoverageTar
                 )
     if mode in {"all", "static"}:
         for table in STATIC_TABLES:
+            profile = TABLE_PROFILES.get(table, {})
+            source_table = str(profile.get("source_table", table))
+            targets.append(
+                CoverageTarget(table=table, year=0, source_table=source_table)
+            )
+        for table in STATIC_FILE_PROFILES:
             profile = TABLE_PROFILES.get(table, {})
             source_table = str(profile.get("source_table", table))
             targets.append(
@@ -216,6 +265,27 @@ def _load_expected_ids(
     target: CoverageTarget,
 ) -> tuple[int, Dict[str, str]]:
     profile = TABLE_PROFILES.get(target.table, {})
+    if profile.get("source_file"):
+        insert_sql = "INSERT INTO expected_ids (id) VALUES (%s) ON CONFLICT DO NOTHING"
+        settings = get_settings()
+        payload = [
+            (chunk.source_row_id,)
+            for chunk in build_static_profile_chunk_payloads(
+                target.table,
+                profile,
+                settings=settings,
+            )
+        ]
+        if payload:
+            dest_cur.executemany(insert_sql, payload)
+        else:
+            dest_cur.execute(
+                insert_sql,
+                (build_static_source_row_prefix(target.table, profile),),
+            )
+        dest_cur.execute("SELECT count(*) FROM expected_ids")
+        return int(dest_cur.fetchone()[0]), {}
+
     pk_columns = resolve_primary_key_columns(source_conn, target.table, profile)
     pk_hint: Sequence[str] = profile.get("pk_hint", [])
     season_year = target.year if target.year != 0 else None
@@ -258,14 +328,32 @@ def _load_expected_ids(
     return int(dest_cur.fetchone()[0]), legacy_aliases
 
 
-def _parse_row_id_pairs(row_id: str) -> Dict[str, str]:
-    pairs: Dict[str, str] = {}
-    for token in row_id.split("|"):
-        if "=" not in token:
-            continue
-        key, value = token.split("=", 1)
-        pairs[key] = value
-    return pairs
+def _is_source_file_target(table: str) -> bool:
+    profile = TABLE_PROFILES.get(table, {})
+    return bool(profile.get("source_file"))
+
+
+def build_actual_rows_query(
+    target: CoverageTarget,
+) -> tuple[str, tuple[Any, ...]]:
+    read_sql = """
+        SELECT source_row_id, meta
+        FROM rag_chunks
+        WHERE source_table = %s
+    """
+    params: List[Any] = [target.source_table]
+
+    if _is_source_file_target(target.table):
+        profile = TABLE_PROFILES.get(target.table, {})
+        static_prefix = build_static_source_row_prefix(target.table, profile)
+        read_sql += " AND (source_row_id = %s OR source_row_id LIKE %s)"
+        params.extend([static_prefix, f"{static_prefix}#part%"])
+        return read_sql, tuple(params)
+
+    if target.year != 0:
+        read_sql += " AND season_year = %s"
+        params.append(target.year)
+    return read_sql, tuple(params)
 
 
 def normalize_actual_source_row_id(
@@ -274,6 +362,9 @@ def normalize_actual_source_row_id(
     meta: Optional[Dict[str, Any]] = None,
     legacy_aliases: Optional[Dict[str, str]] = None,
 ) -> str:
+    if _is_source_file_target(table):
+        return raw_source_row_id
+
     base = raw_source_row_id.split("#part", 1)[0]
     pairs = _parse_row_id_pairs(base)
 
@@ -303,22 +394,22 @@ def normalize_actual_source_row_id(
     return base
 
 
+def _parse_row_id_pairs(row_id: str) -> Dict[str, str]:
+    pairs: Dict[str, str] = {}
+    for token in row_id.split("|"):
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        pairs[key] = value
+    return pairs
+
+
 def _load_actual_ids(
     dest_cur,
     target: CoverageTarget,
     legacy_aliases: Dict[str, str],
 ) -> int:
-    read_sql = """
-        SELECT source_row_id, meta
-        FROM rag_chunks
-        WHERE source_table = %s
-    """
-    params: tuple[Any, ...]
-    if target.year == 0:
-        params = (target.source_table,)
-    else:
-        read_sql += " AND season_year = %s"
-        params = (target.source_table, target.year)
+    read_sql, params = build_actual_rows_query(target)
 
     insert_sql = "INSERT INTO actual_ids (id) VALUES (%s) ON CONFLICT DO NOTHING"
     with dest_cur.connection.cursor() as read_cur:
@@ -507,19 +598,23 @@ def main() -> int:
 
     exit_code = 0
     try:
-        with psycopg.connect(source_db_url, autocommit=True) as source_conn:
-            with psycopg.connect(dest_db_url) as dest_conn:
-                for idx, target in enumerate(targets, start=1):
-                    print(
-                        f"[{idx}/{len(targets)}] verifying table={target.table} year={target.year}"
-                    )
-                    result = verify_target(
-                        source_conn=source_conn,
-                        dest_conn=dest_conn,
-                        target=target,
-                        sample_limit=args.sample_limit,
-                    )
-                    rows.append(result)
+        for idx, target in enumerate(targets, start=1):
+            print(
+                f"[{idx}/{len(targets)}] verifying table={target.table} year={target.year}"
+            )
+            source_conn = psycopg.connect(source_db_url, autocommit=True)
+            dest_conn = psycopg.connect(dest_db_url)
+            try:
+                result = verify_target(
+                    source_conn=source_conn,
+                    dest_conn=dest_conn,
+                    target=target,
+                    sample_limit=args.sample_limit,
+                )
+            finally:
+                _safe_close_connection(source_conn)
+                _safe_close_connection(dest_conn)
+            rows.append(result)
     except Exception as exc:
         report["fatal_error"] = str(exc)
         exit_code = 1
