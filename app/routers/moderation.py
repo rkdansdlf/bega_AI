@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, Literal, TypedDict
+from typing import Any, Dict, Literal
 
 import google.generativeai as genai
 from fastapi import APIRouter, Body, Depends, HTTPException
+from typing_extensions import TypedDict
 
 from ..config import Settings, get_settings
 from ..deps import require_ai_internal_token
