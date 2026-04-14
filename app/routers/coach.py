@@ -1307,9 +1307,23 @@ def _is_completed_review(evidence: GameEvidence) -> bool:
     return _is_completed_review_bucket(evidence.game_status_bucket)
 
 
+def _has_game_row_context(evidence: GameEvidence) -> bool:
+    if getattr(evidence, "game_row_found", False):
+        return True
+
+    return bool(
+        getattr(evidence, "game_id", None)
+        and evidence.game_date
+        and evidence.season_year
+        and evidence.home_team_code
+        and evidence.away_team_code
+        and evidence.stage_label != "UNKNOWN"
+    )
+
+
 def _default_used_evidence(evidence: GameEvidence) -> List[str]:
     sources: List[str] = []
-    if evidence.game_row_found:
+    if _has_game_row_context(evidence):
         sources.extend(["game", "kbo_seasons"])
     if evidence.stadium_name or evidence.start_time or evidence.weather:
         sources.append("game_metadata")
@@ -1333,8 +1347,9 @@ def assess_game_evidence(evidence: GameEvidence) -> GameEvidenceAssessment:
     )
     series_required = evidence.stage_label not in {"REGULAR", "PRE", "UNKNOWN"}
     series_context_available = bool(evidence.series_state)
+    has_game_row_context = _has_game_row_context(evidence)
     missing_game_context = not bool(
-        evidence.game_row_found
+        has_game_row_context
         and evidence.game_id
         and evidence.game_date
         and evidence.home_team_code
@@ -1576,7 +1591,8 @@ def _build_manual_data_request(
     request_game_date = _parse_iso_date(
         evidence.game_date or (payload.league_context or {}).get("game_date")
     )
-    missing_game_row = not evidence.game_row_found
+    has_game_row = _has_game_row_context(evidence)
+    missing_game_row = not has_game_row
     stage_context_mismatch = (
         request_game_date is not None
         and bool(evidence.season_year)
@@ -1589,7 +1605,7 @@ def _build_manual_data_request(
         away_score=evidence.away_score,
     )
     missing_critical_context = not bool(
-        evidence.game_row_found
+        has_game_row
         and request_game_date
         and evidence.home_team_code
         and evidence.away_team_code
@@ -2638,7 +2654,7 @@ def _claim_cache_generation(
     model_name: str,
     lease_owner: str,
     completed_ttl_seconds: Optional[int],
-    request_mode: str,
+    request_mode: str = COACH_REQUEST_MODE_MANUAL,
 ) -> tuple[str, Any, Optional[str], Optional[str], int]:
     with pool.connection() as conn:
         with conn.transaction():
