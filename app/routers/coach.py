@@ -700,7 +700,12 @@ def _build_completed_review_why_it_matters(
                 f"사전 지표는 {predicted_edge_team} 쪽이었지만, 실제 경기는 {winner_name}가 뒤집었습니다."
             )
 
-    if winner_name and home_recent_games >= 2 and away_recent_games >= 2 and home_run_diff != away_run_diff:
+    if (
+        winner_name
+        and home_recent_games >= 2
+        and away_recent_games >= 2
+        and home_run_diff != away_run_diff
+    ):
         recent_edge_team = home_name if home_run_diff > away_run_diff else away_name
         if recent_edge_team == winner_name:
             reasons.append(
@@ -710,7 +715,12 @@ def _build_completed_review_why_it_matters(
             reasons.append(
                 f"최근 득실 흐름은 {recent_edge_team} 쪽이었지만, 결과는 {winner_name}가 가져갔습니다."
             )
-    elif winner_name and home_bullpen and away_bullpen and abs(home_bullpen - away_bullpen) >= 3.0:
+    elif (
+        winner_name
+        and home_bullpen
+        and away_bullpen
+        and abs(home_bullpen - away_bullpen) >= 3.0
+    ):
         fresher_team = home_name if home_bullpen < away_bullpen else away_name
         if fresher_team == winner_name:
             reasons.append(
@@ -752,11 +762,15 @@ def _build_completed_review_turning_point_verdict(
 ) -> str:
     subject = f"{winner_name} 승리의 분기점은 " if winner_name else "실제 분기점은 "
     if top_moment:
-        inning_label = _normalize_name_token(top_moment.get("inning_label")) or "핵심 이닝"
+        inning_label = (
+            _normalize_name_token(top_moment.get("inning_label")) or "핵심 이닝"
+        )
         return f"{subject}{inning_label} 승부처 대응이었습니다."
     if review_summary_item:
         if review_summary_is_clutch:
-            return f"{subject}'{review_summary_item}' 장면을 리드로 연결한 구간이었습니다."
+            return (
+                f"{subject}'{review_summary_item}' 장면을 리드로 연결한 구간이었습니다."
+            )
         return f"{subject}'{review_summary_item}' 전후 운영이었습니다."
     return f"{subject}득점 연결 뒤 흐름을 지킨 운영이었습니다."
 
@@ -1000,7 +1014,9 @@ def _build_coach_fact_sheet(
         if fact:
             fact_lines.append(fact)
     elif evidence.lineup_announced:
-        caveat_lines.append("라인업 발표 신호는 있으나 선수 구성이 확인되지 않았습니다.")
+        caveat_lines.append(
+            "라인업 발표 신호는 있으나 선수 구성이 확인되지 않았습니다."
+        )
     else:
         caveat_lines.append("라인업이 아직 발표되지 않았습니다.")
 
@@ -1157,7 +1173,9 @@ def _is_scheduled_partial_context(
 ) -> bool:
     if game_status_bucket != "SCHEDULED":
         return False
-    return any(reason in grounding_reasons for reason in SCHEDULED_PARTIAL_GROUNDING_REASONS)
+    return any(
+        reason in grounding_reasons for reason in SCHEDULED_PARTIAL_GROUNDING_REASONS
+    )
 
 
 def _clean_summary_text(value: Optional[str]) -> Optional[str]:
@@ -1735,11 +1753,15 @@ def _default_generation_mode_for_request_mode(
     if request_mode == COACH_REQUEST_MODE_AUTO:
         normalized_cache_state = str(cache_state or "").strip().upper()
         normalized_validation_status = str(validation_status or "").strip().lower()
-        if normalized_validation_status == "success" and normalized_cache_state not in {
-            "FAILED_LOCKED",
-            "FAILED_RETRY_WAIT",
-            "PENDING_WAIT",
-        }:
+        if (
+            normalized_validation_status == "success"
+            and normalized_cache_state
+            not in {
+                "FAILED_LOCKED",
+                "FAILED_RETRY_WAIT",
+                "PENDING_WAIT",
+            }
+        ):
             return "deterministic_auto"
         return "evidence_fallback"
 
@@ -1768,9 +1790,7 @@ def _ensure_stream_meta_contract(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized["cached"] = bool(normalized.get("cached"))
     normalized["in_progress"] = bool(normalized.get("in_progress"))
     normalized["used_evidence"] = list(normalized.get("used_evidence") or [])
-    normalized["grounding_warnings"] = list(
-        normalized.get("grounding_warnings") or []
-    )
+    normalized["grounding_warnings"] = list(normalized.get("grounding_warnings") or [])
     normalized["grounding_reasons"] = _normalize_grounding_reasons(
         list(normalized.get("grounding_reasons") or [])
     )
@@ -1872,9 +1892,8 @@ def _is_completed_manual_review_request(
     *,
     game_status_bucket: str,
 ) -> bool:
-    return (
-        request_mode == COACH_REQUEST_MODE_MANUAL
-        and _is_completed_review_bucket(game_status_bucket)
+    return request_mode == COACH_REQUEST_MODE_MANUAL and _is_completed_review_bucket(
+        game_status_bucket
     )
 
 
@@ -1944,7 +1963,9 @@ def _resolve_coach_llm_idle_timeout_seconds(
         game_status_bucket=game_status_bucket,
         grounding_reasons=grounding_reasons,
     ):
-        return min(base_timeout, COACH_SCHEDULED_HALF_CONFIRMED_MANUAL_IDLE_TIMEOUT_SECONDS)
+        return min(
+            base_timeout, COACH_SCHEDULED_HALF_CONFIRMED_MANUAL_IDLE_TIMEOUT_SECONDS
+        )
     if _is_scheduled_partial_manual_request(
         request_mode,
         game_status_bucket=game_status_bucket,
@@ -2298,9 +2319,11 @@ async def _iterate_coach_llm_with_keepalive(
             wait_timeout = min(
                 effective_heartbeat_seconds,
                 remaining_idle,
-                remaining_first_chunk
-                if remaining_first_chunk is not None
-                else effective_heartbeat_seconds,
+                (
+                    remaining_first_chunk
+                    if remaining_first_chunk is not None
+                    else effective_heartbeat_seconds
+                ),
             )
             try:
                 event_type, payload = await asyncio.wait_for(
@@ -3514,7 +3537,11 @@ def _collect_game_evidence(
             home_score = _parse_optional_int(game_row.get("home_score"))
             away_score = _parse_optional_int(game_row.get("away_score"))
             winning_team_code: Optional[str] = None
-            if home_score is not None and away_score is not None and home_score != away_score:
+            if (
+                home_score is not None
+                and away_score is not None
+                and home_score != away_score
+            ):
                 winning_team_code = home_code if home_score > away_score else away_code
             evidence = GameEvidence(
                 game_id=game_row["game_id"],
@@ -3895,10 +3922,9 @@ def _recent_sample_size(team_data: Dict[str, Any]) -> int:
 
 
 def _should_use_team_level_scheduled_fallback(evidence: GameEvidence) -> bool:
-    return (
-        _normalize_game_status_bucket(evidence.game_status_bucket) == "SCHEDULED"
-        and not _has_confirmed_lineup_details(evidence)
-    )
+    return _normalize_game_status_bucket(
+        evidence.game_status_bucket
+    ) == "SCHEDULED" and not _has_confirmed_lineup_details(evidence)
 
 
 def _recent_record_metric_fragment(team_name: str, team_data: Dict[str, Any]) -> str:
@@ -4000,7 +4026,9 @@ def _scheduled_team_level_bullpen_summary(
         )
 
     if away_bullpen or home_bullpen:
-        known_team = evidence.away_team_name if away_bullpen else evidence.home_team_name
+        known_team = (
+            evidence.away_team_name if away_bullpen else evidence.home_team_name
+        )
         known_value = away_bullpen if away_bullpen else home_bullpen
         return (
             f"{known_team} 불펜 비중은 {known_value:.1f}%로 확인되지만, "
@@ -4033,7 +4061,9 @@ def _scheduled_team_level_bullpen_metric_value(
         )
 
     if away_bullpen or home_bullpen:
-        known_team = evidence.away_team_name if away_bullpen else evidence.home_team_name
+        known_team = (
+            evidence.away_team_name if away_bullpen else evidence.home_team_name
+        )
         known_value = away_bullpen if away_bullpen else home_bullpen
         return f"{known_team} {known_value:.1f}% / 상대 데이터 부족"
 
@@ -4075,7 +4105,9 @@ def _scheduled_team_level_swing_summary(evidence: GameEvidence) -> str:
 
 
 def _scheduled_team_level_watch_points(evidence: GameEvidence) -> List[str]:
-    primary = "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+    primary = (
+        "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+    )
     secondary = (
         "상위 타순 출루가 실제 득점으로 이어지는지 확인할 필요가 있습니다."
         if _has_confirmed_lineup_details(evidence)
@@ -4458,7 +4490,9 @@ def _completed_review_bullpen_focus_summary(
         )
 
     if away_bullpen or home_bullpen:
-        known_team = evidence.away_team_name if away_bullpen else evidence.home_team_name
+        known_team = (
+            evidence.away_team_name if away_bullpen else evidence.home_team_name
+        )
         known_value = away_bullpen if away_bullpen else home_bullpen
         return f"{known_team} 불펜 비중 {known_value:.1f}%만 확인되고 상대 팀 데이터는 부족합니다."
 
@@ -4495,12 +4529,9 @@ def _completed_review_matchup_focus_summary(
         return metric_value
 
     if evidence.stage_label != "REGULAR" and evidence.series_state:
-        return (
-            _series_score_text(evidence)
-            or evidence.series_state.summary_text(
-                evidence.home_team_name,
-                evidence.away_team_name,
-            )
+        return _series_score_text(evidence) or evidence.series_state.summary_text(
+            evidence.home_team_name,
+            evidence.away_team_name,
         )
 
     matchup = tool_results.get("matchup", {}) or {}
@@ -4660,9 +4691,7 @@ def _build_scheduled_team_level_deterministic_metrics(
     metrics.append(
         {
             "label": "불펜 운용",
-            "value": _scheduled_team_level_bullpen_metric_value(
-                evidence, tool_results
-            ),
+            "value": _scheduled_team_level_bullpen_metric_value(evidence, tool_results),
             "status": "warning",
             "trend": "neutral",
             "is_critical": True,
@@ -4747,15 +4776,11 @@ def _build_scheduled_team_level_deterministic_analysis(
         weaknesses.append(
             f"{ops_trailing_team}는 정규시즌 OPS {ops_trailing_value:.3f}로 초반 득점 설계가 과제입니다."
         )
-        ops_reason = (
-            f"{ops_edge_team}가 팀 OPS에서 앞서 초반 선취점 압박을 먼저 걸 가능성이 있습니다."
-        )
+        ops_reason = f"{ops_edge_team}가 팀 OPS에서 앞서 초반 선취점 압박을 먼저 걸 가능성이 있습니다."
 
     if recent_edge_team:
         strengths.append(f"{recent_edge_team}는 최근 득실 흐름에서 앞섰습니다.")
-        recent_reason = (
-            f"최근 표본에서는 {recent_edge_team}가 득실 흐름 우위를 보여 경기 중반 운영 선택지가 더 넓습니다."
-        )
+        recent_reason = f"최근 표본에서는 {recent_edge_team}가 득실 흐름 우위를 보여 경기 중반 운영 선택지가 더 넓습니다."
 
     edge_team, trailing_team, edge_source, secondary_edge_team = (
         _scheduled_primary_edge_assessment(
@@ -4798,9 +4823,13 @@ def _build_scheduled_team_level_deterministic_analysis(
     swing_factors.append(_scheduled_team_level_swing_summary(evidence))
     watch_points.extend(_scheduled_team_level_watch_points(evidence))
 
-    uncertainty.append("라인업 미발표라 타순 기반 세부 매치업은 경기 직전까지 달라질 수 있습니다.")
+    uncertainty.append(
+        "라인업 미발표라 타순 기반 세부 매치업은 경기 직전까지 달라질 수 있습니다."
+    )
     if not evidence.home_pitcher or not evidence.away_pitcher:
-        uncertainty.append("선발 정보가 완전히 확정되지 않아 초반 흐름 해석은 보수적으로 봐야 합니다.")
+        uncertainty.append(
+            "선발 정보가 완전히 확정되지 않아 초반 흐름 해석은 보수적으로 봐야 합니다."
+        )
 
     summary: str
     verdict: str
@@ -5323,7 +5352,7 @@ def _build_deterministic_analysis(
                 )
                 if review_mode
                 else f"{top_moment.get('inning_label', '이닝 미상')} 전후에 어떤 타순이 올라오는지가 체감 승부처가 됩니다."
-            )
+            ),
         )
     elif review_mode:
         if review_summary_item:
@@ -5415,22 +5444,21 @@ def _build_deterministic_analysis(
                 f"{scoreline} 무승부로 끝났고, 확인된 실데이터 기준으로는 "
                 "득점 연결과 승부처 대응이 서로 맞물린 경기였습니다."
             )
-            verdict = (
-                lead_swing_factor
-                or (
-                    f"무승부였지만 '{review_summary_item}' 장면 전후 대응이 "
-                    "가장 큰 분기점으로 남았습니다."
-                    if review_summary_item
-                    else "무승부였지만 후반 운영과 득점 연결 효율이 경기 흐름을 가장 크게 흔들었습니다."
-                )
+            verdict = lead_swing_factor or (
+                f"무승부였지만 '{review_summary_item}' 장면 전후 대응이 "
+                "가장 큰 분기점으로 남았습니다."
+                if review_summary_item
+                else "무승부였지만 후반 운영과 득점 연결 효율이 경기 흐름을 가장 크게 흔들었습니다."
             )
         elif winner_name and loser_name and scoreline:
             margin_text = (
                 "한 점 차 접전에서"
                 if result_margin == 1
-                else "중반 이후 운영에서"
-                if isinstance(result_margin, int) and result_margin <= 3
-                else "득점 연결과 불펜 운용에서"
+                else (
+                    "중반 이후 운영에서"
+                    if isinstance(result_margin, int) and result_margin <= 3
+                    else "득점 연결과 불펜 운용에서"
+                )
             )
             summary = (
                 f"{scoreline} 경기에서 {winner_name}가 이겼고, "
@@ -5493,9 +5521,7 @@ def _build_deterministic_analysis(
             elif lead_swing_factor:
                 verdict = f"{verdict} {lead_swing_factor}"
             else:
-                verdict = (
-                    f"{verdict} 후반 불펜과 초반 선발 운영이 승부처로 남습니다."
-                )
+                verdict = f"{verdict} 후반 불펜과 초반 선발 운영이 승부처로 남습니다."
         else:
             verdict = (
                 f"{edge_team}가 확인된 지표에서 한 발 앞서 있지만, "
@@ -5663,9 +5689,7 @@ def _build_deterministic_markdown(
 def _markdown_section_has_body(markdown: str, header: str) -> bool:
     if not markdown or not header:
         return False
-    pattern = re.compile(
-        rf"(?ms)^{re.escape(header)}\s*\n(?P<body>.*?)(?=^##\s+|\Z)"
-    )
+    pattern = re.compile(rf"(?ms)^{re.escape(header)}\s*\n(?P<body>.*?)(?=^##\s+|\Z)")
     match = pattern.search(markdown)
     if not match:
         return False
@@ -5674,7 +5698,9 @@ def _markdown_section_has_body(markdown: str, header: str) -> bool:
     return bool(body)
 
 
-def _find_markdown_section_span(markdown: str, header: str) -> Optional[Tuple[int, int]]:
+def _find_markdown_section_span(
+    markdown: str, header: str
+) -> Optional[Tuple[int, int]]:
     if not markdown or not header:
         return None
     pattern = re.compile(rf"(?ms)^{re.escape(header)}\s*\n.*?(?=^##\s+|\Z)")
@@ -5720,7 +5746,11 @@ def _build_missing_focus_section_summary(
     evidence: Optional[GameEvidence] = None,
     tool_results: Optional[Dict[str, Any]] = None,
 ) -> str:
-    if evidence is not None and tool_results is not None and _is_completed_review(evidence):
+    if (
+        evidence is not None
+        and tool_results is not None
+        and _is_completed_review(evidence)
+    ):
         return _completed_review_focus_summary(
             focus,
             evidence,
@@ -5793,7 +5823,11 @@ def _populate_empty_focus_sections(
 
     for focus in resolved_focus or []:
         header = FOCUS_SECTION_HEADERS.get(focus)
-        if not header or header not in updated or _markdown_section_has_body(updated, header):
+        if (
+            not header
+            or header not in updated
+            or _markdown_section_has_body(updated, header)
+        ):
             continue
         summary = _build_missing_focus_section_summary(
             response_payload,
@@ -5804,9 +5838,7 @@ def _populate_empty_focus_sections(
         )
         if not summary:
             continue
-        pattern = re.compile(
-            rf"(?ms)^{re.escape(header)}\s*\n(?:\s*\n)*(?=^##\s+|\Z)"
-        )
+        pattern = re.compile(rf"(?ms)^{re.escape(header)}\s*\n(?:\s*\n)*(?=^##\s+|\Z)")
         updated = pattern.sub(f"{header}\n- {summary}\n\n", updated, count=1)
 
     return _normalize_detailed_markdown_layout(updated)
@@ -5867,7 +5899,10 @@ def _ensure_completed_review_markdown_sections(
         return
 
     section_candidates = (
-        ("## 결과 진단", _clean_summary_text(analysis.get("verdict") or analysis.get("summary"))),
+        (
+            "## 결과 진단",
+            _clean_summary_text(analysis.get("verdict") or analysis.get("summary")),
+        ),
         (
             "## 결과를 가른 이유",
             _clean_summary_text(
@@ -6029,17 +6064,16 @@ def _normalize_scheduled_partial_analysis_sections(
     grounding_reasons: List[str],
     tool_results: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    if (
-        not tool_results
-        or not _is_scheduled_partial_context(
-            evidence.game_status_bucket,
-            grounding_reasons,
-        )
+    if not tool_results or not _is_scheduled_partial_context(
+        evidence.game_status_bucket,
+        grounding_reasons,
     ):
         return response_payload
 
     updated = deepcopy(response_payload)
-    template = _build_scheduled_team_level_deterministic_analysis(evidence, tool_results)
+    template = _build_scheduled_team_level_deterministic_analysis(
+        evidence, tool_results
+    )
     analysis = updated.get("analysis")
     if not isinstance(analysis, dict):
         analysis = {}
@@ -6082,7 +6116,10 @@ def _align_completed_review_markdown_sections(
 
     updated = str(markdown or "")
     section_candidates = (
-        ("## 결과 진단", _clean_summary_text(analysis.get("verdict") or analysis.get("summary"))),
+        (
+            "## 결과 진단",
+            _clean_summary_text(analysis.get("verdict") or analysis.get("summary")),
+        ),
         (
             "## 결과를 가른 이유",
             _clean_summary_text(
@@ -6162,7 +6199,10 @@ def _align_scheduled_partial_markdown_sections(
 
     updated = str(markdown or "")
     section_candidates = (
-        ("## 코치 판단", _clean_summary_text(analysis.get("verdict") or analysis.get("summary"))),
+        (
+            "## 코치 판단",
+            _clean_summary_text(analysis.get("verdict") or analysis.get("summary")),
+        ),
         (
             "## 왜 중요한가",
             _clean_summary_text(
@@ -6331,7 +6371,10 @@ def _build_deterministic_coach_response(
         key_metrics=_build_deterministic_metrics(evidence, tool_results),
         analysis=analysis,
         detailed_markdown=_build_deterministic_markdown(
-            evidence, tool_results, resolved_focus, grounding_warnings=grounding_warnings
+            evidence,
+            tool_results,
+            resolved_focus,
+            grounding_warnings=grounding_warnings,
         ),
         coach_note=_build_compact_coach_note(coach_note_parts),
     )
@@ -6651,9 +6694,7 @@ ENTITY_REPLACEMENT_SUFFIXES = (
     "에",
     "로",
 )
-TEAM_CODE_SUFFIXES = tuple(
-    dict.fromkeys(KOREAN_PARTICLE_SUFFIXES + ("보다",))
-)
+TEAM_CODE_SUFFIXES = tuple(dict.fromkeys(KOREAN_PARTICLE_SUFFIXES + ("보다",)))
 TEAM_DISPLAY_ALIASES_BY_CODE: Dict[str, Tuple[str, ...]] = {
     "KIA": ("기아",),
     "LG": ("LG",),
@@ -6691,9 +6732,7 @@ TEAM_ZERO_RECORD_PLACEHOLDER_PATTERN = re.compile(
     r"([가-힣A-Za-z]{2,})\s*0승\s*0패(?=\s*/|\s*$)"
 )
 ZERO_RECORD_PLACEHOLDER_PATTERN = re.compile(r"0승\s*0패")
-DUPLICATE_PLACEHOLDER_PHRASE_PATTERN = re.compile(
-    r"데이터 부족(?:와|과)\s*데이터 부족"
-)
+DUPLICATE_PLACEHOLDER_PHRASE_PATTERN = re.compile(r"데이터 부족(?:와|과)\s*데이터 부족")
 UNSUPPORTED_RECENT_FORM_CLAUSE_PATTERN = re.compile(
     r"[^,.!?\n]*최근\s*(?:경기|흐름)[^,.!?\n]*"
     r"(?:승리|패배|연승|연패|승패|상승세|하락세|호조|부진)[^,.!?\n]*(?:[,.!?]\s*|$)"
@@ -6890,7 +6929,9 @@ def _collect_grounding_candidates(text: str) -> Set[str]:
     candidates: Set[str] = set()
     for token in re.findall(r"[가-힣]{2,6}", text):
         normalized = token
-        if any(normalized.startswith(prefix) for prefix in GENERIC_ENTITY_ROLE_PREFIXES):
+        if any(
+            normalized.startswith(prefix) for prefix in GENERIC_ENTITY_ROLE_PREFIXES
+        ):
             continue
         normalized = _strip_entity_suffix(normalized)
         if (
@@ -6927,13 +6968,16 @@ def _segment_has_name_like_usage(segment: str, token: str) -> bool:
         return False
     escaped_token = re.escape(token)
     particle_pattern = "|".join(
-        re.escape(suffix) for suffix in sorted(KOREAN_PARTICLE_SUFFIXES, key=len, reverse=True)
+        re.escape(suffix)
+        for suffix in sorted(KOREAN_PARTICLE_SUFFIXES, key=len, reverse=True)
     )
     preceding_pattern = "|".join(
-        re.escape(cue) for cue in sorted(PLAYER_NAME_PRECEDING_CUES, key=len, reverse=True)
+        re.escape(cue)
+        for cue in sorted(PLAYER_NAME_PRECEDING_CUES, key=len, reverse=True)
     )
     following_pattern = "|".join(
-        re.escape(cue) for cue in sorted(PLAYER_NAME_FOLLOWING_CUES, key=len, reverse=True)
+        re.escape(cue)
+        for cue in sorted(PLAYER_NAME_FOLLOWING_CUES, key=len, reverse=True)
     )
     patterns = (
         rf"{escaped_token}(?:{particle_pattern})(?=[^가-힣A-Za-z]|$)",
@@ -6953,9 +6997,9 @@ def _segment_has_player_context(segment: str, token: str) -> bool:
         if index == -1:
             return False
         window = segment[max(0, index - 12) : index + len(token) + 12]
-        if any(keyword in window for keyword in PLAYER_CONTEXT_KEYWORDS) and _segment_has_name_like_usage(
-            segment, token
-        ):
+        if any(
+            keyword in window for keyword in PLAYER_CONTEXT_KEYWORDS
+        ) and _segment_has_name_like_usage(segment, token):
             return True
         start = index + len(token)
 
@@ -7087,7 +7131,11 @@ def _find_unconfirmed_lineup_named_players(
                         continue
                     if token in protected_lookup or token.lower() in protected_lookup:
                         continue
-                    if token.endswith("즈") or token.endswith("스") or token.endswith("스파크"):
+                    if (
+                        token.endswith("즈")
+                        or token.endswith("스")
+                        or token.endswith("스파크")
+                    ):
                         continue
                     tokens.append(token)
     return list(dict.fromkeys(tokens))
@@ -7135,15 +7183,25 @@ def _cleanup_unconfirmed_lineup_player_placeholders(
         updated = updated.replace("상위 타선와", "상위 타선과")
         updated = updated.replace("상위 타선를", "상위 타선을")
         updated = updated.replace("상위 타선 수 없으며", "파악할 수 없으며")
-        updated = updated.replace("개별 상위 타선 폼 비교 보류", "개별 타자 폼 비교 보류")
+        updated = updated.replace(
+            "개별 상위 타선 폼 비교 보류", "개별 타자 폼 비교 보류"
+        )
         updated = updated.replace("극단적인 타격 상위 타선", "극단적인 타격 생산성")
-        updated = updated.replace("한화 이글스 양 팀 상위 타선 폼 유지 여부", "양 팀 상위 타선 폼 유지 여부")
+        updated = updated.replace(
+            "한화 이글스 양 팀 상위 타선 폼 유지 여부", "양 팀 상위 타선 폼 유지 여부"
+        )
         updated = updated.replace("경기 경기 후반", "경기 후반")
         updated = updated.replace("핵심 구간가", "핵심 구간이")
-        updated = updated.replace("상위 타선 등 상위 타선의 생산성", "상위 타선의 생산성")
+        updated = updated.replace(
+            "상위 타선 등 상위 타선의 생산성", "상위 타선의 생산성"
+        )
         updated = updated.replace("상위 타선 등 상위 타선", "상위 타선")
-        updated = updated.replace("상위 타선과 상위 타선 폼 유지 여부", "양 팀 상위 타선 폼 유지 여부")
-        updated = updated.replace("상위 타선와 상위 타선 폼 유지 여부", "양 팀 상위 타선 폼 유지 여부")
+        updated = updated.replace(
+            "상위 타선과 상위 타선 폼 유지 여부", "양 팀 상위 타선 폼 유지 여부"
+        )
+        updated = updated.replace(
+            "상위 타선와 상위 타선 폼 유지 여부", "양 팀 상위 타선 폼 유지 여부"
+        )
         updated = re.sub(
             r"상위 타선\s*(?:와|과)\s+[A-Za-z가-힣\s]{0,20}?상위 타선\s+폼 유지 여부",
             "양 팀 상위 타선 폼 유지 여부",
@@ -7171,10 +7229,20 @@ def _cleanup_unconfirmed_lineup_player_placeholders(
         )
         updated = updated.replace("상위 타선과 상위 타선 비교", "양 팀 상위 타선 비교")
         updated = updated.replace("상위 타선와 상위 타선 비교", "양 팀 상위 타선 비교")
-        updated = updated.replace("상위 타선과 상위 타선의 시즌 OPS 비교", "양 팀 상위 타선의 시즌 OPS 비교")
-        updated = updated.replace("상위 타선와 상위 타선의 시즌 OPS 비교", "양 팀 상위 타선의 시즌 OPS 비교")
-        updated = updated.replace("상위 타선과 상위 타선을 동시에 막아야 합니다.", "양 팀 상위 타선을 함께 제어해야 합니다.")
-        updated = updated.replace("상위 타선와 상위 타선을 동시에 막아야 합니다.", "양 팀 상위 타선을 함께 제어해야 합니다.")
+        updated = updated.replace(
+            "상위 타선과 상위 타선의 시즌 OPS 비교", "양 팀 상위 타선의 시즌 OPS 비교"
+        )
+        updated = updated.replace(
+            "상위 타선와 상위 타선의 시즌 OPS 비교", "양 팀 상위 타선의 시즌 OPS 비교"
+        )
+        updated = updated.replace(
+            "상위 타선과 상위 타선을 동시에 막아야 합니다.",
+            "양 팀 상위 타선을 함께 제어해야 합니다.",
+        )
+        updated = updated.replace(
+            "상위 타선와 상위 타선을 동시에 막아야 합니다.",
+            "양 팀 상위 타선을 함께 제어해야 합니다.",
+        )
         updated = re.sub(r"\s{2,}", " ", updated).strip()
         return updated
 
@@ -7198,7 +7266,9 @@ def _cleanup_unconfirmed_lineup_player_placeholders(
         ):
             metric["label"] = "상위 타선 흐름"
             metric["value"] = "라인업 미확정으로 개별 타자 폼 비교 보류"
-        elif ("OPS" in metric_value or "wRC+" in metric_value) and "상위 타선" in metric_value:
+        elif (
+            "OPS" in metric_value or "wRC+" in metric_value
+        ) and "상위 타선" in metric_value:
             metric["label"] = "상위 타선 생산성"
             metric["value"] = "라인업 미확정으로 개별 타자 비교 보류"
 
@@ -7262,9 +7332,7 @@ def _sanitize_scheduled_unconfirmed_lineup_entities(
         response_data, protected_names
     )
     disallowed_entities = [
-        token
-        for token in disallowed_entities
-        if token not in {"변수지"}
+        token for token in disallowed_entities if token not in {"변수지"}
     ]
     disallowed_entities = [
         token
@@ -7391,7 +7459,9 @@ def _enforce_completed_result_anchor(
         return response_data
 
     updated = _ensure_completed_result_metric(response_data, evidence)
-    if not tool_results or not _completed_payload_needs_result_anchor(updated, evidence):
+    if not tool_results or not _completed_payload_needs_result_anchor(
+        updated, evidence
+    ):
         return updated
 
     repaired = _build_deterministic_coach_response(
@@ -7420,10 +7490,7 @@ def _repair_scheduled_unconfirmed_lineup_artifacts(
         return response_data
 
     cleaned = _cleanup_unconfirmed_lineup_player_placeholders(response_data)
-    if (
-        not _response_contains_unconfirmed_lineup_artifacts(cleaned)
-        or not tool_results
-    ):
+    if not _response_contains_unconfirmed_lineup_artifacts(cleaned) or not tool_results:
         return cleaned
 
     repaired = deepcopy(cleaned)
@@ -7500,9 +7567,7 @@ def _sanitize_response_disallowed_entities(
         for key in ("label", "value"):
             value = metric.get(key)
             if isinstance(value, str):
-                metric[key] = _replace_disallowed_entity_names(
-                    value, disallowed_tokens
-                )
+                metric[key] = _replace_disallowed_entity_names(value, disallowed_tokens)
 
     analysis = sanitized.get("analysis")
     if isinstance(analysis, dict):
@@ -7523,9 +7588,11 @@ def _sanitize_response_disallowed_entities(
             items = analysis.get(key)
             if isinstance(items, list):
                 analysis[key] = [
-                    _replace_disallowed_entity_names(item, disallowed_tokens)
-                    if isinstance(item, str)
-                    else item
+                    (
+                        _replace_disallowed_entity_names(item, disallowed_tokens)
+                        if isinstance(item, str)
+                        else item
+                    )
                     for item in items
                 ]
         risks = analysis.get("risks")
@@ -7619,7 +7686,8 @@ def _replace_team_alias_with_display_name(
         return updated
 
     suffix_pattern = "|".join(
-        re.escape(suffix) for suffix in sorted(set(TEAM_CODE_SUFFIXES), key=len, reverse=True)
+        re.escape(suffix)
+        for suffix in sorted(set(TEAM_CODE_SUFFIXES), key=len, reverse=True)
     )
     for alias in aliases:
         token = str(alias or "").strip()
@@ -7879,9 +7947,7 @@ def _rebuild_scheduled_coach_note(analysis: Dict[str, Any]) -> str:
 
     swing_factors = analysis.get("swing_factors") or []
     if isinstance(swing_factors, list) and swing_factors:
-        _append_distinct_note_part(
-            note_parts, _ensure_sentence(str(swing_factors[0]))
-        )
+        _append_distinct_note_part(note_parts, _ensure_sentence(str(swing_factors[0])))
 
     verdict = _clean_summary_text(analysis.get("verdict"))
     if verdict:
@@ -8013,7 +8079,9 @@ def _normalize_detailed_markdown_layout(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _normalize_response_markdown_layout(response_data: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_response_markdown_layout(
+    response_data: Dict[str, Any],
+) -> Dict[str, Any]:
     normalized = deepcopy(response_data)
     normalized["detailed_markdown"] = _normalize_detailed_markdown_layout(
         normalized.get("detailed_markdown") or ""
@@ -8159,7 +8227,8 @@ def _strip_unsupported_numeric_lines(text: str, unsupported_tokens: Set[str]) ->
     kept_sentences = [
         sentence
         for sentence in sentences
-        if sentence and not _text_contains_unsupported_numeric_claim(sentence, unsupported_tokens)
+        if sentence
+        and not _text_contains_unsupported_numeric_claim(sentence, unsupported_tokens)
     ]
     if kept_sentences:
         return " ".join(kept_sentences).strip()
@@ -8222,8 +8291,12 @@ def _sanitize_response_unsupported_numeric_claims(
             if not (
                 isinstance(metric, dict)
                 and (
-                    _text_contains_unsupported_numeric_claim(metric.get("label"), token_set)
-                    or _text_contains_unsupported_numeric_claim(metric.get("value"), token_set)
+                    _text_contains_unsupported_numeric_claim(
+                        metric.get("label"), token_set
+                    )
+                    or _text_contains_unsupported_numeric_claim(
+                        metric.get("value"), token_set
+                    )
                 )
             )
         ]
@@ -10041,10 +10114,12 @@ async def analyze_team(
                         grounding_reasons=grounding_reasons,
                     )
                 )
-                llm_request_timeout_seconds = _resolve_coach_llm_request_timeout_seconds(
-                    request_mode=request_mode,
-                    game_status_bucket=game_evidence.game_status_bucket,
-                    grounding_reasons=grounding_reasons,
+                llm_request_timeout_seconds = (
+                    _resolve_coach_llm_request_timeout_seconds(
+                        request_mode=request_mode,
+                        game_status_bucket=game_evidence.game_status_bucket,
+                        grounding_reasons=grounding_reasons,
+                    )
                 )
                 logger.info(
                     "[Coach] LLM config game_id=%s cache_key=%s request_mode=%s game_status_bucket=%s max_attempts=%d max_tokens=%d idle_timeout=%.1fs first_chunk_timeout=%s total_timeout=%s request_timeout=%.1fs empty_chunk_retries=%d",
@@ -10128,7 +10203,9 @@ async def analyze_team(
                                         ),
                                     }
                                     continue
-                                response_chunks.append(str(llm_event.get("chunk") or ""))
+                                response_chunks.append(
+                                    str(llm_event.get("chunk") or "")
+                                )
                         else:
                             async with asyncio.timeout(llm_total_timeout_seconds):
                                 async for llm_event in llm_event_stream:
@@ -10144,7 +10221,9 @@ async def analyze_team(
                                             ),
                                         }
                                         continue
-                                    response_chunks.append(str(llm_event.get("chunk") or ""))
+                                    response_chunks.append(
+                                        str(llm_event.get("chunk") or "")
+                                    )
                     except Exception as llm_exc:  # noqa: BLE001
                         logger.warning(
                             "[Coach] LLM failed on attempt=%d cache_key=%s elapsed_sec=%.2f error=%s",
@@ -10297,19 +10376,21 @@ async def analyze_team(
                                 fact_sheet,
                             )
                             numeric_sanitized = False
-                            if set(grounding_validation.reasons) == {
-                                "unsupported_numeric_claim"
-                            } and grounding_validation.unsupported_numeric_tokens:
-                                sanitized_numeric_payload = (
-                                    _sanitize_response_unsupported_numeric_claims(
-                                        candidate_payload,
-                                        unsupported_tokens=grounding_validation.unsupported_numeric_tokens,
-                                    )
+                            if (
+                                set(grounding_validation.reasons)
+                                == {"unsupported_numeric_claim"}
+                                and grounding_validation.unsupported_numeric_tokens
+                            ):
+                                sanitized_numeric_payload = _sanitize_response_unsupported_numeric_claims(
+                                    candidate_payload,
+                                    unsupported_tokens=grounding_validation.unsupported_numeric_tokens,
                                 )
-                                sanitized_numeric_payload = _cleanup_response_language_quality(
-                                    _normalize_response_team_display(
-                                        sanitized_numeric_payload,
-                                        evidence=game_evidence,
+                                sanitized_numeric_payload = (
+                                    _cleanup_response_language_quality(
+                                        _normalize_response_team_display(
+                                            sanitized_numeric_payload,
+                                            evidence=game_evidence,
+                                        )
                                     )
                                 )
                                 sanitized_numeric_payload = _polish_scheduled_partial_response(
@@ -10326,11 +10407,13 @@ async def analyze_team(
                                         resolved_focus=resolved_focus,
                                     )
                                 )
-                                sanitized_numeric_payload = _enforce_completed_result_anchor(
-                                    sanitized_numeric_payload,
-                                    evidence=game_evidence,
-                                    tool_results=tool_results,
-                                    resolved_focus=resolved_focus,
+                                sanitized_numeric_payload = (
+                                    _enforce_completed_result_anchor(
+                                        sanitized_numeric_payload,
+                                        evidence=game_evidence,
+                                        tool_results=tool_results,
+                                        resolved_focus=resolved_focus,
+                                    )
                                 )
                                 sanitized_grounding_validation = (
                                     validate_response_against_fact_sheet(

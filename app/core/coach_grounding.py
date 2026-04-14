@@ -267,7 +267,9 @@ def validate_response_against_fact_sheet(
 
     if response_is_semantically_empty(response_data):
         reasons.append("empty_response")
-        warnings.append("LLM 응답에 실질적인 분석 내용이 없어 재시도 또는 보수 요약으로 전환합니다.")
+        warnings.append(
+            "LLM 응답에 실질적인 분석 내용이 없어 재시도 또는 보수 요약으로 전환합니다."
+        )
 
     unsupported_numeric_tokens = sorted(
         token

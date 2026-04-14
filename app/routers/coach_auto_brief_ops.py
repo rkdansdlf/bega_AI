@@ -34,7 +34,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def _detect_workspace_root(start: Path) -> Path:
     current = start.resolve()
     while True:
-        if (current / "docker-compose.yml").exists() or (current / ".env.prod").exists():
+        if (current / "docker-compose.yml").exists() or (
+            current / ".env.prod"
+        ).exists():
             return current
         if (current / "scripts").exists() and (current / "tests").exists():
             return current
@@ -118,7 +120,9 @@ class CoachAutoBriefOpsGate(BaseModel):
     pending_wait_count: int
     insufficient_count: int
     insufficient_ratio: float
-    checks: CoachAutoBriefOpsGateChecks = Field(default_factory=CoachAutoBriefOpsGateChecks)
+    checks: CoachAutoBriefOpsGateChecks = Field(
+        default_factory=CoachAutoBriefOpsGateChecks
+    )
 
 
 class CoachAutoBriefOpsLatestReport(BaseModel):
@@ -154,7 +158,9 @@ class CoachAutoBriefOpsHealthResponse(BaseModel):
     recommended_command: str
     summary: CoachAutoBriefOpsSummary
     gate: CoachAutoBriefOpsGate
-    unresolved_targets: list[CoachAutoBriefOpsTargetSample] = Field(default_factory=list)
+    unresolved_targets: list[CoachAutoBriefOpsTargetSample] = Field(
+        default_factory=list
+    )
     latest_report: CoachAutoBriefOpsLatestReport | None = None
 
 
@@ -201,7 +207,9 @@ def _load_target_pool_for_years(years: list[int]) -> list[MatchupTarget]:
             seen_cache_keys.add(target.cache_key)
             deduped.append(target)
 
-    return sorted(deduped, key=lambda item: (item.game_date, item.game_id, item.cache_key))
+    return sorted(
+        deduped, key=lambda item: (item.game_date, item.game_id, item.cache_key)
+    )
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float:
@@ -266,8 +274,12 @@ def _load_latest_auto_brief_report() -> CoachAutoBriefOpsLatestReport | None:
 
 
 def _build_recommended_command(start: date, end: date, years: list[int]) -> str:
-    report_suffix = start.isoformat() if start == end else f"{start.isoformat()}_{end.isoformat()}"
-    date_window = start.isoformat() if start == end else f"{start.isoformat()}:{end.isoformat()}"
+    report_suffix = (
+        start.isoformat() if start == end else f"{start.isoformat()}_{end.isoformat()}"
+    )
+    date_window = (
+        start.isoformat() if start == end else f"{start.isoformat()}:{end.isoformat()}"
+    )
     years_arg = ",".join(str(year) for year in years)
     return (
         "./.venv/bin/python scripts/batch_coach_auto_brief.py "
@@ -287,7 +299,9 @@ def _normalize_gate_thresholds(
         max_unresolved=max(0, int(resolved.max_unresolved)),
         max_failed_locked=max(0, int(resolved.max_failed_locked)),
         max_pending_wait=(
-            None if resolved.max_pending_wait is None else max(0, int(resolved.max_pending_wait))
+            None
+            if resolved.max_pending_wait is None
+            else max(0, int(resolved.max_pending_wait))
         ),
         max_insufficient_ratio=(
             None
@@ -422,9 +436,13 @@ def _build_summary(
     results: list[dict],
 ) -> CoachAutoBriefOpsSummary:
     breakdowns = _collect_report_breakdowns(results)
-    generated_success_count = sum(1 for item in results if item.get("status") == "generated")
+    generated_success_count = sum(
+        1 for item in results if item.get("status") == "generated"
+    )
     cache_hit_count = sum(1 for item in results if item.get("status") == "skipped")
-    in_progress_count = sum(1 for item in results if item.get("status") == "in_progress")
+    in_progress_count = sum(
+        1 for item in results if item.get("status") == "in_progress"
+    )
     failed_count = sum(1 for item in results if item.get("status") == "failed")
 
     return CoachAutoBriefOpsSummary(

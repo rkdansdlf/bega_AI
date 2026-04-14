@@ -209,7 +209,10 @@ def test_analyze_team_configures_sse_ping(monkeypatch):
         "app.routers.coach.build_coach_cache_identity",
         lambda **kwargs: (
             "cache-key",
-            {"focus_signature": "focus-signature", "question_signature": "question-signature"},
+            {
+                "focus_signature": "focus-signature",
+                "question_signature": "question-signature",
+            },
             "starter-signature",
             "lineup-signature",
         ),

@@ -592,7 +592,9 @@ class TestCoachEvidenceHelpers:
         assert _normalize_game_status_bucket("POSTPONED") == "UNKNOWN"
         assert _normalize_game_status_bucket("CANCELLED") == "UNKNOWN"
 
-    def test_unavailable_game_status_message_is_defined_for_cancelled_and_postponed(self):
+    def test_unavailable_game_status_message_is_defined_for_cancelled_and_postponed(
+        self,
+    ):
         from app.routers.coach import _get_unavailable_game_status_message
 
         assert (
@@ -693,7 +695,10 @@ class TestCoachEvidenceHelpers:
 
         assert "game_id=202503120001" in caplog.text
         assert "data_quality=partial" in caplog.text
-        assert "grounding_reasons=['missing_starters', 'focus_data_unavailable']" in caplog.text
+        assert (
+            "grounding_reasons=['missing_starters', 'focus_data_unavailable']"
+            in caplog.text
+        )
 
     def test_preview_verdict_keeps_pitcher_sentence_well_formed(self):
         from app.routers.coach import _build_deterministic_coach_response
@@ -764,14 +769,19 @@ class TestCoachEvidenceHelpers:
 
         payload = _build_deterministic_coach_response(evidence, tool_results)
 
-        assert "근소 우세지만 격차는 크지 않습니다." not in payload["analysis"]["verdict"]
+        assert (
+            "근소 우세지만 격차는 크지 않습니다." not in payload["analysis"]["verdict"]
+        )
         assert (
             "초반 선취점 이후 불펜 투입 시점이 경기 방향을 크게 흔들 변수입니다."
             not in payload["analysis"]["swing_factors"][0]
         )
         assert "한화 이글스" in payload["analysis"]["verdict"]
         assert payload["analysis"]["verdict"].endswith("한 발 앞섭니다.")
-        assert payload["analysis"]["watch_points"][0] == "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+        assert (
+            payload["analysis"]["watch_points"][0]
+            == "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+        )
 
     def test_compact_coach_note_does_not_repeat_or_cut_mid_sentence(self):
         from app.routers.coach import _build_compact_coach_note
@@ -788,7 +798,9 @@ class TestCoachEvidenceHelpers:
         assert coach_note.endswith(".")
         assert coach_note.count("실제 승부처였습니다.") == 1
 
-    def test_rebuild_scheduled_coach_note_avoids_duplicate_prefix_and_stays_compact(self):
+    def test_rebuild_scheduled_coach_note_avoids_duplicate_prefix_and_stays_compact(
+        self,
+    ):
         from app.routers.coach import _rebuild_scheduled_coach_note
 
         note = _rebuild_scheduled_coach_note(
@@ -799,7 +811,9 @@ class TestCoachEvidenceHelpers:
                 "uncertainty": [
                     "라인업 미발표라 타순 기반 세부 매치업은 경기 직전까지 달라질 수 있습니다."
                 ],
-                "swing_factors": ["선발 발표 전이라 첫 투수 교체 시점이 핵심 변수입니다."],
+                "swing_factors": [
+                    "선발 발표 전이라 첫 투수 교체 시점이 핵심 변수입니다."
+                ],
                 "verdict": "롯데 자이언츠가 팀 타격 생산성에서 한 발 앞섭니다.",
             }
         )
@@ -828,16 +842,25 @@ class TestCoachEvidenceHelpers:
         )
         tool_results = {
             "home": {
-                "recent": {"found": True, "summary": {"wins": 3, "losses": 7, "draws": 0, "run_diff": -12}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 3, "losses": 7, "draws": 0, "run_diff": -12},
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.740}}},
                 "summary": {"found": True},
             },
             "away": {
-                "recent": {"found": True, "summary": {"wins": 3, "losses": 6, "draws": 1, "run_diff": -9}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 3, "losses": 6, "draws": 1, "run_diff": -9},
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.779}}},
                 "summary": {"found": True},
             },
-            "matchup": {"found": True, "summary": {"team2_wins": 1, "team1_wins": 0, "draws": 0}},
+            "matchup": {
+                "found": True,
+                "summary": {"team2_wins": 1, "team1_wins": 0, "draws": 0},
+            },
             "clutch_moments": {
                 "found": True,
                 "moments": [
@@ -860,7 +883,10 @@ class TestCoachEvidenceHelpers:
 
         rendered = json.dumps(payload, ensure_ascii=False)
         assert "타자 미상" not in rendered
-        assert "1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다." in rendered
+        assert (
+            "1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."
+            in rendered
+        )
 
     def test_completed_clutch_moment_text_deduplicates_inning_prefix(self):
         from app.routers.coach import _completed_clutch_moment_text
@@ -897,16 +923,25 @@ class TestCoachEvidenceHelpers:
         )
         tool_results = {
             "home": {
-                "recent": {"found": True, "summary": {"wins": 3, "losses": 7, "draws": 0, "run_diff": -12}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 3, "losses": 7, "draws": 0, "run_diff": -12},
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.740}}},
                 "summary": {"found": True},
             },
             "away": {
-                "recent": {"found": True, "summary": {"wins": 3, "losses": 6, "draws": 1, "run_diff": -9}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 3, "losses": 6, "draws": 1, "run_diff": -9},
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.779}}},
                 "summary": {"found": True},
             },
-            "matchup": {"found": True, "summary": {"team2_wins": 1, "team1_wins": 0, "draws": 0}},
+            "matchup": {
+                "found": True,
+                "summary": {"team2_wins": 1, "team1_wins": 0, "draws": 0},
+            },
             "clutch_moments": {
                 "found": True,
                 "moments": [
@@ -927,12 +962,30 @@ class TestCoachEvidenceHelpers:
             grounding_warnings=[],
         )
 
-        assert payload["analysis"]["verdict"] == "LG 트윈스 승리의 분기점은 1회말 승부처 대응이었습니다."
-        assert payload["analysis"]["swing_factors"][0] == "1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."
-        assert payload["analysis"]["watch_points"][0] == "해당 승부처 직전 배터리 선택과 주자 운영을 다시 볼 필요가 있습니다."
-        assert "## 결과 진단\n- LG 트윈스 승리의 분기점은 1회말 승부처 대응이었습니다." in payload["detailed_markdown"]
-        assert "## 실제 전환점\n- 1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다." in payload["detailed_markdown"]
-        assert "## 다시 볼 장면\n- 해당 승부처 직전 배터리 선택과 주자 운영을 다시 볼 필요가 있습니다." in payload["detailed_markdown"]
+        assert (
+            payload["analysis"]["verdict"]
+            == "LG 트윈스 승리의 분기점은 1회말 승부처 대응이었습니다."
+        )
+        assert (
+            payload["analysis"]["swing_factors"][0]
+            == "1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."
+        )
+        assert (
+            payload["analysis"]["watch_points"][0]
+            == "해당 승부처 직전 배터리 선택과 주자 운영을 다시 볼 필요가 있습니다."
+        )
+        assert (
+            "## 결과 진단\n- LG 트윈스 승리의 분기점은 1회말 승부처 대응이었습니다."
+            in payload["detailed_markdown"]
+        )
+        assert (
+            "## 실제 전환점\n- 1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."
+            in payload["detailed_markdown"]
+        )
+        assert (
+            "## 다시 볼 장면\n- 해당 승부처 직전 배터리 선택과 주자 운영을 다시 볼 필요가 있습니다."
+            in payload["detailed_markdown"]
+        )
 
     def test_scheduled_manual_detail_with_supported_facts_does_not_short_circuit(self):
         from app.core.coach_grounding import CoachFactSheet
@@ -963,7 +1016,9 @@ class TestCoachEvidenceHelpers:
             is False
         )
 
-    def test_scheduled_partial_manual_short_circuits_when_starter_and_lineup_are_both_missing(self):
+    def test_scheduled_partial_manual_short_circuits_when_starter_and_lineup_are_both_missing(
+        self,
+    ):
         from app.core.coach_grounding import CoachFactSheet
         from app.routers.coach import (
             COACH_REQUEST_MODE_MANUAL,
@@ -989,7 +1044,11 @@ class TestCoachEvidenceHelpers:
                 request_mode=COACH_REQUEST_MODE_MANUAL,
                 fact_sheet=fact_sheet,
                 game_status_bucket="SCHEDULED",
-                grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+                grounding_reasons=[
+                    "missing_starters",
+                    "missing_lineups",
+                    "missing_summary",
+                ],
             )
             is True
         )
@@ -1502,7 +1561,9 @@ class TestCoachEvidenceHelpers:
         assert captured["request_timeout_seconds"] == 45.0
         assert events[-1] == {"type": "chunk", "chunk": "응답"}
 
-    def test_iterate_coach_llm_with_keepalive_times_out_before_first_chunk_deadline(self):
+    def test_iterate_coach_llm_with_keepalive_times_out_before_first_chunk_deadline(
+        self,
+    ):
         from app.routers.coach import _iterate_coach_llm_with_keepalive
 
         async def _slow_first_chunk_llm(*_args, **_kwargs):
@@ -1890,7 +1951,10 @@ class TestCoachFastPath:
             "LG 트윈스가 출루·장타 베이스라인에서 앞서" not in item
             for item in payload["analysis"]["why_it_matters"]
         )
-        assert any("실제 경기 결과" in item or "실제 경기" in item for item in payload["analysis"]["why_it_matters"])
+        assert any(
+            "실제 경기 결과" in item or "실제 경기" in item
+            for item in payload["analysis"]["why_it_matters"]
+        )
         assert payload["key_metrics"][0]["label"] == "최종 스코어"
         assert "LG 트윈스 승리" not in serialized
 
@@ -2079,7 +2143,9 @@ class TestCoachFastPath:
         assert "하락" in form_metric["value"]
         assert any("폼 점수" in item for item in payload["analysis"]["strengths"])
 
-    def test_scheduled_preview_fallback_uses_team_level_sentences_when_lineups_missing(self):
+    def test_scheduled_preview_fallback_uses_team_level_sentences_when_lineups_missing(
+        self,
+    ):
         from app.routers.coach import (
             _build_deterministic_coach_response,
             _find_missing_focus_sections,
@@ -2220,16 +2286,34 @@ class TestCoachFastPath:
             resolved_focus=["recent_form", "starter", "bullpen"],
         )
 
-        assert payload["analysis"]["verdict"] == "SSG 랜더스가 최근 전력과 팀 타격 생산성에서 앞섭니다."
+        assert (
+            payload["analysis"]["verdict"]
+            == "SSG 랜더스가 최근 전력과 팀 타격 생산성에서 앞섭니다."
+        )
         assert (
             payload["analysis"]["why_it_matters"][0]
             == "SSG 랜더스가 최근 전력과 팀 OPS를 함께 앞세워 초중반 주도권을 먼저 잡을 가능성이 있습니다."
         )
-        assert payload["analysis"]["swing_factors"][0] == "발표 선발 뒤 첫 불펜 카드가 핵심 변수입니다."
-        assert payload["analysis"]["watch_points"][0] == "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
-        assert "## 코치 판단\n- SSG 랜더스가 최근 전력과 팀 타격 생산성에서 앞섭니다." in payload["detailed_markdown"]
-        assert "## 승부 스윙 포인트\n- 발표 선발 뒤 첫 불펜 카드가 핵심 변수입니다." in payload["detailed_markdown"]
-        assert "## 체크 포인트\n- 첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다." in payload["detailed_markdown"]
+        assert (
+            payload["analysis"]["swing_factors"][0]
+            == "발표 선발 뒤 첫 불펜 카드가 핵심 변수입니다."
+        )
+        assert (
+            payload["analysis"]["watch_points"][0]
+            == "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+        )
+        assert (
+            "## 코치 판단\n- SSG 랜더스가 최근 전력과 팀 타격 생산성에서 앞섭니다."
+            in payload["detailed_markdown"]
+        )
+        assert (
+            "## 승부 스윙 포인트\n- 발표 선발 뒤 첫 불펜 카드가 핵심 변수입니다."
+            in payload["detailed_markdown"]
+        )
+        assert (
+            "## 체크 포인트\n- 첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+            in payload["detailed_markdown"]
+        )
 
     def test_completed_deterministic_response_avoids_sentence_gluing(self):
         from app.routers.coach import _build_deterministic_coach_response
@@ -2879,8 +2963,13 @@ class TestCoachFastPath:
         assert assessment.lineup_announced is False
         assert "missing_lineups" in assessment.root_causes
         assert "game_lineups" not in assessment.used_evidence
-        assert not any(line.startswith("발표 라인업:") for line in fact_sheet.fact_lines)
-        assert "라인업 발표 신호는 있으나 선수 구성이 확인되지 않았습니다." in fact_sheet.caveat_lines
+        assert not any(
+            line.startswith("발표 라인업:") for line in fact_sheet.fact_lines
+        )
+        assert (
+            "라인업 발표 신호는 있으나 선수 구성이 확인되지 않았습니다."
+            in fact_sheet.caveat_lines
+        )
         assert _should_use_team_level_scheduled_fallback(evidence) is True
 
     def test_collect_allowed_entity_names_includes_summary_item_players(self):
@@ -3100,7 +3189,10 @@ class TestCoachFastPath:
             },
         }
 
-        assert _find_disallowed_entities(response_data, {"한화 이글스", "SSG 랜더스"}) == []
+        assert (
+            _find_disallowed_entities(response_data, {"한화 이글스", "SSG 랜더스"})
+            == []
+        )
 
     def test_disallowed_entity_detection_ignores_general_terms_with_suffixes(self):
         from app.routers.coach import _find_disallowed_entities
@@ -3115,13 +3207,20 @@ class TestCoachFastPath:
             "coach_note": "불펜 카드가 공개될 경우와 득실점 마진으로 이어지는 운영 흐름을 함께 봐야 합니다.",
             "analysis": {
                 "strengths": [],
-                "weaknesses": ["득실점 마진으로 접전 운영 선택지가 달라질 수 있습니다."],
+                "weaknesses": [
+                    "득실점 마진으로 접전 운영 선택지가 달라질 수 있습니다."
+                ],
             },
         }
 
-        assert _find_disallowed_entities(response_data, {"한화 이글스", "SSG 랜더스"}) == []
+        assert (
+            _find_disallowed_entities(response_data, {"한화 이글스", "SSG 랜더스"})
+            == []
+        )
 
-    def test_disallowed_entity_detection_ignores_narrative_tokens_near_player_context(self):
+    def test_disallowed_entity_detection_ignores_narrative_tokens_near_player_context(
+        self,
+    ):
         from app.routers.coach import _find_disallowed_entities
 
         response_data = {
@@ -3183,7 +3282,11 @@ class TestCoachFastPath:
                 "strengths": ["김도영이 최근 타격감이 좋습니다."],
                 "weaknesses": [],
                 "risks": [
-                    {"area": "batting", "level": 1, "description": "김도영의 장타 허용이 변수입니다."}
+                    {
+                        "area": "batting",
+                        "level": 1,
+                        "description": "김도영의 장타 허용이 변수입니다.",
+                    }
                 ],
                 "why_it_matters": ["김도영과의 승부를 피하기 어렵습니다."],
                 "swing_factors": ["김도영이 출루하면 흐름이 달라집니다."],
@@ -3191,7 +3294,13 @@ class TestCoachFastPath:
                 "uncertainty": [],
             },
             "key_metrics": [
-                {"label": "폼 진단", "value": "김도영 상승세", "status": "good", "trend": "up", "is_critical": True}
+                {
+                    "label": "폼 진단",
+                    "value": "김도영 상승세",
+                    "status": "good",
+                    "trend": "up",
+                    "is_critical": True,
+                }
             ],
         }
         allowed_names = {"한화 이글스", "LG 트윈스", "오스틴"}
@@ -3205,9 +3314,7 @@ class TestCoachFastPath:
         assert "핵심 선수와 오스틴" in sanitized["coach_note"]
         assert sanitized["analysis"]["verdict"] == "핵심 선수의 초반 타석이 중요합니다."
         assert sanitized["key_metrics"][0]["value"] == "핵심 선수 상승세"
-        assert (
-            _response_mentions_disallowed_entities(sanitized, allowed_names) is False
-        )
+        assert _response_mentions_disallowed_entities(sanitized, allowed_names) is False
 
     def test_scheduled_unconfirmed_lineup_sanitizer_removes_unconfirmed_players(self):
         from app.routers.coach import (
@@ -3240,9 +3347,7 @@ class TestCoachFastPath:
                     "라인업 미확정 상황이라도 한화 이글스의 페라자(OPS 1.163) 등 "
                     "상위 타선의 생산성이 변수가 될 전망입니다."
                 ),
-                "strengths": [
-                    "한화 이글스 페라자의 높은 wRC+ 216.7 및 OPS 1.163"
-                ],
+                "strengths": ["한화 이글스 페라자의 높은 wRC+ 216.7 및 OPS 1.163"],
                 "weaknesses": [],
                 "risks": [],
                 "why_it_matters": ["페라자와 강백호를 동시에 막아야 합니다."],
@@ -3267,7 +3372,7 @@ class TestCoachFastPath:
                     "status": "good",
                     "trend": "up",
                     "is_critical": True,
-                }
+                },
             ],
         }
 
@@ -3296,7 +3401,9 @@ class TestCoachFastPath:
         )
         assert "상위 타선" in sanitized["analysis"]["verdict"]
 
-    def test_scheduled_unconfirmed_lineup_sanitizer_keeps_confirmed_lineup_players(self):
+    def test_scheduled_unconfirmed_lineup_sanitizer_keeps_confirmed_lineup_players(
+        self,
+    ):
         from app.routers.coach import (
             _sanitize_scheduled_unconfirmed_lineup_entities,
         )
@@ -3346,7 +3453,9 @@ class TestCoachFastPath:
 
         assert "페라자" in serialized
 
-    def test_scheduled_unconfirmed_lineup_sanitizer_repairs_placeholder_artifacts_with_team_level_copy(self):
+    def test_scheduled_unconfirmed_lineup_sanitizer_repairs_placeholder_artifacts_with_team_level_copy(
+        self,
+    ):
         from app.routers.coach import (
             _find_missing_focus_sections,
             _sanitize_scheduled_unconfirmed_lineup_entities,
@@ -3475,7 +3584,11 @@ class TestCoachFastPath:
         sanitized = _sanitize_scheduled_unconfirmed_lineup_entities(
             response_data,
             evidence=evidence,
-            grounding_reasons=["missing_lineups", "missing_starters", "missing_summary"],
+            grounding_reasons=[
+                "missing_lineups",
+                "missing_starters",
+                "missing_summary",
+            ],
             tool_results=tool_results,
             resolved_focus=["recent_form", "bullpen"],
         )
@@ -3527,15 +3640,31 @@ class TestCoachFastPath:
 
         sanitized = _sanitize_response_placeholders(
             response_data,
-            used_evidence=["game", "team_advanced_metrics", "opponent_team_advanced_metrics"],
+            used_evidence=[
+                "game",
+                "team_advanced_metrics",
+                "opponent_team_advanced_metrics",
+            ],
         )
 
         assert sanitized["coach_note"] == "데이터 부족해 판단이 어렵습니다."
-        assert sanitized["key_metrics"][0]["value"] == "한화 데이터 부족 / SSG 데이터 부족"
-        assert sanitized["key_metrics"][1]["value"] == "한화 데이터 부족 / SSG 데이터 부족"
-        assert sanitized["analysis"]["summary"] == "불펜 비중 데이터 부족으로 비교가 어렵습니다."
-        assert sanitized["analysis"]["verdict"] == "최근 흐름 데이터 부족 기준 비교는 무의미합니다."
-        assert sanitized["detailed_markdown"] == "결측 데이터 대신 결측을 설명해야 합니다."
+        assert (
+            sanitized["key_metrics"][0]["value"] == "한화 데이터 부족 / SSG 데이터 부족"
+        )
+        assert (
+            sanitized["key_metrics"][1]["value"] == "한화 데이터 부족 / SSG 데이터 부족"
+        )
+        assert (
+            sanitized["analysis"]["summary"]
+            == "불펜 비중 데이터 부족으로 비교가 어렵습니다."
+        )
+        assert (
+            sanitized["analysis"]["verdict"]
+            == "최근 흐름 데이터 부족 기준 비교는 무의미합니다."
+        )
+        assert (
+            sanitized["detailed_markdown"] == "결측 데이터 대신 결측을 설명해야 합니다."
+        )
 
     def test_placeholder_sanitizer_normalizes_mixed_language_artifacts(self):
         from app.routers.coach import _sanitize_response_placeholders
@@ -3565,15 +3694,22 @@ class TestCoachFastPath:
 
         assert sanitized["headline"] == "정규시즌 개막 전 불펜 비교"
         assert sanitized["coach_note"] == "WPA 변동도 확인할 수 없어 판단이 어렵습니다."
-        assert sanitized["analysis"]["summary"] == "경기 중반 운영 전략 비교가 제한됩니다."
-        assert sanitized["analysis"]["verdict"] == "정규시즌 개막 전이라 보수적으로 봐야 합니다."
+        assert (
+            sanitized["analysis"]["summary"] == "경기 중반 운영 전략 비교가 제한됩니다."
+        )
+        assert (
+            sanitized["analysis"]["verdict"]
+            == "정규시즌 개막 전이라 보수적으로 봐야 합니다."
+        )
         assert (
             sanitized["analysis"]["why_it_matters"][0]
             == "WPA 변동도 확인할 수 없어 사후 분석도 제한됩니다."
         )
         assert sanitized["detailed_markdown"] == "정규시즌 개막 전 데이터만 있습니다."
 
-    def test_placeholder_sanitizer_rewrites_recent_form_claims_without_recent_evidence(self):
+    def test_placeholder_sanitizer_rewrites_recent_form_claims_without_recent_evidence(
+        self,
+    ):
         from app.routers.coach import _sanitize_response_placeholders
 
         response_data = {
@@ -3596,16 +3732,29 @@ class TestCoachFastPath:
 
         sanitized = _sanitize_response_placeholders(
             response_data,
-            used_evidence=["game", "team_advanced_metrics", "opponent_team_advanced_metrics"],
+            used_evidence=[
+                "game",
+                "team_advanced_metrics",
+                "opponent_team_advanced_metrics",
+            ],
         )
 
-        assert sanitized["coach_note"] == "최근 흐름 근거가 부족하지만 불펜 변수는 남습니다."
+        assert (
+            sanitized["coach_note"]
+            == "최근 흐름 근거가 부족하지만 불펜 변수는 남습니다."
+        )
         assert (
             sanitized["analysis"]["summary"]
             == "SSG와 한화 모두 최근 흐름 근거가 부족하며 불펜 비중 정보가 없어 판단이 어렵습니다."
         )
-        assert sanitized["analysis"]["verdict"] == "최근 흐름 근거가 부족하며 경기 후반 불펜 운영이 중요합니다."
-        assert sanitized["detailed_markdown"] == "최근 흐름 근거가 부족하지만 불펜 대응은 봐야 합니다."
+        assert (
+            sanitized["analysis"]["verdict"]
+            == "최근 흐름 근거가 부족하며 경기 후반 불펜 운영이 중요합니다."
+        )
+        assert (
+            sanitized["detailed_markdown"]
+            == "최근 흐름 근거가 부족하지만 불펜 대응은 봐야 합니다."
+        )
 
     def test_soften_scheduled_partial_tone_rewrites_overconfident_phrasing(self):
         from app.routers.coach import _soften_scheduled_partial_tone
@@ -3714,7 +3863,10 @@ class TestCoachFastPath:
             normalized["key_metrics"][0]["value"]
             == "SSG 랜더스 8승 2패 / 한화 이글스 6승 4패"
         )
-        assert normalized["analysis"]["summary"] == "SSG 랜더스가 한화 이글스보다 최근 흐름이 좋습니다."
+        assert (
+            normalized["analysis"]["summary"]
+            == "SSG 랜더스가 한화 이글스보다 최근 흐름이 좋습니다."
+        )
 
     def test_normalize_response_markdown_layout_inserts_section_breaks(self):
         from app.routers.coach import _normalize_response_markdown_layout
@@ -3790,7 +3942,10 @@ class TestCoachFastPath:
             normalized["key_metrics"][0]["value"]
             == "SSG 랜더스 8승 2패 / 한화 이글스 6승 4패"
         )
-        assert normalized["analysis"]["summary"] == "SSG 랜더스가 한화 이글스보다 최근 흐름이 좋습니다."
+        assert (
+            normalized["analysis"]["summary"]
+            == "SSG 랜더스가 한화 이글스보다 최근 흐름이 좋습니다."
+        )
 
     def test_normalize_response_team_display_unwraps_bracketed_team_names(self):
         from app.routers.coach import _normalize_response_team_display
@@ -3833,7 +3988,9 @@ class TestCoachFastPath:
             normalized["analysis"]["summary"]
             == "SSG 랜더스가 한화 이글스보다 최근 흐름이 좋습니다."
         )
-        assert normalized["analysis"]["risks"][0]["description"] == "한화 이글스 불펜 변수"
+        assert (
+            normalized["analysis"]["risks"][0]["description"] == "한화 이글스 불펜 변수"
+        )
 
     def test_cleanup_response_language_quality_fixes_awkward_phrases(self):
         from app.routers.coach import _cleanup_response_language_quality
@@ -3841,16 +3998,16 @@ class TestCoachFastPath:
         response_data = {
             "headline": "한화 이글스 vs SSG 랜더스, 불펜 미정형 승부처",
             "coach_note": "불펜 핵심 선수 미공개로 중반 이후 승부처 예측 불가능",
-            "key_metrics": [
-                {"label": "불펜 부담", "value": "양팀 데이터 부족 비중"}
-            ],
+            "key_metrics": [{"label": "불펜 부담", "value": "양팀 데이터 부족 비중"}],
             "analysis": {
                 "summary": "SSG 랜더스의 최근 폼과 득실차 우세로 핵심 선수 가능성 높으나 불펜 부담 미확정",
                 "verdict": "SSG 랜더스 선발 선발 발표 시 불펜 핵심 선수 예측 가능 여부",
                 "strengths": [],
                 "weaknesses": [],
                 "why_it_matters": [],
-                "swing_factors": ["SSG 랜더스의 불펜 부재로 인해 클러치 상황 대비 변수가 됩니다."],
+                "swing_factors": [
+                    "SSG 랜더스의 불펜 부재로 인해 클러치 상황 대비 변수가 됩니다."
+                ],
                 "watch_points": [],
                 "uncertainty": [],
                 "risks": [],
@@ -3861,7 +4018,10 @@ class TestCoachFastPath:
         cleaned = _cleanup_response_language_quality(response_data)
 
         assert cleaned["headline"] == "한화 이글스 vs SSG 랜더스, 불펜 변수 승부처"
-        assert cleaned["coach_note"] == "불펜 핵심 전력 정보 미공개로 중반 이후 승부처 예측이 어렵습니다"
+        assert (
+            cleaned["coach_note"]
+            == "불펜 핵심 전력 정보 미공개로 중반 이후 승부처 예측이 어렵습니다"
+        )
         assert (
             cleaned["analysis"]["summary"]
             == "SSG 랜더스의 최근 폼과 득실차 우세로 주도 가능성 높으나 불펜 부담 미확정"
@@ -3941,7 +4101,10 @@ class TestCoachFastPath:
         assert cleaned["coach_note"] == "경기 후반 변수를 지켜봐야 합니다."
         assert cleaned["analysis"]["summary"] == "경기 후반 운영이 변수입니다."
         assert cleaned["analysis"]["verdict"] == "선발 미확정으로 경기 후반 변수 존재"
-        assert cleaned["analysis"]["risks"][0]["description"] == "선발 미확정으로 경기 후반 변수 존재"
+        assert (
+            cleaned["analysis"]["risks"][0]["description"]
+            == "선발 미확정으로 경기 후반 변수 존재"
+        )
         assert (
             cleaned["detailed_markdown"]
             == "## 코치 판단\n경기 후반 운영 변수를 확인해야 합니다."
@@ -3970,11 +4133,24 @@ class TestCoachFastPath:
 
         cleaned = _cleanup_response_language_quality(response_data)
 
-        assert cleaned["headline"] == "한화 이글스 vs SSG 랜더스, 불펜 운용 정보 확인 필요"
-        assert cleaned["coach_note"] == "불펜 운용 데이터 부족으로 인해 경기 후반 운영에 주의해야 합니다."
-        assert cleaned["analysis"]["summary"] == "양 팀 모두 불펜 운용 데이터가 부족하여 접전 후반 상황 비교가 어렵습니다."
-        assert cleaned["analysis"]["verdict"] == "불펜 운용 정보가 공개되지 않아 운영 판단이 제한됩니다."
-        assert cleaned["analysis"]["weaknesses"][0] == "양 팀 모두 불펜 운용 데이터 부족"
+        assert (
+            cleaned["headline"] == "한화 이글스 vs SSG 랜더스, 불펜 운용 정보 확인 필요"
+        )
+        assert (
+            cleaned["coach_note"]
+            == "불펜 운용 데이터 부족으로 인해 경기 후반 운영에 주의해야 합니다."
+        )
+        assert (
+            cleaned["analysis"]["summary"]
+            == "양 팀 모두 불펜 운용 데이터가 부족하여 접전 후반 상황 비교가 어렵습니다."
+        )
+        assert (
+            cleaned["analysis"]["verdict"]
+            == "불펜 운용 정보가 공개되지 않아 운영 판단이 제한됩니다."
+        )
+        assert (
+            cleaned["analysis"]["weaknesses"][0] == "양 팀 모두 불펜 운용 데이터 부족"
+        )
         assert (
             cleaned["detailed_markdown"]
             == "## 불펜 상태\n- 양 팀 모두 불펜 운용 데이터가 부족하여 접전 후반 상황에서의 팀 기량 비교가 어렵습니다."
@@ -3987,7 +4163,10 @@ class TestCoachFastPath:
             "headline": "SSG 랜더스 vs 한화 이글스, 최근 흐름과 불펜 가용성 비교",
             "coach_note": "경기 후반 불펜 운용과 고레버리지 상황 대응을 주시하세요.",
             "key_metrics": [
-                {"label": "불펜 상태", "value": "고레버리지 상황에서의 과부하 여부 판단이 어렵습니다."}
+                {
+                    "label": "불펜 상태",
+                    "value": "고레버리지 상황에서의 과부하 여부 판단이 어렵습니다.",
+                }
             ],
             "analysis": {
                 "summary": "양 팀 모두 고레버리지 상황 대응 근거가 부족합니다.",
@@ -4005,13 +4184,22 @@ class TestCoachFastPath:
 
         cleaned = _cleanup_response_language_quality(response_data)
 
-        assert cleaned["coach_note"] == "경기 후반 불펜 운용과 접전 후반 상황 대응을 주시하세요."
+        assert (
+            cleaned["coach_note"]
+            == "경기 후반 불펜 운용과 접전 후반 상황 대응을 주시하세요."
+        )
         assert (
             cleaned["key_metrics"][0]["value"]
             == "접전 후반 상황에서의 과부하 여부 판단이 어렵습니다."
         )
-        assert cleaned["analysis"]["summary"] == "양 팀 모두 접전 후반 상황 대응 근거가 부족합니다."
-        assert cleaned["analysis"]["watch_points"][0] == "접전 후반 상황 대응을 지켜봅니다."
+        assert (
+            cleaned["analysis"]["summary"]
+            == "양 팀 모두 접전 후반 상황 대응 근거가 부족합니다."
+        )
+        assert (
+            cleaned["analysis"]["watch_points"][0]
+            == "접전 후반 상황 대응을 지켜봅니다."
+        )
         assert (
             cleaned["detailed_markdown"]
             == "## 다시 볼 장면\n- 선발 교체 뒤 접전 후반 상황 대응을 봅니다."
@@ -4042,7 +4230,10 @@ class TestCoachFastPath:
 
         assert cleaned["coach_note"] == "선발 발표 후 핵심 구간을 다시 보세요."
         assert cleaned["analysis"]["summary"] == "핵심 구간을 단정하기 어렵습니다."
-        assert cleaned["analysis"]["verdict"] == "불펜 정보가 부족하여 핵심 구간을 단정하기 어렵습니다."
+        assert (
+            cleaned["analysis"]["verdict"]
+            == "불펜 정보가 부족하여 핵심 구간을 단정하기 어렵습니다."
+        )
         assert (
             cleaned["detailed_markdown"]
             == "## 다시 볼 장면\n선발 투수 발표 후 핵심 구간을 다시 분석해야 합니다."
@@ -4054,18 +4245,20 @@ class TestCoachFastPath:
         response_data = {
             "headline": "SSG 랜더스 vs 한화 이글스 전략 분석",
             "coach_note": "하이 레버리지 상황 대응을 지켜봐야 합니다.",
-            "key_metrics": [
-                {"label": "불펜 비중", "value": "비교 불가하다"}
-            ],
+            "key_metrics": [{"label": "불펜 비중", "value": "비교 불가하다"}],
             "analysis": {
                 "summary": "불펜 비중이 공개되지 않아 하이 레버리지 상황 처리 능력은 비교 불가하다.",
                 "verdict": "불펜 비중이 공개되지 않아 하이 레버리지 상황 처리 능력은 비교 불가하다.",
                 "strengths": [],
                 "weaknesses": ["하이 레버리지 상황 판단을 할 수 없다."],
                 "why_it_matters": [],
-                "swing_factors": ["불펜 비중이 공개되지 않아 운영 변수 확인이 어렵습니다."],
+                "swing_factors": [
+                    "불펜 비중이 공개되지 않아 운영 변수 확인이 어렵습니다."
+                ],
                 "watch_points": ["실제로 어떻게 활용되는지 확인한다."],
-                "uncertainty": ["선발이 미정이라 구체적인 경기 운영 변수는 남아 있습니다."],
+                "uncertainty": [
+                    "선발이 미정이라 구체적인 경기 운영 변수는 남아 있습니다."
+                ],
                 "risks": [],
             },
             "detailed_markdown": "## 결론\n하이 레버리지 상황은 비교 불가하다.",
@@ -4074,7 +4267,11 @@ class TestCoachFastPath:
         polished = _polish_scheduled_partial_response(
             response_data,
             game_status_bucket="SCHEDULED",
-            grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            grounding_reasons=[
+                "missing_starters",
+                "missing_lineups",
+                "missing_summary",
+            ],
         )
 
         assert polished["key_metrics"][0]["label"] == "불펜 운용"
@@ -4083,9 +4280,15 @@ class TestCoachFastPath:
             polished["analysis"]["summary"]
             == "불펜 비중이 공개되지 않아 접전 후반 상황 처리 능력은 비교가 어렵다."
         )
-        assert polished["analysis"]["verdict"] == "핵심 변수는 불펜 비중이 공개되지 않아 경기 후반 변수 확인이 어렵습니다."
+        assert (
+            polished["analysis"]["verdict"]
+            == "핵심 변수는 불펜 비중이 공개되지 않아 경기 후반 변수 확인이 어렵습니다."
+        )
         assert polished["analysis"]["weaknesses"][0] == "접전 후반 상황 판단이 어렵다."
-        assert polished["detailed_markdown"] == "## 코치 판단\n접전 후반 상황은 비교가 어렵다."
+        assert (
+            polished["detailed_markdown"]
+            == "## 코치 판단\n접전 후반 상황은 비교가 어렵다."
+        )
         assert polished["coach_note"].startswith("관전 포인트는")
 
     def test_polish_scheduled_partial_response_rewrites_live_bullpen_share_copy(self):
@@ -4095,18 +4298,25 @@ class TestCoachFastPath:
             "headline": "SSG 랜더스 vs 한화 이글스, 최근 흐름·불펜 비교",
             "coach_note": "SSG 랜더스의 상승 흐름과 한화 이글스 페라자 폼을 동시에 주시하며, 후반 불펜 투입 타이밍이 승부를 좌우할 것이다.",
             "key_metrics": [
-                {"label": "최근 흐름", "value": "SSG 랜더스 8승 2패 (+29) / 한화 이글스 6승 4패 (+2) (10경기)"},
+                {
+                    "label": "최근 흐름",
+                    "value": "SSG 랜더스 8승 2패 (+29) / 한화 이글스 6승 4패 (+2) (10경기)",
+                },
                 {"label": "불펜 비중", "value": "데이터 부족"},
             ],
             "analysis": {
                 "summary": "SSG 랜더스가 최근 승·패와 득실 차에서 확연히 우위이며, 한화 이글스는 페라자 폼 상승으로 타격 잠재력이 높다.",
                 "verdict": "SSG 랜더스는 10경기 득실 +29라는 압도적 흐름을 바탕으로 경기 후반 점수 확대 가능성이 크며, 한화 이글스는 페라자 상승 폼이 핵심 타격 포인트가 될 것이다.",
                 "strengths": [],
-                "weaknesses": ["양 팀 모두 불펜 비중 데이터가 없으며, 선발·라인업 미확정"],
+                "weaknesses": [
+                    "양 팀 모두 불펜 비중 데이터가 없으며, 선발·라인업 미확정"
+                ],
                 "why_it_matters": [],
                 "swing_factors": [],
                 "watch_points": ["경기 후반 불펜 투입 시점과 양 팀 불펜 실제 활용도"],
-                "uncertainty": ["선발 투수와 라인업 발표가 없으며, 불펜 비중 데이터가 결여됨"],
+                "uncertainty": [
+                    "선발 투수와 라인업 발표가 없으며, 불펜 비중 데이터가 결여됨"
+                ],
                 "risks": [
                     {
                         "area": "overall",
@@ -4124,19 +4334,31 @@ class TestCoachFastPath:
         polished = _polish_scheduled_partial_response(
             response_data,
             game_status_bucket="SCHEDULED",
-            grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            grounding_reasons=[
+                "missing_starters",
+                "missing_lineups",
+                "missing_summary",
+            ],
         )
 
         assert polished["key_metrics"][1]["label"] == "불펜 운용"
         assert polished["key_metrics"][1]["value"] == "데이터 부족"
-        assert polished["analysis"]["weaknesses"][0] == "양 팀 모두 불펜 운용 데이터가 부족하며, 선발·라인업 미확정"
-        assert polished["analysis"]["uncertainty"][0] == "선발 투수와 라인업 발표가 없으며, 불펜 운용 데이터가 부족함"
+        assert (
+            polished["analysis"]["weaknesses"][0]
+            == "양 팀 모두 불펜 운용 데이터가 부족하며, 선발·라인업 미확정"
+        )
+        assert (
+            polished["analysis"]["uncertainty"][0]
+            == "선발 투수와 라인업 발표가 없으며, 불펜 운용 데이터가 부족함"
+        )
         assert polished["detailed_markdown"] == (
             "## 불펜 상태\n"
             "- 양 팀 모두 불펜 운용 관련 공식 데이터가 없어 현재 불펜 활용 능력을 정확히 판단하기 어렵다."
         )
 
-    def test_polish_scheduled_partial_response_rewrites_bullpen_share_missing_phrase(self):
+    def test_polish_scheduled_partial_response_rewrites_bullpen_share_missing_phrase(
+        self,
+    ):
         from app.routers.coach import _polish_scheduled_partial_response
 
         response_data = {
@@ -4163,7 +4385,11 @@ class TestCoachFastPath:
         polished = _polish_scheduled_partial_response(
             response_data,
             game_status_bucket="SCHEDULED",
-            grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            grounding_reasons=[
+                "missing_starters",
+                "missing_lineups",
+                "missing_summary",
+            ],
         )
 
         assert polished["detailed_markdown"] == (
@@ -4171,7 +4397,9 @@ class TestCoachFastPath:
             "- 두 팀 모두 불펜 운용 데이터가 부족해, 불펜전의 중요성이 더욱 부각되고 있습니다."
         )
 
-    def test_polish_scheduled_partial_response_rewrites_bullpen_share_marked_missing_variants(self):
+    def test_polish_scheduled_partial_response_rewrites_bullpen_share_marked_missing_variants(
+        self,
+    ):
         from app.routers.coach import _polish_scheduled_partial_response
 
         response_data = {
@@ -4198,19 +4426,34 @@ class TestCoachFastPath:
         polished = _polish_scheduled_partial_response(
             response_data,
             game_status_bucket="SCHEDULED",
-            grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            grounding_reasons=[
+                "missing_starters",
+                "missing_lineups",
+                "missing_summary",
+            ],
         )
 
-        assert polished["coach_note"] == "불펜 운용 데이터 결측으로 경기 후반 예측이 어렵습니다."
-        assert polished["analysis"]["summary"] == "불펜 운용 및 소모 흐름에 대한 데이터 부족으로 경기 후반 대응력 예측이 어렵습니다."
-        assert polished["analysis"]["verdict"] == "불펜 운용 데이터 결측이 커서 보수적으로 봐야 합니다."
+        assert (
+            polished["coach_note"]
+            == "불펜 운용 데이터 결측으로 경기 후반 예측이 어렵습니다."
+        )
+        assert (
+            polished["analysis"]["summary"]
+            == "불펜 운용 및 소모 흐름에 대한 데이터 부족으로 경기 후반 대응력 예측이 어렵습니다."
+        )
+        assert (
+            polished["analysis"]["verdict"]
+            == "불펜 운용 데이터 결측이 커서 보수적으로 봐야 합니다."
+        )
         assert polished["analysis"]["uncertainty"][0] == "불펜 운용 데이터 결측"
         assert polished["detailed_markdown"] == (
             "## 불펜 상태\n"
             "- 현재 불펜 운용 및 소모 흐름에 대한 데이터가 부족하여 경기 후반 대응력을 예측하기 어렵습니다."
         )
 
-    def test_polish_scheduled_partial_response_relabels_bullpen_share_metric_when_value_is_unconfirmed(self):
+    def test_polish_scheduled_partial_response_relabels_bullpen_share_metric_when_value_is_unconfirmed(
+        self,
+    ):
         from app.routers.coach import _polish_scheduled_partial_response
 
         response_data = {
@@ -4236,13 +4479,19 @@ class TestCoachFastPath:
         polished = _polish_scheduled_partial_response(
             response_data,
             game_status_bucket="SCHEDULED",
-            grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            grounding_reasons=[
+                "missing_starters",
+                "missing_lineups",
+                "missing_summary",
+            ],
         )
 
         assert polished["key_metrics"][0]["label"] == "불펜 운용"
         assert polished["key_metrics"][0]["value"] == "SSG 랜더스 불펜 데이터 미확정"
 
-    def test_polish_scheduled_partial_response_rewrites_review_style_scheduled_copy(self):
+    def test_polish_scheduled_partial_response_rewrites_review_style_scheduled_copy(
+        self,
+    ):
         from app.routers.coach import _polish_scheduled_partial_response
 
         response_data = {
@@ -4289,11 +4538,21 @@ class TestCoachFastPath:
         polished = _polish_scheduled_partial_response(
             response_data,
             game_status_bucket="SCHEDULED",
-            grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            grounding_reasons=[
+                "missing_starters",
+                "missing_lineups",
+                "missing_summary",
+            ],
         )
 
-        assert polished["headline"] == "한화 이글스 vs SSG 랜더스 불펜, 데이터 부족으로 전략 불확실"
-        assert polished["coach_note"] == "선발·라인업 발표 전 불펜 핵심 자원과 운영 지표 데이터 미공개로 전략 비교가 어렵습니다"
+        assert (
+            polished["headline"]
+            == "한화 이글스 vs SSG 랜더스 불펜, 데이터 부족으로 전략 불확실"
+        )
+        assert (
+            polished["coach_note"]
+            == "선발·라인업 발표 전 불펜 핵심 자원과 운영 지표 데이터 미공개로 전략 비교가 어렵습니다"
+        )
         assert polished["key_metrics"][0]["label"] == "불펜 핵심 자원"
         assert polished["key_metrics"][1]["label"] == "최근 운영 지표"
         assert (
@@ -4304,8 +4563,13 @@ class TestCoachFastPath:
             polished["analysis"]["verdict"]
             == "불펜 전략 비교가 어렵습니다 - 선발·라인업 미발표로 변수 과다"
         )
-        assert polished["analysis"]["risks"][0]["description"] == "불펜 핵심 자원과 운영 지표 수치 미공개로 핵심 구간 분석 한계"
-        assert polished["detailed_markdown"].startswith("## 코치 판단\n- 선발·라인업 미발표로 불펜 핵심 자원 미확정")
+        assert (
+            polished["analysis"]["risks"][0]["description"]
+            == "불펜 핵심 자원과 운영 지표 수치 미공개로 핵심 구간 분석 한계"
+        )
+        assert polished["detailed_markdown"].startswith(
+            "## 코치 판단\n- 선발·라인업 미발표로 불펜 핵심 자원 미확정"
+        )
         assert "## 왜 중요한가" in polished["detailed_markdown"]
         assert "## 체크 포인트" in polished["detailed_markdown"]
 
@@ -4322,7 +4586,9 @@ class TestCoachFastPath:
                 "strengths": [],
                 "weaknesses": [],
                 "why_it_matters": [],
-                "swing_factors": ["불펜 비중이 공개되지 않아 경기 후반 변수 확인이 어렵습니다."],
+                "swing_factors": [
+                    "불펜 비중이 공개되지 않아 경기 후반 변수 확인이 어렵습니다."
+                ],
                 "watch_points": ["경기 중 불펜 교체 시점을 확인해야 합니다."],
                 "uncertainty": ["라인업 발표 전까지는 타순 변수도 남아 있습니다."],
                 "risks": [],
@@ -4379,7 +4645,10 @@ class TestCoachFastPath:
             softened["analysis"]["why_it_matters"][0]
             == "SSG 랜더스의 뚜렷한 득실 마진 우위는 경기 흐름에 영향을 줄 수 있습니다."
         )
-        assert softened["coach_note"] == "SSG 랜더스의 뚜렷한 최근 우세 흐름을 고려하되 우세 흐름을 이어가야 합니다."
+        assert (
+            softened["coach_note"]
+            == "SSG 랜더스의 뚜렷한 최근 우세 흐름을 고려하되 우세 흐름을 이어가야 합니다."
+        )
 
     def test_soften_scheduled_partial_tone_rewrites_live_intense_margin_copy(self):
         from app.routers.coach import _soften_scheduled_partial_tone
@@ -4405,7 +4674,11 @@ class TestCoachFastPath:
         softened = _soften_scheduled_partial_tone(
             response_data,
             game_status_bucket="SCHEDULED",
-            grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            grounding_reasons=[
+                "missing_starters",
+                "missing_lineups",
+                "missing_summary",
+            ],
         )
 
         assert "압도적 득실 마진" not in softened["headline"]
@@ -4454,7 +4727,9 @@ class TestCoachFastPath:
             softened["analysis"]["verdict"]
             == "SSG 랜더스가 초반 흐름에서 불펜 투입 시점에서 우세 흐름을 보이고 있으나, 운영 변동이 변수입니다."
         )
-        assert softened["analysis"]["weaknesses"][0] == "불펜의 운영 변동이 승부처에 영향"
+        assert (
+            softened["analysis"]["weaknesses"][0] == "불펜의 운영 변동이 승부처에 영향"
+        )
         assert (
             softened["analysis"]["watch_points"][0]
             == "관전 포인트로는 불펜의 핵심 전력 운용을 봐야 합니다."
@@ -4514,16 +4789,21 @@ class TestCoachFastPath:
             "detailed_markdown": "## 최근 전력\n## 불펜 상태\n- 불펜 비중 데이터 부족"
         }
 
-        assert _find_missing_focus_sections(response_data, ["recent_form", "bullpen"]) == [
-            "recent_form"
-        ]
+        assert _find_missing_focus_sections(
+            response_data, ["recent_form", "bullpen"]
+        ) == ["recent_form"]
 
-    def test_ensure_detailed_markdown_fills_missing_focus_sections_from_key_metrics(self):
+    def test_ensure_detailed_markdown_fills_missing_focus_sections_from_key_metrics(
+        self,
+    ):
         from app.routers.coach import _ensure_detailed_markdown
 
         response_payload = {
             "key_metrics": [
-                {"label": "최근 흐름", "value": "SSG 랜더스 8승 2패 / 한화 이글스 6승 4패"},
+                {
+                    "label": "최근 흐름",
+                    "value": "SSG 랜더스 8승 2패 / 한화 이글스 6승 4패",
+                },
                 {"label": "불펜 비중", "value": "양 팀 모두 불펜 비중 데이터 부족"},
             ],
             "analysis": {
@@ -4549,7 +4829,10 @@ class TestCoachFastPath:
 
         response_payload = {
             "key_metrics": [
-                {"label": "최근 흐름", "value": "한화 이글스 6승 4패 / SSG 랜더스 8승 2패"},
+                {
+                    "label": "최근 흐름",
+                    "value": "한화 이글스 6승 4패 / SSG 랜더스 8승 2패",
+                },
                 {"label": "불펜 비중", "value": "한화/SSG 랜더스 모두 데이터 부족"},
             ],
             "analysis": {
@@ -4570,12 +4853,17 @@ class TestCoachFastPath:
             == "## 최근 전력\n- 한화 이글스 6승 4패 / SSG 랜더스 8승 2패\n\n## 불펜 상태\n- 한화/SSG 랜더스 모두 데이터 부족\n\n## 결과 진단\n- SSG 랜더스의 최근 상승세와 한화의 불펜 부담이 잠재적 승부처입니다."
         )
 
-    def test_ensure_detailed_markdown_populates_empty_focus_headers_with_blank_lines(self):
+    def test_ensure_detailed_markdown_populates_empty_focus_headers_with_blank_lines(
+        self,
+    ):
         from app.routers.coach import _ensure_detailed_markdown
 
         response_payload = {
             "key_metrics": [
-                {"label": "최근 흐름", "value": "한화 이글스 상승 83.1 / SSG 랜더스 상승 93.0"},
+                {
+                    "label": "최근 흐름",
+                    "value": "한화 이글스 상승 83.1 / SSG 랜더스 상승 93.0",
+                },
                 {"label": "불펜 운용", "value": "양 팀 모두 불펜 운용 데이터 부족"},
             ],
             "analysis": {
@@ -4601,7 +4889,9 @@ class TestCoachFastPath:
             == "## 최근 전력\n- 한화 이글스 상승 83.1 / SSG 랜더스 상승 93.0\n\n## 불펜 상태\n- 양 팀 모두 불펜 운용 데이터 부족\n\n## 코치 판단\n- 첫 번째 불펜 선택이 가장 큰 변수입니다."
         )
 
-    def test_ensure_detailed_markdown_inserts_missing_focus_after_existing_focus_sections(self):
+    def test_ensure_detailed_markdown_inserts_missing_focus_after_existing_focus_sections(
+        self,
+    ):
         from app.routers.coach import _ensure_detailed_markdown
 
         response_payload = {
@@ -4631,7 +4921,9 @@ class TestCoachFastPath:
             == "## 최근 전력\n- SSG 랜더스 8승 2패 / 한화 이글스 6승 4패\n\n## 불펜 상태\n- 불펜 비중 정보 없음\n\n## 결과 진단\n- SSG 랜더스의 최근 우세 흐름이 유지되고 있습니다."
         )
 
-    def test_completed_deterministic_markdown_populates_focus_sections_immediately(self):
+    def test_completed_deterministic_markdown_populates_focus_sections_immediately(
+        self,
+    ):
         from app.routers.coach import _build_deterministic_markdown
 
         evidence = _build_game_evidence(
@@ -4651,14 +4943,18 @@ class TestCoachFastPath:
         )
         tool_results = {
             "home": {
-                "recent": {"summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -9}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -9}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.783}},
                     "fatigue_index": {"bullpen_share": 38.0},
                 },
             },
             "away": {
-                "recent": {"summary": {"wins": 4, "losses": 5, "draws": 0, "run_diff": -1}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 5, "draws": 0, "run_diff": -1}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.799}},
                     "fatigue_index": {"bullpen_share": 31.0},
@@ -4674,10 +4970,19 @@ class TestCoachFastPath:
             resolved_focus=["recent_form", "bullpen", "starter", "matchup", "batting"],
         )
 
-        assert "## 최근 전력\n- NC 다이노스 최근 4승 5패, 득실 -1 / 한화 이글스 최근 4승 6패, 득실 -9" in markdown
-        assert "## 불펜 상태\n- 불펜 비중은 NC 다이노스 31.0% / 한화 이글스 38.0%로 차이가 확인됩니다." in markdown
+        assert (
+            "## 최근 전력\n- NC 다이노스 최근 4승 5패, 득실 -1 / 한화 이글스 최근 4승 6패, 득실 -9"
+            in markdown
+        )
+        assert (
+            "## 불펜 상태\n- 불펜 비중은 NC 다이노스 31.0% / 한화 이글스 38.0%로 차이가 확인됩니다."
+            in markdown
+        )
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
-        assert "## 상대 전적\n- 상대 전적 근거가 충분하지 않아 직접 비교는 보수적으로 해석해야 합니다." in markdown
+        assert (
+            "## 상대 전적\n- 상대 전적 근거가 충분하지 않아 직접 비교는 보수적으로 해석해야 합니다."
+            in markdown
+        )
         assert "## 타격 생산성\n- NC 다이노스 0.799 / 한화 이글스 0.783" in markdown
 
     def test_ensure_detailed_markdown_uses_completed_focus_specific_summaries(self):
@@ -4700,14 +5005,18 @@ class TestCoachFastPath:
         )
         tool_results = {
             "home": {
-                "recent": {"summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -9}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -9}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.783}},
                     "fatigue_index": {"bullpen_share": 38.0},
                 },
             },
             "away": {
-                "recent": {"summary": {"wins": 4, "losses": 5, "draws": 0, "run_diff": -1}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 5, "draws": 0, "run_diff": -1}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.799}},
                     "fatigue_index": {"bullpen_share": 31.0},
@@ -4718,7 +5027,10 @@ class TestCoachFastPath:
         }
         response_payload = {
             "key_metrics": [
-                {"label": "승부처 요약", "value": "결승타 최재훈 (2회 2사 1,2루서 좌월 홈런)"},
+                {
+                    "label": "승부처 요약",
+                    "value": "결승타 최재훈 (2회 2사 1,2루서 좌월 홈런)",
+                },
             ],
             "analysis": {
                 "summary": "NC 다이노스 4 / 한화 이글스 11 경기에서 한화 이글스가 이겼고, NC 다이노스는 득점 연결과 불펜 운용에서 차이를 남겼습니다.",
@@ -4761,14 +5073,22 @@ class TestCoachFastPath:
         )
 
         markdown = response_payload["detailed_markdown"]
-        assert "## 최근 전력\n- NC 다이노스 최근 4승 5패, 득실 -1 / 한화 이글스 최근 4승 6패, 득실 -9" in markdown
-        assert "## 불펜 상태\n- 불펜 비중은 NC 다이노스 31.0% / 한화 이글스 38.0%로 차이가 확인됩니다." in markdown
+        assert (
+            "## 최근 전력\n- NC 다이노스 최근 4승 5패, 득실 -1 / 한화 이글스 최근 4승 6패, 득실 -9"
+            in markdown
+        )
+        assert (
+            "## 불펜 상태\n- 불펜 비중은 NC 다이노스 31.0% / 한화 이글스 38.0%로 차이가 확인됩니다."
+            in markdown
+        )
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
         assert "## 상대 전적\n- 상대 전적 표본이 부족합니다." in markdown
         assert "## 타격 생산성\n- NC 다이노스 0.799 / 한화 이글스 0.783" in markdown
         assert "## 불펜 상태\n- NC 다이노스 4 / 한화 이글스 11 경기에서" not in markdown
 
-    def test_ensure_detailed_markdown_rewrites_completed_focus_sections_to_thematic_bodies(self):
+    def test_ensure_detailed_markdown_rewrites_completed_focus_sections_to_thematic_bodies(
+        self,
+    ):
         from app.routers.coach import _ensure_detailed_markdown
 
         evidence = _build_game_evidence(
@@ -4788,14 +5108,18 @@ class TestCoachFastPath:
         )
         tool_results = {
             "home": {
-                "recent": {"summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -9}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -9}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.783}},
                     "fatigue_index": {"bullpen_share": 38.0},
                 },
             },
             "away": {
-                "recent": {"summary": {"wins": 4, "losses": 5, "draws": 1, "run_diff": -21}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 5, "draws": 1, "run_diff": -21}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.799}},
                     "fatigue_index": {"bullpen_share": 31.0},
@@ -4806,8 +5130,14 @@ class TestCoachFastPath:
         }
         response_payload = {
             "key_metrics": [
-                {"label": "발표 선발", "value": "NC 다이노스 김태경 / 한화 이글스 류현진"},
-                {"label": "팀 타격 생산성", "value": "NC 다이노스 0.799 / 한화 이글스 0.783"},
+                {
+                    "label": "발표 선발",
+                    "value": "NC 다이노스 김태경 / 한화 이글스 류현진",
+                },
+                {
+                    "label": "팀 타격 생산성",
+                    "value": "NC 다이노스 0.799 / 한화 이글스 0.783",
+                },
             ],
             "analysis": {
                 "summary": "NC 다이노스 4 / 한화 이글스 11 경기에서 한화 이글스가 이겼습니다.",
@@ -4847,8 +5177,14 @@ class TestCoachFastPath:
         )
 
         markdown = response_payload["detailed_markdown"]
-        assert "## 최근 전력\n- NC 다이노스 최근 4승 5패 1무, 득실 -21 / 한화 이글스 최근 4승 6패, 득실 -9" in markdown
-        assert "## 불펜 상태\n- 불펜 비중은 NC 다이노스 31.0% / 한화 이글스 38.0%로 차이가 확인됩니다." in markdown
+        assert (
+            "## 최근 전력\n- NC 다이노스 최근 4승 5패 1무, 득실 -21 / 한화 이글스 최근 4승 6패, 득실 -9"
+            in markdown
+        )
+        assert (
+            "## 불펜 상태\n- 불펜 비중은 NC 다이노스 31.0% / 한화 이글스 38.0%로 차이가 확인됩니다."
+            in markdown
+        )
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
         assert "## 상대 전적\n- 상대 전적 표본이 부족합니다." in markdown
         assert "## 타격 생산성\n- NC 다이노스 0.799 / 한화 이글스 0.783" in markdown
@@ -4856,7 +5192,10 @@ class TestCoachFastPath:
         assert "NC 다이노스 4 / 한화 이글스 11 경기에서" not in markdown
 
     def test_sanitize_response_unsupported_numeric_claims_repairs_payload(self):
-        from app.core.coach_grounding import CoachFactSheet, validate_response_against_fact_sheet
+        from app.core.coach_grounding import (
+            CoachFactSheet,
+            validate_response_against_fact_sheet,
+        )
         from app.routers.coach import _sanitize_response_unsupported_numeric_claims
 
         response_payload = {
@@ -4919,7 +5258,9 @@ class TestCoachFastPath:
         assert "[폼 점수]" in COACH_PROMPT_V2
         assert "[WPA 변화]" in COACH_PROMPT_V2
 
-    def test_should_regenerate_completed_cache_for_semantically_empty_manual_payload(self):
+    def test_should_regenerate_completed_cache_for_semantically_empty_manual_payload(
+        self,
+    ):
         from app.routers.coach import _should_regenerate_completed_cache
 
         cached_data = {
@@ -5160,7 +5501,9 @@ class TestCoachFastPath:
         )
         tool_results = {
             "home": {
-                "recent": {"summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -9}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 6, "draws": 0, "run_diff": -9}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.783}},
                     "fatigue_index": {"bullpen_share": 38.0},
@@ -5168,7 +5511,9 @@ class TestCoachFastPath:
                 "summary": {},
             },
             "away": {
-                "recent": {"summary": {"wins": 4, "losses": 5, "draws": 1, "run_diff": -21}},
+                "recent": {
+                    "summary": {"wins": 4, "losses": 5, "draws": 1, "run_diff": -21}
+                },
                 "advanced": {
                     "metrics": {"batting": {"ops": 0.799}},
                     "fatigue_index": {"bullpen_share": 31.0},
@@ -5227,11 +5572,20 @@ class TestCoachFastPath:
         )
 
         markdown = processed["detailed_markdown"]
-        assert "## 최근 전력\n- NC 다이노스 최근 4승 5패 1무, 득실 -21 / 한화 이글스 최근 4승 6패, 득실 -9" in markdown
-        assert "## 불펜 상태\n- 불펜 비중은 NC 다이노스 31.0% / 한화 이글스 38.0%로 차이가 확인됩니다." in markdown
+        assert (
+            "## 최근 전력\n- NC 다이노스 최근 4승 5패 1무, 득실 -21 / 한화 이글스 최근 4승 6패, 득실 -9"
+            in markdown
+        )
+        assert (
+            "## 불펜 상태\n- 불펜 비중은 NC 다이노스 31.0% / 한화 이글스 38.0%로 차이가 확인됩니다."
+            in markdown
+        )
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
         assert "OPS 우위가 먼저 확인됐습니다." not in markdown
-        assert "NC 다이노스 4 / 한화 이글스 11 경기에서 한화 이글스가 이겼습니다." not in markdown
+        assert (
+            "NC 다이노스 4 / 한화 이글스 11 경기에서 한화 이글스가 이겼습니다."
+            not in markdown
+        )
 
     def test_postprocess_completed_payload_compacts_repeated_clutch_sections(self):
         from app.routers.coach import _postprocess_coach_response_payload
@@ -5275,9 +5629,15 @@ class TestCoachFastPath:
                 "strengths": [],
                 "weaknesses": [],
                 "risks": [],
-                "why_it_matters": ["1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."],
-                "swing_factors": ["1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."],
-                "watch_points": ["1회말 8번타자 이재원 장면 직전 배터리 선택과 작전 흐름을 다시 볼 필요가 있습니다."],
+                "why_it_matters": [
+                    "1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."
+                ],
+                "swing_factors": [
+                    "1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."
+                ],
+                "watch_points": [
+                    "1회말 8번타자 이재원 장면 직전 배터리 선택과 작전 흐름을 다시 볼 필요가 있습니다."
+                ],
                 "uncertainty": [],
             },
             "detailed_markdown": (
@@ -5303,13 +5663,34 @@ class TestCoachFastPath:
             resolved_focus=["recent_form", "bullpen"],
         )
 
-        assert processed["analysis"]["verdict"] == "LG 트윈스 승리의 분기점은 1회말 승부처 대응이었습니다."
-        assert processed["analysis"]["why_it_matters"][0] == "LG 트윈스는 고레버리지 기회를 득점 흐름으로 연결하며 주도권을 잡았습니다."
-        assert processed["analysis"]["swing_factors"][0] == "1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."
-        assert processed["analysis"]["watch_points"][0] == "해당 승부처 직전 배터리 선택과 주자 운영을 다시 볼 필요가 있습니다."
-        assert "## 결과 진단\n- LG 트윈스 승리의 분기점은 1회말 승부처 대응이었습니다." in processed["detailed_markdown"]
-        assert "## 결과를 가른 이유\n- LG 트윈스는 고레버리지 기회를 득점 흐름으로 연결하며 주도권을 잡았습니다." in processed["detailed_markdown"]
-        assert "## 다시 볼 장면\n- 해당 승부처 직전 배터리 선택과 주자 운영을 다시 볼 필요가 있습니다." in processed["detailed_markdown"]
+        assert (
+            processed["analysis"]["verdict"]
+            == "LG 트윈스 승리의 분기점은 1회말 승부처 대응이었습니다."
+        )
+        assert (
+            processed["analysis"]["why_it_matters"][0]
+            == "LG 트윈스는 고레버리지 기회를 득점 흐름으로 연결하며 주도권을 잡았습니다."
+        )
+        assert (
+            processed["analysis"]["swing_factors"][0]
+            == "1회말 8번타자 이재원 장면의 WPA 21.2%p 변동이 실제 승부처였습니다."
+        )
+        assert (
+            processed["analysis"]["watch_points"][0]
+            == "해당 승부처 직전 배터리 선택과 주자 운영을 다시 볼 필요가 있습니다."
+        )
+        assert (
+            "## 결과 진단\n- LG 트윈스 승리의 분기점은 1회말 승부처 대응이었습니다."
+            in processed["detailed_markdown"]
+        )
+        assert (
+            "## 결과를 가른 이유\n- LG 트윈스는 고레버리지 기회를 득점 흐름으로 연결하며 주도권을 잡았습니다."
+            in processed["detailed_markdown"]
+        )
+        assert (
+            "## 다시 볼 장면\n- 해당 승부처 직전 배터리 선택과 주자 운영을 다시 볼 필요가 있습니다."
+            in processed["detailed_markdown"]
+        )
 
     def test_postprocess_scheduled_partial_payload_realigns_llm_sections(self):
         from app.routers.coach import _postprocess_coach_response_payload
@@ -5327,12 +5708,16 @@ class TestCoachFastPath:
         )
         tool_results = {
             "home": {
-                "recent": {"summary": {"wins": 9, "losses": 1, "draws": 0, "run_diff": 26}},
+                "recent": {
+                    "summary": {"wins": 9, "losses": 1, "draws": 0, "run_diff": 26}
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.740}}},
                 "summary": {},
             },
             "away": {
-                "recent": {"summary": {"wins": 3, "losses": 7, "draws": 0, "run_diff": -19}},
+                "recent": {
+                    "summary": {"wins": 3, "losses": 7, "draws": 0, "run_diff": -19}
+                },
                 "advanced": {"metrics": {"batting": {"ops": 0.905}}},
                 "summary": {},
             },
@@ -5342,8 +5727,14 @@ class TestCoachFastPath:
             "headline": "LG 트윈스 vs 롯데 자이언츠 예정 경기 분석",
             "sentiment": "neutral",
             "key_metrics": [
-                {"label": "최근 흐름", "value": "롯데 자이언츠 최근 3승 7패 / LG 트윈스 최근 9승 1패"},
-                {"label": "팀 타격 생산성", "value": "롯데 자이언츠 OPS 0.905 / LG 트윈스 OPS 0.740"},
+                {
+                    "label": "최근 흐름",
+                    "value": "롯데 자이언츠 최근 3승 7패 / LG 트윈스 최근 9승 1패",
+                },
+                {
+                    "label": "팀 타격 생산성",
+                    "value": "롯데 자이언츠 OPS 0.905 / LG 트윈스 OPS 0.740",
+                },
             ],
             "analysis": {
                 "summary": "롯데 자이언츠의 장타 생산성과 LG 트윈스의 최근 상승 흐름이 함께 변수입니다.",
@@ -5351,8 +5742,12 @@ class TestCoachFastPath:
                 "strengths": [],
                 "weaknesses": [],
                 "risks": [],
-                "why_it_matters": ["롯데 자이언츠의 장타 생산성이 경기 초반 흐름을 좌우할 수 있습니다."],
-                "swing_factors": ["라인업 변화와 첫 투수 교체 시점을 함께 봐야 합니다."],
+                "why_it_matters": [
+                    "롯데 자이언츠의 장타 생산성이 경기 초반 흐름을 좌우할 수 있습니다."
+                ],
+                "swing_factors": [
+                    "라인업 변화와 첫 투수 교체 시점을 함께 봐야 합니다."
+                ],
                 "watch_points": ["라인업 변화와 첫 투수 교체 시점을 함께 봐야 합니다."],
                 "uncertainty": ["라인업 발표 전까지는 변수도 큽니다."],
             },
@@ -5373,25 +5768,53 @@ class TestCoachFastPath:
             response_payload,
             evidence=evidence,
             used_evidence=["game", "team_recent_form", "opponent_recent_form"],
-            grounding_reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            grounding_reasons=[
+                "missing_starters",
+                "missing_lineups",
+                "missing_summary",
+            ],
             grounding_warnings=[],
             tool_results=tool_results,
             resolved_focus=["recent_form", "bullpen", "starter"],
         )
 
-        assert processed["analysis"]["verdict"] == "LG 트윈스가 최근 흐름 우세로 근소하게 앞섭니다."
+        assert (
+            processed["analysis"]["verdict"]
+            == "LG 트윈스가 최근 흐름 우세로 근소하게 앞섭니다."
+        )
         assert (
             processed["analysis"]["why_it_matters"][0]
             == "LG 트윈스가 최근 흐름 우위로 경기 중반 운영 선택지를 먼저 확보할 가능성이 있습니다."
         )
-        assert processed["analysis"]["swing_factors"][0] == "선발 발표 전이라 첫 투수 교체 시점이 핵심 변수입니다."
-        assert processed["analysis"]["watch_points"][0] == "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+        assert (
+            processed["analysis"]["swing_factors"][0]
+            == "선발 발표 전이라 첫 투수 교체 시점이 핵심 변수입니다."
+        )
+        assert (
+            processed["analysis"]["watch_points"][0]
+            == "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+        )
         assert "핵심 변수는 선발 발표 전이라" not in processed["coach_note"]
-        assert "## 코치 판단\n- LG 트윈스가 최근 흐름 우세로 근소하게 앞섭니다." in processed["detailed_markdown"]
-        assert "## 왜 중요한가\n- LG 트윈스가 최근 흐름 우위로 경기 중반 운영 선택지를 먼저 확보할 가능성이 있습니다." in processed["detailed_markdown"]
-        assert "롯데 자이언츠의 팀 타격 생산성 반격 여지는 남아 있습니다." in processed["analysis"]["summary"]
-        assert "## 승부 스윙 포인트\n- 선발 발표 전이라 첫 투수 교체 시점이 핵심 변수입니다." in processed["detailed_markdown"]
-        assert "## 체크 포인트\n- 첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다." in processed["detailed_markdown"]
+        assert (
+            "## 코치 판단\n- LG 트윈스가 최근 흐름 우세로 근소하게 앞섭니다."
+            in processed["detailed_markdown"]
+        )
+        assert (
+            "## 왜 중요한가\n- LG 트윈스가 최근 흐름 우위로 경기 중반 운영 선택지를 먼저 확보할 가능성이 있습니다."
+            in processed["detailed_markdown"]
+        )
+        assert (
+            "롯데 자이언츠의 팀 타격 생산성 반격 여지는 남아 있습니다."
+            in processed["analysis"]["summary"]
+        )
+        assert (
+            "## 승부 스윙 포인트\n- 선발 발표 전이라 첫 투수 교체 시점이 핵심 변수입니다."
+            in processed["detailed_markdown"]
+        )
+        assert (
+            "## 체크 포인트\n- 첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
+            in processed["detailed_markdown"]
+        )
 
 
 # ============================================================

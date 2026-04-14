@@ -146,8 +146,13 @@ def test_build_gate_report_fails_on_threshold_and_smoke_miss() -> None:
 
     assert report["verdict"] == "FAIL"
     assert any("unresolved_count 2 > 0" in item for item in report["checks"]["failed"])
-    assert any("failed_locked_count 1 > 0" in item for item in report["checks"]["failed"])
-    assert any("insufficient_ratio 0.500 > 0.250" in item for item in report["checks"]["failed"])
+    assert any(
+        "failed_locked_count 1 > 0" in item for item in report["checks"]["failed"]
+    )
+    assert any(
+        "insufficient_ratio 0.500 > 0.250" in item
+        for item in report["checks"]["failed"]
+    )
     assert any("warm_path_smoke failed" in item for item in report["checks"]["failed"])
 
 
@@ -176,7 +181,10 @@ def test_build_gate_report_fails_when_report_missing_for_non_empty_window() -> N
     )
 
     assert report["verdict"] == "FAIL"
-    assert "latest auto_brief report missing for selected window" in report["checks"]["failed"]
+    assert (
+        "latest auto_brief report missing for selected window"
+        in report["checks"]["failed"]
+    )
 
 
 def test_build_gate_report_warns_for_off_day_without_failing() -> None:
@@ -205,7 +213,10 @@ def test_build_gate_report_warns_for_off_day_without_failing() -> None:
 
     assert report["verdict"] == "WARN"
     assert report["checks"]["failed"] == []
-    assert any("selected target window is empty" in item for item in report["checks"]["warnings"])
+    assert any(
+        "selected target window is empty" in item
+        for item in report["checks"]["warnings"]
+    )
 
 
 def test_async_main_writes_output_for_passing_gate(
@@ -217,7 +228,9 @@ def test_async_main_writes_output_for_passing_gate(
         years=[2026],
         target_pool=[target],
         selected_targets=[target],
-        results=[{"status": "skipped", "meta": {"cache_state": "COMPLETED", "cached": True}}],
+        results=[
+            {"status": "skipped", "meta": {"cache_state": "COMPLETED", "cached": True}}
+        ],
     )
     snapshot = _build_snapshot(selected_target_count=1, unresolved_count=0)
     output_path = tmp_path / "auto_brief_ops_gate.json"
@@ -227,7 +240,9 @@ def test_async_main_writes_output_for_passing_gate(
         "_resolve_requested_window",
         lambda **kwargs: (date(2026, 4, 8), date(2026, 4, 8)),
     )
-    monkeypatch.setattr(smoke, "collect_auto_brief_health_inputs", lambda **kwargs: inputs)
+    monkeypatch.setattr(
+        smoke, "collect_auto_brief_health_inputs", lambda **kwargs: inputs
+    )
     monkeypatch.setattr(
         smoke,
         "_build_auto_brief_health_snapshot_from_inputs",

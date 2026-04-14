@@ -17,7 +17,9 @@ def _build_client() -> TestClient:
     return TestClient(test_app)
 
 
-def _build_target(*, cache_key: str, game_date: str, stage_label: str = "REGULAR") -> MatchupTarget:
+def _build_target(
+    *, cache_key: str, game_date: str, stage_label: str = "REGULAR"
+) -> MatchupTarget:
     return MatchupTarget(
         cache_key=cache_key,
         game_id=f"{cache_key}-game",
@@ -156,9 +158,17 @@ def test_build_auto_brief_health_snapshot_aggregates_results(monkeypatch) -> Non
         },
     ]
 
-    monkeypatch.setattr(coach_auto_brief_ops, "_load_target_pool_for_years", lambda years: targets)
-    monkeypatch.setattr(coach_auto_brief_ops, "collect_cache_verification_results", lambda selected: results)
-    monkeypatch.setattr(coach_auto_brief_ops, "_load_latest_auto_brief_report", lambda: None)
+    monkeypatch.setattr(
+        coach_auto_brief_ops, "_load_target_pool_for_years", lambda years: targets
+    )
+    monkeypatch.setattr(
+        coach_auto_brief_ops,
+        "collect_cache_verification_results",
+        lambda selected: results,
+    )
+    monkeypatch.setattr(
+        coach_auto_brief_ops, "_load_latest_auto_brief_report", lambda: None
+    )
 
     snapshot = coach_auto_brief_ops.build_auto_brief_health_snapshot(
         window="today",
@@ -173,7 +183,10 @@ def test_build_auto_brief_health_snapshot_aggregates_results(monkeypatch) -> Non
     assert snapshot.summary.cache_state_breakdown["FAILED_LOCKED"] == 1
     assert snapshot.gate.verdict == "FAIL"
     assert snapshot.gate.failed_locked_count == 1
-    assert "latest auto_brief report missing for selected window" in snapshot.gate.checks.failed
+    assert (
+        "latest auto_brief report missing for selected window"
+        in snapshot.gate.checks.failed
+    )
     assert snapshot.unresolved_targets[0].cache_state == "FAILED_LOCKED"
     assert "batch_coach_auto_brief.py" in snapshot.recommended_command
 
