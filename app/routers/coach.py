@@ -1673,12 +1673,8 @@ def _build_manual_data_request(
         )
 
     if missing_game_row or missing_critical_context:
-        home_pitcher_present = bool(
-            getattr(assessment, "home_pitcher_present", False)
-        )
-        away_pitcher_present = bool(
-            getattr(assessment, "away_pitcher_present", False)
-        )
+        home_pitcher_present = bool(getattr(assessment, "home_pitcher_present", False))
+        away_pitcher_present = bool(getattr(assessment, "away_pitcher_present", False))
         lineup_announced = bool(getattr(assessment, "lineup_announced", False))
         if not (home_pitcher_present and away_pitcher_present):
             add_item(
