@@ -1516,21 +1516,21 @@ def _has_stage_context_mismatch(
     evidence: GameEvidence,
     game_date: Optional[date_cls],
 ) -> bool:
-    league_type_code = getattr(evidence, "league_type_code", None)
-    season_year = getattr(evidence, "season_year", None)
+    league_type_code = _parse_optional_int(getattr(evidence, "league_type_code", None))
+    season_year = _parse_optional_int(getattr(evidence, "season_year", None))
     if (
         league_type_code is None
         or league_type_code < 2
         or league_type_code > 5
         or game_date is None
-        or not season_year
+        or season_year is None
     ):
         return False
 
     stage_start = _lookup_stage_start_date(
         pool,
-        season_year=int(season_year),
-        league_type_code=int(league_type_code),
+        season_year=season_year,
+        league_type_code=league_type_code,
     )
     if stage_start is not None:
         return game_date < stage_start
@@ -1673,14 +1673,21 @@ def _build_manual_data_request(
         )
 
     if missing_game_row or missing_critical_context:
-        if not (assessment.home_pitcher_present and assessment.away_pitcher_present):
+        home_pitcher_present = bool(
+            getattr(assessment, "home_pitcher_present", False)
+        )
+        away_pitcher_present = bool(
+            getattr(assessment, "away_pitcher_present", False)
+        )
+        lineup_announced = bool(getattr(assessment, "lineup_announced", False))
+        if not (home_pitcher_present and away_pitcher_present):
             add_item(
                 "starters",
                 "선발 정보",
                 "분석에 필요한 선발 정보가 부족합니다.",
                 "home_pitcher, away_pitcher",
             )
-        if not assessment.lineup_announced:
+        if not lineup_announced:
             add_item(
                 "lineup",
                 "라인업",
@@ -9188,7 +9195,7 @@ async def analyze_team(
             evidence_assessment,
         )
         unavailable_game_status_message = _get_unavailable_game_status_message(
-            game_evidence.game_status
+            getattr(game_evidence, "game_status", None)
         )
 
         async def event_generator():
