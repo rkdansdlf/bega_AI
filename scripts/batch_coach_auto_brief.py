@@ -86,9 +86,11 @@ def _extract_brief_headline(item: Dict[str, Any]) -> str | None:
 
     candidate_structured_responses = [
         meta.get("structured_response"),
-        (meta.get("cached_response") or {}).get("structured_response")
-        if isinstance(meta.get("cached_response"), dict)
-        else None,
+        (
+            (meta.get("cached_response") or {}).get("structured_response")
+            if isinstance(meta.get("cached_response"), dict)
+            else None
+        ),
     ]
 
     for structured_response in candidate_structured_responses:
@@ -205,7 +207,8 @@ def _filter_targets_by_eligible_cache_state(
     return [
         target
         for target in targets
-        if state_by_cache_key.get(target.cache_key, "MISSING") in UNRESOLVED_CACHE_STATES
+        if state_by_cache_key.get(target.cache_key, "MISSING")
+        in UNRESOLVED_CACHE_STATES
     ]
 
 
@@ -236,7 +239,7 @@ def _slice_targets(
     offset: int,
     limit: int | None,
 ) -> List[MatchupTarget]:
-    sliced = targets[max(0, offset):]
+    sliced = targets[max(0, offset) :]
     if limit is not None and limit >= 0:
         sliced = sliced[:limit]
     return sliced
@@ -265,7 +268,9 @@ def _resolve_cache_state_label(item: Dict[str, Any]) -> str:
     return "UNKNOWN"
 
 
-def _collect_report_breakdowns(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, int] | int]:
+def _collect_report_breakdowns(
+    results: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, int] | int]:
     cache_state_breakdown: Dict[str, int] = {
         "COMPLETED": 0,
         "PENDING": 0,
@@ -284,7 +289,9 @@ def _collect_report_breakdowns(results: List[Dict[str, Any]]) -> Dict[str, Dict[
 
     for item in results:
         cache_state = _resolve_cache_state_label(item)
-        cache_state_breakdown[cache_state] = cache_state_breakdown.get(cache_state, 0) + 1
+        cache_state_breakdown[cache_state] = (
+            cache_state_breakdown.get(cache_state, 0) + 1
+        )
 
         data_quality = _extract_data_quality(item)
         if data_quality not in data_quality_breakdown:

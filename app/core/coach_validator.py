@@ -329,7 +329,7 @@ class CoachResponse(BaseModel):
 
 _TRAILING_COMMA_PATTERN = re.compile(r",\s*([}\]])")
 _UNQUOTED_JSON_KEY_PATTERN = re.compile(
-    r'(?P<prefix>[{,]\s*)(?P<key>[A-Za-z_][A-Za-z0-9_-]*)(?P<suffix>\s*:)'
+    r"(?P<prefix>[{,]\s*)(?P<key>[A-Za-z_][A-Za-z0-9_-]*)(?P<suffix>\s*:)"
 )
 _METRIC_VALUE_TOKEN_PATTERN = re.compile(r"(?P<value>[^\s]*\d[^\s]*)$")
 _METRIC_LABEL_PREFIXES = (
@@ -561,7 +561,9 @@ def _split_string_metric_item(text: str) -> Tuple[str, str]:
             if remainder:
                 return prefix, remainder
 
-    colon_match = re.match(r"(?P<label>[^:：]+)\s*[:：]\s*(?P<value>.+)", normalized_text)
+    colon_match = re.match(
+        r"(?P<label>[^:：]+)\s*[:：]\s*(?P<value>.+)", normalized_text
+    )
     if colon_match:
         label = colon_match.group("label").strip()
         value = colon_match.group("value").strip()
@@ -619,12 +621,14 @@ def coerce_string_key_metrics(data: Dict[str, Any]) -> List[str]:
             continue
 
         label, value = _split_string_metric_item(raw_text)
-        normalized_label = _normalize_short_text(
-            label, max_length=MAX_KEY_METRIC_LABEL_LENGTH
-        ) or "핵심 지표"
-        normalized_value = _normalize_short_text(
-            value, max_length=MAX_KEY_METRIC_VALUE_LENGTH
-        ) or "데이터 확인"
+        normalized_label = (
+            _normalize_short_text(label, max_length=MAX_KEY_METRIC_LABEL_LENGTH)
+            or "핵심 지표"
+        )
+        normalized_value = (
+            _normalize_short_text(value, max_length=MAX_KEY_METRIC_VALUE_LENGTH)
+            or "데이터 확인"
+        )
         metrics[idx] = {
             "label": normalized_label,
             "value": normalized_value,

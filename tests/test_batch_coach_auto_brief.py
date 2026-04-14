@@ -50,9 +50,9 @@ def test_parse_date_window_supports_single_day_and_range() -> None:
 
 def test_filter_targets_by_date_window_uses_inclusive_bounds() -> None:
     targets = [
-      _build_target(cache_key="a", game_date="2026-04-07"),
-      _build_target(cache_key="b", game_date="2026-04-08"),
-      _build_target(cache_key="c", game_date="2026-04-09"),
+        _build_target(cache_key="a", game_date="2026-04-07"),
+        _build_target(cache_key="b", game_date="2026-04-08"),
+        _build_target(cache_key="c", game_date="2026-04-09"),
     ]
 
     filtered = _filter_targets_by_date_window(
@@ -106,7 +106,10 @@ def test_collect_report_breakdowns_counts_cache_states_and_data_quality() -> Non
             {
                 "status": "failed",
                 "reason": "failed_locked",
-                "meta": {"cache_state": "FAILED_LOCKED", "data_quality": "insufficient"},
+                "meta": {
+                    "cache_state": "FAILED_LOCKED",
+                    "data_quality": "insufficient",
+                },
             },
         ]
     )
