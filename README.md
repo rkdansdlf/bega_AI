@@ -9,7 +9,7 @@
 
 <em>사용된 기술 스택:</em>
 
-<img src="https://img.shields.io/badge/Python-3776AB.svg?style=flat&logo=Python&logoColor=white" alt="Python"> <img src="https://img.shields.io/badge/FastAPI-009688.svg?style=flat&logo=FastAPI&logoColor=white" alt="FastAPI"> <img src="https://img.shields.io/badge/OpenAI-412991.svg?style=flat&logo=OpenAI&logoColor=white" alt="OpenAI"> <img src="https://img.shields.io/badge/Docker-2496ED.svg?style=flat&logo=Docker&logoColor=white" alt="Docker"> <img src="https://img.shields.io/badge/Selenium-43B02A.svg?style=flat&logo=Selenium&logoColor=white" alt="Selenium"> <img src="https://img.shields.io/badge/Amazon%20AWS-232F3E.svg?style=flat&logo=Amazon-AWS&logoColor=white" alt="AWS"> <img src="https://img.shields.io/badge/Nginx-009639.svg?style=flat&logo=NGINX&logoColor=white" alt="Nginx"> </div> <br>
+<img src="https://img.shields.io/badge/Python-3776AB.svg?style=flat&logo=Python&logoColor=white" alt="Python"> <img src="https://img.shields.io/badge/FastAPI-009688.svg?style=flat&logo=FastAPI&logoColor=white" alt="FastAPI"> <img src="https://img.shields.io/badge/OpenAI-412991.svg?style=flat&logo=OpenAI&logoColor=white" alt="OpenAI"> <img src="https://img.shields.io/badge/Docker-2496ED.svg?style=flat&logo=Docker&logoColor=white" alt="Docker"> <img src="https://img.shields.io/badge/Amazon%20AWS-232F3E.svg?style=flat&logo=Amazon-AWS&logoColor=white" alt="AWS"> <img src="https://img.shields.io/badge/Nginx-009639.svg?style=flat&logo=NGINX&logoColor=white" alt="Nginx"> </div> <br>
 
 ----------
 
@@ -34,6 +34,12 @@
 ## 개요
 
 AI Service는 BEGA(Baseball Guide) 플랫폼의 지능형 기능을 지원하는 벡터 기반 RAG(검색 증강 생성) 서비스입니다. KBO 데이터베이스 위에 최신 LLM 제공자(OpenRouter 또는 Google Gemini)를 계층화하여, pgvector 저장소, SSE 스트리밍 채팅, 경량 의도 라우터를 통해 야구 정보를 제공합니다.
+
+### 야구 데이터 운영 원칙
+
+- 외부 야구 웹 조회나 크롤링은 사용하지 않습니다.
+- 야구 데이터는 내부 DB와 정적 문서만 사용합니다.
+- 경기 메타데이터가 부족하거나 정합성이 깨지면 `MANUAL_BASEBALL_DATA_REQUIRED` payload로 운영자 데이터를 요청합니다.
 
 **왜 AI Service인가?**
 
@@ -85,11 +91,11 @@ AI Service는 BEGA(Baseball Guide) 플랫폼의 지능형 기능을 지원하는
 
 ### 데이터 서비스
 
--   **KBO 데이터 크롤링**
+-   **운영자 요청형 야구 데이터 처리**
     
-    -   Selenium 기반 웹 스크래핑
-    -   일정 및 결과 파싱
-    -   자동화된 데이터 업데이트
+    -   외부 웹 조회 비활성화
+    -   내부 DB 기반 분석 유지
+    -   부족 데이터는 운영자 제공 데이터로 보완
 -   **벡터 데이터베이스**
     
     -   pgvector 확장 기능 활용
@@ -151,7 +157,7 @@ AI/
 -   **언어:** Python 3.14
 -   **AI/ML:** OpenAI API (Whisper), OpenRouter, Google Gemini
 -   **임베딩:** OpenRouter, Gemini, OpenAI
--   **웹 스크래핑:** Selenium
+-   **야구 데이터 정책:** 외부 웹 조회 비활성화, 내부 DB/정적 문서만 사용
 -   **데이터베이스:** PostgreSQL + pgvector
 -   **스트리밍:** sse-starlette
 -   **웹 서버:** Nginx (리버스 프록시)
@@ -191,7 +197,6 @@ FastAPI Application (8001)
 -   **패키지 매니저:** pip
 -   **데이터베이스:** PostgreSQL 14+ (pgvector 확장 필요)
 -   **컨테이너 런타임:** Docker (선택사항)
--   **웹 드라이버:** ChromeDriver (크롤링용)
 
 ### 설치
 
@@ -542,9 +547,9 @@ json {
 	"conversation_id": "id" 
 	} 
 ``` 
-### 데이터 크롤러 
+### 데이터 요청 정책
 ``` 
-crawlers.py 
+데이터 부족 시 MANUAL_BASEBALL_DATA_REQUIRED payload 반환
 ```
 
  ### 임베딩 
@@ -645,7 +650,7 @@ psql $POSTGRES_DB_URL -f app/db/schema.sql
 
 ### 초기 데이터 수집
 
-`scripts/ingest_from_kbo.py` 스크립트를 사용하여 KBO 데이터를 벡터 데이터베이스에 수집합니다:
+`scripts/ingest_from_kbo.py` 스크립트는 내부 DB와 정적 문서를 벡터 데이터베이스에 적재합니다:
 
 ```bash
 # AI 디렉토리에서 실행
@@ -685,9 +690,7 @@ EMBED_PROVIDER=local
     # Python 설치
     sudo apt install python3.14 python3.14-venv python3-pip -y
     
-    # Selenium을 위한 Chrome 및 ChromeDriver 설치 (크롤링용)
-    wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-    sudo apt install ./google-chrome-stable_current_amd64.deb
+    # 외부 야구 크롤링은 사용하지 않으므로 추가 웹 드라이버는 필요하지 않습니다.
     ```
     
 2.  **PostgreSQL pgvector 설정:**

@@ -32,6 +32,11 @@ SERIES_REFERENCE_TOKENS = (
     "3승",
     "4승",
 )
+GENERIC_EMPTY_HEADLINES = {
+    "AI 코치 분석 요약",
+    "AI 코치 브리핑",
+    "전략 코치 리뷰",
+}
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,65 @@ def response_numeric_tokens(response_data: Dict[str, Any]) -> Set[str]:
     return collect_numeric_tokens(combined)
 
 
+def _strip_markdown_scaffold(text: str) -> str:
+    kept_lines: List[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("## "):
+            continue
+        line = re.sub(r"^[-*]\s*", "", line).strip()
+        if line:
+            kept_lines.append(line)
+    return " ".join(kept_lines).strip()
+
+
+def response_is_semantically_empty(response_data: Dict[str, Any]) -> bool:
+    analysis = response_data.get("analysis") or {}
+    key_metrics = response_data.get("key_metrics") or []
+
+    has_key_metric = any(
+        isinstance(metric, dict)
+        and (
+            str(metric.get("label") or "").strip()
+            or str(metric.get("value") or "").strip()
+        )
+        for metric in key_metrics
+    )
+    if has_key_metric:
+        return False
+
+    text_fields = [
+        str(analysis.get("summary") or "").strip(),
+        str(analysis.get("verdict") or "").strip(),
+        str(response_data.get("coach_note") or "").strip(),
+        _strip_markdown_scaffold(response_data.get("detailed_markdown") or ""),
+    ]
+    if any(text_fields):
+        return False
+
+    for key in (
+        "strengths",
+        "weaknesses",
+        "why_it_matters",
+        "swing_factors",
+        "watch_points",
+        "uncertainty",
+    ):
+        items = analysis.get(key) or []
+        if any(str(item or "").strip() for item in items):
+            return False
+
+    risks = analysis.get("risks") or []
+    if any(
+        isinstance(item, dict) and str(item.get("description") or "").strip()
+        for item in risks
+    ):
+        return False
+
+    headline = str(response_data.get("headline") or "").strip()
+    return not headline or headline in GENERIC_EMPTY_HEADLINES
+
+
 def has_grounding_disclaimer(text: str) -> bool:
     return any(token in text for token in GROUNDING_DISCLAIMER_TOKENS)
 
@@ -200,6 +264,12 @@ def validate_response_against_fact_sheet(
 ) -> CoachGroundingValidationResult:
     warnings: List[str] = []
     reasons: List[str] = []
+
+    if response_is_semantically_empty(response_data):
+        reasons.append("empty_response")
+        warnings.append(
+            "LLM 응답에 실질적인 분석 내용이 없어 재시도 또는 보수 요약으로 전환합니다."
+        )
 
     unsupported_numeric_tokens = sorted(
         token
