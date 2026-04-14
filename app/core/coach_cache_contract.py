@@ -11,7 +11,7 @@ from .coach_cache_key import (
 )
 
 COACH_CACHE_SCHEMA_VERSION = "v5"
-COACH_CACHE_PROMPT_VERSION = "v12_strategy_coach_wpa_form"
+COACH_CACHE_PROMPT_VERSION = "v66_noncanonical_game_guard"
 
 
 def _normalize_optional_signature(value: Optional[str]) -> Optional[str]:

@@ -30,6 +30,7 @@ from app.routers.coach import (
     _resolve_target_year,
     analyze_team,
 )
+from app.config import get_settings
 
 
 def _make_pool(fetchone_result):
@@ -167,3 +168,61 @@ def test_analyze_team_masks_internal_exception_with_fixed_error_code(monkeypatch
 
     assert exc.value.status_code == 500
     assert exc.value.detail == COACH_INTERNAL_ERROR_CODE
+
+
+def test_analyze_team_configures_sse_ping(monkeypatch):
+    payload = AnalyzeRequest(
+        home_team_id="SSG",
+        away_team_id="LG",
+        request_mode="manual_detail",
+        focus=["recent_form"],
+        league_context={"season_year": 2024, "league_type": "KBO"},
+    )
+    agent = MagicMock()
+    agent._convert_team_id_to_name.side_effect = lambda team_id: team_id
+
+    monkeypatch.setattr("app.routers.coach.get_connection_pool", lambda: MagicMock())
+    monkeypatch.setattr(
+        "app.routers.coach._collect_game_evidence",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            home_team_code="SSG",
+            away_team_code="LG",
+            home_team_name="SSG",
+            away_team_name="LG",
+            game_id="20240401SSLG0",
+            league_type_code="REG",
+            stage_label="REGULAR",
+            game_status_bucket="SCHEDULED",
+            season_id=20245,
+            game_date="2024-04-01",
+            home_pitcher=None,
+            away_pitcher=None,
+            home_lineup=[],
+            away_lineup=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "app.routers.coach._build_effective_league_context",
+        lambda league_context, game_evidence: dict(league_context or {}),
+    )
+    monkeypatch.setattr(
+        "app.routers.coach.build_coach_cache_identity",
+        lambda **kwargs: (
+            "cache-key",
+            {"focus_signature": "focus-signature", "question_signature": "question-signature"},
+            "starter-signature",
+            "lineup-signature",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.routers.coach.assess_game_evidence",
+        lambda game_evidence: types.SimpleNamespace(root_causes=[]),
+    )
+
+    response = asyncio.run(analyze_team(payload, agent=agent, _=None))
+    expected_ping = max(1, int(get_settings().chat_sse_ping_seconds))
+
+    if hasattr(response, "ping_interval"):
+        assert response.ping_interval == expected_ping
+    else:
+        assert response.kwargs["ping"] == expected_ping
