@@ -15,6 +15,7 @@ from typing_extensions import Annotated
 
 logger = logging.getLogger(__name__)
 MAX_KEY_METRIC_VALUE_LENGTH = 50
+MAX_KEY_METRIC_LABEL_LENGTH = 30
 MAX_CRITICAL_METRICS = 2
 FALLBACK_HEADLINE = "AI 코치 분석 요약"
 MAX_ANALYSIS_TEXT_LENGTH = 240
@@ -169,6 +170,38 @@ class RiskItem(BaseModel):
         }
         return area_mapping.get(normalized, "overall")
 
+    @field_validator("level", mode="before")
+    @classmethod
+    def normalize_level(cls, v: Any) -> int:
+        """위험도 값을 허용 범위(0/1/2)로 보수 정규화"""
+        if isinstance(v, bool):
+            return 1
+        if isinstance(v, (int, float)):
+            normalized = int(v)
+            return normalized if normalized in (0, 1, 2) else 1
+        if isinstance(v, str):
+            normalized = v.strip().lower()
+            level_mapping = {
+                "0": 0,
+                "danger": 0,
+                "critical": 0,
+                "high": 0,
+                "위험": 0,
+                "1": 1,
+                "warning": 1,
+                "caution": 1,
+                "medium": 1,
+                "moderate": 1,
+                "주의": 1,
+                "2": 2,
+                "good": 2,
+                "safe": 2,
+                "low": 2,
+                "양호": 2,
+            }
+            return level_mapping.get(normalized, 1)
+        return 1
+
 
 class AnalysisSection(BaseModel):
     """분석 섹션 모델"""
@@ -295,11 +328,39 @@ class CoachResponse(BaseModel):
 
 
 _TRAILING_COMMA_PATTERN = re.compile(r",\s*([}\]])")
+_UNQUOTED_JSON_KEY_PATTERN = re.compile(
+    r'(?P<prefix>[{,]\s*)(?P<key>[A-Za-z_][A-Za-z0-9_-]*)(?P<suffix>\s*:)'
+)
+_METRIC_VALUE_TOKEN_PATTERN = re.compile(r"(?P<value>[^\s]*\d[^\s]*)$")
+_METRIC_LABEL_PREFIXES = (
+    "최대 WPA 변동",
+    "정규시즌 OPS",
+    "정규시즌 ERA",
+    "최근 흐름",
+    "폼 진단",
+    "불펜 비중",
+    "불펜 ERA",
+    "선발 ERA",
+    "팀 OPS",
+    "팀 ERA",
+    "OPS",
+    "ERA",
+)
 
 
 def _strip_trailing_commas(text: str) -> str:
     """Remove trailing commas before } or ] (common LLM JSON mistake)."""
     return _TRAILING_COMMA_PATTERN.sub(r"\1", text)
+
+
+def _quote_unquoted_json_keys(text: str) -> str:
+    """Quote bare object keys like {headline: ...} into valid JSON."""
+    return _UNQUOTED_JSON_KEY_PATTERN.sub(
+        lambda match: (
+            f'{match.group("prefix")}"{match.group("key")}"{match.group("suffix")}'
+        ),
+        text,
+    )
 
 
 def _try_auto_close_json(text: str) -> Optional[str]:
@@ -425,6 +486,41 @@ def extract_json_from_response(raw_response: str) -> Optional[str]:
     return None
 
 
+def _load_json_object_with_repairs(
+    json_text: str,
+) -> Tuple[Optional[Dict[str, Any]], List[str], Optional[str]]:
+    """Load a JSON object with lightweight repairs for common LLM mistakes."""
+    candidates: List[Tuple[str, List[str]]] = [(json_text, [])]
+    stripped = _strip_trailing_commas(json_text)
+    if stripped != json_text:
+        candidates.append((stripped, ["strip_trailing_commas"]))
+    quoted = _quote_unquoted_json_keys(stripped)
+    if quoted != stripped:
+        repair_reasons: List[str] = []
+        if stripped != json_text:
+            repair_reasons.append("strip_trailing_commas")
+        repair_reasons.append("quote_unquoted_json_keys")
+        candidates.append((quoted, repair_reasons))
+
+    last_error: Optional[str] = None
+    seen_candidates = set()
+    for candidate, reasons in candidates:
+        if candidate in seen_candidates:
+            continue
+        seen_candidates.add(candidate)
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = f"JSON decode error: {exc}"
+            continue
+
+        if not isinstance(data, dict):
+            return None, reasons, "Validation error: root JSON must be an object"
+        return data, reasons, None
+
+    return None, [], last_error or "JSON decode error: failed to load object"
+
+
 def derive_headline(data: Dict[str, Any]) -> str:
     """헤드라인 누락 시 대체 헤드라인을 생성합니다."""
     raw_headline = data.get("headline")
@@ -452,6 +548,93 @@ def derive_headline(data: Dict[str, Any]) -> str:
                         return item.strip()
 
     return FALLBACK_HEADLINE
+
+
+def _split_string_metric_item(text: str) -> Tuple[str, str]:
+    normalized_text = " ".join(str(text).split()).strip()
+    if not normalized_text:
+        return "핵심 지표", "데이터 확인"
+
+    for prefix in _METRIC_LABEL_PREFIXES:
+        if normalized_text.startswith(prefix):
+            remainder = normalized_text[len(prefix) :].strip(" :")
+            if remainder:
+                return prefix, remainder
+
+    colon_match = re.match(r"(?P<label>[^:：]+)\s*[:：]\s*(?P<value>.+)", normalized_text)
+    if colon_match:
+        label = colon_match.group("label").strip()
+        value = colon_match.group("value").strip()
+        if label and value:
+            return label, value
+
+    value_match = _METRIC_VALUE_TOKEN_PATTERN.search(normalized_text)
+    if value_match:
+        value = value_match.group("value").strip()
+        label = normalized_text[: value_match.start()].strip(" -:()")
+        if label and value:
+            return label, value
+
+    return "핵심 지표", normalized_text
+
+
+def _infer_metric_status(label: str, value: str) -> str:
+    text = f"{label} {value}"
+    if re.search(r"하락|부진|부족|열세|불안|과부하|악화|위험", text):
+        return "danger"
+    if re.search(r"상승|반등|우세|양호|호조|개선", text):
+        return "good"
+    return "warning"
+
+
+def _infer_metric_trend(value: str) -> str:
+    stripped = value.strip()
+    if stripped.startswith("+"):
+        return "up"
+    if stripped.startswith("-"):
+        return "down"
+    return "neutral"
+
+
+def coerce_string_key_metrics(data: Dict[str, Any]) -> List[str]:
+    """Convert string key_metrics entries into structured metric objects."""
+    reasons: List[str] = []
+    metrics = data.get("key_metrics")
+    if not isinstance(metrics, list):
+        return reasons
+
+    for idx, metric in enumerate(metrics):
+        if not isinstance(metric, str):
+            continue
+        raw_text = " ".join(metric.split()).strip()
+        if not raw_text:
+            metrics[idx] = {
+                "label": "핵심 지표",
+                "value": "데이터 확인",
+                "status": "warning",
+                "trend": "neutral",
+                "is_critical": False,
+            }
+            reasons.append(f"coerce_key_metric_{idx}_empty_string")
+            continue
+
+        label, value = _split_string_metric_item(raw_text)
+        normalized_label = _normalize_short_text(
+            label, max_length=MAX_KEY_METRIC_LABEL_LENGTH
+        ) or "핵심 지표"
+        normalized_value = _normalize_short_text(
+            value, max_length=MAX_KEY_METRIC_VALUE_LENGTH
+        ) or "데이터 확인"
+        metrics[idx] = {
+            "label": normalized_label,
+            "value": normalized_value,
+            "status": _infer_metric_status(normalized_label, normalized_value),
+            "trend": _infer_metric_trend(normalized_value),
+            "is_critical": "wpa" in raw_text.lower(),
+        }
+        reasons.append(f"coerce_key_metric_{idx}_from_string")
+
+    return reasons
 
 
 def normalize_key_metric_values(data: Dict[str, Any]) -> List[str]:
@@ -498,6 +681,30 @@ def normalize_critical_flags(
     return reasons
 
 
+def normalize_risk_levels(data: Dict[str, Any]) -> List[str]:
+    """analysis.risks[].level을 허용 범위(0/1/2)로 정규화합니다."""
+    reasons: List[str] = []
+    analysis = data.get("analysis")
+    if not isinstance(analysis, dict):
+        return reasons
+
+    risks = analysis.get("risks")
+    if not isinstance(risks, list):
+        return reasons
+
+    for idx, risk in enumerate(risks):
+        if not isinstance(risk, dict) or "level" not in risk:
+            continue
+
+        raw_level = risk.get("level")
+        normalized_level = RiskItem.normalize_level(raw_level)
+        if raw_level != normalized_level:
+            risk["level"] = normalized_level
+            reasons.append(f"coerce_risk_level_{idx}_to_{normalized_level}")
+
+    return reasons
+
+
 def normalize_coach_payload(data: dict) -> Tuple[dict, List[str]]:
     """LLM 응답 payload를 검증 전에 정규화합니다."""
     if not isinstance(data, dict):
@@ -510,6 +717,7 @@ def normalize_coach_payload(data: dict) -> Tuple[dict, List[str]]:
         normalized["key_metrics"] = []
         reasons.append("coerce_key_metrics_to_empty_list")
 
+    reasons.extend(coerce_string_key_metrics(normalized))
     headline = normalized.get("headline")
     if not isinstance(headline, str) or not headline.strip():
         normalized["headline"] = derive_headline(normalized)
@@ -517,6 +725,7 @@ def normalize_coach_payload(data: dict) -> Tuple[dict, List[str]]:
 
     reasons.extend(normalize_key_metric_values(normalized))
     reasons.extend(normalize_critical_flags(normalized))
+    reasons.extend(normalize_risk_levels(normalized))
     return normalized, reasons
 
 
@@ -579,12 +788,15 @@ def parse_coach_response_with_meta(
             if not temp_json.endswith("}"):
                 temp_json += "}"
             try:
-                data = json.loads(temp_json)
-                if not isinstance(data, dict):
-                    error = "Validation error: root JSON must be an object"
+                data, repair_reasons, load_error = _load_json_object_with_repairs(
+                    temp_json
+                )
+                if load_error:
+                    error = load_error
                     meta["error_code"] = classify_parse_error(error)
                     return None, error, meta
                 normalized_data, reasons = normalize_coach_payload(data)
+                meta["normalization_reasons"].extend(repair_reasons)
                 meta["normalization_reasons"].extend(reasons)
                 meta["normalization_applied"] = bool(meta["normalization_reasons"])
                 return CoachResponse(**normalized_data), None, meta
@@ -596,19 +808,14 @@ def parse_coach_response_with_meta(
             meta["error_code"] = classify_parse_error(error)
             return None, error, meta
 
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.warning(f"[CoachValidator] JSON decode error: {e}")
-            error = f"JSON decode error: {e}"
+        data, repair_reasons, load_error = _load_json_object_with_repairs(json_str)
+        if load_error:
+            logger.warning(f"[CoachValidator] {load_error}")
+            error = load_error
             meta["error_code"] = classify_parse_error(error)
             return None, error, meta
 
-        if not isinstance(data, dict):
-            error = "Validation error: root JSON must be an object"
-            meta["error_code"] = classify_parse_error(error)
-            return None, error, meta
-
+        meta["normalization_reasons"].extend(repair_reasons)
         normalized_data, reasons = normalize_coach_payload(data)
         meta["normalization_reasons"].extend(reasons)
         meta["normalization_applied"] = bool(meta["normalization_reasons"])

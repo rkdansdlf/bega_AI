@@ -22,12 +22,15 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 import httpx
+
+os.environ.setdefault("BEGA_SKIP_APP_INIT", "1")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -45,6 +48,8 @@ from scripts.batch_coach_matchup_cache import (
     _cache_resolution_log_suffix,
     _collect_retryable_replay_targets,
     _filter_targets_by_cache_state,
+    _fetch_cache_rows,
+    _normalize_cache_state_label,
     _normalize_recovered_pending_result,
     call_analyze_with_retries,
     collect_cache_verification_results,
@@ -64,19 +69,34 @@ logging.basicConfig(
 )
 
 AUTO_BRIEF_MODE = "auto_brief"
+DATE_WINDOW_SEPARATORS = ("..", ":")
+UNRESOLVED_CACHE_STATES = {"MISSING", "PENDING", "FAILED", "UNAVAILABLE"}
+UNRESOLVED_STATE_PRIORITY = {
+    "UNAVAILABLE": 0,
+    "MISSING": 1,
+    "PENDING": 2,
+    "FAILED": 3,
+    "COMPLETED": 4,
+}
 
 
 def _extract_brief_headline(item: Dict[str, Any]) -> str | None:
     """결과에서 auto_brief headline을 추출합니다."""
     meta = item.get("meta") or {}
 
-    cached_response = meta.get("cached_response") or {}
-    if isinstance(cached_response, dict):
-        sr = cached_response.get("structured_response") or {}
-        if isinstance(sr, dict):
-            headline = sr.get("headline")
-            if isinstance(headline, str) and headline.strip():
-                return headline.strip()
+    candidate_structured_responses = [
+        meta.get("structured_response"),
+        (meta.get("cached_response") or {}).get("structured_response")
+        if isinstance(meta.get("cached_response"), dict)
+        else None,
+    ]
+
+    for structured_response in candidate_structured_responses:
+        if not isinstance(structured_response, dict):
+            continue
+        headline = structured_response.get("headline")
+        if isinstance(headline, str) and headline.strip():
+            return headline.strip()
 
     return None
 
@@ -84,7 +104,8 @@ def _extract_brief_headline(item: Dict[str, Any]) -> str | None:
 def _extract_data_quality(item: Dict[str, Any]) -> str:
     """결과에서 data_quality를 추출합니다."""
     meta = item.get("meta") or {}
-    return str(meta.get("data_quality") or meta.get("generation_mode") or "unknown")
+    value = str(meta.get("data_quality") or "").strip().lower()
+    return value or "unknown"
 
 
 def _extract_grounding_warnings(item: Dict[str, Any]) -> List[str]:
@@ -96,11 +117,203 @@ def _extract_grounding_warnings(item: Dict[str, Any]) -> List[str]:
     return []
 
 
+def _parse_date_token(token: str) -> date:
+    try:
+        return date.fromisoformat(token)
+    except ValueError as exc:
+        raise ValueError(f"Invalid date token: {token!r}") from exc
+
+
+def _parse_date_window(raw: str | None) -> tuple[date, date] | None:
+    if not raw:
+        return None
+
+    normalized = str(raw).strip()
+    if not normalized:
+        return None
+
+    separator = next(
+        (candidate for candidate in DATE_WINDOW_SEPARATORS if candidate in normalized),
+        None,
+    )
+    if separator is None:
+        parsed = _parse_date_token(normalized)
+        return parsed, parsed
+
+    start_raw, end_raw = [part.strip() for part in normalized.split(separator, 1)]
+    if not start_raw or not end_raw:
+        raise ValueError(
+            "date-window must use start and end dates, e.g. 2026-04-01:2026-04-09"
+        )
+
+    start = _parse_date_token(start_raw)
+    end = _parse_date_token(end_raw)
+    if start > end:
+        raise ValueError("date-window start must be earlier than or equal to end")
+    return start, end
+
+
+def _format_date_window(date_window: tuple[date, date] | None) -> str | None:
+    if not date_window:
+        return None
+    start, end = date_window
+    return f"{start.isoformat()}:{end.isoformat()}"
+
+
+def _filter_targets_by_date_window(
+    targets: List[MatchupTarget],
+    date_window: tuple[date, date] | None,
+) -> List[MatchupTarget]:
+    if not date_window:
+        return targets
+
+    start, end = date_window
+    filtered: List[MatchupTarget] = []
+    for target in targets:
+        try:
+            target_date = date.fromisoformat(target.game_date)
+        except ValueError:
+            continue
+        if start <= target_date <= end:
+            filtered.append(target)
+    return filtered
+
+
+def _resolve_target_cache_state_map(
+    targets: List[MatchupTarget],
+) -> Dict[str, str]:
+    if not targets:
+        return {}
+
+    rows = _fetch_cache_rows([target.cache_key for target in targets])
+    state_by_cache_key: Dict[str, str] = {}
+    for target in targets:
+        state_by_cache_key[target.cache_key] = _normalize_cache_state_label(
+            rows.get(target.cache_key)
+        )
+    return state_by_cache_key
+
+
+def _filter_targets_by_eligible_cache_state(
+    targets: List[MatchupTarget],
+    *,
+    state_by_cache_key: Dict[str, str],
+) -> List[MatchupTarget]:
+    if not targets:
+        return targets
+
+    return [
+        target
+        for target in targets
+        if state_by_cache_key.get(target.cache_key, "MISSING") in UNRESOLVED_CACHE_STATES
+    ]
+
+
+def _prioritize_unresolved_targets(
+    targets: List[MatchupTarget],
+    *,
+    state_by_cache_key: Dict[str, str],
+) -> List[MatchupTarget]:
+    if not targets:
+        return targets
+
+    base_order = list(targets)
+    index_by_cache_key = {
+        target.cache_key: idx for idx, target in enumerate(base_order)
+    }
+
+    def _priority_key(target: MatchupTarget) -> tuple[int, int]:
+        state = state_by_cache_key.get(target.cache_key, "MISSING")
+        priority = UNRESOLVED_STATE_PRIORITY.get(state, 5)
+        return priority, index_by_cache_key[target.cache_key]
+
+    return sorted(base_order, key=_priority_key)
+
+
+def _slice_targets(
+    targets: List[MatchupTarget],
+    *,
+    offset: int,
+    limit: int | None,
+) -> List[MatchupTarget]:
+    sliced = targets[max(0, offset):]
+    if limit is not None and limit >= 0:
+        sliced = sliced[:limit]
+    return sliced
+
+
+def _resolve_cache_state_label(item: Dict[str, Any]) -> str:
+    meta = item.get("meta") or {}
+    label = str(meta.get("cache_state") or "").strip().upper()
+    if label:
+        return label
+
+    status = str(item.get("status") or "").strip().lower()
+    reason = str(item.get("reason") or "").strip().lower()
+    if status in {"generated", "skipped"}:
+        return "COMPLETED"
+    if status == "in_progress":
+        return "PENDING"
+    if "failed_locked" in reason:
+        return "FAILED_LOCKED"
+    if "pending" in reason:
+        return "PENDING"
+    if "missing" in reason:
+        return "MISSING"
+    if reason:
+        return "FAILED"
+    return "UNKNOWN"
+
+
+def _collect_report_breakdowns(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, int] | int]:
+    cache_state_breakdown: Dict[str, int] = {
+        "COMPLETED": 0,
+        "PENDING": 0,
+        "FAILED_LOCKED": 0,
+        "FAILED": 0,
+        "MISSING": 0,
+        "UNAVAILABLE": 0,
+        "UNKNOWN": 0,
+    }
+    data_quality_breakdown: Dict[str, int] = {
+        "grounded": 0,
+        "partial": 0,
+        "insufficient": 0,
+        "unknown": 0,
+    }
+
+    for item in results:
+        cache_state = _resolve_cache_state_label(item)
+        cache_state_breakdown[cache_state] = cache_state_breakdown.get(cache_state, 0) + 1
+
+        data_quality = _extract_data_quality(item)
+        if data_quality not in data_quality_breakdown:
+            data_quality = "unknown"
+        data_quality_breakdown[data_quality] += 1
+
+    unresolved_count = sum(
+        count for state, count in cache_state_breakdown.items() if state != "COMPLETED"
+    )
+    completed_count = cache_state_breakdown.get("COMPLETED", 0)
+    return {
+        "cache_state_breakdown": cache_state_breakdown,
+        "data_quality_breakdown": data_quality_breakdown,
+        "completed_count": completed_count,
+        "unresolved_count": unresolved_count,
+    }
+
+
+def _format_counts(counts: Dict[str, int]) -> str:
+    items = [f"{key.lower()}={value}" for key, value in counts.items() if value]
+    return ", ".join(items) if items else "none"
+
+
 async def async_main(args: argparse.Namespace) -> int:
     years = parse_years(args.years)
     target_order = parse_target_order(args.order)
     status_bucket_filter = parse_status_bucket_filter(args.status_bucket)
     cache_state_filter = parse_cache_state_filter(args.cache_state_filter)
+    date_window = _parse_date_window(args.date_window)
 
     targets = load_targets(
         years=years,
@@ -108,12 +321,26 @@ async def async_main(args: argparse.Namespace) -> int:
         request_focus=list(AUTO_BRIEF_FOCUS),
         request_mode=AUTO_BRIEF_MODE,
         question_override=None,
-        offset=max(0, args.offset),
-        limit=args.limit,
+        offset=0,
+        limit=None,
         order=target_order,
         status_bucket_filter=status_bucket_filter,
     )
+    loaded_target_count = len(targets)
+    targets = _filter_targets_by_date_window(targets, date_window)
+    state_by_cache_key = _resolve_target_cache_state_map(targets)
     targets = _filter_targets_by_cache_state(targets, cache_state_filter)
+    if args.eligible_only:
+        targets = _filter_targets_by_eligible_cache_state(
+            targets,
+            state_by_cache_key=state_by_cache_key,
+        )
+    if args.prioritize_unresolved:
+        targets = _prioritize_unresolved_targets(
+            targets,
+            state_by_cache_key=state_by_cache_key,
+        )
+    targets = _slice_targets(targets, offset=max(0, args.offset), limit=args.limit)
 
     if not targets:
         print("No auto_brief targets found.")
@@ -251,6 +478,13 @@ async def async_main(args: argparse.Namespace) -> int:
         league_type="REGULAR",
         focus=list(AUTO_BRIEF_FOCUS),
     )
+    breakdowns = _collect_report_breakdowns(results)
+    summary.update(breakdowns)
+    summary["loaded_target_count"] = loaded_target_count
+    summary["selected_target_count"] = len(targets)
+    summary["date_window"] = _format_date_window(date_window)
+    summary["eligible_only"] = bool(args.eligible_only)
+    summary["prioritize_unresolved"] = bool(args.prioritize_unresolved)
     if not args.verify_cache_only:
         elapsed = datetime.now() - start_time
         summary["runtime_seconds"] = round(elapsed.total_seconds(), 3)
@@ -264,7 +498,16 @@ async def async_main(args: argparse.Namespace) -> int:
         f"\n=== Summary ===\n"
         f"total={summary['cases']}, generated={generated}, "
         f"cache_hit={skipped}, failed={failed}, in_progress={in_progress}\n"
-        f"coverage_rate={summary.get('coverage_rate', 0):.1%}"
+        f"loaded={summary.get('loaded_target_count', 0)}, "
+        f"selected={summary.get('selected_target_count', 0)}, "
+        f"date_window={summary.get('date_window') or 'none'}, "
+        f"eligible_only={summary.get('eligible_only')}, "
+        f"prioritize_unresolved={summary.get('prioritize_unresolved')}\n"
+        f"coverage_rate={summary.get('coverage_rate', 0):.1%}\n"
+        f"unresolved={summary.get('unresolved_count', 0)}, "
+        f"completed={summary.get('completed_count', 0)}\n"
+        f"cache_state_breakdown={_format_counts(summary['cache_state_breakdown'])}\n"
+        f"data_quality_breakdown={_format_counts(summary['data_quality_breakdown'])}"
     )
 
     if args.quality_report:
@@ -279,6 +522,9 @@ async def async_main(args: argparse.Namespace) -> int:
                 "offset": args.offset,
                 "limit": args.limit,
                 "cache_state_filter": cache_state_filter,
+                "date_window": summary["date_window"],
+                "eligible_only": bool(args.eligible_only),
+                "prioritize_unresolved": bool(args.prioritize_unresolved),
                 "verify_cache_only": args.verify_cache_only,
             },
             "details": results,
@@ -345,6 +591,21 @@ def parse_args() -> argparse.Namespace:
         default="ANY",
         choices=VALID_CACHE_STATE_FILTERS,
         help="Filter by cache row state.",
+    )
+    parser.add_argument(
+        "--date-window",
+        default=None,
+        help="Optional inclusive date window in YYYY-MM-DD, YYYY-MM-DD:YYYY-MM-DD, or YYYY-MM-DD..YYYY-MM-DD form.",
+    )
+    parser.add_argument(
+        "--eligible-only",
+        action="store_true",
+        help="Skip cache rows that are already COMPLETED and only prewarm unresolved targets.",
+    )
+    parser.add_argument(
+        "--prioritize-unresolved",
+        action="store_true",
+        help="Sort unresolved cache states ahead of completed cache hits before replaying targets.",
     )
     parser.add_argument(
         "--delay-seconds",

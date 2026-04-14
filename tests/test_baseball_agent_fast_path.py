@@ -116,6 +116,26 @@ def test_player_comparison_query_uses_compare_players_fast_path() -> None:
     }
 
 
+def test_latest_info_query_returns_manual_data_request_answer() -> None:
+    agent = _build_agent_for_fast_path()
+    query = "오늘 선발 변경된 팀 있어?"
+
+    decision = agent.chat_intent_router.resolve(
+        query,
+        extract_entities_from_query(query),
+        agent=agent,
+    )
+
+    assert decision.intent == ChatIntent.LATEST_INFO
+    assert decision.tool_calls == []
+    assert decision.metric_policy == "manual_data_request"
+    assert decision.grounding_mode == "manual_data_request"
+    assert decision.source_tier == "none"
+    assert decision.fallback_reason == "manual_baseball_data_required"
+    assert decision.direct_answer is not None
+    assert "외부 야구 웹 조회는 사용하지 않습니다." in decision.direct_answer
+
+
 def test_fast_path_bundle_dedupes_and_caps_to_three_tools() -> None:
     agent = _build_agent_for_fast_path()
 
