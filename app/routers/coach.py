@@ -1311,13 +1311,19 @@ def _has_game_row_context(evidence: GameEvidence) -> bool:
     if getattr(evidence, "game_row_found", False):
         return True
 
+    game_id = getattr(evidence, "game_id", None)
+    game_date = getattr(evidence, "game_date", None)
+    season_year = getattr(evidence, "season_year", None)
+    home_team_code = getattr(evidence, "home_team_code", None)
+    away_team_code = getattr(evidence, "away_team_code", None)
+    stage_label = getattr(evidence, "stage_label", "UNKNOWN")
     return bool(
-        getattr(evidence, "game_id", None)
-        and evidence.game_date
-        and evidence.season_year
-        and evidence.home_team_code
-        and evidence.away_team_code
-        and evidence.stage_label != "UNKNOWN"
+        game_id
+        and game_date
+        and season_year
+        and home_team_code
+        and away_team_code
+        and stage_label != "UNKNOWN"
     )
 
 
@@ -1510,19 +1516,21 @@ def _has_stage_context_mismatch(
     evidence: GameEvidence,
     game_date: Optional[date_cls],
 ) -> bool:
+    league_type_code = getattr(evidence, "league_type_code", None)
+    season_year = getattr(evidence, "season_year", None)
     if (
-        evidence.league_type_code is None
-        or evidence.league_type_code < 2
-        or evidence.league_type_code > 5
+        league_type_code is None
+        or league_type_code < 2
+        or league_type_code > 5
         or game_date is None
-        or not evidence.season_year
+        or not season_year
     ):
         return False
 
     stage_start = _lookup_stage_start_date(
         pool,
-        season_year=int(evidence.season_year),
-        league_type_code=int(evidence.league_type_code),
+        season_year=int(season_year),
+        league_type_code=int(league_type_code),
     )
     if stage_start is not None:
         return game_date < stage_start
@@ -1587,29 +1595,45 @@ def _build_manual_data_request(
             _manual_data_missing_item(key, label, reason, expected_format)
         )
 
-    request_game_id = str(payload.game_id or evidence.game_id or "").strip() or None
+    evidence_game_id = getattr(evidence, "game_id", None)
+    evidence_game_date = getattr(evidence, "game_date", None)
+    evidence_season_year = getattr(evidence, "season_year", None)
+    evidence_home_team_code = getattr(evidence, "home_team_code", None)
+    evidence_away_team_code = getattr(evidence, "away_team_code", None)
+    evidence_stage_label = getattr(evidence, "stage_label", "UNKNOWN")
+    evidence_game_status = str(getattr(evidence, "game_status", "UNKNOWN"))
+    evidence_home_score = getattr(evidence, "home_score", None)
+    evidence_away_score = getattr(evidence, "away_score", None)
+
+    request_game_id = str(payload.game_id or evidence_game_id or "").strip() or None
     request_game_date = _parse_iso_date(
-        evidence.game_date or (payload.league_context or {}).get("game_date")
+        evidence_game_date or (payload.league_context or {}).get("game_date")
     )
     has_game_row = _has_game_row_context(evidence)
     missing_game_row = not has_game_row
+    season_year_for_context = (
+        (int(evidence_season_year) if evidence_season_year is not None else None)
+        if request_game_date is not None
+        else None
+    )
     stage_context_mismatch = (
         request_game_date is not None
-        and bool(evidence.season_year)
-        and int(evidence.season_year) != request_game_date.year
+        and bool(evidence_season_year)
+        and season_year_for_context is not None
+        and season_year_for_context != request_game_date.year
     ) or _has_stage_context_mismatch(pool, evidence, request_game_date)
     missing_final_state = _is_past_game_missing_final_state(
         request_game_date,
-        evidence.game_status,
-        home_score=evidence.home_score,
-        away_score=evidence.away_score,
+        evidence_game_status,
+        home_score=evidence_home_score,
+        away_score=evidence_away_score,
     )
     missing_critical_context = not bool(
         has_game_row
         and request_game_date
-        and evidence.home_team_code
-        and evidence.away_team_code
-        and evidence.stage_label != "UNKNOWN"
+        and evidence_home_team_code
+        and evidence_away_team_code
+        and evidence_stage_label != "UNKNOWN"
     )
 
     if missing_game_row:
