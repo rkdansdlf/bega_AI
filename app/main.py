@@ -16,6 +16,7 @@ from .routers import (
     ingest,
     vision,
     coach,
+    coach_auto_brief_ops,
     moderation,
     release_decision,
 )
@@ -65,6 +66,7 @@ def create_app() -> FastAPI:
     app.include_router(vision.router, prefix="/ai")
     app.include_router(coach.router)
     app.include_router(coach.router, prefix="/ai")
+    app.include_router(coach_auto_brief_ops.router)
     app.include_router(moderation.router)
     app.include_router(release_decision.router)
 

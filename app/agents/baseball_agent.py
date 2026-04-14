@@ -25,9 +25,7 @@ from ..tools.database_query import DatabaseQueryTool
 from ..tools.regulation_query import RegulationQueryTool
 from ..tools.game_query import GameQueryTool
 from ..tools.document_query import DocumentQueryTool
-from ..tools.latest_baseball import LatestBaseballSearchTool
 from ..tools.team_display import replace_team_codes
-from ..core.chat_cache_key import has_temporal_keyword
 from ..core.tools.datetime_tool import (
     get_current_datetime,
     get_baseball_season_info,
@@ -127,7 +125,6 @@ class BaseballAgentRuntime:
         *,
         llm_generator,
         settings: Optional[Settings] = None,
-        latest_baseball_tool: LatestBaseballSearchTool | None = None,
         fast_path_enabled: bool = True,
         fast_path_scope: str = "team",
         fast_path_min_messages: int = 1,
@@ -158,7 +155,6 @@ class BaseballAgentRuntime:
         self._team_name_cache: Dict[str, str] | None = None
         self.llm_generator = llm_generator
         self.settings = settings
-        self.latest_baseball_tool = latest_baseball_tool or LatestBaseballSearchTool()
         self.fast_path_enabled = fast_path_enabled
         self.fast_path_scope = fast_path_scope
         self.fast_path_min_messages = max(0, int(fast_path_min_messages))
@@ -618,7 +614,6 @@ class BaseballStatisticsAgent:
         connection: psycopg.Connection,
         llm_generator,
         settings: Optional[Settings] = None,
-        latest_baseball_tool: LatestBaseballSearchTool | None = None,
         fast_path_enabled: bool = True,
         fast_path_scope: str = "team",
         fast_path_min_messages: int = 1,
@@ -640,7 +635,6 @@ class BaseballStatisticsAgent:
             connection,
             llm_generator,
             settings,
-            latest_baseball_tool,
             fast_path_enabled,
             fast_path_scope,
             fast_path_min_messages,
@@ -667,7 +661,6 @@ class BaseballStatisticsAgent:
         self.runtime_id = runtime.runtime_id
         self.llm_generator = runtime.llm_generator
         self.settings = runtime.settings
-        self.latest_baseball_tool = runtime.latest_baseball_tool
         self.fast_path_enabled = runtime.fast_path_enabled
         self.fast_path_scope = runtime.fast_path_scope
         self.fast_path_min_messages = runtime.fast_path_min_messages
@@ -1436,16 +1429,6 @@ class BaseballStatisticsAgent:
             self._tool_search_documents,
         )
 
-        self.tool_caller.register_tool(
-            "search_latest_baseball",
-            "최신 KBO/야구 기사와 웹 검색 결과를 조회합니다. 오늘/지금/최신/부상/라인업/트레이드/루머처럼 시간 민감한 질문의 fallback에 사용하세요.",
-            {
-                "query": "검색할 최신성 질문 또는 키워드",
-                "limit": "반환할 최대 결과 수 (선택적, 기본값 5)",
-            },
-            self._tool_search_latest_baseball,
-        )
-
         # WPA(승리 확률) 계산 도구 (신규 추가)
         self.tool_caller.register_tool(
             "calculate_win_probability",
@@ -1700,40 +1683,6 @@ class BaseballStatisticsAgent:
             logger.error(f"[BaseballAgent] Document search tool error: {e}")
             return ToolResult(
                 success=False, data={}, message=f"문서 검색 도구 실행 중 오류 발생: {e}"
-            )
-
-    def _tool_search_latest_baseball(self, query: str, limit: int = 5) -> ToolResult:
-        """최신 야구 정보 검색 도구의 래퍼 함수"""
-        try:
-            result = self.latest_baseball_tool.search_latest_baseball(query, limit)
-            if result.get("error"):
-                return ToolResult(
-                    success=False,
-                    data=result,
-                    message=f"최신 야구 정보 검색 오류: {result['error']}",
-                )
-            if not result.get("found"):
-                return ToolResult(
-                    success=True,
-                    data={
-                        "source": result.get("source", "web_search"),
-                        "found": False,
-                        "results": [],
-                        "as_of_date": result.get("as_of_date"),
-                    },
-                    message=f"'{query}'와 관련된 최신 야구 정보를 찾지 못했습니다.",
-                )
-            return ToolResult(
-                success=True,
-                data=result,
-                message=f"'{query}' 관련 최신 야구 정보를 {len(result.get('results', []))}건 찾았습니다.",
-            )
-        except Exception as e:
-            logger.error(f"[BaseballAgent] Latest baseball search tool error: {e}")
-            return ToolResult(
-                success=False,
-                data={},
-                message=f"최신 야구 정보 검색 도구 실행 중 오류 발생: {e}",
             )
 
     def _tool_get_current_datetime(self, **kwargs) -> ToolResult:
@@ -5379,23 +5328,6 @@ class BaseballStatisticsAgent:
                 }
             )
 
-        if (
-            has_temporal_keyword(query)
-            and not self._has_meaningful_tool_results(tool_results)
-            and not self._tool_results_have_source_tier(tool_results, "web")
-        ):
-            fallback_plan.append(
-                {
-                    "tool_call": ToolCall(
-                        "search_latest_baseball",
-                        {"query": query, "limit": 5},
-                    ),
-                    "grounding_mode": "latest_info",
-                    "source_tier": "web",
-                    "fallback_reason": "temporal_keyword_with_low_internal_grounding",
-                }
-            )
-
         return fallback_plan
 
     def _normalize_source_tier(self, raw_source: str) -> str:
@@ -6470,7 +6402,7 @@ class BaseballStatisticsAgent:
                 compact_results.append(compact_item)
 
             compact_payload: Dict[str, Any] = {
-                "source": data.get("source", "latest_baseball"),
+                "source": data.get("source", "manual_request"),
                 "found": bool(data.get("found", compact_results)),
                 "results": compact_results,
             }

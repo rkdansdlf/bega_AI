@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from importlib import import_module
 
-__all__ = ["chat_stream", "search", "ingest", "release_decision"]
+__all__ = [
+    "chat_stream",
+    "search",
+    "ingest",
+    "vision",
+    "coach",
+    "coach_auto_brief_ops",
+    "moderation",
+    "release_decision",
+]
 
 
 def __getattr__(name: str):

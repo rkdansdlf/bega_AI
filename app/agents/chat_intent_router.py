@@ -501,17 +501,20 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.LATEST_INFO,
                 planner_mode="fast_path",
-                tool_calls=[
-                    ToolCall("search_latest_baseball", {"query": query, "limit": 5})
-                ],
+                tool_calls=[],
                 subject_type="latest_info",
                 season_year=season_year,
-                metric_policy="latest_web_search",
+                metric_policy="manual_data_request",
                 confidence=0.9,
-                analysis="최신성 질문으로 판단되어 최신 야구 정보 검색 fast-path를 사용합니다.",
-                grounding_mode="latest_info",
-                source_tier="web",
-                fallback_reason="direct_latest_request",
+                analysis="최신성 질문으로 판단되지만 외부 웹 조회가 비활성화되어 수동 데이터 요청으로 전환합니다.",
+                direct_answer=(
+                    "외부 야구 웹 조회는 사용하지 않습니다.\n\n"
+                    "다음 야구 데이터가 필요합니다: "
+                    "질문 기준 날짜, 경기 ID 또는 팀명, 경기 상태, 점수, 선발 정보, 라인업, 시즌/리그 구분."
+                ),
+                grounding_mode="manual_data_request",
+                source_tier="none",
+                fallback_reason="manual_baseball_data_required",
             )
 
         if self._is_long_tail_entity_query(query_lower):
