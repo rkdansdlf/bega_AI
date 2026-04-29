@@ -1,3 +1,5 @@
+import os
+import json
 import math
 
 
@@ -8,11 +10,24 @@ class WPACalculator:
     """
 
     def __init__(self):
-        # Simplified Win Expectancy Matrix (Inning -> Score Diff -> Win Prob)
-        # This is a placeholder. In a real scenario, this should be loaded from historical KBO data.
-        # Format: { Inning (1-9): { ScoreDiff (-5 to +5): WinProb } }
-        # Score Diff = Home Score - Away Score (from Home team perspective)
+        # Load the data-driven KBO matrix if available
+        self.matrix_path = os.path.join(
+            os.path.dirname(__file__), "data", "we_matrix_kbo.json"
+        )
+        self.we_matrix = self._load_matrix()
+
+        # Simplified Fallback Matrix (only used if lookup fails or file missing)
         self.base_matrix = self._initialize_base_matrix()
+
+    def _load_matrix(self):
+        """Loads the pre-generated KBO WE Matrix JSON."""
+        try:
+            if os.path.exists(self.matrix_path):
+                with open(self.matrix_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"⚠️ Failed to load WE Matrix: {e}")
+        return None
 
     def _initialize_base_matrix(self):
         """
@@ -48,9 +63,31 @@ class WPACalculator:
             float: Win Probability (0.0 to 1.0)
         """
         if inning > 9:
-            inning = 9  # Cap at 9th inning logic for extras in this simplified model
+            inning = 9
 
-        # Base probability from score difference
+        # 1. Attempt Data-Driven Lookup (High Precision)
+        if self.we_matrix:
+            try:
+                is_bot_key = "1" if not is_top else "0"
+                # Clip score diff to matrix range (-7 to 7)
+                diff_key = str(max(-7, min(7, score_diff)))
+                outs_key = str(outs)
+                runners_key = "".join(["1" if r else "0" for r in runners])
+
+                # Nested lookup: Inning -> IsBot -> Diff -> Outs -> Runners
+                prob = (
+                    self.we_matrix.get(str(inning), {})
+                    .get(is_bot_key, {})
+                    .get(diff_key, {})
+                    .get(outs_key, {})
+                    .get(runners_key)
+                )
+                if prob is not None:
+                    return float(prob)
+            except Exception:
+                pass
+
+        # 2. Fallback to Heuristic Matrix (Low Precision)
         base_prob = self.base_matrix.get(inning, {}).get(score_diff, 0.5)
 
         # Adjust for runners and outs (Simplified adjustments)
