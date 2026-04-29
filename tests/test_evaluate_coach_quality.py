@@ -79,7 +79,9 @@ def test_evaluate_reports_accepts_coach_backfill_summary_schema():
         )
     ]
 
-    result = evaluate_reports(reports, required_years={2026}, require_game_type="SCHEDULED")
+    result = evaluate_reports(
+        reports, required_years={2026}, require_game_type="SCHEDULED"
+    )
 
     assert result["status"] == "PASS"
     assert result["metrics"]["cases"] == 40

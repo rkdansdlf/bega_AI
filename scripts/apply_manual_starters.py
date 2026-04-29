@@ -276,12 +276,8 @@ def build_update_plan(
             continue
 
         would_overwrite = (
-            existing.home_pitcher
-            and existing.home_pitcher != item.home_pitcher
-        ) or (
-            existing.away_pitcher
-            and existing.away_pitcher != item.away_pitcher
-        )
+            existing.home_pitcher and existing.home_pitcher != item.home_pitcher
+        ) or (existing.away_pitcher and existing.away_pitcher != item.away_pitcher)
         if would_overwrite and not allow_overwrite:
             issues.append(
                 _issue(
@@ -346,8 +342,12 @@ def _fetch_existing_games(game_ids: Sequence[str]) -> Dict[str, GameStarterSnaps
     """
     pool = get_connection_pool()
     with pool.connection() as conn:
-        rows = conn.cursor(row_factory=dict_row).execute(sql, (list(game_ids),)).fetchall()
-    return {_normalize_text(row.get("game_id")): _normalize_snapshot(row) for row in rows}
+        rows = (
+            conn.cursor(row_factory=dict_row).execute(sql, (list(game_ids),)).fetchall()
+        )
+    return {
+        _normalize_text(row.get("game_id")): _normalize_snapshot(row) for row in rows
+    }
 
 
 def _apply_updates(plans: Sequence[StarterUpdatePlan]) -> int:
@@ -378,7 +378,9 @@ def _apply_updates(plans: Sequence[StarterUpdatePlan]) -> int:
     return applied
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fields: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fields: Sequence[str]
+) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fields))
         writer.writeheader()
@@ -449,7 +451,9 @@ def _write_reports(
     latest_plan_path = output_dir / "coach_manual_starter_apply_plan_latest.csv"
     latest_issues_path = output_dir / "coach_manual_starter_apply_issues_latest.csv"
 
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     _write_csv(
         plan_path,
         _plan_rows(plans),

@@ -128,7 +128,9 @@ def format_coach_fact_sheet(fact_sheet: CoachFactSheet) -> str:
         lines.append("")
         lines.append("### 결측 및 주의")
         lines.extend(f"- {line}" for line in fact_sheet.caveat_lines)
-        lines.append("- 위 한계 중 경기 해석에 가장 큰 영향을 주는 항목은 `analysis.uncertainty`나 상세 마크다운의 한계 섹션에 반영하세요.")
+        lines.append(
+            "- 위 한계 중 경기 해석에 가장 큰 영향을 주는 항목은 `analysis.uncertainty`나 상세 마크다운의 한계 섹션에 반영하세요."
+        )
     if fact_sheet.allowed_entity_names:
         lines.append("")
         lines.append("### 허용 엔티티")

@@ -137,46 +137,224 @@ _RRF_LOG_PREVIEW_LEN = 140
 # `_is_game_flow_narrative_query`, `_is_general_conversation`)가 매 요청마다
 # 키워드 list를 새로 만들지 않도록 모듈 레벨 상수로 추출.
 # 모두 query.lower() 기준으로 substring match에 사용된다.
-_STAT_CHITCHAT_KEYWORDS = frozenset({
-    "안녕", "누구", "좋아해", "응원", "날씨", "어때", "뭐해", "어디", "언제", "왜",
-    "어떻게", "고마워", "미안", "반가워", "잘가", "소개", "설명", "도움", "기능", "사용법",
-})
-_STATISTICAL_KEYWORDS = frozenset({
-    "타율", "홈런", "타점", "득점", "ops", "era", "방어율", "whip", "승", "패",
-    "세이브", "홀드", "삼진", "볼넷", "출루율", "장타율", "wrc+", "war", "fip", "babip",
-    "몇위", "순위", "1위", "최고", "상위", "리더", "기록", "통계", "성적", "몇개",
-    "몇점", "얼마나", "vs", "대", "비교", "누가", "더", "뛰어난", "우수한", "좋은",
-    "맞대결",
-})
-_STAT_SPECIFIC_REQUEST_WORDS = frozenset({
-    "알려줘", "궁금", "얼마", "몇", "는", "은", "의",
-})
-_STAT_CORE_INDICATORS = frozenset({
-    "타율", "홈런", "ops", "era", "방어율",
-})
-_REGULATION_KEYWORDS = frozenset({
-    "규정", "규칙", "룰", "조항", "가능해", "허용", "금지", "벌칙", "징계", "반칙",
-    "파울", "아웃", "세이프", "스트라이크", "볼", "홈런", "인플레이", "타이브레이크",
-    "지명타자", "연장전", "콜드게임", "더블헤더", "비디오판독", "FA", "자유계약",
-    "외국인선수", "몇명까지", "드래프트", "트레이드", "도박", "폭력", "약물", "심판",
-    "모독", "퇴장", "플레이오프", "포스트시즌", "와일드카드", "한국시리즈", "몇팀",
-    "보크", "방해", "인필드플라이", "그라운드룰", "몸에맞는공", "용어", "뜻", "의미",
-    "정의", "설명", "조건", "언제적용", "세이브조건", "승리투수", "왕", "홈런왕",
-    "득점왕", "순위", "wrc+", "ops", "era", "whip", "babip", "war", "fip",
-})
-_GAME_KEYWORDS = frozenset({
-    "경기", "게임", "박스스코어", "스코어", "결과", "이닝별", "이닝별 득점", "몇 점",
-    "7회", "8회", "9회", "연장", "오늘", "어제", "내일", "날짜", "언제", "몇일",
-    "며칠", "vs", "대", "맞대결", "직접대결", "상대전적", "시리즈", "승부", "이겼",
-    "졌", "무승부", "점수", "승리", "패배", "홈", "원정", "away", "home", "구장에서",
-    "에서", "몇점", "득점", "실점", "타점", "안타", "홈런친", "투구", "선발", "등판",
-    "세이브", "홀드", "승", "패",
-})
+_STAT_CHITCHAT_KEYWORDS = frozenset(
+    {
+        "안녕",
+        "누구",
+        "좋아해",
+        "응원",
+        "날씨",
+        "어때",
+        "뭐해",
+        "어디",
+        "언제",
+        "왜",
+        "어떻게",
+        "고마워",
+        "미안",
+        "반가워",
+        "잘가",
+        "소개",
+        "설명",
+        "도움",
+        "기능",
+        "사용법",
+    }
+)
+_STATISTICAL_KEYWORDS = frozenset(
+    {
+        "타율",
+        "홈런",
+        "타점",
+        "득점",
+        "ops",
+        "era",
+        "방어율",
+        "whip",
+        "승",
+        "패",
+        "세이브",
+        "홀드",
+        "삼진",
+        "볼넷",
+        "출루율",
+        "장타율",
+        "wrc+",
+        "war",
+        "fip",
+        "babip",
+        "몇위",
+        "순위",
+        "1위",
+        "최고",
+        "상위",
+        "리더",
+        "기록",
+        "통계",
+        "성적",
+        "몇개",
+        "몇점",
+        "얼마나",
+        "vs",
+        "대",
+        "비교",
+        "누가",
+        "더",
+        "뛰어난",
+        "우수한",
+        "좋은",
+        "맞대결",
+    }
+)
+_STAT_SPECIFIC_REQUEST_WORDS = frozenset(
+    {
+        "알려줘",
+        "궁금",
+        "얼마",
+        "몇",
+        "는",
+        "은",
+        "의",
+    }
+)
+_STAT_CORE_INDICATORS = frozenset(
+    {
+        "타율",
+        "홈런",
+        "ops",
+        "era",
+        "방어율",
+    }
+)
+_REGULATION_KEYWORDS = frozenset(
+    {
+        "규정",
+        "규칙",
+        "룰",
+        "조항",
+        "가능해",
+        "허용",
+        "금지",
+        "벌칙",
+        "징계",
+        "반칙",
+        "파울",
+        "아웃",
+        "세이프",
+        "스트라이크",
+        "볼",
+        "홈런",
+        "인플레이",
+        "타이브레이크",
+        "지명타자",
+        "연장전",
+        "콜드게임",
+        "더블헤더",
+        "비디오판독",
+        "FA",
+        "자유계약",
+        "외국인선수",
+        "몇명까지",
+        "드래프트",
+        "트레이드",
+        "도박",
+        "폭력",
+        "약물",
+        "심판",
+        "모독",
+        "퇴장",
+        "플레이오프",
+        "포스트시즌",
+        "와일드카드",
+        "한국시리즈",
+        "몇팀",
+        "보크",
+        "방해",
+        "인필드플라이",
+        "그라운드룰",
+        "몸에맞는공",
+        "용어",
+        "뜻",
+        "의미",
+        "정의",
+        "설명",
+        "조건",
+        "언제적용",
+        "세이브조건",
+        "승리투수",
+        "왕",
+        "홈런왕",
+        "득점왕",
+        "순위",
+        "wrc+",
+        "ops",
+        "era",
+        "whip",
+        "babip",
+        "war",
+        "fip",
+    }
+)
+_GAME_KEYWORDS = frozenset(
+    {
+        "경기",
+        "게임",
+        "박스스코어",
+        "스코어",
+        "결과",
+        "이닝별",
+        "이닝별 득점",
+        "몇 점",
+        "7회",
+        "8회",
+        "9회",
+        "연장",
+        "오늘",
+        "어제",
+        "내일",
+        "날짜",
+        "언제",
+        "몇일",
+        "며칠",
+        "vs",
+        "대",
+        "맞대결",
+        "직접대결",
+        "상대전적",
+        "시리즈",
+        "승부",
+        "이겼",
+        "졌",
+        "무승부",
+        "점수",
+        "승리",
+        "패배",
+        "홈",
+        "원정",
+        "away",
+        "home",
+        "구장에서",
+        "에서",
+        "몇점",
+        "득점",
+        "실점",
+        "타점",
+        "안타",
+        "홈런친",
+        "투구",
+        "선발",
+        "등판",
+        "세이브",
+        "홀드",
+        "승",
+        "패",
+    }
+)
 # Game query 보조: 날짜 패턴 (미리 컴파일)
 _GAME_DATE_PATTERNS = (
-    re.compile(r"\d{4}-\d{1,2}-\d{1,2}"),       # 2025-10-15
-    re.compile(r"\d{1,2}/\d{1,2}"),              # 10/15
-    re.compile(r"\d{1,2}월\s*\d{1,2}일"),       # 10월 15일
+    re.compile(r"\d{4}-\d{1,2}-\d{1,2}"),  # 2025-10-15
+    re.compile(r"\d{1,2}/\d{1,2}"),  # 10/15
+    re.compile(r"\d{1,2}월\s*\d{1,2}일"),  # 10월 15일
     re.compile(r"오늘|어제|내일|모레|그저께"),
 )
 # Game query 보조: 팀 vs 팀 (case-insensitive, 미리 컴파일)
@@ -186,24 +364,101 @@ _GAME_TEAM_VS_PATTERN = re.compile(
     r"(KIA|HT|LG|DB|DO|OB|두산|LT|롯데|SS|삼성|KH|KI|WO|NX|키움|HH|한화|KT|NC|SSG|SK)",
     re.IGNORECASE,
 )
-_GAME_FLOW_NARRATIVE_KEYWORDS = frozenset({
-    "경기 흐름", "흐름 요약", "승부처", "언제 갈렸어", "언제 갈렸", "역전",
-    "동점 흐름", "초중후반 득점", "득점 양상",
-})
-_GENERAL_BASEBALL_KEYWORDS = frozenset({
-    "ops", "wrc+", "war", "era", "whip", "babip", "fip", "골든글러브", "fa", "신인왕",
-    "mvp", "타율", "방어율", "출루율", "장타율", "자책점", "세이브", "홀드", "승리투수",
-    "뜻", "의미", "정의", "계산", "어떻게", "무엇", "기준",
-    # 통계 질문 키워드 추가
-    "홈런", "타점", "득점", "승", "패", "삼진", "볼넷", "몇위", "순위", "1위",
-    "최고", "상위", "리더", "기록", "통계", "성적", "몇개", "몇점", "얼마나", "얼마",
-    "vs", "대", "비교", "누가", "더", "뛰어난", "우수한", "좋은", "맞대결", "시즌",
-    "년", "연도",
-})
-_GENERAL_CONVERSATION_KEYWORDS = frozenset({
-    "안녕", "누구", "좋아해", "응원", "날씨", "어때", "뭐해", "고마워", "미안", "반가워",
-    "잘가", "소개", "도움", "기능", "사용법",
-})
+_GAME_FLOW_NARRATIVE_KEYWORDS = frozenset(
+    {
+        "경기 흐름",
+        "흐름 요약",
+        "승부처",
+        "언제 갈렸어",
+        "언제 갈렸",
+        "역전",
+        "동점 흐름",
+        "초중후반 득점",
+        "득점 양상",
+    }
+)
+_GENERAL_BASEBALL_KEYWORDS = frozenset(
+    {
+        "ops",
+        "wrc+",
+        "war",
+        "era",
+        "whip",
+        "babip",
+        "fip",
+        "골든글러브",
+        "fa",
+        "신인왕",
+        "mvp",
+        "타율",
+        "방어율",
+        "출루율",
+        "장타율",
+        "자책점",
+        "세이브",
+        "홀드",
+        "승리투수",
+        "뜻",
+        "의미",
+        "정의",
+        "계산",
+        "어떻게",
+        "무엇",
+        "기준",
+        # 통계 질문 키워드 추가
+        "홈런",
+        "타점",
+        "득점",
+        "승",
+        "패",
+        "삼진",
+        "볼넷",
+        "몇위",
+        "순위",
+        "1위",
+        "최고",
+        "상위",
+        "리더",
+        "기록",
+        "통계",
+        "성적",
+        "몇개",
+        "몇점",
+        "얼마나",
+        "얼마",
+        "vs",
+        "대",
+        "비교",
+        "누가",
+        "더",
+        "뛰어난",
+        "우수한",
+        "좋은",
+        "맞대결",
+        "시즌",
+        "년",
+        "연도",
+    }
+)
+_GENERAL_CONVERSATION_KEYWORDS = frozenset(
+    {
+        "안녕",
+        "누구",
+        "좋아해",
+        "응원",
+        "날씨",
+        "어때",
+        "뭐해",
+        "고마워",
+        "미안",
+        "반가워",
+        "잘가",
+        "소개",
+        "도움",
+        "기능",
+        "사용법",
+    }
+)
 
 
 def _meta_cache_key(meta: Dict[str, Any]) -> str:
@@ -1031,9 +1286,7 @@ class RAGPipeline:
 
     def _is_game_flow_narrative_query(self, query: str) -> bool:
         query_lower = query.lower()
-        return any(
-            keyword in query_lower for keyword in _GAME_FLOW_NARRATIVE_KEYWORDS
-        )
+        return any(keyword in query_lower for keyword in _GAME_FLOW_NARRATIVE_KEYWORDS)
 
     def _is_general_conversation(self, query: str) -> bool:
         """
@@ -1046,9 +1299,7 @@ class RAGPipeline:
             return False  # 야구 관련 질문이므로 일반 대화가 아님
 
         # 야구/통계와 무관한 일반적인 대화만 일반 대화로 분류
-        return any(
-            keyword in query_lower for keyword in _GENERAL_CONVERSATION_KEYWORDS
-        )
+        return any(keyword in query_lower for keyword in _GENERAL_CONVERSATION_KEYWORDS)
 
     async def _try_agent_first(
         self,
@@ -1066,7 +1317,9 @@ class RAGPipeline:
 
         try:
             # 야구 에이전트를 통한 처리 시도
-            with self._checkout_conn() as conn, self.agent_runtime.request_context(conn):
+            with self._checkout_conn() as conn, self.agent_runtime.request_context(
+                conn
+            ):
                 agent_result = await self.baseball_agent.process_query(
                     query,
                     {"intent": intent, "filters": filters, "history": history},

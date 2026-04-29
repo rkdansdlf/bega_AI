@@ -522,9 +522,12 @@ class TestCoachErrorMaskingHelpers:
             _cache_error_code_from_exception,
         )
 
-        assert _cache_error_code_from_exception(
-            TimeoutError("coach_llm_stream_timeout_after_18s")
-        ) == COACH_LLM_TIMEOUT_ERROR_CODE
+        assert (
+            _cache_error_code_from_exception(
+                TimeoutError("coach_llm_stream_timeout_after_18s")
+            )
+            == COACH_LLM_TIMEOUT_ERROR_CODE
+        )
 
     def test_coach_public_error_payload_masks_unknown_code(self):
         from app.routers.coach import (
@@ -1897,16 +1900,13 @@ class TestCoachEvidenceHelpers:
         )
 
         assert (
-            COACH_PROMPT_V2_STATIC + COACH_PROMPT_V2_DYNAMIC_TEMPLATE
-            == COACH_PROMPT_V2
+            COACH_PROMPT_V2_STATIC + COACH_PROMPT_V2_DYNAMIC_TEMPLATE == COACH_PROMPT_V2
         )
         assert "{focus_section_requirements}" not in COACH_PROMPT_V2_STATIC
         assert "{question}" not in COACH_PROMPT_V2_STATIC
         assert "{context}" not in COACH_PROMPT_V2_STATIC
 
-    def test_build_coach_llm_messages_disabled_returns_plain_string(
-        self, monkeypatch
-    ):
+    def test_build_coach_llm_messages_disabled_returns_plain_string(self, monkeypatch):
         from app.routers import coach as coach_module
 
         monkeypatch.setenv("COACH_PROMPT_CACHE_ENABLED", "0")
@@ -1914,22 +1914,16 @@ class TestCoachEvidenceHelpers:
             "STATIC_PREFIX_",
             "DYNAMIC_SUFFIX",
         )
-        assert messages == [
-            {"role": "user", "content": "STATIC_PREFIX_DYNAMIC_SUFFIX"}
-        ]
+        assert messages == [{"role": "user", "content": "STATIC_PREFIX_DYNAMIC_SUFFIX"}]
 
-    def test_build_coach_llm_messages_enabled_applies_cache_control(
-        self, monkeypatch
-    ):
+    def test_build_coach_llm_messages_enabled_applies_cache_control(self, monkeypatch):
         from app.routers import coach as coach_module
 
         monkeypatch.setenv("COACH_PROMPT_CACHE_ENABLED", "1")
         monkeypatch.setenv("COACH_PROMPT_CACHE_MIN_STATIC_CHARS", "10")
         static_text = "A" * 50
         dynamic_text = "DYNAMIC"
-        messages = coach_module._build_coach_llm_messages(
-            static_text, dynamic_text
-        )
+        messages = coach_module._build_coach_llm_messages(static_text, dynamic_text)
         assert len(messages) == 1
         content = messages[0]["content"]
         assert isinstance(content, list)
@@ -1996,19 +1990,13 @@ class TestCoachEvidenceHelpers:
         assert summary["coach_tool_fetch_seconds"] is None
         assert summary["cache_enabled"] is True
 
-    def test_build_coach_llm_messages_enabled_skips_below_threshold(
-        self, monkeypatch
-    ):
+    def test_build_coach_llm_messages_enabled_skips_below_threshold(self, monkeypatch):
         from app.routers import coach as coach_module
 
         monkeypatch.setenv("COACH_PROMPT_CACHE_ENABLED", "1")
         monkeypatch.setenv("COACH_PROMPT_CACHE_MIN_STATIC_CHARS", "9999")
-        messages = coach_module._build_coach_llm_messages(
-            "short_static", "dynamic"
-        )
-        assert messages == [
-            {"role": "user", "content": "short_staticdynamic"}
-        ]
+        messages = coach_module._build_coach_llm_messages("short_static", "dynamic")
+        assert messages == [{"role": "user", "content": "short_staticdynamic"}]
 
 
 # ============================================================
@@ -4834,8 +4822,7 @@ class TestCoachFastPath:
         cleaned = _cleanup_response_language_quality(response_data)
 
         assert (
-            cleaned["headline"]
-            == "SSG 랜더스 vs 삼성 라이온즈, 상승세 맞불 대구 개막"
+            cleaned["headline"] == "SSG 랜더스 vs 삼성 라이온즈, 상승세 맞불 대구 개막"
         )
         assert (
             cleaned["coach_note"]
@@ -5769,8 +5756,7 @@ class TestCoachFastPath:
         assert all("최근" in summary for summary in recent_summaries)
         assert all("선발" in summary for summary in starter_summaries)
         assert all(
-            "상대" in summary or "맞대결" in summary
-            for summary in matchup_summaries
+            "상대" in summary or "맞대결" in summary for summary in matchup_summaries
         )
         assert _completed_review_bullpen_focus_summary(
             evidences[0], tool_results
@@ -5875,8 +5861,7 @@ class TestCoachFastPath:
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
         assert "## 상대 전적\n-" in markdown
         assert any(
-            phrase in markdown
-            for phrase in ("상대 전적", "맞대결 표본", "직접 비교")
+            phrase in markdown for phrase in ("상대 전적", "맞대결 표본", "직접 비교")
         )
         assert "## 타격 생산성\n- NC 다이노스 0.799 / 한화 이글스 0.783" in markdown
         assert "## 불펜 상태\n- NC 다이노스 4 / 한화 이글스 11 경기에서" not in markdown
@@ -5983,8 +5968,7 @@ class TestCoachFastPath:
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
         assert "## 상대 전적\n-" in markdown
         assert any(
-            phrase in markdown
-            for phrase in ("상대 전적", "맞대결 표본", "직접 비교")
+            phrase in markdown for phrase in ("상대 전적", "맞대결 표본", "직접 비교")
         )
         assert "## 타격 생산성\n- NC 다이노스 0.799 / 한화 이글스 0.783" in markdown
         assert "OPS 우세가 먼저 보였습니다" not in markdown
