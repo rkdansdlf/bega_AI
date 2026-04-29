@@ -108,7 +108,9 @@ def _build_redis_backend() -> Optional[EmbeddingCacheBackend]:
     try:
         client = redis_asyncio.from_url(url, decode_responses=True)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[EmbedCache] Redis client init failed: %s — using in-memory", exc)
+        logger.warning(
+            "[EmbedCache] Redis client init failed: %s — using in-memory", exc
+        )
         return None
     ttl = int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS", "86400"))
     logger.info("[EmbedCache] Redis backend ready ttl=%ds prefix=embed", ttl)
@@ -122,7 +124,9 @@ async def get_backend() -> EmbeddingCacheBackend:
     async with _backend_lock:
         if _backend_instance is not None:
             return _backend_instance
-        backend_name = (os.getenv("EMBEDDING_CACHE_BACKEND") or "memory").strip().lower()
+        backend_name = (
+            (os.getenv("EMBEDDING_CACHE_BACKEND") or "memory").strip().lower()
+        )
         backend: Optional[EmbeddingCacheBackend] = None
         if backend_name == "redis":
             backend = _build_redis_backend()

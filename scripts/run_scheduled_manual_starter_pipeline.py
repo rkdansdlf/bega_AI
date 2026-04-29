@@ -100,7 +100,9 @@ def _step_output_dir(output_dir: Path, name: str) -> Path:
     return output_dir / name
 
 
-def build_apply_step(args: argparse.Namespace, output_dir: Path) -> Optional[PipelineStep]:
+def build_apply_step(
+    args: argparse.Namespace, output_dir: Path
+) -> Optional[PipelineStep]:
     if not args.csv_path:
         return None
 
@@ -219,9 +221,7 @@ def _readiness_blockers(readiness_summary: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         starter_pending_count = 0
     missing_data_distribution = summary.get("missing_data_distribution") or {}
-    diagnosis_quality_distribution = (
-        summary.get("diagnosis_quality_distribution") or {}
-    )
+    diagnosis_quality_distribution = summary.get("diagnosis_quality_distribution") or {}
     if manual_required_count > 0 and starter_pending_count > 0:
         status = "mixed_manual_required_and_announcement_pending"
     elif manual_required_count > 0:
@@ -468,7 +468,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
             print(summary_path)
             return result.returncode or 1
 
-    grounded_ids = grounded_game_ids_from_results(_load_jsonl(readiness_step.report_path))
+    grounded_ids = grounded_game_ids_from_results(
+        _load_jsonl(readiness_step.report_path)
+    )
     backfill_step = build_backfill_step(args, output_dir, grounded_ids)
     if backfill_step:
         result = _run_step(backfill_step)

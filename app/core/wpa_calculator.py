@@ -11,9 +11,11 @@ class WPACalculator:
 
     def __init__(self):
         # Load the data-driven KBO matrix if available
-        self.matrix_path = os.path.join(os.path.dirname(__file__), "data", "we_matrix_kbo.json")
+        self.matrix_path = os.path.join(
+            os.path.dirname(__file__), "data", "we_matrix_kbo.json"
+        )
         self.we_matrix = self._load_matrix()
-        
+
         # Simplified Fallback Matrix (only used if lookup fails or file missing)
         self.base_matrix = self._initialize_base_matrix()
 
@@ -21,7 +23,7 @@ class WPACalculator:
         """Loads the pre-generated KBO WE Matrix JSON."""
         try:
             if os.path.exists(self.matrix_path):
-                with open(self.matrix_path, 'r', encoding='utf-8') as f:
+                with open(self.matrix_path, "r", encoding="utf-8") as f:
                     return json.load(f)
         except Exception as e:
             print(f"⚠️ Failed to load WE Matrix: {e}")
@@ -70,14 +72,16 @@ class WPACalculator:
                 # Clip score diff to matrix range (-7 to 7)
                 diff_key = str(max(-7, min(7, score_diff)))
                 outs_key = str(outs)
-                runners_key = "".join(['1' if r else '0' for r in runners])
-                
+                runners_key = "".join(["1" if r else "0" for r in runners])
+
                 # Nested lookup: Inning -> IsBot -> Diff -> Outs -> Runners
-                prob = self.we_matrix.get(str(inning), {})\
-                                     .get(is_bot_key, {})\
-                                     .get(diff_key, {})\
-                                     .get(outs_key, {})\
-                                     .get(runners_key)
+                prob = (
+                    self.we_matrix.get(str(inning), {})
+                    .get(is_bot_key, {})
+                    .get(diff_key, {})
+                    .get(outs_key, {})
+                    .get(runners_key)
+                )
                 if prob is not None:
                     return float(prob)
             except Exception:

@@ -130,7 +130,9 @@ def test_run_pipeline_plan_only_does_not_execute(
     assert summary["next_action"]["code"] == "RUN_PIPELINE"
 
 
-def test_latest_report_summaries_expose_manual_required_blockers(tmp_path: Path) -> None:
+def test_latest_report_summaries_expose_manual_required_blockers(
+    tmp_path: Path,
+) -> None:
     readiness_dir = tmp_path / "readiness"
     readiness_dir.mkdir()
     (readiness_dir / "coach_backfill_summary_latest.json").write_text(
@@ -157,9 +159,12 @@ def test_latest_report_summaries_expose_manual_required_blockers(tmp_path: Path)
     assert blockers["status"] == "manual_data_required"
     assert blockers["manual_baseball_data_required_count"] == 30
     assert blockers["missing_data_distribution"] == {"missing_starters": 30}
-    assert report_summaries["readiness_summary"]["paths"][
-        "latest_manual_baseball_data_required_csv"
-    ] == "/app/reports/manual_required.csv"
+    assert (
+        report_summaries["readiness_summary"]["paths"][
+            "latest_manual_baseball_data_required_csv"
+        ]
+        == "/app/reports/manual_required.csv"
+    )
 
 
 def test_readiness_blockers_expose_official_announcement_pending() -> None:

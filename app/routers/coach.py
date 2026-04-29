@@ -17,7 +17,17 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from time import perf_counter
 from datetime import date as date_cls, datetime, time as dt_time, timedelta
-from typing import List, Optional, Dict, Any, Literal, Set, AsyncIterator, Tuple, Sequence
+from typing import (
+    List,
+    Optional,
+    Dict,
+    Any,
+    Literal,
+    Set,
+    AsyncIterator,
+    Tuple,
+    Sequence,
+)
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, model_validator
@@ -94,6 +104,7 @@ def _coach_prompt_cache_min_static_chars() -> int:
 
 def _coach_fast_path_manual_recent_form_enabled() -> bool:
     return _read_flag_env("COACH_FAST_PATH_MANUAL_RECENT_FORM", "0")
+
 
 COACH_YEAR_MIN = 1982
 MAX_COACH_FOCUS_ITEMS = 6
@@ -1843,9 +1854,7 @@ def _build_manual_data_request(
     has_game_row = _has_game_row_context(evidence)
     missing_game_row = not has_game_row
     season_year_for_context = (
-        parsed_evidence_season_year
-        if request_game_date is not None
-        else None
+        parsed_evidence_season_year if request_game_date is not None else None
     )
     stage_context_mismatch = (
         request_game_date is not None
@@ -2124,9 +2133,7 @@ def _should_regenerate_completed_cache(
         return True
 
     expected_evidence = {
-        str(item)
-        for item in expected_used_evidence or []
-        if str(item or "").strip()
+        str(item) for item in expected_used_evidence or [] if str(item or "").strip()
     }
     cached_evidence = {
         str(item) for item in meta.get("used_evidence") or [] if str(item or "").strip()
@@ -2214,17 +2221,13 @@ class _CoachLatencyTracker:
                 else None
             ),
             "coach_tool_fetch_seconds": self._round(
-                self._delta(
-                    self.tool_fetch_started_at, self.tool_fetch_completed_at
-                )
+                self._delta(self.tool_fetch_started_at, self.tool_fetch_completed_at)
             ),
             "coach_llm_seconds": self._round(
                 self._delta(self.llm_started_at, self.llm_completed_at)
             ),
             "coach_grounding_seconds": self._round(
-                self._delta(
-                    self.grounding_started_at, self.grounding_completed_at
-                )
+                self._delta(self.grounding_started_at, self.grounding_completed_at)
             ),
             "cache_state": cache_state,
             "request_mode": request_mode,
@@ -2691,9 +2694,7 @@ def _is_retryable_cache_error_code(code: Any) -> bool:
 
 def _cache_error_code_from_exception(exc: Exception) -> str:
     text = str(exc or "").lower()
-    if isinstance(exc, TimeoutError) or (
-        "coach_llm" in text and "timeout" in text
-    ):
+    if isinstance(exc, TimeoutError) or ("coach_llm" in text and "timeout" in text):
         return COACH_LLM_TIMEOUT_ERROR_CODE
     if "readtimeout" in text or "request timeout" in text:
         return COACH_LLM_TIMEOUT_ERROR_CODE
@@ -6931,9 +6932,7 @@ def _align_scheduled_partial_markdown_sections(
         if snapshot_lines:
             snapshot = "## 경기 전 스냅샷\n" + "\n".join(snapshot_lines)
             updated = (
-                f"{snapshot}\n\n{updated.strip()}"
-                if updated.strip()
-                else snapshot
+                f"{snapshot}\n\n{updated.strip()}" if updated.strip() else snapshot
             )
     section_candidates = (
         (
@@ -9364,6 +9363,7 @@ async def _execute_coach_tools_parallel(
                 return func(*args, **kwargs)
             finally:
                 tool_timings[name] = perf_counter() - started
+
         return _wrapper
 
     def get_team_data(team_code: str):
@@ -9428,21 +9428,32 @@ async def _execute_coach_tools_parallel(
     gather_started = perf_counter()
 
     # 1. 홈팀 데이터
-    tasks.append(loop.run_in_executor(None, _timed("home_team", get_team_data), home_team_id))
+    tasks.append(
+        loop.run_in_executor(None, _timed("home_team", get_team_data), home_team_id)
+    )
 
     # 2. 원정팀 데이터 (있을 경우)
     if away_team_id:
-        tasks.append(loop.run_in_executor(None, _timed("away_team", get_team_data), away_team_id))
+        tasks.append(
+            loop.run_in_executor(None, _timed("away_team", get_team_data), away_team_id)
+        )
 
     # 3. 상대 전적 (Matchup focus일 경우)
     if "matchup" in focus and away_team_id:
         tasks.append(
             loop.run_in_executor(
-                None, _timed("matchup", get_matchup_stats_sync), home_team_id, away_team_id
+                None,
+                _timed("matchup", get_matchup_stats_sync),
+                home_team_id,
+                away_team_id,
             )
         )
     if include_clutch and game_id:
-        tasks.append(loop.run_in_executor(None, _timed("clutch_moments", get_clutch_moments_sync), game_id))
+        tasks.append(
+            loop.run_in_executor(
+                None, _timed("clutch_moments", get_clutch_moments_sync), game_id
+            )
+        )
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     gather_elapsed = perf_counter() - gather_started
@@ -9654,7 +9665,10 @@ def _build_coach_llm_messages(
     ``static_text + dynamic_text``; upstream providers that don't support
     ``cache_control`` simply ignore the marker.
     """
-    if _coach_prompt_cache_enabled() and len(static_text) >= _coach_prompt_cache_min_static_chars():
+    if (
+        _coach_prompt_cache_enabled()
+        and len(static_text) >= _coach_prompt_cache_min_static_chars()
+    ):
         return [
             {
                 "role": "user",
@@ -11273,7 +11287,9 @@ async def analyze_team(
                                                 "event": "status",
                                                 "data": json.dumps(
                                                     {
-                                                        "message": llm_event.get("message")
+                                                        "message": llm_event.get(
+                                                            "message"
+                                                        )
                                                         or "AI 코치가 근거를 정리하는 중입니다..."
                                                     },
                                                     ensure_ascii=False,
@@ -11614,8 +11630,7 @@ async def analyze_team(
                         scheduled_guard_reasons,
                     )
                     runtime_grounding_reasons = _normalize_grounding_reasons(
-                        runtime_grounding_reasons
-                        + ["scheduled_output_guard_fallback"]
+                        runtime_grounding_reasons + ["scheduled_output_guard_fallback"]
                     )
                     runtime_grounding_warnings = _merge_grounding_warnings(
                         runtime_grounding_warnings,

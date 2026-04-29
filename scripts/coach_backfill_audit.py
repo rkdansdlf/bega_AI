@@ -395,7 +395,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--date-from", default=None)
     parser.add_argument("--date-to", default=None)
     parser.add_argument("--game-ids", default=None)
-    parser.add_argument("--status-bucket", default="ANY", choices=sorted(STATUS_BUCKETS))
+    parser.add_argument(
+        "--status-bucket", default="ANY", choices=sorted(STATUS_BUCKETS)
+    )
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--order", default="asc", choices=("asc", "desc"))
@@ -415,7 +417,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=str(DEFAULT_OUTPUT_DIR),
         help="Output directory. Relative paths resolve under bega_AI.",
     )
-    parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument(
+        "--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS
+    )
     parser.add_argument("--delay-seconds", type=float, default=0.0)
     parser.add_argument(
         "--request-interval-seconds",
@@ -531,7 +535,9 @@ def _safe_json_loads(raw: str) -> Any:
         return raw
 
 
-def parse_sse_stream(response: httpx.Response, elapsed_seconds: float) -> BackfillCapture:
+def parse_sse_stream(
+    response: httpx.Response, elapsed_seconds: float
+) -> BackfillCapture:
     current_event = "message"
     event_sequence: List[str] = []
     message_chunks: List[str] = []
@@ -577,7 +583,9 @@ def parse_sse_stream(response: httpx.Response, elapsed_seconds: float) -> Backfi
     structured_response = meta_payload.get("structured_response")
     if not isinstance(structured_response, dict):
         parsed_message = _safe_json_loads("".join(message_chunks).strip())
-        structured_response = parsed_message if isinstance(parsed_message, dict) else None
+        structured_response = (
+            parsed_message if isinstance(parsed_message, dict) else None
+        )
 
     return BackfillCapture(
         status_code=response.status_code,
@@ -657,7 +665,9 @@ def call_coach(
         )
 
 
-def _sleep_for_request_interval(state: Dict[str, float], interval_seconds: float) -> None:
+def _sleep_for_request_interval(
+    state: Dict[str, float], interval_seconds: float
+) -> None:
     interval = max(0.0, float(interval_seconds or 0.0))
     if interval <= 0:
         state["last_request_at"] = time.monotonic()
@@ -785,9 +795,7 @@ def _dedupe_messages(messages: Sequence[str]) -> List[str]:
 
 def is_transport_failure_message(message: str) -> bool:
     normalized = str(message or "")
-    return any(
-        normalized.startswith(prefix) for prefix in TRANSPORT_FAILURE_PREFIXES
-    )
+    return any(normalized.startswith(prefix) for prefix in TRANSPORT_FAILURE_PREFIXES)
 
 
 def _failure_category(message: str) -> str:
@@ -940,15 +948,14 @@ def assess_quality(
     data_quality = str(meta.get("data_quality") or "")
     if data_quality == "insufficient":
         hard_failures.append("data_quality=insufficient")
-    if (
-        record.get("expected_data_quality") == "grounded"
-        and data_quality == "partial"
-    ):
+    if record.get("expected_data_quality") == "grounded" and data_quality == "partial":
         soft_warnings.append("진단은 grounded이나 응답은 partial")
 
     cache_state = str(meta.get("cache_state") or "").upper()
     if cache_hit_probe and cache_state != "HIT":
-        hard_failures.append(f"재호출 cache_state가 HIT가 아님: {cache_state or 'missing'}")
+        hard_failures.append(
+            f"재호출 cache_state가 HIT가 아님: {cache_state or 'missing'}"
+        )
 
     for fragment in BANNED_FRAGMENTS:
         if fragment in blob:
@@ -960,13 +967,13 @@ def assess_quality(
                 hard_failures.append(f"예정 경기 결과 확정 표현 포함: {fragment}")
         for fragment in SCHEDULED_METRIC_JARGON_FRAGMENTS:
             if fragment in blob:
-                hard_failures.append(f"예정 경기 사용자 문구에 지표/언어 잔여 포함: {fragment}")
+                hard_failures.append(
+                    f"예정 경기 사용자 문구에 지표/언어 잔여 포함: {fragment}"
+                )
         if record.get("home_pitcher_present") and record.get("away_pitcher_present"):
             for fragment in SCHEDULED_CONFIRMED_STARTER_CONFLICT_FRAGMENTS:
                 if fragment in blob:
-                    hard_failures.append(
-                        f"예정 경기 선발 확정 상태와 충돌: {fragment}"
-                    )
+                    hard_failures.append(f"예정 경기 선발 확정 상태와 충돌: {fragment}")
     elif bucket == "COMPLETED":
         for fragment in COMPLETED_PREDICTION_FRAGMENTS:
             if fragment in blob:
@@ -1122,11 +1129,17 @@ def summarize_results(
         str(item.get("expected_data_quality") or "unknown") for item in records
     )
     response_quality = Counter(
-        str(((item.get("response") or {}).get("meta") or {}).get("data_quality") or "none")
+        str(
+            ((item.get("response") or {}).get("meta") or {}).get("data_quality")
+            or "none"
+        )
         for item in results
     )
     cache_states = Counter(
-        str(((item.get("response") or {}).get("meta") or {}).get("cache_state") or "none")
+        str(
+            ((item.get("response") or {}).get("meta") or {}).get("cache_state")
+            or "none"
+        )
         for item in results
     )
     cache_probe_states = Counter(
@@ -1162,8 +1175,7 @@ def summarize_results(
         _starter_announcement_pending_rows(results)
     )
     hard_failure_count = sum(
-        len((item.get("quality") or {}).get("hard_failures") or [])
-        for item in results
+        len((item.get("quality") or {}).get("hard_failures") or []) for item in results
     )
     transport_failure_count = sum(
         1
@@ -1189,8 +1201,7 @@ def summarize_results(
         )
     )
     soft_warning_count = sum(
-        len((item.get("quality") or {}).get("soft_warnings") or [])
-        for item in results
+        len((item.get("quality") or {}).get("soft_warnings") or []) for item in results
     )
     return {
         "total_targets": len(records),
@@ -1421,8 +1432,7 @@ def _manual_baseball_data_required_rows(
         diagnosis = item.get("diagnosis") or {}
         target_game_id = str(target.get("game_id") or "")
         missing_codes = {
-            str(row.get("code") or "")
-            for row in item.get("missing_data") or []
+            str(row.get("code") or "") for row in item.get("missing_data") or []
         }
         missing_codes.update(str(code) for code in diagnosis.get("root_causes") or [])
         if "missing_starters" not in missing_codes:
@@ -1603,7 +1613,9 @@ def write_reports(
     summary_json_path = output_dir / f"coach_backfill_summary_{timestamp}.json"
     summary_csv_path = output_dir / f"coach_backfill_summary_{timestamp}.csv"
     missing_csv_path = output_dir / f"coach_missing_data_report_{timestamp}.csv"
-    response_notes_csv_path = output_dir / f"coach_response_notes_report_{timestamp}.csv"
+    response_notes_csv_path = (
+        output_dir / f"coach_response_notes_report_{timestamp}.csv"
+    )
     manual_required_csv_path = (
         output_dir / f"coach_manual_baseball_data_required_{timestamp}.csv"
     )
@@ -1615,7 +1627,9 @@ def write_reports(
     latest_summary_json_path = output_dir / "coach_backfill_summary_latest.json"
     latest_summary_csv_path = output_dir / "coach_backfill_summary_latest.csv"
     latest_missing_csv_path = output_dir / "coach_missing_data_report_latest.csv"
-    latest_response_notes_csv_path = output_dir / "coach_response_notes_report_latest.csv"
+    latest_response_notes_csv_path = (
+        output_dir / "coach_response_notes_report_latest.csv"
+    )
     latest_manual_required_csv_path = (
         output_dir / "coach_manual_baseball_data_required_latest.csv"
     )
@@ -1662,9 +1676,7 @@ def write_reports(
         "latest_manual_baseball_data_required_csv": str(
             latest_manual_required_csv_path
         ),
-        "latest_starter_announcement_pending_csv": str(
-            latest_starter_pending_csv_path
-        ),
+        "latest_starter_announcement_pending_csv": str(latest_starter_pending_csv_path),
         "latest_quality_failures_csv": str(latest_quality_csv_path),
     }
 
@@ -1745,7 +1757,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             diagnosis=[],
             results=[],
         )
-        print(json.dumps({"summary": summarize_results([], []), "paths": paths}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"summary": summarize_results([], []), "paths": paths},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
 
     results = run_backfill(
@@ -1767,7 +1785,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         results=results,
     )
     summary = summarize_results(targets, results)
-    print(json.dumps({"summary": summary, "paths": paths}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps({"summary": summary, "paths": paths}, ensure_ascii=False, indent=2)
+    )
 
     if args.strict and summary["hard_failure_count"] > 0:
         return 1

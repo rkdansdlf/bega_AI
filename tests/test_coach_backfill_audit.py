@@ -376,9 +376,7 @@ def test_missing_starters_before_official_announcement_are_pending(monkeypatch):
     assert _manual_baseball_data_required_rows([result]) == []
     pending_rows = _starter_announcement_pending_rows([result])
     assert pending_rows[0]["status_code"] == "starter_announcement_pending"
-    assert pending_rows[0]["expected_announcement_at_kst"] == (
-        "2026-04-23T18:00+09:00"
-    )
+    assert pending_rows[0]["expected_announcement_at_kst"] == ("2026-04-23T18:00+09:00")
 
 
 def test_explicit_starter_announcement_pending_rows_are_reported(monkeypatch):
@@ -418,9 +416,10 @@ def test_explicit_starter_announcement_pending_rows_are_reported(monkeypatch):
 
 
 def test_starter_announcement_due_at_kst_uses_previous_day_18():
-    assert starter_announcement_due_at_kst("2026-04-24").isoformat(
-        timespec="minutes"
-    ) == "2026-04-23T18:00+09:00"
+    assert (
+        starter_announcement_due_at_kst("2026-04-24").isoformat(timespec="minutes")
+        == "2026-04-23T18:00+09:00"
+    )
 
 
 def test_assess_quality_rejects_banned_template_phrase():
@@ -689,24 +688,15 @@ def test_dedupe_messages_preserves_order():
 
 
 def test_effective_request_interval_clamps_cache_hit_verification():
-    assert (
-        effective_request_interval_seconds(0.2, verify_cache_hit=True)
-        == 3.0
-    )
+    assert effective_request_interval_seconds(0.2, verify_cache_hit=True) == 3.0
 
 
 def test_effective_request_interval_keeps_non_probe_interval():
-    assert (
-        effective_request_interval_seconds(0.2, verify_cache_hit=False)
-        == 0.2
-    )
+    assert effective_request_interval_seconds(0.2, verify_cache_hit=False) == 0.2
 
 
 def test_effective_request_interval_keeps_higher_probe_interval():
-    assert (
-        effective_request_interval_seconds(4.0, verify_cache_hit=True)
-        == 4.0
-    )
+    assert effective_request_interval_seconds(4.0, verify_cache_hit=True) == 4.0
 
 
 def test_resolve_default_internal_api_key_prefers_service_local_env(
