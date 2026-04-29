@@ -18,8 +18,12 @@ GROUNDING_DISCLAIMER_TOKENS = (
     "발표 전",
     "미발표",
     "확정 전",
+    "확정되지",
     "데이터 부족",
+    "부족",
     "확인 필요",
+    "제한",
+    "보수",
     "가능성",
     "변수",
 )
@@ -114,6 +118,7 @@ def format_coach_fact_sheet(fact_sheet: CoachFactSheet) -> str:
         "## FACT SHEET",
         "- 아래 FACT SHEET에 적힌 사실만 사용해 응답을 재작성하세요.",
         "- FACT SHEET에 없는 선수명, 수치, 경기 맥락은 절대 단정하지 마세요.",
+        "- 판단 문장은 확인된 근거와 경기 운영 의미가 함께 보이도록 짧게 연결하세요.",
     ]
     if fact_sheet.fact_lines:
         lines.append("")
@@ -123,6 +128,9 @@ def format_coach_fact_sheet(fact_sheet: CoachFactSheet) -> str:
         lines.append("")
         lines.append("### 결측 및 주의")
         lines.extend(f"- {line}" for line in fact_sheet.caveat_lines)
+        lines.append(
+            "- 위 한계 중 경기 해석에 가장 큰 영향을 주는 항목은 `analysis.uncertainty`나 상세 마크다운의 한계 섹션에 반영하세요."
+        )
     if fact_sheet.allowed_entity_names:
         lines.append("")
         lines.append("### 허용 엔티티")

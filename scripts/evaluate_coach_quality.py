@@ -9,6 +9,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Set
 
 DEFAULT_THRESHOLDS = {
@@ -22,7 +23,15 @@ DEFAULT_THRESHOLDS = {
     "validator_fail_max": 0,
     "cache_invalid_year_max": 0,
     "legacy_residual_max": 0,
+    "weak_grounding_rate_max": 0.1,
+    "uncertainty_gap_rate_max": 0.05,
+    "thin_markdown_rate_max": 0.1,
 }
+QUALITY_RESULT_FILENAMES = (
+    "coach_backfill_results_latest.jsonl",
+    "coach_backfill_results.jsonl",
+)
+MIN_MARKDOWN_SECTION_COUNT = 2
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -87,15 +96,154 @@ def load_reports(paths: List[Path]) -> List[Dict[str, Any]]:
                 "path": str(path),
                 "summary": summary,
                 "options": payload.get("options", {}),
+                "response_quality": _collect_response_quality_from_sidecar(
+                    path, payload.get("options", {})
+                ),
             }
         )
     return reports
+
+
+def _empty_response_quality_counts() -> Dict[str, int]:
+    return {
+        "checked_count": 0,
+        "weak_grounding_count": 0,
+        "uncertainty_gap_count": 0,
+        "thin_markdown_count": 0,
+    }
+
+
+def _merge_response_quality_counts(
+    target: Dict[str, int], source: Dict[str, Any]
+) -> None:
+    for key in _empty_response_quality_counts():
+        target[key] = target.get(key, 0) + _as_int(source.get(key))
+
+
+def _extract_response_meta(entry: Dict[str, Any]) -> Dict[str, Any]:
+    response = entry.get("response")
+    if isinstance(response, dict) and isinstance(response.get("meta"), dict):
+        return response["meta"]
+    if isinstance(entry.get("meta"), dict):
+        return entry["meta"]
+    return {}
+
+
+def _extract_structured_response(entry: Dict[str, Any]) -> Dict[str, Any]:
+    structured = entry.get("structured_response")
+    if isinstance(structured, dict):
+        return structured
+
+    response = entry.get("response")
+    if isinstance(response, dict):
+        response_structured = response.get("structured_response")
+        if isinstance(response_structured, dict):
+            return response_structured
+        meta = response.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("structured_response"), dict):
+            return meta["structured_response"]
+    return {}
+
+
+def _has_text_items(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(isinstance(item, str) and item.strip() for item in value)
+    return False
+
+
+def _markdown_section_count(markdown: str) -> int:
+    return len(re.findall(r"(?m)^##\s+\S", markdown or ""))
+
+
+def _score_response_quality_entry(entry: Dict[str, Any]) -> Dict[str, int]:
+    counts = _empty_response_quality_counts()
+    structured = _extract_structured_response(entry)
+    if not structured:
+        return counts
+
+    counts["checked_count"] = 1
+    analysis = structured.get("analysis")
+    if not isinstance(analysis, dict):
+        analysis = {}
+
+    verdict_or_summary = _has_text_items(analysis.get("verdict")) or _has_text_items(
+        analysis.get("summary")
+    )
+    if not verdict_or_summary or not _has_text_items(analysis.get("why_it_matters")):
+        counts["weak_grounding_count"] = 1
+
+    detailed_markdown = str(structured.get("detailed_markdown") or "")
+    if not detailed_markdown.strip() or (
+        _markdown_section_count(detailed_markdown) < MIN_MARKDOWN_SECTION_COUNT
+    ):
+        counts["thin_markdown_count"] = 1
+
+    meta = _extract_response_meta(entry)
+    grounding_reasons = meta.get("grounding_reasons")
+    grounding_warnings = meta.get("grounding_warnings")
+    response_notes = entry.get("response_notes")
+    data_quality = str(meta.get("data_quality") or "").strip().lower()
+    uncertainty_expected = (
+        data_quality in {"partial", "insufficient"}
+        or bool(grounding_reasons)
+        or bool(grounding_warnings)
+        or bool(response_notes)
+    )
+    if uncertainty_expected and not _has_text_items(analysis.get("uncertainty")):
+        counts["uncertainty_gap_count"] = 1
+
+    return counts
+
+
+def _collect_response_quality_from_jsonl(path: Path) -> Dict[str, int]:
+    counts = _empty_response_quality_counts()
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict):
+                _merge_response_quality_counts(
+                    counts, _score_response_quality_entry(entry)
+                )
+    return counts
+
+
+def _candidate_result_paths(report_path: Path, options: Dict[str, Any]) -> List[Path]:
+    directories: List[Path] = [report_path.parent]
+    output_dir = options.get("output_dir") if isinstance(options, dict) else None
+    if output_dir:
+        directories.append(Path(str(output_dir)))
+
+    candidates: Dict[str, Path] = {}
+    for directory in directories:
+        for filename in QUALITY_RESULT_FILENAMES:
+            candidate = directory / filename
+            candidates[str(candidate.resolve())] = candidate
+    return list(candidates.values())
+
+
+def _collect_response_quality_from_sidecar(
+    report_path: Path, options: Dict[str, Any]
+) -> Dict[str, int]:
+    for candidate in _candidate_result_paths(report_path, options):
+        if candidate.is_file():
+            return _collect_response_quality_from_jsonl(candidate)
+    return _empty_response_quality_counts()
 
 
 def _extract_target_years(summary: Dict[str, Any], options: Dict[str, Any]) -> Set[int]:
     years = summary.get("target_years")
     if years is None:
         years = options.get("years")
+    if years is None:
+        years = summary.get("season_year", options.get("season_year"))
     if years is None:
         return set()
     if isinstance(years, list):
@@ -110,6 +258,8 @@ def _extract_game_type(summary: Dict[str, Any], options: Dict[str, Any]) -> str:
     game_type = summary.get("game_type")
     if game_type is None:
         game_type = options.get("game_type")
+    if game_type is None:
+        game_type = summary.get("status_bucket", options.get("status_bucket"))
     if game_type is None:
         return ""
     return str(game_type).upper().strip()
@@ -135,9 +285,12 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     total_success = 0
     total_generated_success = 0
     total_skipped = 0
+    transport_failed_targets = 0
+    transport_failure_count = 0
     validator_fail_count = 0
     cache_invalid_year_count = 0
     legacy_residual_total = 0
+    response_quality_counts = _empty_response_quality_counts()
 
     warning_rate_numerator = 0.0
     warning_rate_denominator = 0
@@ -158,31 +311,70 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     for entry in reports:
         summary = entry["summary"]
         options = entry.get("options", {})
+        _merge_response_quality_counts(
+            response_quality_counts, entry.get("response_quality", {})
+        )
 
-        cases = _as_int(summary.get("cases"))
-        failed = _as_int(summary.get("failed"))
-        success = _as_int(summary.get("success"))
+        cases = _as_int(summary.get("cases", summary.get("total_targets")))
+        raw_failed = _as_int(summary.get("failed", summary.get("failed_targets")))
+        raw_success = _as_int(summary.get("success", summary.get("passed_targets")))
+        failed = _as_int(summary.get("content_failed_targets"), raw_failed)
+        success = _as_int(summary.get("content_passed_targets"), raw_success)
         generated_success = _as_int(
             summary.get("generated_success_count", summary.get("success"))
         )
+        if "generated_success_count" not in summary and "success" not in summary:
+            generated_success = success
         skipped = _as_int(summary.get("skipped_count", summary.get("skipped")))
+        if not skipped and "processed_targets" in summary and cases:
+            skipped = max(cases - _as_int(summary.get("processed_targets")), 0)
 
         total_cases += cases
         total_failed += failed
         total_success += success
         total_generated_success += generated_success
         total_skipped += skipped
+        transport_failed_targets += _as_int(summary.get("transport_failed_targets"))
+        transport_failure_count += _as_int(summary.get("transport_failure_count"))
 
-        validator_fail_count += _as_int(summary.get("validator_fail_count"))
+        validator_fail_count += _as_int(
+            summary.get(
+                "validator_fail_count",
+                summary.get(
+                    "content_hard_failure_count",
+                    summary.get("hard_failure_count"),
+                ),
+            )
+        )
         cache_invalid_year_count += _as_int(summary.get("cache_invalid_year_count"))
         legacy_residual_total += _as_int(summary.get("legacy_residual_total"))
 
-        warning_rate = _as_float(summary.get("warning_rate"))
+        if "warning_rate" in summary:
+            warning_rate = _as_float(summary.get("warning_rate"))
+        else:
+            warning_rate = (
+                _as_float(summary.get("soft_warning_count")) / success
+                if success > 0
+                else 0.0
+            )
         if success > 0:
             warning_rate_numerator += warning_rate * success
             warning_rate_denominator += success
 
-        critical_rate = _as_float(summary.get("critical_over_limit_rate"))
+        if "critical_over_limit_rate" in summary:
+            critical_rate = _as_float(summary.get("critical_over_limit_rate"))
+        else:
+            critical_rate = (
+                _as_float(
+                    summary.get(
+                        "content_hard_failure_count",
+                        summary.get("hard_failure_count"),
+                    )
+                )
+                / cases
+                if cases > 0
+                else 0.0
+            )
         if success > 0:
             critical_rate_numerator += critical_rate * success
             critical_rate_denominator += success
@@ -256,6 +448,34 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
         if drift_rate_denominator > 0
         else 0.0
     )
+    response_quality_checked_count = response_quality_counts["checked_count"]
+    weak_grounding_rate = (
+        round(
+            response_quality_counts["weak_grounding_count"]
+            / response_quality_checked_count,
+            4,
+        )
+        if response_quality_checked_count > 0
+        else 0.0
+    )
+    uncertainty_gap_rate = (
+        round(
+            response_quality_counts["uncertainty_gap_count"]
+            / response_quality_checked_count,
+            4,
+        )
+        if response_quality_checked_count > 0
+        else 0.0
+    )
+    thin_markdown_rate = (
+        round(
+            response_quality_counts["thin_markdown_count"]
+            / response_quality_checked_count,
+            4,
+        )
+        if response_quality_checked_count > 0
+        else 0.0
+    )
 
     return {
         "report_count": len(reports),
@@ -264,6 +484,8 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
         "generated_success_count": total_generated_success,
         "skipped_count": total_skipped,
         "failed": total_failed,
+        "transport_failed_targets": transport_failed_targets,
+        "transport_failure_count": transport_failure_count,
         "coverage_rate": coverage_rate,
         "validator_fail_count": validator_fail_count,
         "cache_invalid_year_count": cache_invalid_year_count,
@@ -276,6 +498,13 @@ def aggregate_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
         "drift_rate": drift_rate,
         "drift_reports": drift_reports,
         "coach_generation_reports": coach_generation_reports,
+        "response_quality_checked_count": response_quality_checked_count,
+        "weak_grounding_count": response_quality_counts["weak_grounding_count"],
+        "weak_grounding_rate": weak_grounding_rate,
+        "uncertainty_gap_count": response_quality_counts["uncertainty_gap_count"],
+        "uncertainty_gap_rate": uncertainty_gap_rate,
+        "thin_markdown_count": response_quality_counts["thin_markdown_count"],
+        "thin_markdown_rate": thin_markdown_rate,
         "observed_target_years": sorted(observed_years),
         "observed_game_types": sorted(observed_game_types),
         "observed_focus_signatures": sorted(observed_focus_signatures),
@@ -338,6 +567,22 @@ def evaluate_quality(
         thresholds["drift_rate_max"]
     ):
         failure_codes.append("drift_fail")
+
+    if _as_int(metrics.get("response_quality_checked_count")) > 0:
+        if _as_float(metrics.get("weak_grounding_rate")) > _as_float(
+            thresholds["weak_grounding_rate_max"]
+        ):
+            failure_codes.append("weak_grounding_fail")
+
+        if _as_float(metrics.get("uncertainty_gap_rate")) > _as_float(
+            thresholds["uncertainty_gap_rate_max"]
+        ):
+            failure_codes.append("uncertainty_gap_fail")
+
+        if _as_float(metrics.get("thin_markdown_rate")) > _as_float(
+            thresholds["thin_markdown_rate_max"]
+        ):
+            failure_codes.append("thin_markdown_fail")
 
     if _as_int(metrics.get("generated_success_count")) < required_generated_success:
         failure_codes.append("fresh_generation_fail")
@@ -442,6 +687,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_THRESHOLDS["focus_section_missing_rate_max"],
     )
     parser.add_argument(
+        "--weak-grounding-rate-max",
+        type=float,
+        default=DEFAULT_THRESHOLDS["weak_grounding_rate_max"],
+        help="Maximum share of structured responses missing verdict/why_it_matters.",
+    )
+    parser.add_argument(
+        "--uncertainty-gap-rate-max",
+        type=float,
+        default=DEFAULT_THRESHOLDS["uncertainty_gap_rate_max"],
+        help="Maximum share of partial/grounding-warning responses without uncertainty text.",
+    )
+    parser.add_argument(
+        "--thin-markdown-rate-max",
+        type=float,
+        default=DEFAULT_THRESHOLDS["thin_markdown_rate_max"],
+        help="Maximum share of structured responses with fewer than two detailed markdown sections.",
+    )
+    parser.add_argument(
         "--required-generated-success",
         type=int,
         default=0,
@@ -479,6 +742,9 @@ def main() -> int:
         "llm_manual_rate_min": args.llm_manual_rate_min,
         "fallback_rate_max": args.fallback_rate_max,
         "focus_section_missing_rate_max": args.focus_section_missing_rate_max,
+        "weak_grounding_rate_max": args.weak_grounding_rate_max,
+        "uncertainty_gap_rate_max": args.uncertainty_gap_rate_max,
+        "thin_markdown_rate_max": args.thin_markdown_rate_max,
     }
     required_years = parse_years_csv(args.require_years)
 
