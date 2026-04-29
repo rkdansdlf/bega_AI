@@ -264,7 +264,7 @@ FastAPI Application (8001)
     # --- Backend와 공유하는 내부 인증 / CORS ---
     AI_INTERNAL_TOKEN=local-dev-ai-internal-token
     # JSON 배열 또는 CSV 둘 다 허용
-    CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+    CORS_ORIGINS=["http://localhost:5176","http://127.0.0.1:5176","http://localhost:5177","http://127.0.0.1:5177"]
 
     # --- 공통 설정 ---
     DEFAULT_SEARCH_LIMIT=15

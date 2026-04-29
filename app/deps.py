@@ -208,6 +208,7 @@ def get_connection_pool() -> ConnectionPool:
             conninfo=settings.database_url,
             min_size=DB_POOL_MIN_SIZE,
             max_size=DB_POOL_MAX_SIZE,
+            check=ConnectionPool.check_connection,
             # TCP keepalive 옵션 및 기타 설정
             kwargs={
                 "keepalives": 1,
@@ -350,6 +351,14 @@ async def lifespan(app):
     cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
     logger.info("[Lifespan] chat_response_cache cleanup task started (interval=1h)")
 
+    # [Embedding Cache] 백엔드 미리 초기화 (startup 로그 출력)
+    try:
+        from .core.embedding_cache import get_backend as _get_embed_backend
+
+        await _get_embed_backend()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Lifespan] embedding cache backend init failed: %s", exc)
+
     yield
 
     # 종료 시: cleanup 태스크 취소 후 리소스 정리
@@ -361,6 +370,19 @@ async def lifespan(app):
 
     # httpx 클라이언트 정리
     await close_shared_httpx_clients()
+
+    # 임베딩 캐시 백엔드 정리 (Redis 사용 시 클라이언트 close)
+    try:
+        from .core.embedding_cache import get_backend as _get_embed_backend
+        from .core.embedding_cache import RedisEmbeddingBackend as _RedisBackend
+
+        backend = await _get_embed_backend()
+        if isinstance(backend, _RedisBackend):
+            client = getattr(backend, "_client", None)
+            if client is not None and hasattr(client, "aclose"):
+                await client.aclose()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Lifespan] embedding cache cleanup failed: %s", exc)
 
     reset_shared_baseball_agent_runtime()
     close_connection_pool()  # 모든 커넥션 정리
@@ -398,13 +420,17 @@ def get_db_connection() -> Generator[psycopg.Connection, None, None]:
         ) from exc
 
 
-def get_rag_pipeline(
-    conn: psycopg.Connection = Depends(get_db_connection),
-) -> RAGPipeline:
+def get_rag_pipeline() -> RAGPipeline:
+    """RAGPipeline에 ConnectionPool을 주입하여 멀티쿼리가 진정 병렬로 실행되도록 한다.
+
+    각 DB 호출은 풀에서 짧게 커넥션을 빌리므로, 멀티 variation 검색이
+    더 이상 단일 커넥션으로 직렬화되지 않는다.
+    """
     settings = get_settings()
+    pool_instance = get_connection_pool()
     return RAGPipeline(
         settings=settings,
-        connection=conn,
+        pool=pool_instance,
         agent_runtime=get_shared_baseball_agent_runtime(),
         context_formatter=_get_shared_context_formatter(),
         wpa_calculator=_get_shared_wpa_calculator(),
