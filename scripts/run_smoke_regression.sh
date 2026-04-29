@@ -52,7 +52,7 @@ ensure_no_conflicting_local_dev_ports() {
     return 0
   fi
 
-  local -a blocked_ports=(18001 8085 18080 18081)
+  local -a blocked_ports=(8080 18080)
   local port
   for port in "${blocked_ports[@]}"; do
     if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then

@@ -479,6 +479,7 @@ class TestCoachErrorMaskingHelpers:
     def test_sanitize_cache_error_code_allows_known_codes(self):
         from app.routers.coach import (
             COACH_DATA_INSUFFICIENT_CODE,
+            COACH_LLM_TIMEOUT_ERROR_CODE,
             COACH_STREAM_CANCELLED_ERROR_CODE,
             _sanitize_cache_error_code,
         )
@@ -488,6 +489,9 @@ class TestCoachErrorMaskingHelpers:
         )
         assert _sanitize_cache_error_code(COACH_STREAM_CANCELLED_ERROR_CODE) == (
             COACH_STREAM_CANCELLED_ERROR_CODE
+        )
+        assert _sanitize_cache_error_code(COACH_LLM_TIMEOUT_ERROR_CODE) == (
+            COACH_LLM_TIMEOUT_ERROR_CODE
         )
 
     def test_sanitize_cache_error_code_falls_back_for_unknown(self):
@@ -511,6 +515,16 @@ class TestCoachErrorMaskingHelpers:
         assert message
         assert "db_timeout_with_internal_trace" not in message
         assert message == _cache_error_message_for_user(COACH_INTERNAL_ERROR_CODE)
+
+    def test_cache_error_code_from_exception_identifies_coach_llm_timeout(self):
+        from app.routers.coach import (
+            COACH_LLM_TIMEOUT_ERROR_CODE,
+            _cache_error_code_from_exception,
+        )
+
+        assert _cache_error_code_from_exception(
+            TimeoutError("coach_llm_stream_timeout_after_18s")
+        ) == COACH_LLM_TIMEOUT_ERROR_CODE
 
     def test_coach_public_error_payload_masks_unknown_code(self):
         from app.routers.coach import (
@@ -591,6 +605,12 @@ class TestCoachEvidenceHelpers:
 
         assert _normalize_game_status_bucket("POSTPONED") == "UNKNOWN"
         assert _normalize_game_status_bucket("CANCELLED") == "UNKNOWN"
+
+    def test_draw_game_status_bucket_is_completed(self):
+        from app.routers.coach import _normalize_game_status_bucket
+
+        assert _normalize_game_status_bucket("DRAW") == "COMPLETED"
+        assert _normalize_game_status_bucket("TIE") == "COMPLETED"
 
     def test_unavailable_game_status_message_is_defined_for_cancelled_and_postponed(
         self,
@@ -903,6 +923,72 @@ class TestCoachEvidenceHelpers:
             == "6회초 SSG 공격 장면의 WPA -16.4%p 변동"
         )
 
+    def test_completed_clutch_moment_text_ignores_separator_description(self):
+        from app.routers.coach import _completed_clutch_moment_text
+
+        moment = {
+            "inning_label": "9회말",
+            "description": "=" * 80,
+            "wpa_delta_pct": -50.0,
+        }
+
+        assert _completed_clutch_moment_text(moment) == "9회말 핵심 장면"
+        assert (
+            _completed_clutch_moment_text(moment, with_wpa=True)
+            == "9회말 핵심 장면의 WPA -50.0%p 변동"
+        )
+
+    def test_completed_deterministic_metrics_compacts_long_wpa_values(self):
+        from app.core.coach_validator import MAX_KEY_METRIC_VALUE_LENGTH
+        from app.routers.coach import _build_deterministic_metrics
+
+        evidence = _build_game_evidence(
+            home_team_code="HH",
+            away_team_code="SK",
+            home_team_name="한화 이글스",
+            away_team_name="SSG 랜더스",
+            game_status="COMPLETED",
+            game_status_bucket="COMPLETED",
+            home_score=8,
+            away_score=9,
+            winning_team_code="SK",
+            winning_team_name="SSG 랜더스",
+        )
+        tool_results = {
+            "home": {
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 2, "losses": 3, "draws": 0, "run_diff": -2},
+                },
+                "advanced": {"metrics": {"batting": {"ops": 0.711}}},
+            },
+            "away": {
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 3, "losses": 2, "draws": 0, "run_diff": 4},
+                },
+                "advanced": {"metrics": {"batting": {"ops": 0.752}}},
+            },
+            "clutch_moments": {
+                "found": True,
+                "moments": [
+                    {
+                        "inning_label": "9회말",
+                        "batter_name": None,
+                        "description": "=" * 80,
+                        "wpa_delta_pct": -50.0,
+                    }
+                ],
+            },
+        }
+
+        metrics = _build_deterministic_metrics(evidence, tool_results)
+
+        assert any(metric["label"] == "최대 WPA 변동" for metric in metrics)
+        assert all(
+            len(metric["value"]) <= MAX_KEY_METRIC_VALUE_LENGTH for metric in metrics
+        )
+
     def test_completed_deterministic_review_separates_section_roles(self):
         from app.routers.coach import _build_deterministic_coach_response
 
@@ -1080,6 +1166,86 @@ class TestCoachEvidenceHelpers:
                 fact_sheet=fact_sheet,
                 game_status_bucket="SCHEDULED",
                 grounding_reasons=["missing_lineups", "missing_summary"],
+            )
+            is False
+        )
+
+    def test_manual_recent_form_fast_path_requires_flag(self, monkeypatch):
+        from app.core.coach_grounding import CoachFactSheet
+        from app.routers import coach as coach_module
+
+        fact_sheet = CoachFactSheet(
+            fact_lines=["홈팀 최근 10경기 7승 3패"],
+            caveat_lines=[],
+            allowed_entity_names={"LG 트윈스"},
+            allowed_numeric_tokens={"7", "3"},
+            supported_fact_count=1,
+            starters_confirmed=True,
+            lineup_confirmed=True,
+            series_context_confirmed=True,
+            require_series_context=False,
+        )
+
+        monkeypatch.delenv("COACH_FAST_PATH_MANUAL_RECENT_FORM", raising=False)
+        assert coach_module._coach_fast_path_manual_recent_form_enabled() is False
+        assert (
+            coach_module._should_short_circuit_to_deterministic_response(
+                request_mode=coach_module.COACH_REQUEST_MODE_MANUAL,
+                fact_sheet=fact_sheet,
+                game_status_bucket="LIVE",
+                grounding_reasons=[],
+                resolved_focus=["recent_form"],
+            )
+            is False
+        )
+
+    def test_manual_recent_form_fast_path_triggers_when_flag_on(self, monkeypatch):
+        from app.core.coach_grounding import CoachFactSheet
+        from app.routers import coach as coach_module
+
+        fact_sheet = CoachFactSheet(
+            fact_lines=["홈팀 최근 10경기 7승 3패"],
+            caveat_lines=[],
+            allowed_entity_names={"LG 트윈스"},
+            allowed_numeric_tokens={"7", "3"},
+            supported_fact_count=1,
+            starters_confirmed=True,
+            lineup_confirmed=True,
+            series_context_confirmed=True,
+            require_series_context=False,
+        )
+
+        monkeypatch.setenv("COACH_FAST_PATH_MANUAL_RECENT_FORM", "1")
+        assert coach_module._coach_fast_path_manual_recent_form_enabled() is True
+        assert (
+            coach_module._should_short_circuit_to_deterministic_response(
+                request_mode=coach_module.COACH_REQUEST_MODE_MANUAL,
+                fact_sheet=fact_sheet,
+                game_status_bucket="LIVE",
+                grounding_reasons=[],
+                resolved_focus=["recent_form"],
+            )
+            is True
+        )
+        # Mixed focus should NOT trigger the fast path.
+        assert (
+            coach_module._should_short_circuit_to_deterministic_response(
+                request_mode=coach_module.COACH_REQUEST_MODE_MANUAL,
+                fact_sheet=fact_sheet,
+                game_status_bucket="LIVE",
+                grounding_reasons=[],
+                resolved_focus=["recent_form", "pitcher_matchup"],
+            )
+            is False
+        )
+        # Empty focus should NOT trigger the fast path either.
+        assert (
+            coach_module._should_short_circuit_to_deterministic_response(
+                request_mode=coach_module.COACH_REQUEST_MODE_MANUAL,
+                fact_sheet=fact_sheet,
+                game_status_bucket="LIVE",
+                grounding_reasons=[],
+                resolved_focus=[],
             )
             is False
         )
@@ -1441,6 +1607,117 @@ class TestCoachEvidenceHelpers:
             is False
         )
 
+    def test_manual_detail_regenerates_cache_when_current_evidence_is_richer(self):
+        from app.routers.coach import (
+            COACH_REQUEST_MODE_MANUAL,
+            _should_regenerate_completed_cache,
+        )
+
+        stale_payload = {
+            "response": {
+                "headline": "KIA 타이거즈 vs NC 다이노스, 부분 근거 분석",
+                "detailed_markdown": "## 최근 전력\n- 데이터 부족",
+                "coach_note": "선발과 라인업 확인 후 보강이 필요합니다.",
+                "analysis": {
+                    "summary": "데이터가 부족합니다.",
+                    "verdict": "보수적으로 봐야 합니다.",
+                    "strengths": [],
+                    "weaknesses": [],
+                    "risks": [],
+                    "why_it_matters": [],
+                    "swing_factors": [],
+                    "watch_points": [],
+                    "uncertainty": [],
+                },
+                "key_metrics": [],
+            },
+            "_meta": {
+                "data_quality": "partial",
+                "game_status_bucket": "UNKNOWN",
+                "used_evidence": ["game", "kbo_seasons"],
+                "grounding_reasons": [
+                    "missing_starters",
+                    "missing_lineups",
+                    "missing_summary",
+                    "missing_metadata",
+                ],
+            },
+        }
+
+        assert (
+            _should_regenerate_completed_cache(
+                cached_data=stale_payload,
+                request_mode=COACH_REQUEST_MODE_MANUAL,
+                expected_data_quality="grounded",
+                expected_used_evidence=[
+                    "game",
+                    "kbo_seasons",
+                    "game_metadata",
+                    "game_lineups",
+                    "game_summary",
+                ],
+                expected_game_status_bucket="SCHEDULED",
+                current_root_causes=[],
+            )
+            is True
+        )
+
+    def test_manual_detail_keeps_cache_when_evidence_contract_matches(self):
+        from app.routers.coach import (
+            COACH_REQUEST_MODE_MANUAL,
+            _should_regenerate_completed_cache,
+        )
+
+        cached_payload = {
+            "response": {
+                "headline": "KIA 타이거즈 vs NC 다이노스, 근거 기반 분석",
+                "detailed_markdown": "## 최근 전력\n- KIA 4승 5패 / NC 4승 6패",
+                "coach_note": "선발 기준으로 봅니다.",
+                "analysis": {
+                    "summary": "확인된 근거 기준 분석입니다.",
+                    "verdict": "확인된 근거를 우선 봅니다.",
+                    "strengths": [],
+                    "weaknesses": [],
+                    "risks": [],
+                    "why_it_matters": [],
+                    "swing_factors": [],
+                    "watch_points": [],
+                    "uncertainty": [],
+                },
+                "key_metrics": [],
+            },
+            "_meta": {
+                "data_quality": "grounded",
+                "game_status_bucket": "SCHEDULED",
+                "used_evidence": [
+                    "game",
+                    "kbo_seasons",
+                    "game_metadata",
+                    "game_lineups",
+                    "game_summary",
+                ],
+                "grounding_reasons": [],
+            },
+        }
+
+        assert (
+            _should_regenerate_completed_cache(
+                cached_data=cached_payload,
+                request_mode=COACH_REQUEST_MODE_MANUAL,
+                expected_data_quality="grounded",
+                expected_used_evidence=[
+                    "game",
+                    "kbo_seasons",
+                    "game_metadata",
+                    "game_lineups",
+                    "game_summary",
+                ],
+                expected_game_status_bucket="SCHEDULED",
+                current_root_causes=[],
+            )
+            is False
+        )
+
     def test_determine_cache_gate_keeps_completed_manual_fallback_as_hit(self):
         from app.routers.coach import (
             COACH_REQUEST_MODE_MANUAL,
@@ -1583,6 +1860,155 @@ class TestCoachEvidenceHelpers:
 
         with pytest.raises(TimeoutError, match="first_chunk_timeout"):
             asyncio.run(_run())
+
+    def test_coach_stream_preview_flag_defaults_to_disabled(self, monkeypatch):
+        from app.routers import coach as coach_module
+
+        monkeypatch.delenv("COACH_STREAM_PREVIEW_ENABLED", raising=False)
+        assert coach_module._coach_stream_preview_enabled() is False
+
+    @pytest.mark.parametrize(
+        "env_value,expected",
+        [
+            ("1", True),
+            ("true", True),
+            ("TRUE", True),
+            ("yes", True),
+            ("on", True),
+            ("0", False),
+            ("false", False),
+            ("", False),
+            ("no", False),
+        ],
+    )
+    def test_coach_stream_preview_flag_env_parsing(
+        self, monkeypatch, env_value, expected
+    ):
+        from app.routers import coach as coach_module
+
+        monkeypatch.setenv("COACH_STREAM_PREVIEW_ENABLED", env_value)
+        assert coach_module._coach_stream_preview_enabled() is expected
+
+    def test_coach_prompt_v2_split_is_byte_identical(self):
+        from app.core.prompts import (
+            COACH_PROMPT_V2,
+            COACH_PROMPT_V2_DYNAMIC_TEMPLATE,
+            COACH_PROMPT_V2_STATIC,
+        )
+
+        assert (
+            COACH_PROMPT_V2_STATIC + COACH_PROMPT_V2_DYNAMIC_TEMPLATE
+            == COACH_PROMPT_V2
+        )
+        assert "{focus_section_requirements}" not in COACH_PROMPT_V2_STATIC
+        assert "{question}" not in COACH_PROMPT_V2_STATIC
+        assert "{context}" not in COACH_PROMPT_V2_STATIC
+
+    def test_build_coach_llm_messages_disabled_returns_plain_string(
+        self, monkeypatch
+    ):
+        from app.routers import coach as coach_module
+
+        monkeypatch.setenv("COACH_PROMPT_CACHE_ENABLED", "0")
+        messages = coach_module._build_coach_llm_messages(
+            "STATIC_PREFIX_",
+            "DYNAMIC_SUFFIX",
+        )
+        assert messages == [
+            {"role": "user", "content": "STATIC_PREFIX_DYNAMIC_SUFFIX"}
+        ]
+
+    def test_build_coach_llm_messages_enabled_applies_cache_control(
+        self, monkeypatch
+    ):
+        from app.routers import coach as coach_module
+
+        monkeypatch.setenv("COACH_PROMPT_CACHE_ENABLED", "1")
+        monkeypatch.setenv("COACH_PROMPT_CACHE_MIN_STATIC_CHARS", "10")
+        static_text = "A" * 50
+        dynamic_text = "DYNAMIC"
+        messages = coach_module._build_coach_llm_messages(
+            static_text, dynamic_text
+        )
+        assert len(messages) == 1
+        content = messages[0]["content"]
+        assert isinstance(content, list)
+        assert content[0]["text"] == static_text
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+        assert content[1]["text"] == dynamic_text
+        assert "cache_control" not in content[1]
+        # Byte-identical when concatenated back.
+        assert content[0]["text"] + content[1]["text"] == static_text + dynamic_text
+
+    def test_coach_latency_tracker_records_phase_timings(self):
+        from app.routers.coach import _CoachLatencyTracker
+
+        tracker = _CoachLatencyTracker(request_started=0.0)
+        tracker.mark_tool_fetch_start()
+        tracker.mark_tool_fetch_complete()
+        tracker.mark_llm_start()
+        tracker.mark_first_preview()
+        tracker.mark_first_preview()  # idempotent — should not overwrite
+        first_preview_initial = tracker.first_preview_at
+        tracker.mark_first_preview()
+        assert tracker.first_preview_at == first_preview_initial
+        tracker.mark_llm_complete()
+        tracker.mark_grounding_start()
+        tracker.mark_grounding_complete()
+
+        summary = tracker.build_summary(
+            cache_state="COMPLETED",
+            request_mode="manual_detail",
+            game_status_bucket="LIVE",
+            generation_mode="llm_manual",
+            fast_path=False,
+            preview_enabled=True,
+            cache_enabled=False,
+        )
+
+        assert summary["cache_state"] == "COMPLETED"
+        assert summary["request_mode"] == "manual_detail"
+        assert summary["fast_path"] is False
+        assert summary["preview_enabled"] is True
+        assert summary["cache_enabled"] is False
+        assert summary["coach_total_seconds"] is not None
+        assert summary["coach_ttfb_seconds"] is not None
+        assert summary["coach_llm_seconds"] is not None
+        assert summary["coach_grounding_seconds"] is not None
+        assert summary["coach_tool_fetch_seconds"] is not None
+
+    def test_coach_latency_tracker_summary_handles_missing_phases(self):
+        from app.routers.coach import _CoachLatencyTracker
+
+        tracker = _CoachLatencyTracker(request_started=0.0)
+        summary = tracker.build_summary(
+            cache_state="CACHED",
+            request_mode="auto_brief",
+            game_status_bucket="FINAL",
+            generation_mode="deterministic_auto",
+            fast_path=False,
+            preview_enabled=False,
+            cache_enabled=True,
+        )
+        assert summary["coach_ttfb_seconds"] is None
+        assert summary["coach_llm_seconds"] is None
+        assert summary["coach_grounding_seconds"] is None
+        assert summary["coach_tool_fetch_seconds"] is None
+        assert summary["cache_enabled"] is True
+
+    def test_build_coach_llm_messages_enabled_skips_below_threshold(
+        self, monkeypatch
+    ):
+        from app.routers import coach as coach_module
+
+        monkeypatch.setenv("COACH_PROMPT_CACHE_ENABLED", "1")
+        monkeypatch.setenv("COACH_PROMPT_CACHE_MIN_STATIC_CHARS", "9999")
+        messages = coach_module._build_coach_llm_messages(
+            "short_static", "dynamic"
+        )
+        assert messages == [
+            {"role": "user", "content": "short_staticdynamic"}
+        ]
 
 
 # ============================================================
@@ -1771,6 +2197,43 @@ class TestCoachFastPath:
 
         assert len(COACH_CACHE_PROMPT_VERSION) <= 32
 
+    def test_claim_cache_generation_retries_once_after_operational_error(
+        self, monkeypatch
+    ):
+        from app.routers import coach
+
+        calls: list[dict[str, object]] = []
+
+        class _Pool:
+            check_count = 0
+
+            def check(self):
+                self.check_count += 1
+
+        def _fake_claim_once(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise coach.psycopg.OperationalError("server closed connection")
+            return "HIT", {"ok": True}, None, None, 2
+
+        pool = _Pool()
+        monkeypatch.setattr(coach, "_claim_cache_generation_once", _fake_claim_once)
+
+        result = coach._claim_cache_generation(
+            pool=pool,
+            cache_key="cache-key",
+            team_id="HH",
+            year=2026,
+            prompt_version="v-test",
+            model_name="model",
+            lease_owner="owner",
+            completed_ttl_seconds=None,
+        )
+
+        assert result == ("HIT", {"ok": True}, None, None, 2)
+        assert len(calls) == 2
+        assert pool.check_count == 1
+
     def test_build_coach_query(self):
         """Coach 쿼리 빌드 테스트"""
         from app.routers.coach import _build_coach_query
@@ -1898,6 +2361,67 @@ class TestCoachFastPath:
         assert not any(
             metric["label"] == "최대 WPA 변동" for metric in payload["key_metrics"]
         )
+
+    def test_completed_summary_item_skips_structured_preview_json(self):
+        from app.routers.coach import (
+            _build_deterministic_headline,
+            _format_game_summary_item,
+        )
+
+        preview_summary = _format_game_summary_item(
+            "프리뷰",
+            None,
+            '{"game_id":"20260426LGOB0","home_lineup":[{"player_name":"김민석"}]}',
+        )
+        evidence = _build_game_evidence(
+            game_status="COMPLETED",
+            game_status_bucket="COMPLETED",
+            home_score=4,
+            away_score=3,
+            winning_team_code="DB",
+            winning_team_name="두산 베어스",
+            summary_items=[item for item in [preview_summary] if item],
+        )
+
+        headline = _build_deterministic_headline(evidence, {})
+
+        assert preview_summary is None
+        assert "프리뷰" not in headline
+        assert "game_id" not in headline
+        assert "두산 베어스 승리 리뷰" in headline
+
+    def test_completed_summary_items_filter_json_before_limit(self):
+        from app.routers.coach import _format_game_summary_items
+
+        rows = [
+            {
+                "summary_type": "프리뷰",
+                "player_name": None,
+                "detail_text": '{"game_id":"20260426LGOB0"}',
+            }
+            for _ in range(9)
+        ]
+        rows.extend(
+            [
+                {
+                    "summary_type": "결승타",
+                    "player_name": "양의지",
+                    "detail_text": "10회말 좌전 적시타",
+                },
+                {
+                    "summary_type": "리뷰_WPA",
+                    "player_name": None,
+                    "detail_text": "10회말 핵심 장면 WPA 50.0%p",
+                },
+            ]
+        )
+
+        items = _format_game_summary_items(rows, limit=2)
+
+        assert items == [
+            "결승타 양의지 (10회말 좌전 적시타)",
+            "리뷰_WPA (10회말 핵심 장면 WPA 50.0%p)",
+        ]
 
     def test_completed_deterministic_response_anchors_actual_winner(self):
         from app.routers.coach import _build_deterministic_coach_response
@@ -3905,6 +4429,46 @@ class TestCoachFastPath:
             == "## 최근 전력\n- SSG 랜더스 +11 / 한화 이글스 +8\n\n## 불펜 상태\n- 데이터 부족\n\n## 체크 포인트\n불펜 교체 시점 확인"
         )
 
+    def test_normalize_response_markdown_layout_repairs_broken_bold_focus_headers(
+        self,
+    ):
+        from app.routers.coach import (
+            _find_missing_focus_sections,
+            _normalize_response_markdown_layout,
+        )
+
+        response_data = {
+            "detailed_markdown": (
+                "## 체크 포인트\n"
+                "- **\n\n"
+                "## 최근 전력**: SSG 랜더스 8승 2패 / 한화 이글스 4승 6패\n"
+                "- **\n\n"
+                "## 불펜 상태**: 데이터 부족으로 후반 운용은 보수적으로 봐야 합니다.\n"
+                "- **\n\n"
+                "## 선발 투수**: 최민준 vs 왕옌청"
+            )
+        }
+
+        normalized = _normalize_response_markdown_layout(response_data)
+
+        assert "## 최근 전력**" not in normalized["detailed_markdown"]
+        assert "- **" not in normalized["detailed_markdown"]
+        assert (
+            "## 최근 전력\n- SSG 랜더스 8승 2패 / 한화 이글스 4승 6패"
+            in normalized["detailed_markdown"]
+        )
+        assert (
+            "## 불펜 상태\n- 데이터 부족으로 후반 운용은 보수적으로 봐야 합니다."
+            in normalized["detailed_markdown"]
+        )
+        assert "## 선발 투수\n- 최민준 vs 왕옌청" in normalized["detailed_markdown"]
+        assert (
+            _find_missing_focus_sections(
+                normalized, ["recent_form", "bullpen", "starter"]
+            )
+            == []
+        )
+
     def test_normalize_response_team_display_expands_korean_short_aliases(self):
         from app.routers.coach import _normalize_response_team_display
 
@@ -4239,6 +4803,135 @@ class TestCoachFastPath:
             == "## 다시 볼 장면\n선발 투수 발표 후 핵심 구간을 다시 분석해야 합니다."
         )
 
+    def test_cleanup_response_language_quality_fixes_sanitized_entity_artifacts(self):
+        from app.routers.coach import _cleanup_response_language_quality
+
+        response_data = {
+            "headline": "SSG 랜더스 vs 삼성 라이온즈, 상승세 맞불 대구개막",
+            "coach_note": (
+                "선발 이닝 소화 후 불펜으로 핵심 선수는 경기 운영에 영향을 준다."
+            ),
+            "key_metrics": [],
+            "analysis": {
+                "summary": (
+                    "선발 이닝 소화 후 불펜으로 핵심 선수가 경기 운영에 영향을 준다. 핵심 구간는 경기 후반입니다."
+                ),
+                "verdict": "긍분위기에서 불펜으로 핵심 선수를 확인해야 합니다.",
+                "strengths": [],
+                "weaknesses": [],
+                "why_it_matters": [],
+                "swing_factors": [],
+                "watch_points": [],
+                "uncertainty": [],
+                "risks": [],
+            },
+            "detailed_markdown": (
+                "## 불펜 상태\n"
+                "- 선발 이닝 소화 후 불펜으로 핵심 선수는 경기 운영에 영향을 준다."
+            ),
+        }
+
+        cleaned = _cleanup_response_language_quality(response_data)
+
+        assert (
+            cleaned["headline"]
+            == "SSG 랜더스 vs 삼성 라이온즈, 상승세 맞불 대구 개막"
+        )
+        assert (
+            cleaned["coach_note"]
+            == "선발 이닝 소화 후 불펜 운용은 경기 운영에 영향을 준다."
+        )
+        assert (
+            cleaned["analysis"]["summary"]
+            == "선발 이닝 소화 후 불펜 운용이 경기 운영에 영향을 준다. 핵심 구간은 경기 후반입니다."
+        )
+        assert (
+            cleaned["analysis"]["verdict"]
+            == "긍정적인 분위기에서 불펜 운용을 확인해야 합니다."
+        )
+        assert (
+            cleaned["detailed_markdown"]
+            == "## 불펜 상태\n- 선발 이닝 소화 후 불펜 운용은 경기 운영에 영향을 준다."
+        )
+
+    def test_scheduled_output_guard_detects_review_and_starter_conflicts(self):
+        from types import SimpleNamespace
+
+        from app.routers.coach import _scheduled_output_guard_reasons
+
+        payload = {
+            "headline": "최대 10경기 성적 분석",
+            "detailed_markdown": (
+                "## 선발 투수\n"
+                "- 선발 미확정으로 선발 대결 분석 불가능합니다.\n\n"
+                "## 결과 진단\n"
+                "- SSG 랜더스의 우위 확정."
+            ),
+        }
+        evidence = SimpleNamespace(
+            game_status_bucket="SCHEDULED",
+            home_pitcher="후라도",
+            away_pitcher="최민준",
+        )
+
+        reasons = _scheduled_output_guard_reasons(payload, evidence)
+
+        assert any(reason.startswith("review_marker:") for reason in reasons)
+        assert any(reason.startswith("starter_conflict:") for reason in reasons)
+
+    def test_polish_scheduled_partial_response_also_cleans_grounded_scheduled_copy(
+        self,
+    ):
+        from app.routers.coach import _polish_scheduled_partial_response
+
+        response_data = {
+            "headline": "SSG 랜더스의 오프ensive 우위",
+            "coach_note": "",
+            "key_metrics": [{"label": "최근 WPA 변동", "value": "WPA/PA 데이터 부족"}],
+            "analysis": {
+                "summary": "키움 히어로즈은 OPS 우위이지만 WPA/PA는 변수입니다. 두산 베어스을 압박하고 한화 이글스과 맞섭니다.",
+                "verdict": "SSG 랜더스의 오프ensive 흐름이 변수입니다.",
+                "strengths": [],
+                "weaknesses": [],
+                "why_it_matters": ["WPA 변동은 후반 운용 판단에 중요했습니다."],
+                "swing_factors": ["불펜의 WPA/PA 데이터는 미확정입니다."],
+                "watch_points": ["경기 후반 불펜 투입 시점"],
+                "uncertainty": [],
+                "risks": [
+                    {
+                        "area": "bullpen",
+                        "level": 1,
+                        "description": "선발 미확정으로 WPA/PA 데이터 부족",
+                    }
+                ],
+            },
+            "detailed_markdown": (
+                "## 다시 볼 장면\n"
+                "- 선발 정보가 완전히 확정되지 않아 SSG 랜더스 오프ensive 흐름과 WPA/PA를 확인합니다."
+            ),
+        }
+
+        polished = _polish_scheduled_partial_response(
+            response_data,
+            game_status_bucket="SCHEDULED",
+            grounding_reasons=[],
+        )
+        blob = str(polished)
+
+        assert "WPA" not in blob
+        assert "오프ensive" not in blob
+        assert "히어로즈은" not in blob
+        assert "베어스을" not in blob
+        assert "이글스과" not in blob
+        assert "선발 미확정" not in blob
+        assert "선발 정보가 완전히 확정되지" not in blob
+        assert "공식 선발 발표 전이라" in blob
+        assert "두산 베어스를" in blob
+        assert "한화 이글스와" in blob
+        assert polished["coach_note"]
+        assert polished["key_metrics"][0]["label"] == "최근 운영 지표"
+        assert polished["detailed_markdown"].startswith("## 체크 포인트")
+
     def test_polish_scheduled_partial_response_rewrites_jargon(self):
         from app.routers.coach import _polish_scheduled_partial_response
 
@@ -4278,11 +4971,11 @@ class TestCoachFastPath:
         assert polished["key_metrics"][0]["value"] == "비교가 어렵다"
         assert (
             polished["analysis"]["summary"]
-            == "불펜 비중이 공개되지 않아 접전 후반 상황 처리 능력은 비교가 어렵다."
+            == "불펜 운용 정보가 공개되지 않아 접전 후반 상황 처리 능력은 비교가 어렵다."
         )
         assert (
             polished["analysis"]["verdict"]
-            == "핵심 변수는 불펜 비중이 공개되지 않아 경기 후반 변수 확인이 어렵습니다."
+            == "핵심 변수는 불펜 운용 정보가 공개되지 않아 경기 후반 변수 확인이 어렵습니다."
         )
         assert polished["analysis"]["weaknesses"][0] == "접전 후반 상황 판단이 어렵다."
         assert (
@@ -4394,7 +5087,7 @@ class TestCoachFastPath:
 
         assert polished["detailed_markdown"] == (
             "## 불펜 상태\n"
-            "- 두 팀 모두 불펜 운용 데이터가 부족해, 불펜전의 중요성이 더욱 부각되고 있습니다."
+            "- 두 팀 모두 불펜 운용 근거가 제한돼, 불펜전의 중요성이 더욱 부각되고 있습니다."
         )
 
     def test_polish_scheduled_partial_response_rewrites_bullpen_share_marked_missing_variants(
@@ -4889,6 +5582,51 @@ class TestCoachFastPath:
             == "## 최근 전력\n- 한화 이글스 상승 83.1 / SSG 랜더스 상승 93.0\n\n## 불펜 상태\n- 양 팀 모두 불펜 운용 데이터 부족\n\n## 코치 판단\n- 첫 번째 불펜 선택이 가장 큰 변수입니다."
         )
 
+    def test_ensure_detailed_markdown_backfills_malformed_focus_headers(self):
+        from app.routers.coach import _ensure_detailed_markdown
+
+        response_payload = {
+            "key_metrics": [
+                {
+                    "label": "최근 흐름",
+                    "value": "SSG 랜더스 8승 2패 / 한화 이글스 4승 6패",
+                },
+                {"label": "불펜 운용", "value": "양 팀 모두 불펜 운용 데이터 부족"},
+                {"label": "선발 투수", "value": "최민준 / 왕옌청"},
+            ],
+            "analysis": {
+                "summary": "SSG 랜더스가 확인된 지표에서 앞섭니다.",
+                "verdict": "SSG 랜더스가 앞서지만 후반 변수는 남아 있습니다.",
+                "why_it_matters": [],
+                "swing_factors": [],
+                "watch_points": [],
+                "uncertainty": [],
+            },
+            "detailed_markdown": (
+                "## 체크 포인트\n"
+                "- **\n\n"
+                "## 최근 전력**: SSG 랜더스 8승 2패 / 한화 이글스 4승 6패\n"
+                "- **\n\n"
+                "## 불펜 상태**: 데이터 부족으로 후반 운용은 보수적으로 봐야 합니다.\n"
+                "- **\n\n"
+                "## 선발 투수**: 최민준 vs 왕옌청"
+            ),
+        }
+
+        _ensure_detailed_markdown(
+            response_payload, ["recent_form", "bullpen", "starter"]
+        )
+
+        markdown = response_payload["detailed_markdown"]
+        assert "## 최근 전력**" not in markdown
+        assert "- **" not in markdown
+        assert "## 최근 전력\n- SSG 랜더스 8승 2패 / 한화 이글스 4승 6패" in markdown
+        assert (
+            "## 불펜 상태\n- 데이터 부족으로 후반 운용은 보수적으로 봐야 합니다."
+            in markdown
+        )
+        assert "## 선발 투수\n- 최민준 vs 왕옌청" in markdown
+
     def test_ensure_detailed_markdown_inserts_missing_focus_after_existing_focus_sections(
         self,
     ):
@@ -4979,11 +5717,64 @@ class TestCoachFastPath:
             in markdown
         )
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
-        assert (
-            "## 상대 전적\n- 상대 전적 근거가 충분하지 않아 직접 비교는 보수적으로 해석해야 합니다."
-            in markdown
-        )
+        assert "## 상대 전적\n-" in markdown
+        assert "상대" in markdown or "맞대결" in markdown
         assert "## 타격 생산성\n- NC 다이노스 0.799 / 한화 이글스 0.783" in markdown
+
+    def test_completed_focus_fallback_copy_varies_by_game_id(self):
+        from app.routers.coach import (
+            _completed_review_bullpen_focus_summary,
+            _completed_review_matchup_focus_summary,
+            _completed_review_recent_focus_summary,
+            _completed_review_starter_focus_summary,
+        )
+
+        tool_results = {
+            "home": {"recent": {"found": False}, "advanced": {}, "summary": {}},
+            "away": {"recent": {"found": False}, "advanced": {}, "summary": {}},
+            "matchup": {"summary": {}},
+        }
+        evidences = [
+            _build_game_evidence(
+                game_id=f"20260427LGKT{index}",
+                game_status="COMPLETED",
+                game_status_bucket="COMPLETED",
+                home_pitcher=None,
+                away_pitcher=None,
+            )
+            for index in range(12)
+        ]
+
+        bullpen_summaries = {
+            _completed_review_bullpen_focus_summary(evidence, tool_results)
+            for evidence in evidences
+        }
+        recent_summaries = {
+            _completed_review_recent_focus_summary(evidence, tool_results)
+            for evidence in evidences
+        }
+        starter_summaries = {
+            _completed_review_starter_focus_summary(evidence) for evidence in evidences
+        }
+        matchup_summaries = {
+            _completed_review_matchup_focus_summary(evidence, tool_results)
+            for evidence in evidences
+        }
+
+        assert len(bullpen_summaries) > 1
+        assert len(recent_summaries) > 1
+        assert len(starter_summaries) > 1
+        assert len(matchup_summaries) > 1
+        assert all("불펜" in summary for summary in bullpen_summaries)
+        assert all("최근" in summary for summary in recent_summaries)
+        assert all("선발" in summary for summary in starter_summaries)
+        assert all(
+            "상대" in summary or "맞대결" in summary
+            for summary in matchup_summaries
+        )
+        assert _completed_review_bullpen_focus_summary(
+            evidences[0], tool_results
+        ) == _completed_review_bullpen_focus_summary(evidences[0], tool_results)
 
     def test_ensure_detailed_markdown_uses_completed_focus_specific_summaries(self):
         from app.routers.coach import _ensure_detailed_markdown
@@ -5082,7 +5873,11 @@ class TestCoachFastPath:
             in markdown
         )
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
-        assert "## 상대 전적\n- 상대 전적 표본이 부족합니다." in markdown
+        assert "## 상대 전적\n-" in markdown
+        assert any(
+            phrase in markdown
+            for phrase in ("상대 전적", "맞대결 표본", "직접 비교")
+        )
         assert "## 타격 생산성\n- NC 다이노스 0.799 / 한화 이글스 0.783" in markdown
         assert "## 불펜 상태\n- NC 다이노스 4 / 한화 이글스 11 경기에서" not in markdown
 
@@ -5186,7 +5981,11 @@ class TestCoachFastPath:
             in markdown
         )
         assert "## 선발 투수\n- NC 다이노스 김태경 / 한화 이글스 류현진" in markdown
-        assert "## 상대 전적\n- 상대 전적 표본이 부족합니다." in markdown
+        assert "## 상대 전적\n-" in markdown
+        assert any(
+            phrase in markdown
+            for phrase in ("상대 전적", "맞대결 표본", "직접 비교")
+        )
         assert "## 타격 생산성\n- NC 다이노스 0.799 / 한화 이글스 0.783" in markdown
         assert "OPS 우세가 먼저 보였습니다" not in markdown
         assert "NC 다이노스 4 / 한화 이글스 11 경기에서" not in markdown
@@ -5318,6 +6117,57 @@ class TestCoachFastPath:
         assert payload["analysis"]["verdict"]
         assert payload["analysis"]["why_it_matters"]
 
+    def test_scheduled_missing_starters_before_announcement_is_preview_pending(
+        self, monkeypatch
+    ):
+        from app.routers.coach import (
+            COACH_STARTER_ANNOUNCEMENT_PENDING_CODE,
+            _build_coach_fact_sheet,
+            assess_game_evidence,
+        )
+
+        monkeypatch.setenv("COACH_AUDIT_NOW_KST", "2026-04-23T17:00:00+09:00")
+        evidence = _build_game_evidence(
+            game_date="2026-04-24",
+            home_pitcher=None,
+            away_pitcher=None,
+        )
+
+        assessment = assess_game_evidence(evidence)
+        fact_sheet = _build_coach_fact_sheet(
+            evidence,
+            {"home": {}, "away": {}, "matchup": {}},
+            set(),
+            assessment,
+        )
+
+        assert COACH_STARTER_ANNOUNCEMENT_PENDING_CODE in assessment.root_causes
+        assert "missing_starters" not in assessment.root_causes
+        assert assessment.expected_data_quality == "partial"
+        assert COACH_STARTER_ANNOUNCEMENT_PENDING_CODE in fact_sheet.reasons
+        assert any("공식 선발 발표 전" in warning for warning in fact_sheet.warnings)
+
+    def test_scheduled_missing_starters_after_announcement_requires_data(
+        self, monkeypatch
+    ):
+        from app.routers.coach import (
+            COACH_STARTER_ANNOUNCEMENT_PENDING_CODE,
+            assess_game_evidence,
+        )
+
+        monkeypatch.setenv("COACH_AUDIT_NOW_KST", "2026-04-23T19:00:00+09:00")
+        evidence = _build_game_evidence(
+            game_date="2026-04-24",
+            home_pitcher=None,
+            away_pitcher=None,
+        )
+
+        assessment = assess_game_evidence(evidence)
+
+        assert "missing_starters" in assessment.root_causes
+        assert COACH_STARTER_ANNOUNCEMENT_PENDING_CODE not in assessment.root_causes
+        assert assessment.expected_data_quality == "partial"
+
     def test_build_manual_data_request_returns_stage_mismatch_payload(self):
         from app.routers.coach import (
             AnalyzeRequest,
@@ -5359,6 +6209,70 @@ class TestCoachFastPath:
         }
         assert "경기 ID=20260405HHOB0" in manual_request["operatorMessage"]
         assert "날짜=2026-04-05" in manual_request["operatorMessage"]
+
+    def test_build_manual_data_request_handles_invalid_season_year(self):
+        from app.routers.coach import (
+            AnalyzeRequest,
+            _build_manual_data_request,
+            assess_game_evidence,
+        )
+
+        evidence = _build_game_evidence(
+            game_row_found=True,
+            season_year="UNKNOWN",
+            game_date="2099-04-05",
+            game_status="SCHEDULED",
+            game_status_bucket="SCHEDULED",
+        )
+        payload = AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20990405LGKT0",
+            league_context={"game_date": "2099-04-05"},
+        )
+
+        manual_request = _build_manual_data_request(
+            None,
+            payload,
+            evidence,
+            assess_game_evidence(evidence),
+        )
+
+        assert manual_request is not None
+        assert manual_request["code"] == "MANUAL_BASEBALL_DATA_REQUIRED"
+        assert {item["key"] for item in manual_request["missingItems"]} == {
+            "season_league_context"
+        }
+
+    def test_build_manual_data_request_accepts_numeric_string_season_year(self):
+        from app.routers.coach import (
+            AnalyzeRequest,
+            _build_manual_data_request,
+            assess_game_evidence,
+        )
+
+        evidence = _build_game_evidence(
+            game_row_found=True,
+            season_year="2099",
+            game_date="2099-04-05",
+            game_status="SCHEDULED",
+            game_status_bucket="SCHEDULED",
+        )
+        payload = AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20990405LGKT0",
+            league_context={"game_date": "2099-04-05"},
+        )
+
+        manual_request = _build_manual_data_request(
+            None,
+            payload,
+            evidence,
+            assess_game_evidence(evidence),
+        )
+
+        assert manual_request is None
 
     def test_build_manual_data_request_does_not_block_completed_game_with_scores(self):
         from app.routers.coach import (
@@ -5815,6 +6729,187 @@ class TestCoachFastPath:
             "## 체크 포인트\n- 첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
             in processed["detailed_markdown"]
         )
+
+    def test_scheduled_deterministic_preview_has_snapshot_and_guaranteed_metrics(self):
+        """Scheduled games (no starters, no lineup) must still return a rich preview.
+
+        Regression: scheduled deterministic responses used to leave
+        ``swing_factors`` / ``watch_points`` / ``uncertainty`` sparse and omit
+        a snapshot section, which collapsed whole insight cards on the
+        frontend. The scheduled team-level builder should now always emit a
+        '## 경기 전 스냅샷' section and at least three key_metrics.
+        """
+
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence(
+            home_team_name="KT 위즈",
+            away_team_name="LG 트윈스",
+            home_pitcher=None,
+            away_pitcher=None,
+            lineup_announced=False,
+            home_lineup=[],
+            away_lineup=[],
+            summary_items=[],
+        )
+        tool_results = {
+            "home": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.740}}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 5, "losses": 2, "draws": 0, "run_diff": 6},
+                },
+                "player_form_signals": {},
+            },
+            "away": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.715}}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 3, "losses": 4, "draws": 0, "run_diff": -1},
+                },
+                "player_form_signals": {},
+            },
+            "matchup": {},
+            "clutch_moments": {"found": False, "moments": []},
+        }
+
+        payload = _build_deterministic_coach_response(evidence, tool_results)
+
+        assert "## 경기 전 스냅샷" in payload["detailed_markdown"]
+        assert "**KT 위즈**" in payload["detailed_markdown"]
+        assert "**LG 트윈스**" in payload["detailed_markdown"]
+
+        assert payload["analysis"]["swing_factors"]
+        assert payload["analysis"]["watch_points"]
+        assert payload["analysis"]["uncertainty"]
+
+        assert len(payload["key_metrics"]) >= 3
+        metric_labels = {metric["label"] for metric in payload["key_metrics"]}
+        assert "최근 흐름" in metric_labels
+        assert "팀 타격 생산성" in metric_labels
+        assert "발표 선발" in metric_labels
+
+    def test_scheduled_deterministic_preview_keeps_snapshot_with_lineup_context(self):
+        """Scheduled partial responses keep the snapshot even when lineup rows exist."""
+
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence(
+            home_team_name="KT 위즈",
+            away_team_name="SSG 랜더스",
+            home_pitcher=None,
+            away_pitcher=None,
+            lineup_announced=True,
+            home_lineup=["상위 타선"],
+            away_lineup=["상위 타선"],
+            summary_items=[],
+        )
+        tool_results = {
+            "home": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.740}}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 4, "losses": 3, "draws": 0, "run_diff": 3},
+                },
+                "player_form_signals": {},
+            },
+            "away": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.721}}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 3, "losses": 4, "draws": 0, "run_diff": -2},
+                },
+                "player_form_signals": {},
+            },
+            "matchup": {},
+            "clutch_moments": {"found": False, "moments": []},
+        }
+
+        payload = _build_deterministic_coach_response(
+            evidence,
+            tool_results,
+            resolved_focus=["recent_form", "bullpen"],
+        )
+
+        assert "## 경기 전 스냅샷" in payload["detailed_markdown"]
+        assert "## 최근 전력" in payload["detailed_markdown"]
+        assert "## 불펜 상태" in payload["detailed_markdown"]
+        assert "- 발표 선발:" not in payload["detailed_markdown"]
+
+    def test_scheduled_manual_detail_ensure_markdown_adds_snapshot_when_grounded(self):
+        """Grounded scheduled LLM responses must also keep the snapshot section."""
+
+        from app.routers.coach import _ensure_detailed_markdown
+
+        evidence = _build_game_evidence(
+            home_team_name="KT 위즈",
+            away_team_name="LG 트윈스",
+            home_pitcher="사우어",
+            away_pitcher="웰스",
+            lineup_announced=False,
+            home_lineup=[],
+            away_lineup=[],
+            summary_items=[],
+        )
+        tool_results = {
+            "home": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.866}}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 8, "losses": 2, "draws": 0, "run_diff": 24},
+                },
+                "player_form_signals": {},
+            },
+            "away": {
+                "summary": {"found": True},
+                "advanced": {"metrics": {"batting": {"ops": 0.723}}},
+                "recent": {
+                    "found": True,
+                    "summary": {"wins": 8, "losses": 2, "draws": 0, "run_diff": 23},
+                },
+                "player_form_signals": {},
+            },
+            "matchup": {},
+            "clutch_moments": {"found": False, "moments": []},
+        }
+        payload = {
+            "headline": "LG 트윈스 vs KT 위즈, 득점력 대결 전망",
+            "sentiment": "neutral",
+            "key_metrics": [],
+            "analysis": {
+                "summary": "양 팀 모두 최근 흐름이 좋습니다.",
+                "strengths": [],
+                "weaknesses": [],
+                "risks": [],
+            },
+            "detailed_markdown": (
+                "## 최근 전력\n"
+                "- 양 팀 모두 최근 흐름이 좋습니다.\n\n"
+                "## 불펜 상태\n"
+                "- 불펜 운용 데이터는 제한적입니다."
+            ),
+            "coach_note": "근거 기반 상세 분석입니다.",
+        }
+
+        _ensure_detailed_markdown(
+            payload,
+            ["recent_form", "bullpen"],
+            evidence=evidence,
+            tool_results=tool_results,
+        )
+
+        markdown = payload["detailed_markdown"]
+        assert markdown.startswith("## 경기 전 스냅샷")
+        assert "**LG 트윈스**" in markdown
+        assert "**KT 위즈**" in markdown
+        assert "- 발표 선발: LG 트윈스 웰스 / KT 위즈 사우어" in markdown
+        assert "## 최근 전력" in markdown
+        assert "## 불펜 상태" in markdown
 
 
 # ============================================================

@@ -12,9 +12,11 @@ import json
 import logging
 import re
 import random
+from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import psycopg
+from psycopg_pool import ConnectionPool
 
 import httpx
 
@@ -129,6 +131,79 @@ _RRF_STOPWORDS = frozenset(
 )
 _RRF_MAX_QUERY_TOKENS = 4
 _RRF_LOG_PREVIEW_LEN = 140
+
+# --- Intent-branching keyword sets (frozenset for O(1) lookup) ---
+# 각 메서드(`_is_statistical_query`, `_is_regulation_query`, `_is_game_query`,
+# `_is_game_flow_narrative_query`, `_is_general_conversation`)가 매 요청마다
+# 키워드 list를 새로 만들지 않도록 모듈 레벨 상수로 추출.
+# 모두 query.lower() 기준으로 substring match에 사용된다.
+_STAT_CHITCHAT_KEYWORDS = frozenset({
+    "안녕", "누구", "좋아해", "응원", "날씨", "어때", "뭐해", "어디", "언제", "왜",
+    "어떻게", "고마워", "미안", "반가워", "잘가", "소개", "설명", "도움", "기능", "사용법",
+})
+_STATISTICAL_KEYWORDS = frozenset({
+    "타율", "홈런", "타점", "득점", "ops", "era", "방어율", "whip", "승", "패",
+    "세이브", "홀드", "삼진", "볼넷", "출루율", "장타율", "wrc+", "war", "fip", "babip",
+    "몇위", "순위", "1위", "최고", "상위", "리더", "기록", "통계", "성적", "몇개",
+    "몇점", "얼마나", "vs", "대", "비교", "누가", "더", "뛰어난", "우수한", "좋은",
+    "맞대결",
+})
+_STAT_SPECIFIC_REQUEST_WORDS = frozenset({
+    "알려줘", "궁금", "얼마", "몇", "는", "은", "의",
+})
+_STAT_CORE_INDICATORS = frozenset({
+    "타율", "홈런", "ops", "era", "방어율",
+})
+_REGULATION_KEYWORDS = frozenset({
+    "규정", "규칙", "룰", "조항", "가능해", "허용", "금지", "벌칙", "징계", "반칙",
+    "파울", "아웃", "세이프", "스트라이크", "볼", "홈런", "인플레이", "타이브레이크",
+    "지명타자", "연장전", "콜드게임", "더블헤더", "비디오판독", "FA", "자유계약",
+    "외국인선수", "몇명까지", "드래프트", "트레이드", "도박", "폭력", "약물", "심판",
+    "모독", "퇴장", "플레이오프", "포스트시즌", "와일드카드", "한국시리즈", "몇팀",
+    "보크", "방해", "인필드플라이", "그라운드룰", "몸에맞는공", "용어", "뜻", "의미",
+    "정의", "설명", "조건", "언제적용", "세이브조건", "승리투수", "왕", "홈런왕",
+    "득점왕", "순위", "wrc+", "ops", "era", "whip", "babip", "war", "fip",
+})
+_GAME_KEYWORDS = frozenset({
+    "경기", "게임", "박스스코어", "스코어", "결과", "이닝별", "이닝별 득점", "몇 점",
+    "7회", "8회", "9회", "연장", "오늘", "어제", "내일", "날짜", "언제", "몇일",
+    "며칠", "vs", "대", "맞대결", "직접대결", "상대전적", "시리즈", "승부", "이겼",
+    "졌", "무승부", "점수", "승리", "패배", "홈", "원정", "away", "home", "구장에서",
+    "에서", "몇점", "득점", "실점", "타점", "안타", "홈런친", "투구", "선발", "등판",
+    "세이브", "홀드", "승", "패",
+})
+# Game query 보조: 날짜 패턴 (미리 컴파일)
+_GAME_DATE_PATTERNS = (
+    re.compile(r"\d{4}-\d{1,2}-\d{1,2}"),       # 2025-10-15
+    re.compile(r"\d{1,2}/\d{1,2}"),              # 10/15
+    re.compile(r"\d{1,2}월\s*\d{1,2}일"),       # 10월 15일
+    re.compile(r"오늘|어제|내일|모레|그저께"),
+)
+# Game query 보조: 팀 vs 팀 (case-insensitive, 미리 컴파일)
+_GAME_TEAM_VS_PATTERN = re.compile(
+    r"(KIA|HT|LG|DB|DO|OB|두산|LT|롯데|SS|삼성|KH|KI|WO|NX|키움|HH|한화|KT|NC|SSG|SK)"
+    r".*(vs|대|vs\.|대전|맞대결).*"
+    r"(KIA|HT|LG|DB|DO|OB|두산|LT|롯데|SS|삼성|KH|KI|WO|NX|키움|HH|한화|KT|NC|SSG|SK)",
+    re.IGNORECASE,
+)
+_GAME_FLOW_NARRATIVE_KEYWORDS = frozenset({
+    "경기 흐름", "흐름 요약", "승부처", "언제 갈렸어", "언제 갈렸", "역전",
+    "동점 흐름", "초중후반 득점", "득점 양상",
+})
+_GENERAL_BASEBALL_KEYWORDS = frozenset({
+    "ops", "wrc+", "war", "era", "whip", "babip", "fip", "골든글러브", "fa", "신인왕",
+    "mvp", "타율", "방어율", "출루율", "장타율", "자책점", "세이브", "홀드", "승리투수",
+    "뜻", "의미", "정의", "계산", "어떻게", "무엇", "기준",
+    # 통계 질문 키워드 추가
+    "홈런", "타점", "득점", "승", "패", "삼진", "볼넷", "몇위", "순위", "1위",
+    "최고", "상위", "리더", "기록", "통계", "성적", "몇개", "몇점", "얼마나", "얼마",
+    "vs", "대", "비교", "누가", "더", "뛰어난", "우수한", "좋은", "맞대결", "시즌",
+    "년", "연도",
+})
+_GENERAL_CONVERSATION_KEYWORDS = frozenset({
+    "안녕", "누구", "좋아해", "응원", "날씨", "어때", "뭐해", "고마워", "미안", "반가워",
+    "잘가", "소개", "도움", "기능", "사용법",
+})
 
 
 def _meta_cache_key(meta: Dict[str, Any]) -> str:
@@ -455,13 +530,17 @@ class RAGPipeline:
         self,
         *,
         settings: Settings,
-        connection: psycopg.Connection,
+        connection: Optional[psycopg.Connection] = None,
+        pool: Optional[ConnectionPool] = None,
         agent_runtime: BaseballAgentRuntime | None = None,
         context_formatter: Optional[ContextFormatter] = None,
         wpa_calculator: Optional["WPACalculator"] = None,
     ) -> None:
+        if connection is None and pool is None:
+            raise ValueError("RAGPipeline requires either 'connection' or 'pool'")
         self.settings = settings
         self.connection = connection
+        self._pool = pool
         self.query_transformer = QueryTransformer(self._generate)
         self.context_formatter = context_formatter or ContextFormatter()
         self.agent_runtime = agent_runtime or initialize_shared_baseball_agent_runtime(
@@ -472,9 +551,15 @@ class RAGPipeline:
         self._retrieval_error: Optional[str] = (
             None  # set if DB was unreachable during retrieval
         )
-        self._db_lock = (
-            asyncio.Lock()
-        )  # psycopg3 sync connection은 thread-safe하지 않으므로 DB 쿼리 직렬화
+
+    @contextmanager
+    def _checkout_conn(self) -> Iterator[psycopg.Connection]:
+        """풀이 있으면 매 호출마다 짧게 커넥션을 빌리고, 없으면 기존 단일 커넥션 사용."""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                yield conn
+        else:
+            yield self.connection
 
     async def _process_and_enrich_docs(
         self, docs: List[Dict[str, Any]], year: int
@@ -608,19 +693,21 @@ class RAGPipeline:
         )
         from fastapi.concurrency import run_in_threadpool
 
-        try:
-            # psycopg3 sync connection은 thread-safe하지 않으므로 Lock으로 직렬화
-            # HyDE LLM 호출과 임베딩 생성은 Lock 바깥이므로 asyncio.gather 시 병렬 실행됨
-            async with self._db_lock:
-                docs = await run_in_threadpool(
-                    similarity_search,
-                    self.connection,
+        def _do_search() -> List[Dict[str, Any]]:
+            # 풀 모드: 매 호출마다 풀에서 짧게 커넥션을 빌림 (멀티 variation 병렬 가능)
+            # 단일 커넥션 모드: 기존 방식 유지 (테스트/스크립트용)
+            with self._checkout_conn() as conn:
+                return similarity_search(
+                    conn,
                     embedding,
                     limit=limit,
                     filters=filters,
                     keyword=keyword,
                     settings=self.settings,
                 )
+
+        try:
+            docs = await run_in_threadpool(_do_search)
         except DBRetrievalError as exc:
             logger.error("[RAG] DB retrieval error in retrieve(): %s", exc)
             self._retrieval_error = str(exc.cause)
@@ -877,87 +964,18 @@ class RAGPipeline:
         질문이 구체적인 통계 조회인지 판단합니다.
         통계 질문인 경우 야구 에이전트를 우선 사용해야 합니다.
         """
-        # 일반 대화 키워드 (이런 질문들은 통계 질문이 아님)
-        chitchat_keywords = [
-            "안녕",
-            "누구",
-            "좋아해",
-            "응원",
-            "날씨",
-            "어때",
-            "뭐해",
-            "어디",
-            "언제",
-            "왜",
-            "어떻게",
-            "고마워",
-            "미안",
-            "반가워",
-            "잘가",
-            "소개",
-            "설명",
-            "도움",
-            "기능",
-            "사용법",
-        ]
-
-        # 통계 관련 키워드
-        statistical_keywords = [
-            "타율",
-            "홈런",
-            "타점",
-            "득점",
-            "ops",
-            "era",
-            "방어율",
-            "whip",
-            "승",
-            "패",
-            "세이브",
-            "홀드",
-            "삼진",
-            "볼넷",
-            "출루율",
-            "장타율",
-            "wrc+",
-            "war",
-            "fip",
-            "babip",
-            "몇위",
-            "순위",
-            "1위",
-            "최고",
-            "상위",
-            "리더",
-            "기록",
-            "통계",
-            "성적",
-            "몇개",
-            "몇점",
-            "얼마나",
-            "vs",
-            "대",
-            "비교",
-            "누가",
-            "더",
-            "뛰어난",
-            "우수한",
-            "좋은",
-            "맞대결",
-        ]
-
         query_lower = query.lower()
 
         # 1단계: 일반 대화인지 확인 (우선순위 높음)
-        is_chitchat = any(keyword in query_lower for keyword in chitchat_keywords)
+        is_chitchat = any(keyword in query_lower for keyword in _STAT_CHITCHAT_KEYWORDS)
         if is_chitchat and not any(
-            keyword in query_lower for keyword in statistical_keywords
+            keyword in query_lower for keyword in _STATISTICAL_KEYWORDS
         ):
             return False  # 일반 대화이므로 통계 질문 아님
 
         # 2단계: 통계 키워드 확인
         has_stat_keywords = any(
-            keyword in query_lower for keyword in statistical_keywords
+            keyword in query_lower for keyword in _STATISTICAL_KEYWORDS
         )
 
         # 3단계: 구체적인 데이터 요청인지 확인
@@ -965,18 +983,13 @@ class RAGPipeline:
             entity_filter.player_name
             or entity_filter.stat_type
             or "년" in query
-            or any(
-                word in query_lower
-                for word in ["알려줘", "궁금", "얼마", "몇", "는", "은", "의"]
-            )
+            or any(word in query_lower for word in _STAT_SPECIFIC_REQUEST_WORDS)
             or
             # 질문 형태나 통계 지표가 있으면 통계 질문으로 간주
             "?" in query
             or "몇" in query
             or "어떻게" in query
-            or any(
-                stat in query_lower for stat in ["타율", "홈런", "ops", "era", "방어율"]
-            )
+            or any(stat in query_lower for stat in _STAT_CORE_INDICATORS)
         )
 
         # 디버깅을 위한 로그 출력
@@ -996,270 +1009,46 @@ class RAGPipeline:
         """
         질문이 KBO 규정 관련인지 판단합니다.
         """
-        regulation_keywords = [
-            "규정",
-            "규칙",
-            "룰",
-            "조항",
-            "가능해",
-            "허용",
-            "금지",
-            "벌칙",
-            "징계",
-            "반칙",
-            "파울",
-            "아웃",
-            "세이프",
-            "스트라이크",
-            "볼",
-            "홈런",
-            "인플레이",
-            "타이브레이크",
-            "지명타자",
-            "연장전",
-            "콜드게임",
-            "더블헤더",
-            "비디오판독",
-            "FA",
-            "자유계약",
-            "외국인선수",
-            "몇명까지",
-            "드래프트",
-            "트레이드",
-            "도박",
-            "폭력",
-            "약물",
-            "심판",
-            "모독",
-            "퇴장",
-            "플레이오프",
-            "포스트시즌",
-            "와일드카드",
-            "한국시리즈",
-            "몇팀",
-            "보크",
-            "방해",
-            "인필드플라이",
-            "그라운드룰",
-            "몸에맞는공",
-            "용어",
-            "뜻",
-            "의미",
-            "정의",
-            "설명",
-            "조건",
-            "언제적용",
-            "세이브조건",
-            "승리투수",
-            "왕",
-            "홈런왕",
-            "득점왕",
-            "순위",
-            "wrc+",
-            "ops",
-            "era",
-            "whip",
-            "babip",
-            "war",
-            "fip",
-        ]
-
         query_lower = query.lower()
-        return any(keyword in query_lower for keyword in regulation_keywords)
+        return any(keyword in query_lower for keyword in _REGULATION_KEYWORDS)
 
     def _is_game_query(self, query: str) -> bool:
         """
         질문이 경기 데이터 관련인지 판단합니다.
         """
-        game_keywords = [
-            "경기",
-            "게임",
-            "박스스코어",
-            "스코어",
-            "결과",
-            "이닝별",
-            "이닝별 득점",
-            "몇 점",
-            "7회",
-            "8회",
-            "9회",
-            "연장",
-            "오늘",
-            "어제",
-            "내일",
-            "날짜",
-            "언제",
-            "몇일",
-            "며칠",
-            "vs",
-            "대",
-            "맞대결",
-            "직접대결",
-            "상대전적",
-            "시리즈",
-            "승부",
-            "이겼",
-            "졌",
-            "무승부",
-            "점수",
-            "승리",
-            "패배",
-            "홈",
-            "원정",
-            "away",
-            "home",
-            "구장에서",
-            "에서",
-            "몇점",
-            "득점",
-            "실점",
-            "타점",
-            "안타",
-            "홈런친",
-            "투구",
-            "선발",
-            "등판",
-            "세이브",
-            "홀드",
-            "승",
-            "패",
-        ]
-
-        # 날짜 패턴 확인 (YYYY-MM-DD, MM/DD, 월일 등)
-        date_patterns = [
-            r"\d{4}-\d{1,2}-\d{1,2}",  # 2025-10-15
-            r"\d{1,2}/\d{1,2}",  # 10/15
-            r"\d{1,2}월\s*\d{1,2}일",  # 10월 15일
-            r"오늘|어제|내일|모레|그저께",
-        ]
-
         query_lower = query.lower()
 
         # 키워드 매칭
-        has_game_keywords = any(keyword in query_lower for keyword in game_keywords)
+        has_game_keywords = any(keyword in query_lower for keyword in _GAME_KEYWORDS)
 
-        # 날짜 패턴 매칭
-        import re
+        # 날짜 패턴 매칭 (미리 컴파일된 패턴 사용)
+        has_date_pattern = any(p.search(query_lower) for p in _GAME_DATE_PATTERNS)
 
-        has_date_pattern = any(
-            re.search(pattern, query_lower) for pattern in date_patterns
-        )
-
-        # 팀 vs 팀 패턴
-        team_vs_pattern = r"(KIA|HT|LG|DB|DO|OB|두산|LT|롯데|SS|삼성|KH|KI|WO|NX|키움|HH|한화|KT|NC|SSG|SK).*(vs|대|vs\.|대전|맞대결).*(KIA|HT|LG|DB|DO|OB|두산|LT|롯데|SS|삼성|KH|KI|WO|NX|키움|HH|한화|KT|NC|SSG|SK)"
-        has_team_vs_pattern = bool(re.search(team_vs_pattern, query, re.IGNORECASE))
+        # 팀 vs 팀 패턴 (미리 컴파일된 case-insensitive 패턴)
+        has_team_vs_pattern = bool(_GAME_TEAM_VS_PATTERN.search(query))
 
         return has_game_keywords or has_date_pattern or has_team_vs_pattern
 
     def _is_game_flow_narrative_query(self, query: str) -> bool:
         query_lower = query.lower()
-        narrative_keywords = [
-            "경기 흐름",
-            "흐름 요약",
-            "승부처",
-            "언제 갈렸어",
-            "언제 갈렸",
-            "역전",
-            "동점 흐름",
-            "초중후반 득점",
-            "득점 양상",
-        ]
-        return any(keyword in query_lower for keyword in narrative_keywords)
+        return any(
+            keyword in query_lower for keyword in _GAME_FLOW_NARRATIVE_KEYWORDS
+        )
 
     def _is_general_conversation(self, query: str) -> bool:
         """
         일반 대화인지 판단합니다.
         """
-        # 야구 지식/용어 관련 질문들 + 통계 질문 키워드들
-        baseball_keywords = [
-            "ops",
-            "wrc+",
-            "war",
-            "era",
-            "whip",
-            "babip",
-            "fip",
-            "골든글러브",
-            "fa",
-            "신인왕",
-            "mvp",
-            "타율",
-            "방어율",
-            "출루율",
-            "장타율",
-            "자책점",
-            "세이브",
-            "홀드",
-            "승리투수",
-            "뜻",
-            "의미",
-            "정의",
-            "계산",
-            "어떻게",
-            "무엇",
-            "기준",
-            # 통계 질문 키워드 추가
-            "홈런",
-            "타점",
-            "득점",
-            "승",
-            "패",
-            "삼진",
-            "볼넷",
-            "몇위",
-            "순위",
-            "1위",
-            "최고",
-            "상위",
-            "리더",
-            "기록",
-            "통계",
-            "성적",
-            "몇개",
-            "몇점",
-            "얼마나",
-            "얼마",
-            "vs",
-            "대",
-            "비교",
-            "누가",
-            "더",
-            "뛰어난",
-            "우수한",
-            "좋은",
-            "맞대결",
-            "시즌",
-            "년",
-            "연도",
-        ]
-
-        # 일반 대화 키워드 (야구와 무관한 것들)
-        general_keywords = [
-            "안녕",
-            "누구",
-            "좋아해",
-            "응원",
-            "날씨",
-            "어때",
-            "뭐해",
-            "고마워",
-            "미안",
-            "반가워",
-            "잘가",
-            "소개",
-            "도움",
-            "기능",
-            "사용법",
-        ]
-
         query_lower = query.lower()
 
         # 야구 관련 질문이면 일반 대화가 아님
-        if any(keyword in query_lower for keyword in baseball_keywords):
+        if any(keyword in query_lower for keyword in _GENERAL_BASEBALL_KEYWORDS):
             return False  # 야구 관련 질문이므로 일반 대화가 아님
 
         # 야구/통계와 무관한 일반적인 대화만 일반 대화로 분류
-        return any(keyword in query_lower for keyword in general_keywords)
+        return any(
+            keyword in query_lower for keyword in _GENERAL_CONVERSATION_KEYWORDS
+        )
 
     async def _try_agent_first(
         self,
@@ -1277,7 +1066,7 @@ class RAGPipeline:
 
         try:
             # 야구 에이전트를 통한 처리 시도
-            with self.agent_runtime.request_context(self.connection):
+            with self._checkout_conn() as conn, self.agent_runtime.request_context(conn):
                 agent_result = await self.baseball_agent.process_query(
                     query,
                     {"intent": intent, "filters": filters, "history": history},
@@ -1476,7 +1265,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
             # For ranking queries, use multi-query retrieval for better coverage
             if not entity_filter.position_type:
-                # 투수와 타자 멀티쿼리를 병렬 실행 (HyDE+임베딩은 동시, DB는 _db_lock이 직렬화)
+                # 투수와 타자 멀티쿼리를 병렬 실행 (풀 모드에서는 DB 호출도 병렬)
                 pitcher_filters = dict(final_filters)
                 pitcher_filters["source_table"] = "player_season_pitching"
                 batter_filters = dict(final_filters)
@@ -1649,15 +1438,6 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         processed_data = await self._process_and_enrich_docs(docs, year)
 
         # 3. 의도별 컨텍스트 생성 (새로운 컨텍스트 포맷터 사용)
-        # TEMP: 디버깅을 위해 raw 검색 결과도 컨텍스트에 포함
-        raw_context_parts = []
-        for doc in docs[:10]:  # 상위 10개 결과만 사용
-            title = doc.get("title", "제목 없음")
-            content = doc.get("content", "")[:200]  # 내용 200자 제한
-            raw_context_parts.append(f"- {title}: {content}")
-
-        raw_context = "\n### 검색된 원본 데이터:\n" + "\n".join(raw_context_parts)
-
         formatted_context = self.context_formatter.format_context(
             processed_data, intent, query, entity_filter, year
         )
@@ -1670,10 +1450,6 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             formatted_context = self.context_formatter.format_zero_hit_guidance(
                 query, entity_filter, year, final_filters
             )
-
-        # 원본 데이터도 포함 (docs가 있을 때만)
-        if docs:
-            formatted_context = formatted_context + "\n\n" + raw_context
 
         # 대화 기록 컨텍스트 추가
         history_block = _history_context_block(history)
