@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import json
 import logging
 import secrets
+from time import perf_counter
 from typing import Any, Optional
 
 import psycopg
@@ -207,6 +208,7 @@ def get_connection_pool() -> ConnectionPool:
             conninfo=settings.database_url,
             min_size=DB_POOL_MIN_SIZE,
             max_size=DB_POOL_MAX_SIZE,
+            check=ConnectionPool.check_connection,
             # TCP keepalive 옵션 및 기타 설정
             kwargs={
                 "keepalives": 1,
@@ -349,6 +351,14 @@ async def lifespan(app):
     cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
     logger.info("[Lifespan] chat_response_cache cleanup task started (interval=1h)")
 
+    # [Embedding Cache] 백엔드 미리 초기화 (startup 로그 출력)
+    try:
+        from .core.embedding_cache import get_backend as _get_embed_backend
+
+        await _get_embed_backend()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Lifespan] embedding cache backend init failed: %s", exc)
+
     yield
 
     # 종료 시: cleanup 태스크 취소 후 리소스 정리
@@ -360,6 +370,19 @@ async def lifespan(app):
 
     # httpx 클라이언트 정리
     await close_shared_httpx_clients()
+
+    # 임베딩 캐시 백엔드 정리 (Redis 사용 시 클라이언트 close)
+    try:
+        from .core.embedding_cache import get_backend as _get_embed_backend
+        from .core.embedding_cache import RedisEmbeddingBackend as _RedisBackend
+
+        backend = await _get_embed_backend()
+        if isinstance(backend, _RedisBackend):
+            client = getattr(backend, "_client", None)
+            if client is not None and hasattr(client, "aclose"):
+                await client.aclose()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Lifespan] embedding cache cleanup failed: %s", exc)
 
     reset_shared_baseball_agent_runtime()
     close_connection_pool()  # 모든 커넥션 정리
@@ -397,13 +420,17 @@ def get_db_connection() -> Generator[psycopg.Connection, None, None]:
         ) from exc
 
 
-def get_rag_pipeline(
-    conn: psycopg.Connection = Depends(get_db_connection),
-) -> RAGPipeline:
+def get_rag_pipeline() -> RAGPipeline:
+    """RAGPipeline에 ConnectionPool을 주입하여 멀티쿼리가 진정 병렬로 실행되도록 한다.
+
+    각 DB 호출은 풀에서 짧게 커넥션을 빌리므로, 멀티 variation 검색이
+    더 이상 단일 커넥션으로 직렬화되지 않는다.
+    """
     settings = get_settings()
+    pool_instance = get_connection_pool()
     return RAGPipeline(
         settings=settings,
-        connection=conn,
+        pool=pool_instance,
         agent_runtime=get_shared_baseball_agent_runtime(),
         context_formatter=_get_shared_context_formatter(),
         wpa_calculator=_get_shared_wpa_calculator(),
@@ -433,7 +460,12 @@ def get_coach_llm_generator():
     logger = logging.getLogger("CoachLLM")
     settings = get_settings()
 
-    async def coach_openrouter_generator(messages, max_tokens: int):
+    async def coach_openrouter_generator(
+        messages,
+        max_tokens: int,
+        empty_chunk_retry_limit: Optional[int] = None,
+        request_timeout_seconds: Optional[float] = None,
+    ):
         """Coach 전용 OpenRouter generator."""
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required for Coach.")
@@ -463,6 +495,17 @@ def get_coach_llm_generator():
             effective_max_tokens,
         )
 
+        effective_retry_limit = (
+            COACH_OPENROUTER_RETRY_LIMIT
+            if empty_chunk_retry_limit is None
+            else max(0, int(empty_chunk_retry_limit))
+        )
+        effective_request_timeout_seconds = (
+            120.0
+            if request_timeout_seconds is None
+            else max(5.0, float(request_timeout_seconds))
+        )
+
         last_exception = None
         for i, model in enumerate(models_to_try):
             is_fallback = i > 0
@@ -474,7 +517,7 @@ def get_coach_llm_generator():
                     model,
                 )
 
-            for retry_index in range(COACH_OPENROUTER_RETRY_LIMIT + 1):
+            for retry_index in range(effective_retry_limit + 1):
                 payload = {
                     "model": model,
                     "messages": messages,
@@ -485,12 +528,25 @@ def get_coach_llm_generator():
                 }
 
                 try:
+                    attempt_started = perf_counter()
+                    logger.info(
+                        "[Coach LLM] Attempt start model=%s attempt=%d/%d timeout=%.1fs max_tokens=%d",
+                        model,
+                        retry_index + 1,
+                        effective_retry_limit + 1,
+                        effective_request_timeout_seconds,
+                        effective_max_tokens,
+                    )
                     chunk_count = 0
                     empty_choice_count = 0
                     malformed_chunk_count = 0
                     client = get_shared_httpx_client(
-                        "openrouter",
-                        timeout=120.0,
+                        (
+                            "openrouter"
+                            if request_timeout_seconds is None
+                            else f"openrouter:coach:{int(effective_request_timeout_seconds)}"
+                        ),
+                        timeout=effective_request_timeout_seconds,
                         limits=httpx.Limits(
                             max_connections=20,
                             max_keepalive_connections=10,
@@ -562,12 +618,12 @@ def get_coach_llm_generator():
                             f"reason={empty_chunk_reason}, empty_choices={empty_choice_count}, malformed={malformed_chunk_count}"
                         )
                         last_exception = RuntimeError(error_msg)
-                        if retry_index < COACH_OPENROUTER_RETRY_LIMIT:
+                        if retry_index < effective_retry_limit:
                             logger.warning(
                                 "[Coach LLM Retry] model=%s retry_index=%d/%d reason=%s",
                                 model,
                                 retry_index + 1,
-                                COACH_OPENROUTER_RETRY_LIMIT + 1,
+                                effective_retry_limit + 1,
                                 empty_chunk_reason,
                             )
                             await asyncio.sleep(
@@ -575,7 +631,14 @@ def get_coach_llm_generator():
                                 * (2**retry_index)
                             )
                             continue
-                        logger.warning("[Coach LLM] %s", error_msg)
+                        logger.warning(
+                            "[Coach LLM] Empty response model=%s elapsed_sec=%.2f reason=%s empty_choices=%d malformed=%d",
+                            model,
+                            perf_counter() - attempt_started,
+                            empty_chunk_reason,
+                            empty_choice_count,
+                            malformed_chunk_count,
+                        )
                         break
                     if empty_choice_count > 0 or malformed_chunk_count > 0:
                         logger.info(
@@ -586,21 +649,27 @@ def get_coach_llm_generator():
                             malformed_chunk_count,
                         )
                     logger.info(
-                        "[Coach LLM] Success: %d chunks from %s", chunk_count, model
+                        "[Coach LLM] Success model=%s elapsed_sec=%.2f chunk_count=%d empty_choices=%d malformed_chunks=%d",
+                        model,
+                        perf_counter() - attempt_started,
+                        chunk_count,
+                        empty_choice_count,
+                        malformed_chunk_count,
                     )
                     return
                 except Exception as e:
                     retryable = is_retryable_coach_openrouter_error(e)
                     logger.error(
-                        "[Coach LLM] OpenRouter model %s failed attempt=%d/%d retryable=%s: %s",
+                        "[Coach LLM] OpenRouter model %s failed attempt=%d/%d retryable=%s elapsed_sec=%.2f: %s",
                         model,
                         retry_index + 1,
-                        COACH_OPENROUTER_RETRY_LIMIT + 1,
+                        effective_retry_limit + 1,
                         retryable,
+                        perf_counter() - attempt_started,
                         e,
                     )
                     last_exception = e
-                    if retryable and retry_index < COACH_OPENROUTER_RETRY_LIMIT:
+                    if retryable and retry_index < effective_retry_limit:
                         await asyncio.sleep(
                             COACH_OPENROUTER_RETRY_BACKOFF_SECONDS * (2**retry_index)
                         )
@@ -609,7 +678,12 @@ def get_coach_llm_generator():
 
         raise last_exception or RuntimeError("All OpenRouter models failed")
 
-    async def coach_llm(messages, max_tokens=None):
+    async def coach_llm(
+        messages,
+        max_tokens=None,
+        empty_chunk_retry_limit: Optional[int] = None,
+        request_timeout_seconds: Optional[float] = None,
+    ):
         """Coach LLM entrypoint (OpenRouter only).
 
         Note: Coach feature only supports OpenRouter.
@@ -620,7 +694,10 @@ def get_coach_llm_generator():
 
         try:
             async for chunk in coach_openrouter_generator(
-                messages, effective_max_tokens
+                messages,
+                effective_max_tokens,
+                empty_chunk_retry_limit=empty_chunk_retry_limit,
+                request_timeout_seconds=request_timeout_seconds,
             ):
                 yield chunk
         except Exception as e:

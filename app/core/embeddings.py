@@ -20,7 +20,6 @@ import math
 import os
 import re
 import time
-from collections import OrderedDict
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import httpx
@@ -30,9 +29,6 @@ from .http_clients import get_shared_httpx_client
 
 logger = logging.getLogger(__name__)
 
-_QUERY_EMBED_CACHE_MAX = int(os.getenv("EMBED_QUERY_CACHE_MAX", "2048"))
-_QUERY_EMBED_CACHE: "OrderedDict[str, List[float]]" = OrderedDict()
-_QUERY_EMBED_LOCK = asyncio.Lock()
 _QUERY_WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -94,24 +90,17 @@ def _embed_signature(settings: Settings) -> str:
 
 
 async def _get_cached_query_embedding(cache_key: str) -> Optional[List[float]]:
-    if _QUERY_EMBED_CACHE_MAX <= 0:
-        return None
-    async with _QUERY_EMBED_LOCK:
-        cached = _QUERY_EMBED_CACHE.get(cache_key)
-        if cached is None:
-            return None
-        _QUERY_EMBED_CACHE.move_to_end(cache_key)
-        return cached
+    from .embedding_cache import get_backend
+
+    backend = await get_backend()
+    return await backend.get(cache_key)
 
 
 async def _set_cached_query_embedding(cache_key: str, embedding: List[float]) -> None:
-    if _QUERY_EMBED_CACHE_MAX <= 0:
-        return
-    async with _QUERY_EMBED_LOCK:
-        _QUERY_EMBED_CACHE[cache_key] = embedding
-        _QUERY_EMBED_CACHE.move_to_end(cache_key)
-        while len(_QUERY_EMBED_CACHE) > _QUERY_EMBED_CACHE_MAX:
-            _QUERY_EMBED_CACHE.popitem(last=False)
+    from .embedding_cache import get_backend
+
+    backend = await get_backend()
+    await backend.set(cache_key, embedding)
 
 
 def _ensure_dimension(

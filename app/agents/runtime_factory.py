@@ -16,7 +16,6 @@ from tenacity import (
 
 from ..config import get_settings
 from ..core.http_clients import get_shared_httpx_client
-from ..core.shared_resources import get_shared_latest_baseball_tool
 from .baseball_agent import BaseballAgentRuntime
 
 logger = logging.getLogger(__name__)
@@ -326,7 +325,6 @@ def create_baseball_agent_runtime(
     return BaseballAgentRuntime(
         llm_generator=build_baseball_llm_generator(resolved_settings),
         settings=resolved_settings,
-        latest_baseball_tool=get_shared_latest_baseball_tool(),
         fast_path_enabled=resolved_settings.chat_fast_path_enabled,
         fast_path_scope=resolved_settings.chat_fast_path_scope,
         fast_path_min_messages=resolved_settings.chat_fast_path_min_messages,

@@ -32,7 +32,7 @@
   - latency-only failure일 때만 1회 재측정한다.
   - stream first-token p95는 비율 기준 외에 `2.0ms` absolute slack을 둔다.
 - preflight:
-  - local dev listener `18001`, `8085`, `18080`, `18081` 가 살아 있으면 smoke를 시작하지 않는다.
+  - local backend listener `8080`, `18080` 가 살아 있으면 smoke를 시작하지 않는다.
   - local `5432` client pressure가 높으면 smoke를 시작하지 않는다.
 
 ## 3. 최소 검증 순서

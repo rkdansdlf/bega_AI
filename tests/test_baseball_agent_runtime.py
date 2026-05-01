@@ -38,11 +38,9 @@ def test_runtime_reuses_shared_agent_and_rebinds_request_context(monkeypatch):
     monkeypatch.setattr(agent_module, "GameQueryTool", _FakeTool)
     monkeypatch.setattr(agent_module, "DocumentQueryTool", _FakeTool)
 
-    latest_tool = object()
     runtime = BaseballAgentRuntime(
         llm_generator=_fake_llm_generator,
         settings=SimpleNamespace(),
-        latest_baseball_tool=latest_tool,
     )
     conn_one = SimpleNamespace(label="one")
     conn_two = SimpleNamespace(label="two")
@@ -60,7 +58,6 @@ def test_runtime_reuses_shared_agent_and_rebinds_request_context(monkeypatch):
         db_query_two = shared_agent.db_query_tool
         document_query_two = shared_agent.document_query_tool
 
-    assert shared_agent.latest_baseball_tool is latest_tool
     assert shared_agent.llm_generator is _fake_llm_generator
     assert shared_agent.tool_definitions is runtime.tool_definitions
     assert shared_agent.tool_description_text is runtime.tool_description_text

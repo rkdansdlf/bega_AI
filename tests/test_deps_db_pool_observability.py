@@ -49,6 +49,30 @@ def test_snapshot_connection_pool_stats_includes_configured_limits() -> None:
     assert snapshot["stats"]["requests_waiting"] == 3
 
 
+def test_get_connection_pool_checks_connection_before_borrow(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeConnectionPool:
+        check_connection = object()
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(deps, "_connection_pool", None)
+    monkeypatch.setattr(
+        deps,
+        "get_settings",
+        lambda: type("_Settings", (), {"database_url": "postgresql://example/db"})(),
+    )
+    monkeypatch.setattr(deps, "ConnectionPool", _FakeConnectionPool)
+
+    pool = deps.get_connection_pool()
+
+    assert isinstance(pool, _FakeConnectionPool)
+    assert captured["check"] is _FakeConnectionPool.check_connection
+    monkeypatch.setattr(deps, "_connection_pool", None)
+
+
 def test_get_db_connection_logs_pool_stats_on_pool_timeout(monkeypatch, caplog) -> None:
     monkeypatch.setattr(deps, "get_connection_pool", lambda: _PoolTimeoutPool())
     caplog.set_level(logging.ERROR)
