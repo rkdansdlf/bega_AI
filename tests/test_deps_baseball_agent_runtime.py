@@ -78,6 +78,7 @@ async def test_get_agent_uses_request_context_and_shared_agent(monkeypatch):
 def test_get_rag_pipeline_uses_shared_runtime(monkeypatch):
     captured: dict[str, object] = {}
     fake_runtime = object()
+    fake_pool = object()
 
     class _FakePipeline:
         def __init__(self, **kwargs):
@@ -85,8 +86,10 @@ def test_get_rag_pipeline_uses_shared_runtime(monkeypatch):
 
     monkeypatch.setattr(deps, "get_shared_baseball_agent_runtime", lambda: fake_runtime)
     monkeypatch.setattr(deps, "RAGPipeline", _FakePipeline)
+    monkeypatch.setattr(deps, "get_connection_pool", lambda: fake_pool)
 
-    pipeline = deps.get_rag_pipeline(conn=object())
+    pipeline = deps.get_rag_pipeline()
 
     assert pipeline is not None
     assert captured["agent_runtime"] is fake_runtime
+    assert captured["pool"] is fake_pool

@@ -291,6 +291,45 @@ def _normalize_optional_text(value: Any) -> Optional[str]:
     return text or None
 
 
+def _coerce_lineup_entries(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    raw_entries = value
+    if isinstance(value, str):
+        try:
+            raw_entries = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw_entries, list):
+        return []
+    entries: List[Dict[str, Any]] = []
+    for item in raw_entries:
+        if isinstance(item, dict):
+            entries.append(item)
+    return entries
+
+
+def _lineup_names_for_team(
+    entries: Sequence[Dict[str, Any]],
+    *,
+    team_code: str,
+    season_year: int,
+    resolver: TeamCodeResolver,
+) -> List[str]:
+    names: List[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        entry_team = resolver.resolve_canonical(entry.get("team_code"), season_year)
+        if entry_team != team_code:
+            continue
+        player_name = _normalize_optional_text(entry.get("player_name"))
+        if not player_name or player_name in seen:
+            continue
+        seen.add(player_name)
+        names.append(player_name)
+    return names
+
+
 def _is_postseason_stage(stage_label: Optional[str]) -> bool:
     return str(stage_label or "").upper() in POSTSEASON_STAGE_LABELS
 
@@ -358,13 +397,37 @@ def _build_game_evidence_from_row(
     home_team_code = resolver.resolve_canonical(row["home_team"], season_year)
     away_team_code = resolver.resolve_canonical(row["away_team"], season_year)
     stage_label = _normalize_stage_label(row.get("league_type_code"), None)
+    home_score = _normalize_optional_int(row.get("home_score"))
+    away_score = _normalize_optional_int(row.get("away_score"))
+    game_status = str(row.get("game_status") or "UNKNOWN")
+    game_status_bucket = _normalize_game_status_bucket(game_status)
+    if (
+        game_status_bucket == "UNKNOWN"
+        and home_score is not None
+        and away_score is not None
+    ):
+        game_status = "COMPLETED"
+        game_status_bucket = "COMPLETED"
+    lineup_entries = _coerce_lineup_entries(row.get("lineup_entries"))
+    home_lineup = _lineup_names_for_team(
+        lineup_entries,
+        team_code=home_team_code,
+        season_year=season_year,
+        resolver=resolver,
+    )
+    away_lineup = _lineup_names_for_team(
+        lineup_entries,
+        team_code=away_team_code,
+        season_year=season_year,
+        resolver=resolver,
+    )
     evidence = GameEvidence(
         game_id=str(row["game_id"]),
         season_id=row.get("season_id"),
         season_year=season_year,
         game_date=_stringify_date(row.get("game_date")),
-        game_status=str(row.get("game_status") or "UNKNOWN"),
-        game_status_bucket=_normalize_game_status_bucket(row.get("game_status")),
+        game_status=game_status,
+        game_status_bucket=game_status_bucket,
         home_team_code=home_team_code,
         away_team_code=away_team_code,
         home_team_name=resolver.display_name(home_team_code),
@@ -372,9 +435,14 @@ def _build_game_evidence_from_row(
         league_type_code=int(row.get("league_type_code") or 0),
         stage_label=stage_label,
         round_display=_round_display_for_stage(stage_label),
+        home_score=home_score,
+        away_score=away_score,
         home_pitcher=_normalize_optional_text(row.get("home_pitcher")),
         away_pitcher=_normalize_optional_text(row.get("away_pitcher")),
-        lineup_announced=bool(row.get("lineup_count")),
+        lineup_announced=bool(row.get("lineup_count"))
+        or bool(home_lineup or away_lineup),
+        home_lineup=home_lineup,
+        away_lineup=away_lineup,
         summary_items=["summary"] if int(row.get("summary_count") or 0) > 0 else [],
         stadium_name=_normalize_optional_text(row.get("stadium_name")),
         start_time=_stringify_time(row.get("start_time")),
@@ -420,6 +488,8 @@ def diagnose_games(
             g.away_team,
             g.home_pitcher,
             g.away_pitcher,
+            g.home_score,
+            g.away_score,
             g.season_id,
             COALESCE(ks.season_year, EXTRACT(YEAR FROM g.game_date)::int) AS season_year,
             COALESCE(ks.league_type_code, 0) AS league_type_code,
@@ -427,12 +497,24 @@ def diagnose_games(
             gm.start_time,
             gm.weather,
             COALESCE(lineups.lineup_count, 0) AS lineup_count,
+            COALESCE(lineups.lineup_entries, '[]'::jsonb) AS lineup_entries,
             COALESCE(summaries.summary_count, 0) AS summary_count
         FROM game g
         LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
         LEFT JOIN game_metadata gm ON g.game_id = gm.game_id
         LEFT JOIN LATERAL (
-            SELECT COUNT(*) AS lineup_count
+            SELECT
+                COUNT(*) AS lineup_count,
+                jsonb_agg(
+                    jsonb_build_object(
+                        'team_code', gl.team_code,
+                        'player_name', gl.player_name
+                    )
+                    ORDER BY
+                        gl.team_code ASC,
+                        gl.batting_order ASC NULLS LAST,
+                        gl.player_name ASC
+                ) FILTER (WHERE gl.player_name IS NOT NULL) AS lineup_entries
             FROM game_lineups gl
             WHERE gl.game_id = g.game_id
               AND COALESCE(gl.is_starter, true) = true

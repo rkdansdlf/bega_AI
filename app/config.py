@@ -16,12 +16,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 DEFAULT_CORS_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
     "http://localhost:5176",
     "http://127.0.0.1:5176",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    "http://localhost:5177",
+    "http://127.0.0.1:5177",
 ]
 LOCAL_DEV_AI_INTERNAL_TOKEN = "local-dev-ai-internal-token"
 LOCAL_DEV_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "host.docker.internal"}

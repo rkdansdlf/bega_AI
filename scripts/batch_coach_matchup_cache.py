@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+os.environ.setdefault("BEGA_SKIP_APP_INIT", "1")
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.core.coach_cache_contract import (
