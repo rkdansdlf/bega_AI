@@ -51,6 +51,16 @@ from ..core.chat_cache import (
     delete_by_intent,
     delete_by_key,
 )
+from ..observability.metrics import AI_RESPONSE_CACHE_BY_INTENT
+
+
+def _record_cache_by_intent(intent: str, result: str) -> None:
+    try:
+        AI_RESPONSE_CACHE_BY_INTENT.labels(
+            intent=intent or "unknown", result=result
+        ).inc()
+    except Exception:  # noqa: BLE001
+        pass
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -735,6 +745,7 @@ async def _chat_event_generator(
                 cache_key[:8],
                 intent,
             )
+            _record_cache_by_intent(intent, "miss")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatCache] save failed: %s", exc)
     elif cache_key and full_response_text:
@@ -978,6 +989,7 @@ async def _chat_live_event_generator(
                 cache_key[:8],
                 intent,
             )
+            _record_cache_by_intent(intent, "miss")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatCache] save failed: %s", exc)
     elif cache_key and full_response_text:
@@ -1184,6 +1196,7 @@ async def chat_completion(
                     cache_key[:8],
                     cached["hit_count"],
                 )
+                _record_cache_by_intent(cached.get("intent", "unknown"), "hit")
                 asyncio.create_task(_async_update_hit_count(cache_key))
                 return JSONResponse(
                     {
@@ -1337,6 +1350,7 @@ async def chat_completion(
                     cache_key[:8],
                     intent,
                 )
+                _record_cache_by_intent(intent, "miss")
             except Exception as exc:
                 logger.warning("[ChatCache] completion save failed: %s", exc)
 
@@ -1431,6 +1445,7 @@ async def chat_stream_post(
                     cache_key[:8],
                     cached["hit_count"],
                 )
+                _record_cache_by_intent(cached.get("intent", "unknown"), "hit")
                 # hit_count는 background에서 업데이트 (응답 지연 없음)
                 asyncio.create_task(_async_update_hit_count(cache_key))
                 return _make_cached_sse_response(cached, style, cache_key)

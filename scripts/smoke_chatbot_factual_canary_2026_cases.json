@@ -1,0 +1,37 @@
+[
+  {
+    "id": "regulation_foreign_limit_2026",
+    "question": "2026년 KBO 외국인 선수 엔트리 규정 알려줘",
+    "required_all": ["4명"],
+    "required_any": ["외국인", "엔트리"],
+    "forbidden": ["3명", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_asia_quota_2026",
+    "question": "2026년 도입된 아시아 쿼터 제도에 대해 설명해줘",
+    "required_all": ["아시아 쿼터"],
+    "required_any": ["도입", "추가", "선수"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_extra_innings_2026",
+    "question": "2026년 KBO 연장전은 몇 회까지 진행돼?",
+    "required_all": ["11회"],
+    "required_any": ["연장전", "최대"],
+    "forbidden": ["12이닝", "12회", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_shift_2026",
+    "question": "2026년 수비 시프트 규정 변화 알려줘",
+    "required_all": ["제재", "강화"],
+    "required_any": ["수비 시프트", "제한"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  },
+  {
+    "id": "regulation_video_review_2026",
+    "question": "2026년 비디오 판독 보완 사항 알려줘",
+    "required_all": ["보완"],
+    "required_any": ["비디오 판독", "정밀", "확대"],
+    "forbidden": ["질문하신", "세부 조항", "개요", "README.md"]
+  }
+]

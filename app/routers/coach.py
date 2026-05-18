@@ -12,6 +12,7 @@ import json
 import asyncio
 import os
 import re
+import socket
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -71,6 +72,12 @@ from ..core.coach_cache_contract import (
 )
 from ..core.coach_cache_key import normalize_focus
 from ..core.ratelimit import rate_limit_coach_dependency
+from ..observability.metrics import (
+    AI_COACH_DYNAMIC_PROMPT_CHARS,
+    AI_COACH_PAYLOAD_COMPRESSION_TOTAL,
+    AI_COACH_REQUEST_TOTAL,
+)
+from ..schemas.coach_tool_payload import CoachTeamPayload
 from ..tools.database_query import DatabaseQueryTool
 from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
@@ -100,6 +107,18 @@ def _coach_prompt_cache_enabled() -> bool:
 
 def _coach_prompt_cache_min_static_chars() -> int:
     return _read_int_env("COACH_PROMPT_CACHE_MIN_STATIC_CHARS", "3000")
+
+
+def _coach_payload_compression_enabled() -> bool:
+    """``_execute_coach_tools_parallel`` 결과를 ``CoachTeamPayload``로 압축할지.
+
+    기본 활성화. 회귀 발견 시 ``COACH_PAYLOAD_COMPRESSION_ENABLED=0``로 옵트아웃.
+    """
+    return _read_flag_env("COACH_PAYLOAD_COMPRESSION_ENABLED", "1")
+
+
+def _coach_payload_top_n() -> int:
+    return _read_int_env("COACH_PAYLOAD_TOP_N", "3")
 
 
 def _coach_fast_path_manual_recent_form_enabled() -> bool:
@@ -2272,6 +2291,14 @@ def _emit_coach_latency_summary(
         cache_key,
         " ".join(f"{k}={v}" for k, v in summary.items()),
     )
+    # Coach 요청 outcome 메트릭 (cache_state x request_mode 분포)
+    try:
+        AI_COACH_REQUEST_TOTAL.labels(
+            cache_state=str(cache_state or "unknown"),
+            mode=str(request_mode or "unknown"),
+        ).inc()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _is_manual_recent_form_fast_path_eligible(
@@ -2978,7 +3005,13 @@ async def _wait_for_cache_terminal_state(
 
 
 def _build_cache_lease_owner() -> str:
-    return f"coach-{uuid.uuid4().hex}"
+    # hostname+pid 포함으로 멀티 워커 환경에서 어느 프로세스가 lease를 소유하는지 추적 가능
+    try:
+        host = socket.gethostname()[:16]
+    except Exception:
+        host = "unknown"
+    pid = os.getpid()
+    return f"coach-{host}-{pid}-{uuid.uuid4().hex[:12]}"
 
 
 def _dependency_degraded_from_tool_payload(payload: Any) -> bool:
@@ -9515,6 +9548,46 @@ async def _execute_coach_tools_parallel(
         elif len(tasks) > clutch_index:
             tool_results["clutch_moments"] = results[clutch_index]
 
+    # Coach 페이로드 압축: 도구 결과 dict의 미사용 필드 제거 + top_n 절단
+    # 환경변수 COACH_PAYLOAD_COMPRESSION_ENABLED=0으로 옵트아웃 가능
+    if _coach_payload_compression_enabled():
+        try:
+            top_n = max(1, _coach_payload_top_n())
+            for team_key, team_id_value in (
+                ("home", home_team_id),
+                ("away", away_team_id),
+            ):
+                team_data = tool_results.get(team_key) or {}
+                # error-only dict는 그대로 유지 (압축할 데이터 없음)
+                if not team_data or list(team_data.keys()) == ["error"]:
+                    continue
+                if not isinstance(team_data, dict):
+                    continue
+                try:
+                    payload = CoachTeamPayload.from_team_data_dict(
+                        team_data,
+                        team_id=str(team_id_value or team_key),
+                        team_name_fallback=str(team_id_value or team_key),
+                        top_n=top_n,
+                        form_signals_top_n=1,
+                    )
+                    compressed = payload.to_factsheet_dict()
+                    # _dependency_degraded 플래그는 보존
+                    if team_data.get("_dependency_degraded"):
+                        compressed["_dependency_degraded"] = team_data["_dependency_degraded"]
+                        compressed["_dependency_degraded_reason"] = team_data.get(
+                            "_dependency_degraded_reason"
+                        )
+                    tool_results[team_key] = compressed
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[CoachPayloadCompress] %s compression failed: %s — keeping original",
+                        team_key,
+                        exc,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CoachPayloadCompress] compression skipped: %s", exc)
+
     # 레거시 구조 호환성 유지 (단일 팀 분석 요청 시)
     if not away_team_id:
         tool_results["team_summary"] = tool_results["home"].get("summary", {})
@@ -11096,6 +11169,30 @@ async def analyze_team(
                     context=fact_sheet_context,
                     focus_section_requirements=focus_section_requirements,
                 )
+                # 동적 프롬프트 사이즈 메트릭 + 로그 (압축 효과 추적)
+                # ratio 3.5는 한국어 평균 char/token 추정.
+                try:
+                    _dyn_chars = len(coach_prompt_dynamic)
+                    _ctx_chars = len(fact_sheet_context or "")
+                    _est_tokens = int(_dyn_chars / 3.5)
+                    _compress_label = (
+                        "on" if _coach_payload_compression_enabled() else "off"
+                    )
+                    logger.info(
+                        "[CoachPrompt] dynamic_chars=%d context_chars=%d est_tokens=%d compress=%s",
+                        _dyn_chars,
+                        _ctx_chars,
+                        _est_tokens,
+                        _compress_label,
+                    )
+                    AI_COACH_DYNAMIC_PROMPT_CHARS.labels(
+                        compress=_compress_label
+                    ).observe(_dyn_chars)
+                    AI_COACH_PAYLOAD_COMPRESSION_TOTAL.labels(
+                        enabled=_compress_label
+                    ).inc()
+                except Exception:  # noqa: BLE001
+                    pass
                 coach_llm = get_coach_llm_generator()
                 settings = get_settings()
                 default_max_tokens = (

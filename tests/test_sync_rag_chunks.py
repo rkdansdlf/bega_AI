@@ -124,6 +124,21 @@ def test_build_upsert_rows_serializes_meta_and_embedding_text() -> None:
     assert payload == [
         (
             '{"k": "v"}',
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             2025,
             1,
             0,
@@ -230,7 +245,7 @@ def test_sync_rag_chunks_upserts_batches_and_commits(monkeypatch: Any) -> None:
     assert result["synced_rows"] == 3
     assert dest_conn.commit_calls == 2
     assert len(dest_write_cur.executemany_calls) == 2
-    assert dest_write_cur.executemany_calls[0][0][7] == "id=1"
+    assert dest_write_cur.executemany_calls[0][0][22] == "id=1"
 
 
 def test_sync_rag_chunks_dry_run_only_counts(monkeypatch: Any) -> None:

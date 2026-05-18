@@ -46,7 +46,7 @@ class InMemoryRateLimiter:
             bucket.append(now)
 
 
-CHAT_RATE_LIMITER = InMemoryRateLimiter(max_requests=60, window_seconds=60)
+CHAT_RATE_LIMITER = InMemoryRateLimiter(max_requests=1000, window_seconds=60)
 CHAT_VOICE_RATE_LIMITER = InMemoryRateLimiter(max_requests=20, window_seconds=60)
 COACH_RATE_LIMITER = InMemoryRateLimiter(max_requests=25, window_seconds=60)
 VISION_RATE_LIMITER = InMemoryRateLimiter(max_requests=15, window_seconds=60)

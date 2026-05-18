@@ -8,11 +8,13 @@ LLM(Large Language Model)을 사용하여 자연스러운 답변을 생성하는
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
 import random
 from contextlib import contextmanager
+from datetime import datetime
 from functools import lru_cache
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import psycopg
@@ -24,9 +26,10 @@ from ..config import Settings
 from .embeddings import async_embed_query
 from .http_clients import get_shared_httpx_client
 from .prompts import FOLLOWUP_PROMPT, SYSTEM_PROMPT, HYDE_PROMPT
-from .retrieval import similarity_search
+from .retrieval import record_retrieval_event, similarity_search
 from . import kbo_metrics
 from .entity_extractor import enhance_search_strategy
+from .query_normalizer import full_normalize
 from .query_transformer import QueryTransformer, multi_query_retrieval
 from .context_formatter import ContextFormatter
 from ..agents.baseball_agent import BaseballAgentRuntime
@@ -34,6 +37,11 @@ from ..agents.shared_runtime import initialize_shared_baseball_agent_runtime
 from .wpa_calculator import WPACalculator
 from .retry_utils import llm_retry
 from .exceptions import DBRetrievalError
+from ..observability.metrics import (
+    AI_LLM_CALL_DURATION_SECONDS,
+    AI_RAG_STAGE_DURATION_SECONDS,
+)
+from time import perf_counter as _rag_perf_counter
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +73,15 @@ TEAM_MAP = {
 MIN_IP_SP = 70
 MIN_IP_RP = 30
 MIN_PA_BATTER = 100
+DB_UNAVAILABLE_PREFIX = (
+    "⚠️ 현재 KBO 통계 DB에 일시적으로 접속할 수 없어 정확한 수치를 확인하지 못했습니다. "
+    "아래 내용은 일반 야구 지식 기반의 참고 답변입니다."
+)
+EMBEDDING_FAILED_PREFIX = (
+    "검색용 임베딩 생성에 실패해 저장된 KBO 근거를 확인하지 못했습니다. "
+    "아래 내용은 제한적인 참고 답변입니다."
+)
+ZERO_HIT_PREFIX = "저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다."
 
 
 def _to_int(value: Any) -> int:
@@ -74,6 +91,65 @@ def _to_int(value: Any) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _ensure_answer_prefix(answer: str, prefix: str) -> str:
+    answer_text = (answer or "").strip()
+    if not prefix:
+        return answer_text
+    if answer_text.startswith(prefix):
+        return answer_text
+    if not answer_text:
+        return prefix
+    return f"{prefix}\n\n{answer_text}"
+
+
+def _ensure_zero_hit_answer_prefix(answer: str) -> str:
+    answer_text = (answer or "").strip()
+    if answer_text.startswith("저장된"):
+        return answer_text
+    if not answer_text:
+        return ZERO_HIT_PREFIX
+    return f"{ZERO_HIT_PREFIX} {answer_text}"
+
+
+def _build_retrieval_event_filter(
+    final_filters: Dict[str, Any],
+    *,
+    actual_filters: Optional[Dict[str, Any]] = None,
+    fallback_used: bool = False,
+    fallback_stage: Optional[str] = "none",
+) -> Dict[str, Any]:
+    event_filter = dict(final_filters or {})
+    event_filter["original_filters"] = dict(final_filters or {})
+    event_filter["actual_filters"] = dict(
+        actual_filters if actual_filters is not None else final_filters or {}
+    )
+    event_filter["fallback_used"] = bool(fallback_used)
+    event_filter["fallback_stage"] = fallback_stage or "none"
+    return event_filter
+
+
+def _build_citations(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    citations: List[Dict[str, Any]] = []
+    for doc in docs:
+        citation = {
+            "id": doc.get("id"),
+            "title": doc.get("title", ""),
+            "source_table": doc.get("source_table"),
+            "source_row_id": doc.get("source_row_id"),
+            "source_type": doc.get("source_type"),
+            "source_uri": doc.get("source_uri"),
+            "topic_key": doc.get("topic_key") or (doc.get("meta") or {}).get("topic_key"),
+            "similarity": doc.get("similarity"),
+            "combined_score": doc.get("combined_score"),
+            "quality_score": doc.get("quality_score"),
+            "valid_from": doc.get("valid_from"),
+            "valid_to": doc.get("valid_to"),
+            "expires_at": doc.get("expires_at"),
+        }
+        citations.append({key: value for key, value in citation.items() if value is not None})
+    return citations
 
 
 def _get_safe_stat(meta: Dict, key: str, default: Any = None) -> Optional[float]:
@@ -131,6 +207,7 @@ _RRF_STOPWORDS = frozenset(
 )
 _RRF_MAX_QUERY_TOKENS = 4
 _RRF_LOG_PREVIEW_LEN = 140
+RetrievalState = Dict[str, Any]
 
 # --- Intent-branching keyword sets (frozenset for O(1) lookup) ---
 # 각 메서드(`_is_statistical_query`, `_is_regulation_query`, `_is_game_query`,
@@ -536,6 +613,40 @@ def _build_rrf_keyword(query: str, entity_filter: Optional[Any]) -> str:
     return " ".join(terms)
 
 
+def _new_retrieval_state() -> RetrievalState:
+    return {
+        "db_error": None,
+        "embedding_error": None,
+        "partial_errors": [],
+        "error_type": None,
+    }
+
+
+def _record_retrieval_state_error(
+    retrieval_state: Optional[RetrievalState],
+    *,
+    error_type: str,
+    message: str,
+) -> None:
+    if retrieval_state is None:
+        return
+    retrieval_state["error_type"] = error_type
+    if error_type == "db_unavailable":
+        retrieval_state["db_error"] = message
+    elif error_type == "embedding_failed":
+        retrieval_state["embedding_error"] = message
+    partial_errors = retrieval_state.setdefault("partial_errors", [])
+    if isinstance(partial_errors, list):
+        partial_errors.append({"error_type": error_type, "message": message})
+
+
+def _resolve_default_season_year(settings: Settings) -> int:
+    configured = getattr(settings, "default_kbo_season_year", None)
+    if configured:
+        return int(configured)
+    return datetime.now().year
+
+
 class MetaWrapper:
     """
     메타 데이터를 감싸서 효율적인 캐싱을 지원하는 래퍼 클래스입니다.
@@ -547,12 +658,15 @@ class MetaWrapper:
         self._hash_key = self._generate_hash_key()
 
     def _generate_hash_key(self) -> str:
-        # source_row_id가 있으면 가장 효율적인 키로 사용
         row_id = self.meta.get("source_row_id")
         if row_id:
-            return f"id:{row_id}"
+            content_hash_value = self.meta.get("content_hash")
+            if content_hash_value:
+                return f"id:{row_id}:hash:{content_hash_value}"
+            updated_at = self.meta.get("updated_at")
+            if updated_at:
+                return f"id:{row_id}:updated:{updated_at}"
 
-        # 없으면 fallback: 전체 json 덤프
         return _meta_cache_key(self.meta)
 
     def __hash__(self):
@@ -776,6 +890,31 @@ def _build_db_unavailable_context(query: str, entity_filter: Any, year: int) -> 
     return "\n".join(parts)
 
 
+def _build_embedding_failed_context(query: str, entity_filter: Any, year: int) -> str:
+    """검색 임베딩 생성 실패 시 LLM에 전달할 제한 컨텍스트를 생성합니다."""
+    parts = [
+        "### [시스템 안내]",
+        "검색용 임베딩 생성에 실패해 저장된 KBO 근거 문서를 확인하지 못했습니다.",
+        "아래 질문에 대해 구체 수치를 단정하지 말고, 검색 근거 부재를 명확히 밝힌 뒤 제한적으로 답변하세요.",
+        "",
+        "**반드시 지켜야 할 사항:**",
+        f"- 답변 시작 부분에 다음 문구를 포함하세요: '{EMBEDDING_FAILED_PREFIX}'",
+        "- 저장된 RAG 근거를 확인했다고 표현하지 마세요.",
+        "- 선수 기록, 순위, 규정 세부 조건처럼 변동 가능한 정보는 단정하지 마세요.",
+        "",
+        "### 사용자 질문 분석",
+        f"- 질문: {query}",
+        f"- 기준 연도: {year}년",
+    ]
+    if entity_filter.player_name:
+        parts.append(f"- 선수명: {entity_filter.player_name}")
+    if entity_filter.team_id:
+        parts.append(f"- 팀: {entity_filter.team_id}")
+    if entity_filter.stat_type:
+        parts.append(f"- 통계 항목: {entity_filter.stat_type}")
+    return "\n".join(parts)
+
+
 class RAGPipeline:
     """
     검색(Retrieval)과 생성(Generation)을 결합하여 답변을 생성하는 RAG 파이프라인을 관리합니다.
@@ -803,9 +942,6 @@ class RAGPipeline:
         )
         self.baseball_agent = self.agent_runtime.shared_agent
         self.wpa_calculator = wpa_calculator or WPACalculator()
-        self._retrieval_error: Optional[str] = (
-            None  # set if DB was unreachable during retrieval
-        )
 
     @contextmanager
     def _checkout_conn(self) -> Iterator[psycopg.Connection]:
@@ -836,9 +972,7 @@ class RAGPipeline:
             meta = doc.get("meta", {})
             if not meta:
                 continue
-
-            # Always keep raw doc reference
-            raw_docs.append(doc)
+            source_table = doc.get("source_table")
 
             # Filter out non-regular season data (playoffs, etc.)
             # league = meta.get("league", "")
@@ -847,30 +981,39 @@ class RAGPipeline:
             #     continue
 
             # --- Pitcher / Batter Processing (cached) ---
-            if doc.get("source_table") in {
+            if source_table in {
                 "player_season_pitching",
                 "player_season_batting",
             }:
                 league = meta.get("league", "N/A")
-                if doc.get("source_table") == "player_season_pitching":
+                if source_table == "player_season_pitching":
                     logger.info(
                         f"[RAG] Found pitcher: {meta.get('player_name')} - IP: {meta.get('innings_pitched')}, League: {league}"
                     )
 
                 # [Optimized] Use MetaWrapper for efficient caching
-                meta_wrapper = MetaWrapper(meta)
+                cache_meta = dict(meta)
+                if doc.get("content_hash"):
+                    cache_meta["content_hash"] = doc.get("content_hash")
+                if doc.get("updated_at"):
+                    cache_meta["updated_at"] = doc.get("updated_at")
+                meta_wrapper = MetaWrapper(cache_meta)
                 processed, warning = _process_stat_doc_cached(
-                    doc.get("source_table"), meta_wrapper
+                    source_table, meta_wrapper
                 )
                 if warning:
                     warnings.add(warning)
                     continue
+                raw_docs.append(doc)
                 if processed:
-                    if doc.get("source_table") == "player_season_pitching":
+                    if source_table == "player_season_pitching":
                         processed_pitchers.append(processed)
                     else:
                         processed_batters.append(processed)
-            elif doc.get("source_table") in [
+            else:
+                raw_docs.append(doc)
+
+            if source_table in [
                 "game",
                 "game_flow_summary",
                 "game_metadata",
@@ -878,9 +1021,9 @@ class RAGPipeline:
                 "game_pitching_stats",
             ]:
                 processed_games.append(doc)
-            elif doc.get("source_table") == "awards":
+            elif source_table == "awards":
                 processed_awards.append(doc)
-            elif doc.get("source_table") == "player_movements":
+            elif source_table == "player_movements":
                 processed_movements.append(doc)
 
         # Sort by rank score (lower is better)
@@ -923,6 +1066,8 @@ class RAGPipeline:
         filters: Optional[Dict[str, Any]] = None,
         entity_filter: Optional[Any] = None,
         use_hyde: bool = False,
+        intent: str = "",
+        retrieval_state: Optional[RetrievalState] = None,
     ) -> List[Dict[str, Any]]:
         search_query = query
         if use_hyde:
@@ -936,8 +1081,30 @@ class RAGPipeline:
                 search_query = query
 
         limit = limit or self.settings.default_search_limit
-        embedding = await async_embed_query(search_query, self.settings)
+        _embed_start = _rag_perf_counter()
+        try:
+            embedding = await async_embed_query(search_query, self.settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[RAG] Query embedding failed; returning zero retrieval results")
+            _record_retrieval_state_error(
+                retrieval_state,
+                error_type="embedding_failed",
+                message=str(exc),
+            )
+            return []
+        finally:
+            try:
+                AI_RAG_STAGE_DURATION_SECONDS.labels(stage="embed").observe(
+                    _rag_perf_counter() - _embed_start
+                )
+            except Exception:  # noqa: BLE001
+                pass
         if not embedding:
+            _record_retrieval_state_error(
+                retrieval_state,
+                error_type="embedding_failed",
+                message="empty embedding",
+            )
             return []
 
         keyword = _build_rrf_keyword(query, entity_filter)
@@ -961,12 +1128,24 @@ class RAGPipeline:
                     settings=self.settings,
                 )
 
+        _search_start = _rag_perf_counter()
         try:
             docs = await run_in_threadpool(_do_search)
         except DBRetrievalError as exc:
             logger.error("[RAG] DB retrieval error in retrieve(): %s", exc)
-            self._retrieval_error = str(exc.cause)
+            _record_retrieval_state_error(
+                retrieval_state,
+                error_type="db_unavailable",
+                message=str(exc.cause),
+            )
             return []
+        finally:
+            try:
+                AI_RAG_STAGE_DURATION_SECONDS.labels(stage="search").observe(
+                    _rag_perf_counter() - _search_start
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return docs
 
     async def retrieve_with_multi_query(
@@ -977,6 +1156,8 @@ class RAGPipeline:
         filters: Optional[Dict[str, Any]] = None,
         use_llm_expansion: bool = False,
         limit: Optional[int] = None,
+        intent: str = "",
+        retrieval_state: Optional[RetrievalState] = None,
     ) -> List[Dict[str, Any]]:
         """
         Multi-query retrieval을 사용하여 검색 품질을 향상시킵니다.
@@ -1023,6 +1204,8 @@ class RAGPipeline:
             entity_filter=entity_filter,
             limit_per_query=effective_limit_per_query,
             limit=effective_limit,
+            intent=intent,
+            retrieval_state=retrieval_state,
         )
 
         logger.info(f"[RAG] Multi-query retrieval returned {len(docs)} documents")
@@ -1049,16 +1232,115 @@ class RAGPipeline:
             return True
         return False
 
+    def _rerank_docs(self, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """v1 rerank interface; disabled by default and uses existing scores only."""
+        if not bool(getattr(self.settings, "rag_rerank_enabled", False)):
+            return docs
+        candidate_limit = max(
+            1, int(getattr(self.settings, "rag_rerank_candidate_limit", 20) or 20)
+        )
+        context_limit = max(1, int(getattr(self.settings, "rag_context_limit", 10) or 10))
+        candidates = docs[:candidate_limit]
+        candidates.sort(
+            key=lambda doc: (
+                float(doc.get("combined_score") or 0.0),
+                float(doc.get("similarity") or 0.0),
+                float(doc.get("quality_score") or 0.0),
+            ),
+            reverse=True,
+        )
+        return candidates[:context_limit]
+
+    def _record_retrieval_event(
+        self,
+        *,
+        query: str,
+        intent: Optional[str],
+        final_filters: Dict[str, Any],
+        docs: List[Dict[str, Any]],
+        selected_docs: Optional[List[Dict[str, Any]]] = None,
+        retrieval_started_at: float,
+        success: bool,
+        error_type: Optional[str],
+        original_filters: Optional[Dict[str, Any]] = None,
+        actual_filters: Optional[Dict[str, Any]] = None,
+        fallback_used: bool = False,
+        fallback_stage: Optional[str] = "none",
+    ) -> None:
+        selected = selected_docs if selected_docs is not None else docs
+        rewritten_queries = [
+            str(doc.get("_source_query"))
+            for doc in docs
+            if doc.get("_source_query")
+        ]
+        seen_queries: set[str] = set()
+        unique_rewritten_queries: List[str] = []
+        for rewritten_query in rewritten_queries:
+            if rewritten_query in seen_queries:
+                continue
+            seen_queries.add(rewritten_query)
+            unique_rewritten_queries.append(rewritten_query)
+
+        def _doc_id(doc: Dict[str, Any]) -> Any:
+            return doc.get("id")
+
+        scores = [
+            {
+                "id": _doc_id(doc),
+                "similarity": doc.get("similarity"),
+                "combined_score": doc.get("combined_score"),
+                "keyword_rank_val": doc.get("keyword_rank_val"),
+                "quality_score": doc.get("quality_score"),
+            }
+            for doc in docs
+        ]
+        if original_filters is None and actual_filters is None and not fallback_used:
+            metadata_filter = final_filters
+        else:
+            metadata_filter = _build_retrieval_event_filter(
+                original_filters or final_filters,
+                actual_filters=actual_filters if actual_filters is not None else final_filters,
+                fallback_used=fallback_used,
+                fallback_stage=fallback_stage,
+            )
+        latency_ms = int((_rag_perf_counter() - retrieval_started_at) * 1000)
+        try:
+            with self._checkout_conn() as conn:
+                record_retrieval_event(
+                    conn,
+                    user_query=query,
+                    intent=intent,
+                    rewritten_queries=unique_rewritten_queries,
+                    metadata_filter=metadata_filter,
+                    retrieved_chunk_ids=[_doc_id(doc) for doc in docs],
+                    selected_chunk_ids=[_doc_id(doc) for doc in selected],
+                    scores=scores,
+                    latency_ms=latency_ms,
+                    success=success,
+                    error_type=error_type,
+                    settings=self.settings,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RAG] Failed to record retrieval event: %s", exc)
+
     async def _generate(self, messages: Sequence[Dict[str, str]]) -> str:
         provider = self.settings.llm_provider
+        _llm_start = _rag_perf_counter()
 
         try:
             if provider == "gemini":
-                return await self._generate_with_gemini(messages)
+                result = await self._generate_with_gemini(messages)
             elif provider == "openrouter":
-                return await self._generate_with_openrouter(messages)
+                result = await self._generate_with_openrouter(messages)
             else:
                 raise RuntimeError(f"지원되지 않는 LLM 공급자: {provider}")
+            try:
+                AI_LLM_CALL_DURATION_SECONDS.labels(
+                    provider=provider, route="rag"
+                ).observe(_rag_perf_counter() - _llm_start)
+            except Exception:  # noqa: BLE001
+                pass
+            return result
         except Exception as e:
             logger.error(f"[RAG] Primary LLM provider '{provider}' failed: {e}")
 
@@ -1069,13 +1351,27 @@ class RAGPipeline:
             if fallback_provider == "gemini" and self.settings.gemini_api_key:
                 logger.info(f"[RAG] Attempting fallback to Gemini")
                 try:
-                    return await self._generate_with_gemini(messages)
+                    fb_result = await self._generate_with_gemini(messages)
+                    try:
+                        AI_LLM_CALL_DURATION_SECONDS.labels(
+                            provider="gemini", route="rag_fallback"
+                        ).observe(_rag_perf_counter() - _llm_start)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return fb_result
                 except Exception as fallback_e:
                     logger.error(f"[RAG] Fallback to Gemini also failed: {fallback_e}")
             elif fallback_provider == "openrouter" and self.settings.openrouter_api_key:
                 logger.info(f"[RAG] Attempting fallback to OpenRouter")
                 try:
-                    return await self._generate_with_openrouter(messages)
+                    fb_result = await self._generate_with_openrouter(messages)
+                    try:
+                        AI_LLM_CALL_DURATION_SECONDS.labels(
+                            provider="openrouter", route="rag_fallback"
+                        ).observe(_rag_perf_counter() - _llm_start)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return fb_result
                 except Exception as fallback_e:
                     logger.error(
                         f"[RAG] Fallback to OpenRouter also failed: {fallback_e}"
@@ -1247,17 +1543,22 @@ class RAGPipeline:
             or any(stat in query_lower for stat in _STAT_CORE_INDICATORS)
         )
 
-        # 디버깅을 위한 로그 출력
-        logger.info(f"[RAG] _is_statistical_query debug:")
-        logger.info(f"  query: {query}")
-        logger.info(f"  has_stat_keywords: {has_stat_keywords}")
-        logger.info(f"  has_specific_request: {has_specific_request}")
-        logger.info(f"  entity_filter.player_name: {entity_filter.player_name}")
-        logger.info(f"  entity_filter.stat_type: {entity_filter.stat_type}")
-
         # 통계 키워드가 있고 구체적인 요청이면 통계 질문
         result = has_stat_keywords and has_specific_request
-        logger.info(f"  RESULT: {result}")
+
+        # 디버깅용 로그는 DEBUG 레벨로 강등 (매 요청마다 평가되는 hot path).
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[RAG] _is_statistical_query debug: query=%r, "
+                "has_stat_keywords=%s, has_specific_request=%s, "
+                "player_name=%r, stat_type=%r, result=%s",
+                query,
+                has_stat_keywords,
+                has_specific_request,
+                entity_filter.player_name,
+                entity_filter.stat_type,
+                result,
+            )
         return result
 
     def _is_regulation_query(self, query: str) -> bool:
@@ -1362,8 +1663,6 @@ class RAGPipeline:
             "war": "WAR(Wins Above Replacement)는 대체 선수 대비 승수 기여도입니다.\n- WAR 2: 평균 주전급\n- WAR 5: 올스타급\n- WAR 8+: MVP급\n\nWAR은 선수의 종합적인 가치를 하나의 숫자로 나타내는 가장 포괄적인 지표입니다.",
             "era": "ERA(자책점평균)는 투수가 9이닝당 내주는 자책점 수입니다.\n- 계산법: (자책점 × 9) ÷ 투구이닝\n- 좋은 ERA: 4.00 미만\n- 뛰어난 ERA: 3.00 미만\n- 최고 수준 ERA: 2.50 미만",
             "whip": "WHIP는 투수가 이닝당 내주는 안타와 볼넷의 합계입니다.\n- 계산법: (피안타 + 볼넷) ÷ 투구이닝\n- 좋은 WHIP: 1.30 미만\n- 뛰어난 WHIP: 1.20 미만\n- 최고 수준 WHIP: 1.10 미만",
-            "골든글러브": "KBO 골든글러브는 각 포지션별 최고의 수비수에게 수여되는 상입니다.\n- 선정 방식: 기자단 투표\n- 대상: 각 포지션별 1명 (포수, 1루수, 2루수, 3루수, 유격수, 외야수 3명, 지명타자)\n- 기준: 수비율, 범위, 송구력 등 종합적인 수비 능력\n- 최소 출전: 규정 이닝의 2/3 이상",
-            "fa": "FA(자유계약선수)는 팀을 자유롭게 선택할 수 있는 선수입니다.\n- 자격 조건: 프로 경력 9년 이상 (2015년부터 8년으로 단축)\n- 권리: 어떤 팀과도 자유롭게 계약 가능\n- 보상: FA 영입팀은 원소속팀에게 보상선수 제공",
         }
 
         # 간단한 대화 응답 패턴
@@ -1433,8 +1732,9 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         # 1. Enhanced Entity Extraction and Search Strategy
+        query = full_normalize(query)  # 특수문자 제거, 한영 정규화, 공백 정리
         logger.info(f"[RAG] Processing query: {query}")
-        self._retrieval_error = None  # 요청마다 플래그 초기화
+        retrieval_state = _new_retrieval_state()
 
         # Extract entities and enhance search strategy
         search_strategy = enhance_search_strategy(query)
@@ -1506,12 +1806,36 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             final_filters["source_table"] = "game_flow_summary"
 
         # Determine year for analysis
-        year = final_filters.get("season_year") or entity_filter.season_year or 2025
+        year = (
+            final_filters.get("season_year")
+            or entity_filter.season_year
+            or _resolve_default_season_year(self.settings)
+        )
         logger.info(f"[RAG] Analysis year: {year}")
         logger.info(f"[RAG] Final filters: {final_filters}")
 
         # 2. Intelligent Multi-Strategy Retrieval
         docs = []
+        actual_filters: Dict[str, Any] = dict(final_filters)
+        fallback_used = False
+        fallback_stage = "none"
+        retrieval_started_at = _rag_perf_counter()
+
+        async def _run_retrieve(*args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+            _sig = inspect.signature(self.retrieve).parameters
+            if "retrieval_state" in _sig:
+                kwargs["retrieval_state"] = retrieval_state
+            if "intent" in _sig:
+                kwargs.setdefault("intent", intent)
+            return await self.retrieve(*args, **kwargs)
+
+        async def _run_multi_query(*args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+            _sig = inspect.signature(self.retrieve_with_multi_query).parameters
+            if "retrieval_state" in _sig:
+                kwargs["retrieval_state"] = retrieval_state
+            if "intent" in _sig:
+                kwargs.setdefault("intent", intent)
+            return await self.retrieve_with_multi_query(*args, **kwargs)
 
         if search_strategy["is_ranking_query"]:
             logger.info("[RAG] Ranking query detected - using multi-query retrieval")
@@ -1525,13 +1849,13 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 batter_filters["source_table"] = "player_season_batting"
 
                 _results = await asyncio.gather(
-                    self.retrieve_with_multi_query(
+                    _run_multi_query(
                         query,
                         entity_filter,
                         filters=pitcher_filters,
                         limit=search_limit,
                     ),
-                    self.retrieve_with_multi_query(
+                    _run_multi_query(
                         query,
                         entity_filter,
                         filters=batter_filters,
@@ -1539,6 +1863,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     ),
                     return_exceptions=True,
                 )
+                actual_filters = {"branch_filters": [pitcher_filters, batter_filters]}
                 docs_pitchers = (
                     _results[0] if not isinstance(_results[0], BaseException) else []
                 )
@@ -1556,12 +1881,13 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 )
             else:
                 # Position-specific multi-query search
-                docs = await self.retrieve_with_multi_query(
+                docs = await _run_multi_query(
                     query,
                     entity_filter,
                     filters=final_filters,
                     limit=search_limit,
                 )
+                actual_filters = dict(final_filters)
 
         elif (not is_game_flow_narrative) and self._should_use_single_query_retrieval(
             search_strategy=search_strategy,
@@ -1584,22 +1910,24 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 logger.info(
                     "[RAG] Team/entity strict query detected - using single-query retrieval"
                 )
-            docs = await self.retrieve(
+            docs = await _run_retrieve(
                 query,
                 filters=single_query_filters,
                 entity_filter=entity_filter,
                 limit=search_limit,
             )
+            actual_filters = dict(single_query_filters)
 
         else:
             logger.info("[RAG] General search strategy with multi-query")
             # Use multi-query for general searches to improve coverage
-            docs = await self.retrieve_with_multi_query(
+            docs = await _run_multi_query(
                 query,
                 entity_filter,
                 filters=final_filters,
                 limit=search_limit,
             )
+            actual_filters = dict(final_filters)
 
         # 3. Fallback Strategy
         if not docs and final_filters:
@@ -1610,7 +1938,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             # Try removing source_table first
             if "source_table" in fallback_filters:
                 fallback_filters.pop("source_table")
-                docs = await self.retrieve(
+                docs = await _run_retrieve(
                     query,
                     filters=fallback_filters,
                     limit=max(
@@ -1619,12 +1947,15 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     ),
                     use_hyde=False,
                 )
+                actual_filters = dict(fallback_filters)
+                fallback_used = True
+                fallback_stage = "without_source_table"
                 logger.info(f"[RAG] Fallback without source_table: {len(docs)} docs")
 
             # If still no results, try without team filter
             if not docs and "team_id" in fallback_filters:
                 fallback_filters.pop("team_id")
-                docs = await self.retrieve(
+                docs = await _run_retrieve(
                     query,
                     filters=fallback_filters,
                     limit=max(
@@ -1633,6 +1964,9 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     ),
                     use_hyde=False,
                 )
+                actual_filters = dict(fallback_filters)
+                fallback_used = True
+                fallback_stage = "without_team_id"
                 logger.info(f"[RAG] Fallback without team filter: {len(docs)} docs")
 
             # Final fallback: only keep year and league filters
@@ -1642,7 +1976,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     minimal_filters["season_year"] = final_filters["season_year"]
                 if "meta.league" in final_filters:
                     minimal_filters["meta.league"] = final_filters["meta.league"]
-                docs = await self.retrieve(
+                docs = await _run_retrieve(
                     query,
                     filters=minimal_filters,
                     limit=max(
@@ -1651,16 +1985,19 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     ),
                     use_hyde=False,
                 )
+                actual_filters = dict(minimal_filters)
+                fallback_used = True
+                fallback_stage = "minimal"
                 logger.info(f"[RAG] Minimal fallback: {len(docs)} docs")
 
         logger.info(f"[RAG] Final retrieval result: {len(docs)} documents")
 
         # --- DB 연결 장애 폴백 ---
         # docs가 있으면 일부 검색이 성공한 것이므로 에러가 있어도 폴백하지 않음
-        if self._retrieval_error is not None and not docs:
+        if retrieval_state.get("db_error") is not None and not docs:
             logger.warning(
                 "[RAG] DB was unavailable during retrieval, using LLM knowledge fallback. cause=%s",
-                self._retrieval_error,
+                retrieval_state.get("db_error"),
             )
             db_down_context = _build_db_unavailable_context(query, entity_filter, year)
             history_block = _history_context_block(history)
@@ -1671,6 +2008,20 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             db_messages.extend(_history_for_messages(history))
             db_messages.append({"role": "user", "content": prompt})
             answer = await self._generate(db_messages)
+            answer = _ensure_answer_prefix(answer, DB_UNAVAILABLE_PREFIX)
+            self._record_retrieval_event(
+                query=query,
+                intent=intent,
+                final_filters=final_filters,
+                docs=[],
+                retrieval_started_at=retrieval_started_at,
+                success=False,
+                error_type="db_unavailable",
+                original_filters=final_filters,
+                actual_filters=actual_filters,
+                fallback_used=fallback_used,
+                fallback_stage=fallback_stage,
+            )
             return {
                 "answer": answer,
                 "citations": [],
@@ -1686,6 +2037,76 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 },
             }
         # --- DB 연결 장애 폴백 끝 ---
+
+        if retrieval_state.get("embedding_error") is not None and not docs:
+            logger.warning(
+                "[RAG] Query embedding failed during retrieval, using limited fallback. cause=%s",
+                retrieval_state.get("embedding_error"),
+            )
+            embedding_failed_context = _build_embedding_failed_context(
+                query, entity_filter, year
+            )
+            history_block = _history_context_block(history)
+            if history_block:
+                embedding_failed_context = (
+                    history_block + "\n\n" + embedding_failed_context
+                )
+            prompt = FOLLOWUP_PROMPT.format(
+                question=query, context=embedding_failed_context
+            )
+            embedding_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            embedding_messages.extend(_history_for_messages(history))
+            embedding_messages.append({"role": "user", "content": prompt})
+            answer = await self._generate(embedding_messages)
+            answer = _ensure_answer_prefix(answer, EMBEDDING_FAILED_PREFIX)
+            self._record_retrieval_event(
+                query=query,
+                intent=intent,
+                final_filters=final_filters,
+                docs=[],
+                retrieval_started_at=retrieval_started_at,
+                success=False,
+                error_type="embedding_failed",
+                original_filters=final_filters,
+                actual_filters=actual_filters,
+                fallback_used=fallback_used,
+                fallback_stage=fallback_stage,
+            )
+            return {
+                "answer": answer,
+                "citations": [],
+                "intent": intent,
+                "retrieved": [],
+                "strategy": "llm_knowledge_embedding_failed",
+                "entity_filter": {
+                    "season_year": entity_filter.season_year,
+                    "team_id": entity_filter.team_id,
+                    "player_name": entity_filter.player_name,
+                    "stat_type": entity_filter.stat_type,
+                    "position_type": entity_filter.position_type,
+                },
+            }
+
+        retrieved_docs = list(docs)
+        docs = self._rerank_docs(docs)
+        self._record_retrieval_event(
+            query=query,
+            intent=intent,
+            final_filters=final_filters,
+            docs=retrieved_docs,
+            selected_docs=docs,
+            retrieval_started_at=retrieval_started_at,
+            success=bool(retrieved_docs),
+            error_type=(
+                None
+                if retrieved_docs
+                else retrieval_state.get("error_type") or "zero_hit"
+            ),
+            original_filters=final_filters,
+            actual_filters=actual_filters,
+            fallback_used=fallback_used,
+            fallback_stage=fallback_stage,
+        )
 
         # 2. 데이터 처리 및 보강
         processed_data = await self._process_and_enrich_docs(docs, year)
@@ -1725,13 +2146,13 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         # 5. LLM을 호출하여 답변 생성
         answer = await self._generate(messages)
+        if not docs:
+            answer = _ensure_zero_hit_answer_prefix(answer)
 
         # 6. 최종 결과 구성
         return {
             "answer": answer,
-            "citations": [
-                {"id": doc["id"], "title": doc.get("title", "")} for doc in docs
-            ],
+            "citations": _build_citations(docs),
             "intent": intent,
             "retrieved": docs,
             "strategy": "rag_v3_enhanced",  # 업데이트된 버전 명시

@@ -290,6 +290,39 @@ async def _chat_cache_cleanup_loop(interval_seconds: int = 3600) -> None:
             logger.warning("[ChatCache] Cleanup loop error: %s", exc)
 
 
+async def _db_pool_metrics_loop(interval_seconds: int = 30) -> None:
+    """주기적으로 DB 풀 stats를 Prometheus gauge에 publish.
+
+    psycopg_pool stats 키 (예시): pool_size, pool_available, requests_waiting,
+    pool_min, pool_max. 모든 키를 일일이 매핑하지 않고 주요 4개만 노출.
+    """
+    try:
+        from app.observability.metrics import AI_DB_POOL_SIZE
+    except ImportError:
+        return
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            pool = get_connection_pool()
+            get_stats = getattr(pool, "get_stats", None)
+            if not callable(get_stats):
+                continue
+            stats = get_stats() or {}
+            mapping = {
+                "max": stats.get("pool_max") or DB_POOL_MAX_SIZE,
+                "min": stats.get("pool_min") or DB_POOL_MIN_SIZE,
+                "available": stats.get("pool_available", 0),
+                "requests_waiting": stats.get("requests_waiting", 0),
+            }
+            for state, value in mapping.items():
+                try:
+                    AI_DB_POOL_SIZE.labels(state=state).set(float(value or 0))
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DBPoolMetrics] publish loop error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app):
     """앱 시작/종료 시 실행되는 lifespan 이벤트"""
@@ -351,6 +384,10 @@ async def lifespan(app):
     cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
     logger.info("[Lifespan] chat_response_cache cleanup task started (interval=1h)")
 
+    # [Observability] DB 풀 stats를 주기적으로 Prometheus gauge에 publish
+    db_pool_metrics_task = asyncio.create_task(_db_pool_metrics_loop())
+    logger.info("[Lifespan] db pool metrics publisher started (interval=30s)")
+
     # [Embedding Cache] 백엔드 미리 초기화 (startup 로그 출력)
     try:
         from .core.embedding_cache import get_backend as _get_embed_backend
@@ -363,10 +400,12 @@ async def lifespan(app):
 
     # 종료 시: cleanup 태스크 취소 후 리소스 정리
     cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
+    db_pool_metrics_task.cancel()
+    for task in (cleanup_task, db_pool_metrics_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     # httpx 클라이언트 정리
     await close_shared_httpx_clients()

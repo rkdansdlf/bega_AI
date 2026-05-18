@@ -70,6 +70,20 @@ def create_app() -> FastAPI:
     app.include_router(moderation.router)
     app.include_router(release_decision.router)
 
+    # Prometheus /metrics 엔드포인트 마운트
+    # /ai/metrics와 /metrics 양쪽 모두 노출하여 운영자/스크레이퍼 호환성 확보
+    try:
+        from app.observability.metrics import metrics_asgi_app
+
+        app.mount("/metrics", metrics_asgi_app())
+        app.mount("/ai/metrics", metrics_asgi_app())
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "[Observability] failed to mount /metrics endpoint: %s", exc
+        )
+
     def _custom_openapi():
         if app.openapi_schema:
             return app.openapi_schema
