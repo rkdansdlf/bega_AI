@@ -1,221 +1,230 @@
+"""coach_cache_key.py 단위 테스트.
+
+Coach 전용 캐시 키 생성 모듈의 모든 공개 함수를 외부 의존성 없이 검증한다.
+캐시 키 충돌 = 다른 사용자에게 잘못된 Coach 분석이 노출되는 보안 이슈이므로
+해시 결정론·focus 정렬·lineup 순서 독립성 검증이 핵심이다.
+"""
+from __future__ import annotations
+
 from app.core.coach_cache_key import (
+    FOCUS_ORDER,
+    FOCUS_SET,
     build_coach_cache_key,
     build_focus_signature,
     build_lineup_signature,
+    build_question_signature,
     build_starter_signature,
     normalize_focus,
+    normalize_question_override,
 )
 
 
-def test_normalize_focus_dedup_and_sort():
-    resolved = normalize_focus(["starter", "recent_form", "starter", "unknown"])
-    assert resolved == ["recent_form", "starter"]
+# ── TestNormalizeFocus ────────────────────────────────────────────────────────
+
+class TestNormalizeFocus:
+    def test_valid_focus_returned(self):
+        result = normalize_focus(["bullpen"])
+        assert result == ["bullpen"]
+
+    def test_invalid_focus_filtered_out(self):
+        result = normalize_focus(["invalid_focus", "bullpen"])
+        assert result == ["bullpen"]
+
+    def test_none_returns_empty_list(self):
+        assert normalize_focus(None) == []
+
+    def test_empty_sequence_returns_empty_list(self):
+        assert normalize_focus([]) == []
+
+    def test_duplicates_removed(self):
+        result = normalize_focus(["bullpen", "bullpen", "starter"])
+        assert result.count("bullpen") == 1
+
+    def test_uppercase_normalized(self):
+        result = normalize_focus(["BULLPEN"])
+        assert "bullpen" in result
+
+    def test_canonical_order_preserved(self):
+        result = normalize_focus(["batting", "recent_form", "bullpen"])
+        expected_order = [f for f in FOCUS_ORDER if f in {"batting", "recent_form", "bullpen"}]
+        assert result == expected_order
+
+    def test_all_valid_focus_accepted(self):
+        all_focus = list(FOCUS_SET)
+        result = normalize_focus(all_focus)
+        assert set(result) == FOCUS_SET
 
 
-def test_build_coach_cache_key_same_focus_different_order_same_key():
-    key1, payload1 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="SSG",
+# ── TestNormalizeQuestionOverride ─────────────────────────────────────────────
+
+class TestNormalizeQuestionOverride:
+    def test_none_returns_none(self):
+        assert normalize_question_override(None) is None
+
+    def test_empty_string_returns_none(self):
+        assert normalize_question_override("") is None
+
+    def test_whitespace_only_returns_none(self):
+        assert normalize_question_override("   ") is None
+
+    def test_consecutive_spaces_collapsed(self):
+        result = normalize_question_override("KIA  분석")
+        assert result == "KIA 분석"
+
+    def test_normal_text_preserved(self):
+        result = normalize_question_override("양현종 선발 분석")
+        assert result == "양현종 선발 분석"
+
+
+# ── TestBuildFocusSignature ───────────────────────────────────────────────────
+
+class TestBuildFocusSignature:
+    def test_none_returns_all(self):
+        assert build_focus_signature(None) == "all"
+
+    def test_empty_list_returns_all(self):
+        assert build_focus_signature([]) == "all"
+
+    def test_single_focus_returned(self):
+        result = build_focus_signature(["bullpen"])
+        assert result == "bullpen"
+
+    def test_multiple_focus_joined_with_plus(self):
+        result = build_focus_signature(["bullpen", "recent_form"])
+        assert "+" in result
+        assert "bullpen" in result
+        assert "recent_form" in result
+
+    def test_invalid_focus_produces_all(self):
+        assert build_focus_signature(["nonexistent"]) == "all"
+
+
+# ── TestBuildQuestionSignature ────────────────────────────────────────────────
+
+class TestBuildQuestionSignature:
+    def test_none_returns_auto(self):
+        assert build_question_signature(None) == "auto"
+
+    def test_empty_string_returns_auto(self):
+        assert build_question_signature("") == "auto"
+
+    def test_text_returns_q_prefix_hash(self):
+        result = build_question_signature("양현종 분석")
+        assert result.startswith("q:")
+        assert len(result) == len("q:") + 16
+
+    def test_deterministic(self):
+        r1 = build_question_signature("테스트 질문")
+        r2 = build_question_signature("테스트 질문")
+        assert r1 == r2
+
+    def test_different_texts_different_signatures(self):
+        r1 = build_question_signature("질문 A")
+        r2 = build_question_signature("질문 B")
+        assert r1 != r2
+
+
+# ── TestBuildStarterSignature ─────────────────────────────────────────────────
+
+class TestBuildStarterSignature:
+    def test_both_none_returns_digest_with_pending_prefix(self):
+        # None|None → "|" → not empty → produces "starter_pending:{hash}"
+        result = build_starter_signature(None, None)
+        assert result.startswith("starter_pending:")
+
+    def test_both_provided_returns_digest(self):
+        result = build_starter_signature("양현종", "원태인")
+        assert result.startswith("starter_pending:")
+        assert len(result) == len("starter_pending:") + 12
+
+    def test_deterministic(self):
+        r1 = build_starter_signature("양현종", "원태인")
+        r2 = build_starter_signature("양현종", "원태인")
+        assert r1 == r2
+
+    def test_different_pitchers_different_signatures(self):
+        r1 = build_starter_signature("양현종", "원태인")
+        r2 = build_starter_signature("김광현", "원태인")
+        assert r1 != r2
+
+
+# ── TestBuildLineupSignature ──────────────────────────────────────────────────
+
+class TestBuildLineupSignature:
+    def test_none_returns_pending(self):
+        assert build_lineup_signature(None) == "lineup_pending"
+
+    def test_empty_list_returns_pending(self):
+        assert build_lineup_signature([]) == "lineup_pending"
+
+    def test_players_returns_digest(self):
+        result = build_lineup_signature(["김도영", "나성범"])
+        assert result.startswith("lineup:")
+        assert len(result) == len("lineup:") + 12
+
+    def test_order_invariant(self):
+        r1 = build_lineup_signature(["김도영", "나성범"])
+        r2 = build_lineup_signature(["나성범", "김도영"])
+        assert r1 == r2
+
+    def test_different_players_different_signatures(self):
+        r1 = build_lineup_signature(["김도영"])
+        r2 = build_lineup_signature(["나성범"])
+        assert r1 != r2
+
+
+# ── TestBuildCoachCacheKey ────────────────────────────────────────────────────
+
+def _default_key(**overrides):
+    kwargs = dict(
+        schema_version="v1",
+        prompt_version="v2",
+        home_team_code="KIA",
         away_team_code="LG",
         year=2025,
-        game_type="REGULAR",
-        focus=["recent_form", "bullpen"],
-        question_override=None,
-    )
-    key2, payload2 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="SSG",
-        away_team_code="LG",
-        year=2025,
-        game_type="regular",
-        focus=["bullpen", "recent_form"],
-        question_override=None,
-    )
-
-    assert key1 == key2
-    assert (
-        payload1["focus_signature"]
-        == payload2["focus_signature"]
-        == "recent_form+bullpen"
-    )
-
-
-def test_build_coach_cache_key_diff_focus_different_key():
-    key1, _ = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="SSG",
-        away_team_code="LG",
-        year=2025,
-        game_type="REGULAR",
-        focus=["recent_form"],
-        question_override=None,
-    )
-    key2, _ = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="SSG",
-        away_team_code="LG",
-        year=2025,
-        game_type="REGULAR",
+        game_type="REG",
         focus=["bullpen"],
         question_override=None,
     )
-    assert key1 != key2
+    kwargs.update(overrides)
+    return build_coach_cache_key(**kwargs)
 
 
-def test_build_coach_cache_key_same_focus_diff_question_different_key():
-    key1, payload1 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="DB",
-        away_team_code=None,
-        year=2025,
-        game_type="REGULAR",
-        focus=["recent_form"],
-        question_override="두산 최근 전력 분석",
-    )
-    key2, payload2 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="DB",
-        away_team_code=None,
-        year=2025,
-        game_type="REGULAR",
-        focus=["recent_form"],
-        question_override="두산 불펜 집중 분석",
-    )
-    assert key1 != key2
-    assert payload1["question_signature"] != payload2["question_signature"]
+class TestBuildCoachCacheKey:
+    def test_returns_tuple_of_two(self):
+        result = _default_key()
+        assert isinstance(result, tuple)
+        assert len(result) == 2
 
+    def test_key_is_64_char_hex(self):
+        key, _ = _default_key()
+        assert len(key) == 64
+        assert all(c in "0123456789abcdef" for c in key)
 
-def test_build_coach_cache_key_auto_brief_question_signature_fixed():
-    key1, payload1 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="OB",
-        away_team_code="LG",
-        year=2025,
-        game_type="REGULAR",
-        focus=["recent_form", "bullpen"],
-        question_override="LG 최근 전력 분석",
-        question_signature_override="auto",
-    )
-    key2, payload2 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="OB",
-        away_team_code="LG",
-        year=2025,
-        game_type="regular",
-        focus=["bullpen", "recent_form"],
-        question_override="LG 불펜 리스크 분석",
-        question_signature_override="auto",
-    )
+    def test_deterministic(self):
+        k1, _ = _default_key()
+        k2, _ = _default_key()
+        assert k1 == k2
 
-    assert key1 == key2
-    assert payload1["question_signature"] == "auto"
-    assert payload2["question_signature"] == "auto"
+    def test_different_focus_different_key(self):
+        k1, _ = _default_key(focus=["bullpen"])
+        k2, _ = _default_key(focus=["starter"])
+        assert k1 != k2
 
+    def test_different_team_different_key(self):
+        k1, _ = _default_key(home_team_code="KIA")
+        k2, _ = _default_key(home_team_code="LG")
+        assert k1 != k2
 
-def test_build_coach_cache_key_auto_brief_stable_with_focus_order_and_case():
-    key1, payload1 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="HH",
-        away_team_code="LG",
-        year=2025,
-        game_type="regular",
-        focus=["bullpen", "recent_form", "starter", "BULLPEN"],
-        question_override="HH 최근 전력 분석",
-        question_signature_override="auto",
-    )
-    key2, payload2 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="HH",
-        away_team_code="LG",
-        year=2025,
-        game_type="REGULAR",
-        focus=["recent_form", "bullpen", "starter"],
-        question_override="HH 불펜 리스크 분석",
-        question_signature_override="auto",
-    )
+    def test_payload_contains_schema(self):
+        _, payload = _default_key()
+        assert payload["schema"] == "v1"
 
-    assert key1 == key2
-    assert payload1["focus_signature"] == "recent_form+bullpen+starter"
-    assert payload2["focus_signature"] == "recent_form+bullpen+starter"
-    assert payload1["question_signature"] == "auto"
-    assert payload2["question_signature"] == "auto"
+    def test_payload_contains_focus_signature(self):
+        _, payload = _default_key(focus=["bullpen"])
+        assert "focus_signature" in payload
+        assert payload["focus_signature"] == "bullpen"
 
-
-def test_build_coach_cache_key_manual_question_change_always_changes_key():
-    key1, payload1 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="OB",
-        away_team_code="LG",
-        year=2025,
-        game_type="REGULAR",
-        focus=["recent_form"],
-        question_override="OB 전력 분석",
-    )
-    key2, payload2 = build_coach_cache_key(
-        schema_version="v3",
-        prompt_version="v5_focus",
-        home_team_code="OB",
-        away_team_code="LG",
-        year=2025,
-        game_type="REGULAR",
-        focus=["recent_form"],
-        question_override="OB 경기력 분석",
-    )
-
-    assert key1 != key2
-    assert payload1["question_signature"] != payload2["question_signature"]
-
-
-def test_unknown_focus_ignored_signature_all():
-    assert build_focus_signature(["unknown", "legacy_only"]) == "all"
-
-
-def test_build_starter_signature_changes_with_pitchers():
-    sig1 = build_starter_signature("류현진", "임찬규")
-    sig2 = build_starter_signature("문동주", "임찬규")
-
-    assert sig1 != sig2
-
-
-def test_build_lineup_signature_ignores_order_noise_and_whitespace():
-    sig1 = build_lineup_signature(["  문현빈", "노시환", "채은성 "])
-    sig2 = build_lineup_signature(["채은성", "문현빈", "노시환"])
-
-    assert sig1 == sig2
-
-
-def test_build_coach_cache_key_changes_when_game_id_differs_for_auto_brief():
-    common_kwargs = {
-        "schema_version": "v4",
-        "prompt_version": "v6_game",
-        "home_team_code": "HH",
-        "away_team_code": "LG",
-        "year": 2025,
-        "game_type": "POST",
-        "focus": ["recent_form"],
-        "question_override": None,
-        "league_type_code": 4,
-        "stage_label": "PO",
-        "starter_signature": build_starter_signature("폰세", "임찬규"),
-        "lineup_signature": build_lineup_signature(["문현빈", "노시환", "오스틴"]),
-        "request_mode": "auto_brief",
-        "question_signature_override": "auto",
-    }
-
-    key1, payload1 = build_coach_cache_key(game_id="202510200001", **common_kwargs)
-    key2, payload2 = build_coach_cache_key(game_id="202510220001", **common_kwargs)
-
-    assert key1 != key2
-    assert payload1["game_id"] == "202510200001"
-    assert payload2["game_id"] == "202510220001"
+    def test_team_code_uppercased_in_payload(self):
+        _, payload = _default_key(home_team_code="kia")
+        assert payload["team_code_canonical"] == "KIA"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -13,6 +14,7 @@ def test_parse_args_parallel_engine_defaults(monkeypatch: Any) -> None:
     assert args.parallel_engine == "thread"
     assert args.workers == 4
     assert args.embed_batch_size == 32
+    assert args.row_stale_cleanup == "off"
     assert "game_inning_scores" not in ingest_script.DEFAULT_TABLES
     assert "game_flow_summary" in ingest_script.DEFAULT_TABLES
 
@@ -116,6 +118,120 @@ def test_static_profile_source_row_ids_do_not_collide() -> None:
     )
 
 
+def test_static_profile_payloads_include_source_metadata() -> None:
+    profile_key = "markdown_docs_rules_terms"
+    profile = ingest_script.TABLE_PROFILES[profile_key]
+
+    payloads = ingest_script.build_static_profile_chunk_payloads(
+        profile_key,
+        profile,
+        settings=SimpleNamespace(rag_chunk_target_chars=650),
+        content="KBO 공식 규정 설명과 경기 운영 기준을 충분히 담은 문서입니다.",
+    )
+
+    payload = payloads[0]
+    assert payload.source_type in {"official_rulebook", "markdown_doc"}
+    assert payload.source_uri.startswith("file:")
+    assert payload.topic_key.startswith("markdown_docs:")
+    assert payload.quality_score in {0.95, 0.70}
+    assert payload.meta["source_version"] == "v1"
+    assert payload.meta["visibility"] == "public"
+
+
+def test_kbo_row_payloads_include_source_metadata(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        ingest_script,
+        "get_settings",
+        lambda: SimpleNamespace(rag_chunk_target_chars=650),
+    )
+
+    payloads = ingest_script._build_chunk_payload_dicts_for_row(
+        table_name="teams",
+        row={"team_id": "LG", "team_name": "LG 트윈스"},
+        source_row_id="team_id=LG",
+        use_legacy_renderer=True,
+        today_str="2026-01-01",
+    )
+
+    payload = payloads[0]
+    assert payload["source_type"] == "kbo_db_table"
+    assert payload["source_uri"] == "db:teams:team_id=LG"
+    assert payload["topic_key"] == "teams:team_id=LG"
+    assert payload["quality_score"] == 0.85
+
+
+def test_game_lineup_manual_notes_propagate_source_metadata(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        ingest_script,
+        "get_settings",
+        lambda: SimpleNamespace(rag_chunk_target_chars=650),
+    )
+    notes = {
+        "source_type": "manual_lineup",
+        "source_url": "operator://lineup-card/20260510LGHH0",
+        "source_name": "operator lineup card",
+        "source_checked_at": "2026-05-10T10:00:00+09:00",
+        "manual_override_reason": "operator-provided missing lineup",
+        "is_verified": True,
+        "confidence": 0.92,
+        "quality_score": 0.70,
+    }
+
+    payloads = ingest_script._build_chunk_payload_dicts_for_row(
+        table_name="game_lineups",
+        row={
+            "game_id": "20260510LGHH0",
+            "team_code": "LG",
+            "team_id": "LG",
+            "player_id": "1001",
+            "player_name": "홍길동",
+            "batting_order": 1,
+            "position": "CF",
+            "notes": json.dumps(notes),
+        },
+        source_row_id="game_id=20260510LGHH0|team_code=LG|batting_order=1",
+        use_legacy_renderer=True,
+        today_str="2026-05-10",
+    )
+
+    payload = payloads[0]
+    assert payload["source_type"] == "manual_lineup"
+    assert payload["source_uri"] == "operator://lineup-card/20260510LGHH0"
+    assert payload["quality_score"] == 0.70
+    assert payload["meta"]["source_type"] == "manual_lineup"
+    assert payload["meta"]["confidence"] == 0.92
+    assert payload["meta"]["is_verified"] is True
+    assert payload["meta"]["source_checked_at"] == "2026-05-10T10:00:00+09:00"
+
+
+def test_row_stale_cleanup_only_runs_for_full_ingest() -> None:
+    assert ingest_script.should_run_row_stale_cleanup(
+        since=None,
+        limit=None,
+        row_stale_cleanup="dry-run",
+    )
+    assert ingest_script.should_run_row_stale_cleanup(
+        since=None,
+        limit=None,
+        row_stale_cleanup="apply",
+    )
+    assert not ingest_script.should_run_row_stale_cleanup(
+        since=None,
+        limit=10,
+        row_stale_cleanup="apply",
+    )
+    assert not ingest_script.should_run_row_stale_cleanup(
+        since=object(),  # type: ignore[arg-type]
+        limit=None,
+        row_stale_cleanup="apply",
+    )
+    assert not ingest_script.should_run_row_stale_cleanup(
+        since=None,
+        limit=None,
+        row_stale_cleanup="off",
+    )
+
+
 def test_ingest_sets_pgvector_search_path_on_destination_connection(
     monkeypatch: Any,
 ) -> None:
@@ -178,6 +294,7 @@ def test_ingest_sets_pgvector_search_path_on_destination_connection(
         commit_interval=100,
         parallel_engine="thread",
         workers=2,
+        row_stale_cleanup="off",
     )
 
     assert "SET statement_timeout TO 0;" in dest_conn.executed

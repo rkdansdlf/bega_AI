@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.retrieval import similarity_search
+from app.core.retrieval import (
+    _RRF_K_BY_INTENT,
+    _resolve_rrf_k,
+    record_retrieval_event,
+    similarity_search,
+)
 
 
 class _DummyCursor:
@@ -44,6 +49,19 @@ class _DummyConnection:
         return self.last_cursor
 
 
+class _RaisingEventCursor(_DummyCursor):
+    def execute(self, query: str, params: list[Any] | tuple[Any, ...] | None = None):
+        super().execute(query, params)
+        if "INSERT INTO rag_retrieval_events" in query:
+            raise RuntimeError("event table unavailable")
+
+
+class _RaisingEventConnection(_DummyConnection):
+    def cursor(self, row_factory=None):  # noqa: ANN001
+        self.last_cursor = _RaisingEventCursor(self.rows)
+        return self.last_cursor
+
+
 def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() -> None:
     rows = [
         {
@@ -73,17 +91,24 @@ def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() -> Non
 
     assert result == rows
     assert conn.last_cursor is not None
-    assert len(conn.last_cursor.executed) == 3
+    # _ensure_pgvector_session uses its own cursor (SET search_path + SET ivfflat.probes).
+    # The main-query cursor only sees: SET LOCAL statement_timeout + the SELECT.
+    assert len(conn.last_cursor.executed) == 2
 
-    timeout_sql, _ = conn.last_cursor.executed[1]
+    timeout_sql, _ = conn.last_cursor.executed[0]
     assert "SET LOCAL statement_timeout = 8000;" in timeout_sql
 
-    sql, params = conn.last_cursor.executed[2]
+    sql, params = conn.last_cursor.executed[1]
     expected_vector = "[0.10000000,0.20000000,0.30000000]"
     assert "keyword_query AS" in sql
     assert "candidates AS" in sql
     assert "UNION" in sql
     assert "source_table <> %s" in sql
+    assert "COALESCE(is_active, true) = true" in sql
+    assert "(expires_at IS NULL OR expires_at > now())" in sql
+    assert "(valid_from IS NULL OR valid_from <= now())" in sql
+    assert "(valid_to IS NULL OR valid_to > now())" in sql
+    assert "metadata->>%s = %s" in sql
     assert "ORDER BY combined_score DESC, similarity DESC" in sql
     assert params == [
         keyword,
@@ -128,16 +153,20 @@ def test_similarity_search_without_keyword_keeps_vector_path() -> None:
 
     assert result == rows
     assert conn.last_cursor is not None
-    assert len(conn.last_cursor.executed) == 3
+    assert len(conn.last_cursor.executed) == 2
 
-    timeout_sql, _ = conn.last_cursor.executed[1]
+    timeout_sql, _ = conn.last_cursor.executed[0]
     assert "SET LOCAL statement_timeout = 8000;" in timeout_sql
 
-    sql, params = conn.last_cursor.executed[2]
+    sql, params = conn.last_cursor.executed[1]
     expected_vector = "[0.40000000,0.50000000,0.60000000]"
     assert "keyword_query AS" not in sql
     assert "candidates AS" not in sql
     assert "source_table <> %s" in sql
+    assert "COALESCE(is_active, true) = true" in sql
+    assert "(expires_at IS NULL OR expires_at > now())" in sql
+    assert "(valid_from IS NULL OR valid_from <= now())" in sql
+    assert "(valid_to IS NULL OR valid_to > now())" in sql
     assert "ORDER BY embedding <=> %s::vector ASC" in sql
     assert params == [expected_vector, "game_inning_scores", 2025, expected_vector, 3]
 
@@ -168,10 +197,10 @@ def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> None:
     assert result == rows
     assert conn.last_cursor is not None
 
-    timeout_sql, _ = conn.last_cursor.executed[1]
+    timeout_sql, _ = conn.last_cursor.executed[0]
     assert "SET LOCAL statement_timeout = 8000;" in timeout_sql
 
-    sql, params = conn.last_cursor.executed[2]
+    sql, params = conn.last_cursor.executed[1]
     expected_vector = "[0.70000000,0.80000000,0.90000000]"
     assert "source_table <> %s" not in sql
     assert params == [expected_vector, 2025, expected_vector, 2]
@@ -206,10 +235,10 @@ def test_similarity_search_internal_exclude_source_tables_appends_filters() -> N
     assert result == rows
     assert conn.last_cursor is not None
 
-    timeout_sql, _ = conn.last_cursor.executed[1]
+    timeout_sql, _ = conn.last_cursor.executed[0]
     assert "SET LOCAL statement_timeout = 8000;" in timeout_sql
 
-    sql, params = conn.last_cursor.executed[2]
+    sql, params = conn.last_cursor.executed[1]
     expected_vector = "[0.90000000,0.10000000,0.20000000]"
     assert sql.count("source_table <> %s") == 2
     assert params == [
@@ -220,3 +249,79 @@ def test_similarity_search_internal_exclude_source_tables_appends_filters() -> N
         expected_vector,
         2,
     ]
+
+
+def test_record_retrieval_event_inserts_best_effort_payload() -> None:
+    conn = _DummyConnection([])
+
+    record_retrieval_event(
+        conn,
+        user_query="김도영 홈런",
+        intent="stat",
+        rewritten_queries=["김도영 home_runs"],
+        metadata_filter={"season_year": 2025},
+        retrieved_chunk_ids=[1, 2],
+        selected_chunk_ids=[1],
+        scores=[{"id": 1, "similarity": 0.9}],
+        latency_ms=123,
+        success=True,
+        error_type=None,
+    )
+
+    assert conn.last_cursor is not None
+    insert_sql, params = conn.last_cursor.executed[-1]
+    assert "INSERT INTO rag_retrieval_events" in insert_sql
+    assert params[0] == "김도영 홈런"
+    assert params[1] == "stat"
+    assert '"season_year": 2025' in params[3]
+
+
+def test_record_retrieval_event_swallows_event_insert_failure() -> None:
+    conn = _RaisingEventConnection([])
+
+    record_retrieval_event(
+        conn,
+        user_query="DB 장애",
+        intent="stat",
+        rewritten_queries=[],
+        metadata_filter={},
+        retrieved_chunk_ids=[],
+        selected_chunk_ids=[],
+        scores=[],
+        latency_ms=1,
+        success=False,
+        error_type="db_unavailable",
+    )
+
+    assert conn.last_cursor is not None
+    assert any(
+        "INSERT INTO rag_retrieval_events" in query
+        for query, _params in conn.last_cursor.executed
+    )
+
+
+# ── RRF k intent-aware 테스트 ─────────────────────────────────────────────────
+
+def test_resolve_rrf_k_player_profile_returns_30() -> None:
+    assert _resolve_rrf_k("player_profile") == 30
+
+
+def test_resolve_rrf_k_stats_lookup_returns_40() -> None:
+    assert _resolve_rrf_k("stats_lookup") == 40
+
+
+def test_resolve_rrf_k_comparison_returns_50() -> None:
+    assert _resolve_rrf_k("comparison") == 50
+
+
+def test_resolve_rrf_k_unknown_intent_returns_60() -> None:
+    assert _resolve_rrf_k("unknown") == 60
+
+
+def test_resolve_rrf_k_empty_string_returns_60() -> None:
+    assert _resolve_rrf_k("") == 60
+
+
+def test_rrf_k_by_intent_dict_covers_expected_intents() -> None:
+    """_RRF_K_BY_INTENT에 player_profile, stats_lookup, comparison 세 키가 있어야 한다."""
+    assert set(_RRF_K_BY_INTENT.keys()) == {"player_profile", "stats_lookup", "comparison"}

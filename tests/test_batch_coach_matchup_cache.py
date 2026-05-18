@@ -803,6 +803,14 @@ def test_call_analyze_with_deadline_returns_failed_on_wall_timeout(
         return {"status": "generated", "reason": "generated", "meta": {}}
 
     monkeypatch.setattr(batch_module, "call_analyze", _stuck_call)
+    # Patch DB-dependent helpers so _fetch_cache_state (and _get_connection_pool)
+    # are not called during the timeout path — keeps the test offline and fast.
+    monkeypatch.setattr(
+        batch_module, "_build_terminal_cache_result_if_available", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        batch_module, "_build_in_progress_cache_result_if_available", lambda *a, **kw: None
+    )
 
     result = asyncio.run(
         call_analyze_with_deadline(
@@ -1100,7 +1108,7 @@ def test_force_rebuild_delete_blocks_active_pending_but_deletes_terminal(
             return _Ctx(self._conn)
 
     conn = _FakeConn()
-    monkeypatch.setattr(batch_module, "get_connection_pool", lambda: _FakePool(conn))
+    monkeypatch.setattr(batch_module, "_get_connection_pool", lambda: _FakePool(conn))
 
     stats = batch_module.force_rebuild_delete(
         ["pending-key", "completed-key", "missing-key"]

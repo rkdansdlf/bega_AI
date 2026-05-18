@@ -1,75 +1,314 @@
-"""
-PostgreSQL 데이터베이스에 HNSW 벡터 인덱스를 생성하는 스크립트입니다.
-이 인덱스는 벡터 유사도 검색 속도를 크게 향상시킵니다.
+"""HNSW 벡터 인덱스 생성/마이그레이션 스크립트.
+
+이 스크립트는 rag_chunks 테이블에 HNSW 인덱스를 생성하고,
+선택적으로 구형 IVFFlat 인덱스를 제거합니다.
+
+주요 기능:
+  - pgvector 버전 확인 (HNSW는 pgvector 0.5.0+)
+  - CREATE INDEX CONCURRENTLY 사용 (운영 중 테이블 잠금 없음)
+  - --dry-run: 실제 변경 없이 상태만 출력
+  - --drop-ivfflat: HNSW 생성 후 구형 IVFFlat 인덱스 제거
+  - EXPLAIN ANALYZE로 인덱스 사용 여부 검증
+
+운영 전환 흐름:
+  1. 이 스크립트를 --dry-run으로 실행하여 상태 확인
+  2. 스크립트를 --drop-ivfflat 없이 실행하여 HNSW 생성
+  3. AI 서비스에 AI_VECTOR_INDEX=hnsw 배포
+  4. 정상 확인 후 --drop-ivfflat 옵션으로 IVFFlat 제거
+
+사용 예:
+  python scripts/create_vector_index.py --dry-run
+  python scripts/create_vector_index.py
+  python scripts/create_vector_index.py --drop-ivfflat
+  python scripts/create_vector_index.py --m 16 --ef-construction 128
 """
 
+from __future__ import annotations
+
+import argparse
+import sys
 import time
+from typing import Optional, Tuple
+
 import psycopg
 
-from app.config import get_settings
+# ---------------------------------------------------------------------------
+# 기본값
+# ---------------------------------------------------------------------------
+HNSW_INDEX_NAME = "idx_rag_chunks_embedding_hnsw"
+IVFFLAT_INDEX_NAME = "idx_rag_chunks_embedding"
+TABLE_NAME = "rag_chunks"
 
-settings = get_settings()
-dsn = settings.database_url
-print(f"Connecting to database...")
+_PGVECTOR_MIN_VERSION_HNSW = (0, 5, 0)  # HNSW가 도입된 버전
 
-try:
-    conn = psycopg.connect(dsn, connect_timeout=30, autocommit=True)
 
-    with conn.cursor() as cur:
-        # 1. Check if index already exists
-        cur.execute("""
-            SELECT indexname FROM pg_indexes 
-            WHERE tablename = 'rag_chunks' AND indexname = 'idx_rag_chunks_embedding_hnsw'
-        """)
-        existing = cur.fetchone()
+# ---------------------------------------------------------------------------
+# 헬퍼
+# ---------------------------------------------------------------------------
 
-        if existing:
-            print("HNSW index already exists. Skipping creation.")
-        else:
-            print("Creating HNSW index on embedding column...")
-            print("This may take several minutes depending on data size...")
 
-            start = time.time()
-            # Create HNSW index for cosine distance (<=>)
-            # m=16: max connections per layer (default)
-            # ef_construction=64: size of dynamic candidate list during construction
-            cur.execute("""
-                CREATE INDEX idx_rag_chunks_embedding_hnsw 
-                ON rag_chunks 
-                USING hnsw (embedding vector_cosine_ops)
-                WITH (m = 16, ef_construction = 64)
-            """)
-            elapsed = time.time() - start
-            print(f"HNSW index created successfully in {elapsed:.2f}s")
+def _parse_version(version_str: str) -> Tuple[int, ...]:
+    """'0.7.4' → (0, 7, 4)."""
+    parts = []
+    for part in version_str.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            break
+    return tuple(parts)
 
-        # 2. Verify index
-        cur.execute("""
-            SELECT indexname, indexdef FROM pg_indexes 
-            WHERE tablename = 'rag_chunks' AND indexname LIKE '%embedding%'
-        """)
-        indexes = cur.fetchall()
-        print(f"\nCurrent embedding indexes:")
-        for idx in indexes:
-            print(f"  - {idx[0]}")
 
-        # 3. Test query performance
-        print("\nTesting vector search performance...")
-        vector_str = "[" + ",".join("0.0" for _ in range(settings.embed_dim)) + "]"
-
+def _get_pgvector_version(cur: psycopg.Cursor) -> Optional[str]:
+    try:
         cur.execute(
-            "EXPLAIN ANALYZE SELECT id, (1 - (embedding <=> %s::vector)) as similarity FROM rag_chunks LIMIT 5",
-            (vector_str,),
+            "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
         )
-        plan = cur.fetchall()
-        print("Query plan:")
-        for row in plan:
-            print(f"  {row[0]}")
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
 
-    conn.close()
-    print("\nDatabase optimization complete!")
 
-except Exception as e:
-    print(f"Error: {e}")
-    import traceback
+def _index_exists(cur: psycopg.Cursor, index_name: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM pg_indexes WHERE tablename = %s AND indexname = %s",
+        (TABLE_NAME, index_name),
+    )
+    return cur.fetchone() is not None
 
-    traceback.print_exc()
+
+def _get_table_row_count(cur: psycopg.Cursor) -> int:
+    """EXPLAIN을 통한 빠른 행 수 추정 (reltuples)."""
+    cur.execute(
+        "SELECT reltuples::bigint FROM pg_class WHERE relname = %s", (TABLE_NAME,)
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def _print_current_indexes(cur: psycopg.Cursor) -> None:
+    cur.execute(
+        """
+        SELECT indexname, pg_size_pretty(pg_relation_size(indexname::regclass)) AS size, indexdef
+        FROM pg_indexes
+        WHERE tablename = %s AND indexname LIKE '%%embedding%%'
+        ORDER BY indexname
+        """,
+        (TABLE_NAME,),
+    )
+    rows = cur.fetchall()
+    if rows:
+        print(f"\n현재 {TABLE_NAME} embedding 인덱스:")
+        for name, size, definition in rows:
+            print(f"  [{size}] {name}")
+            print(f"         {definition}")
+    else:
+        print(f"\n{TABLE_NAME}에 embedding 인덱스가 없습니다.")
+
+
+def _verify_hnsw_usage(
+    cur: psycopg.Cursor, embed_dim: int, ef_search: int
+) -> bool:
+    """EXPLAIN ANALYZE로 HNSW 인덱스 사용 여부를 검증합니다."""
+    vector_str = "[" + ",".join("0.0" for _ in range(embed_dim)) + "]"
+    cur.execute(f"SET hnsw.ef_search = {ef_search}")
+    cur.execute(
+        "EXPLAIN (FORMAT TEXT) "
+        "SELECT id FROM rag_chunks "
+        "ORDER BY embedding <=> %s::vector LIMIT 10",
+        (vector_str,),
+    )
+    plan_rows = cur.fetchall()
+    plan = "\n".join(row[0] for row in plan_rows)
+    uses_hnsw = "Index Scan" in plan and HNSW_INDEX_NAME in plan
+    print("\nEXPLAIN (처음 5줄):")
+    for line in plan.splitlines()[:5]:
+        print(f"  {line}")
+    return uses_hnsw
+
+
+# ---------------------------------------------------------------------------
+# 메인
+# ---------------------------------------------------------------------------
+
+
+def run(
+    *,
+    dry_run: bool,
+    drop_ivfflat: bool,
+    m: int,
+    ef_construction: int,
+    ef_search: int,
+) -> int:
+    """
+    Returns:
+        0 = 성공, 1 = 오류.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    dsn = settings.database_url
+    embed_dim: int = getattr(settings, "embed_dim", 1536)
+
+    print(f"데이터베이스 연결 중...")
+    try:
+        conn = psycopg.connect(dsn, connect_timeout=30, autocommit=True)
+    except Exception as exc:
+        print(f"[ERROR] DB 연결 실패: {exc}")
+        return 1
+
+    try:
+        with conn.cursor() as cur:
+            # 1. pgvector 버전 확인
+            pgvec_ver_str = _get_pgvector_version(cur)
+            if pgvec_ver_str is None:
+                print("[ERROR] pgvector 확장이 설치되어 있지 않습니다.")
+                return 1
+            pgvec_ver = _parse_version(pgvec_ver_str)
+            if pgvec_ver < _PGVECTOR_MIN_VERSION_HNSW:
+                print(
+                    f"[ERROR] pgvector {pgvec_ver_str}는 HNSW를 지원하지 않습니다. "
+                    f"pgvector >= {'.'.join(str(v) for v in _PGVECTOR_MIN_VERSION_HNSW)} 필요."
+                )
+                return 1
+            print(f"pgvector 버전: {pgvec_ver_str} ✓")
+
+            # 2. 행 수 추정
+            row_count = _get_table_row_count(cur)
+            print(f"{TABLE_NAME} 추정 행 수: {row_count:,}")
+
+            # 3. 현재 인덱스 상태 출력
+            _print_current_indexes(cur)
+
+            hnsw_exists = _index_exists(cur, HNSW_INDEX_NAME)
+            ivfflat_exists = _index_exists(cur, IVFFLAT_INDEX_NAME)
+
+            # 4. HNSW 인덱스 생성
+            if hnsw_exists:
+                print(f"\n[SKIP] HNSW 인덱스 '{HNSW_INDEX_NAME}'가 이미 존재합니다.")
+            else:
+                hnsw_sql = (
+                    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {HNSW_INDEX_NAME} "
+                    f"ON {TABLE_NAME} "
+                    f"USING hnsw (embedding vector_cosine_ops) "
+                    f"WITH (m = {m}, ef_construction = {ef_construction})"
+                )
+                if dry_run:
+                    print(f"\n[DRY-RUN] 실행 예정 SQL:\n  {hnsw_sql}")
+                else:
+                    print(
+                        f"\nHNSW 인덱스 생성 중 (m={m}, ef_construction={ef_construction})..."
+                    )
+                    print(
+                        f"행 수 {row_count:,}개 기준 예상 소요 시간: "
+                        f"{max(1, row_count // 50_000)}~{max(2, row_count // 20_000)}분"
+                    )
+                    print("(CREATE INDEX CONCURRENTLY: 운영 트래픽에 영향 없음)")
+                    start = time.time()
+                    cur.execute(hnsw_sql)
+                    elapsed = time.time() - start
+                    print(f"HNSW 인덱스 생성 완료! ({elapsed:.1f}초)")
+                    hnsw_exists = True
+
+            # 5. IVFFlat 제거 (선택)
+            if drop_ivfflat and ivfflat_exists:
+                drop_sql = f"DROP INDEX CONCURRENTLY IF EXISTS {IVFFLAT_INDEX_NAME}"
+                if dry_run:
+                    print(f"\n[DRY-RUN] IVFFlat 제거 예정 SQL:\n  {drop_sql}")
+                else:
+                    if not hnsw_exists:
+                        print(
+                            "[WARNING] HNSW 인덱스가 없는 상태에서 IVFFlat을 제거하면 "
+                            "검색 성능이 크게 저하됩니다. 작업을 건너뜁니다."
+                        )
+                    else:
+                        print(f"\nIVFFlat 인덱스 '{IVFFLAT_INDEX_NAME}' 제거 중...")
+                        cur.execute(drop_sql)
+                        print("IVFFlat 인덱스 제거 완료!")
+                        ivfflat_exists = False
+            elif drop_ivfflat and not ivfflat_exists:
+                print(f"\n[SKIP] IVFFlat 인덱스 '{IVFFLAT_INDEX_NAME}'가 이미 없습니다.")
+
+            # 6. 최종 인덱스 상태
+            print("\n--- 최종 인덱스 상태 ---")
+            _print_current_indexes(cur)
+
+            # 7. HNSW 사용 검증
+            if hnsw_exists and not dry_run:
+                print("\nHNSW 인덱스 사용 여부 검증 중...")
+                uses_hnsw = _verify_hnsw_usage(cur, embed_dim, ef_search)
+                if uses_hnsw:
+                    print("✓ HNSW 인덱스가 쿼리 플랜에서 사용됩니다.")
+                else:
+                    print(
+                        "[WARNING] EXPLAIN 플랜에서 HNSW 인덱스 사용이 확인되지 않았습니다. "
+                        "행 수가 너무 적거나 플래너 비용 추정 문제일 수 있습니다. "
+                        "`SET enable_seqscan = off`로 강제 검증을 시도할 수 있습니다."
+                    )
+
+            # 8. 환경변수 안내
+            if not dry_run:
+                print(
+                    "\n--- 다음 단계 ---\n"
+                    "1. AI 서비스 환경변수 설정:\n"
+                    "     AI_VECTOR_INDEX=hnsw\n"
+                    "2. 서비스 재시작 또는 재배포\n"
+                    "3. 기존 IVFFlat 제거 (아직 제거하지 않은 경우):\n"
+                    f"     python scripts/create_vector_index.py --drop-ivfflat\n"
+                    "4. ef_search 튜닝 (기본 100, 정확도↑ = 값↑, 속도↑ = 값↓):\n"
+                    f"     RETRIEVAL_HNSW_EF_SEARCH={ef_search}  # 현재 기본값"
+                )
+    finally:
+        conn.close()
+
+    return 0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="rag_chunks에 HNSW 벡터 인덱스를 생성/마이그레이션합니다.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="실제 변경 없이 실행 예정 작업만 출력합니다.",
+    )
+    parser.add_argument(
+        "--drop-ivfflat",
+        action="store_true",
+        help="HNSW 생성 후 구형 IVFFlat 인덱스(idx_rag_chunks_embedding)를 제거합니다.",
+    )
+    parser.add_argument(
+        "--m",
+        type=int,
+        default=16,
+        help="HNSW 레이어당 최대 연결 수 (기본: 16, 정확도↑=값↑, 빌드 시간↑)",
+    )
+    parser.add_argument(
+        "--ef-construction",
+        type=int,
+        default=64,
+        help="HNSW 빌드 시 동적 후보 리스트 크기 (기본: 64, 정확도↑=값↑, 빌드 시간↑)",
+    )
+    parser.add_argument(
+        "--ef-search",
+        type=int,
+        default=100,
+        help="검색 시 후보 리스트 크기 (기본: 100, RETRIEVAL_HNSW_EF_SEARCH 환경변수와 동일)",
+    )
+    args = parser.parse_args()
+
+    sys.exit(
+        run(
+            dry_run=args.dry_run,
+            drop_ivfflat=args.drop_ivfflat,
+            m=args.m,
+            ef_construction=args.ef_construction,
+            ef_search=args.ef_search,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

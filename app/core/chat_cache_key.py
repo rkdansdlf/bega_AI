@@ -26,7 +26,7 @@ INTENT_TTL_SECONDS: Dict[str, int] = {
     "game_lookup": 3 * 3600,  # 3h - 박스스코어/이닝 결과는 최신성이 중요
     "player_profile": 48 * 3600,  # 48h - 선수 기본 정보는 상대적으로 안정적
     "recent_form": 3 * 3600,  # 3h  - 최근 폼은 빠르게 변함
-    "comparison": 3 * 3600,  # 3h  - 비교도 최신성 중요
+    "comparison": 72 * 3600,  # 72h - 통계 비교는 대부분 역사 데이터라 안정적
     "general_conversation": 48 * 3600,  # 48h - 인사/일반 대화는 거의 불변
     "knowledge_explanation": 48 * 3600,  # 48h - KBO 규정·설명은 안정적
     "freeform": 12 * 3600,  # 12h - 기타 (기본값)
@@ -39,6 +39,7 @@ TEMPORAL_KEYWORDS = frozenset(
     {
         "오늘",
         "어제",
+        "그저께",
         "내일",
         "지금",
         "현재",
@@ -49,6 +50,9 @@ TEMPORAL_KEYWORDS = frozenset(
         "라이브",
         "순위표",
         "오늘의",
+        "올시즌",   # 진행 중인 시즌 → 실시간 통계 변동
+        "예상",     # 현재 데이터 기반 전망 → 자주 바뀔 수 있음
+        "전망",     # 동상: 현재 흐름에 따라 변동
     }
 )
 
@@ -113,6 +117,12 @@ def has_temporal_keyword(question: str) -> bool:
     """
     normalized = question.lower()
     if any(kw in normalized for kw in TEMPORAL_KEYWORDS):
+        return True
+    if re.search(r"\d{1,2}월\s*\d{1,2}일", normalized):
+        return True
+    if re.search(r"\d{4}-\d{1,2}-\d{1,2}", normalized):
+        return True
+    if re.search(r"20\d{2}년.*?\d{1,2}월\s*\d{1,2}일", normalized):
         return True
     if "시리즈" not in normalized:
         return False

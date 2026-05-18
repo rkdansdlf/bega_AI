@@ -146,9 +146,9 @@ def test_prune_extra_rag_chunks_execute_deletes_in_batches(
 
     assert report["total_deleted_count"] == 3
     assert dest_conn.commit_calls == 2
-    delete_queries = [
+    deactivate_queries = [
         query
         for query, _params in dest_delete_cur.executed
-        if "DELETE FROM rag_chunks" in query
+        if "UPDATE rag_chunks" in query and "is_active = false" in query
     ]
-    assert len(delete_queries) == 2
+    assert len(deactivate_queries) == 2

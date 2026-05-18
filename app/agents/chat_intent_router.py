@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from ..core.entity_extractor import extract_entities_from_query, extract_team
 from .tool_caller import ToolCall
@@ -155,6 +156,33 @@ class ChatIntentRouter:
         extracted_date = self._extract_date(query, query_lower)
         explicit_metric = self._resolve_leaderboard_spec(query_lower)
 
+        # stat_leader 체크 — get_leaderboard fast path (최우선 라우팅).
+        # 홈런왕/다승왕/평균자책점 1위/홈런 가장 많이 등 통계 리더 키워드는
+        # player_bundle, comparison, award 체크보다 먼저 처리해야 합니다:
+        # - entity_extractor가 일부 단어("많이" 등)를 player_name으로 오인 추출하여
+        #   player_bundle 경로로 잘못 라우팅될 수 있음
+        # - awards 테이블이 아닌 player_season_batting/pitching 테이블에서 응답해야 함
+        _stat_leader = getattr(entity_filter, "stat_leader", None)
+        if _stat_leader:
+            return IntentDecision(
+                intent=ChatIntent.LEADERBOARD_LOOKUP,
+                planner_mode="fast_path",
+                tool_calls=[ToolCall(
+                    "get_leaderboard",
+                    {
+                        "stat_name": _stat_leader["stat_name"],
+                        "year": season_year,
+                        "position": _stat_leader["position"],
+                        "limit": 10,
+                    },
+                )],
+                subject_type="pitcher" if _stat_leader["position"] == "pitching" else "batter",
+                season_year=season_year,
+                metric_policy=f"stat_leader_{_stat_leader['stat_name']}",
+                confidence=0.97,
+                analysis=f"stat_leader_fast_path:{_stat_leader['stat_name']}",
+            )
+
         comparison_tool_calls = self._build_player_comparison_tool_calls(
             query=query,
             query_lower=query_lower,
@@ -201,6 +229,7 @@ class ChatIntentRouter:
         team_bundle_tool_calls = self._build_team_analysis_bundle_tool_calls(
             query_lower=query_lower,
             team_name=team_name,
+            extracted_date=extracted_date,
             season_year=season_year,
         )
         if team_bundle_tool_calls:
@@ -253,7 +282,7 @@ class ChatIntentRouter:
                 analysis="경기 흐름 질문으로 판단되어 박스스코어 기반 game-flow fast-path를 사용합니다.",
             )
 
-        if self._is_team_analysis_query(query_lower, team_name):
+        if self._is_team_analysis_query(query_lower, team_name, extracted_date):
             return IntentDecision(
                 intent=ChatIntent.TEAM_ANALYSIS,
                 planner_mode="fast_path",
@@ -741,21 +770,63 @@ class ChatIntentRouter:
         ]
         return any(token in query_lower for token in baseball_tokens)
 
+    def _now(self) -> datetime:
+        try:
+            return datetime.now(ZoneInfo("Asia/Seoul"))
+        except Exception:
+            return datetime.now()
+
     def _extract_date(self, query: str, query_lower: str) -> Optional[str]:
+        now = self._now()
+
+        if "그저께" in query_lower:
+            return (now - timedelta(days=2)).strftime("%Y-%m-%d")
+        if "어제" in query_lower:
+            return (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
         if "오늘" in query_lower and any(
             keyword in query_lower
             for keyword in ["경기", "일정", "중계", "몇 시", "몇시"]
         ):
-            return datetime.now().strftime("%Y-%m-%d")
+            return now.strftime("%Y-%m-%d")
+
+        if "내일" in query_lower and any(
+            keyword in query_lower
+            for keyword in ["경기", "일정", "중계", "예매"]
+        ):
+            return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        if any(keyword in query_lower for keyword in ["모레", "내일 모레"]):
+            return (now + timedelta(days=2)).strftime("%Y-%m-%d")
+
         for pattern in [
-            r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일",
+            r"(20\d{2})년.*?(\d{1,2})월\s*(\d{1,2})일",
+            r"(\d{1,2})월\s*(\d{1,2})일",
             r"(\d{4})-(\d{1,2})-(\d{1,2})",
         ]:
             match = re.search(pattern, query)
             if match:
-                year_str, month_str, day_str = match.groups()
+                if pattern == r"(\d{1,2})월\s*(\d{1,2})일":
+                    year_str = str(now.year)
+                    month_str, day_str = match.groups()
+                elif pattern == r"(\d{4})-(\d{1,2})-(\d{1,2})":
+                    year_str, month_str, day_str = match.groups()
+                else:
+                    year_str, month_str, day_str = match.groups()
                 return f"{year_str}-{month_str.zfill(2)}-{day_str.zfill(2)}"
         return None
+
+    def _contains_date_expression(self, query_lower: str) -> bool:
+        if any(
+            token in query_lower
+            for token in ["어제", "그저께", "오늘", "내일", "모레", "내일 모레"]
+        ):
+            return True
+        if re.search(r"\d{1,2}월\s*\d{1,2}일", query_lower):
+            return True
+        if re.search(r"\d{4}-\d{1,2}-\d{1,2}", query_lower):
+            return True
+        return False
 
     def _resolve_subject_type(self, query_lower: str) -> Optional[str]:
         if any(token in query_lower for token in ["투수", "선발", "불펜", "마무리"]):
@@ -851,11 +922,12 @@ class ChatIntentRouter:
         *,
         query_lower: str,
         team_name: Optional[str],
+        extracted_date: Optional[str],
         season_year: int,
     ) -> list[ToolCall]:
         if not team_name:
             return []
-        if not self._is_team_analysis_query(query_lower, team_name):
+        if not self._is_team_analysis_query(query_lower, team_name, extracted_date):
             return []
 
         has_recent_scope = any(
@@ -1093,17 +1165,26 @@ class ChatIntentRouter:
             "era",
             "홈런",
             "타점",
+            "투수진",
+            "마운드",
         ]
         return any(token in query_lower for token in team_context_tokens) and any(
             token in query_lower for token in team_metric_tokens
         )
 
     def _is_team_analysis_query(
-        self, query_lower: str, team_name: Optional[str]
+        self,
+        query_lower: str,
+        team_name: Optional[str],
+        extracted_date: Optional[str],
     ) -> bool:
         if not self._fast_path_enabled or self._fast_path_scope != "team":
             return False
         if not team_name:
+            return False
+        if extracted_date:
+            return False
+        if self._contains_date_expression(query_lower):
             return False
         if self._is_regulation_query(query_lower):
             return False
@@ -1150,6 +1231,8 @@ class ChatIntentRouter:
             "5경기",
             "10경기",
             "필승조",
+            "투수진",
+            "마운드",
             "살아난",
             "식은",
             "올라오는",
