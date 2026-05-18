@@ -9379,7 +9379,10 @@ class BaseballStatisticsAgent:
         기존의 하드코딩된 일반 답변 대신 None을 반환하여 에이전트 외부의 
         RAG 파이프라인이 검색 결과를 바탕으로 유연하게 답변할 수 있도록 합니다.
         """
-        return None
+        query_lower = query.lower()
+        regulations = data.get("regulations", [])
+        if not isinstance(regulations, list):
+            regulations = []
 
         if any(
             keyword in query_lower
