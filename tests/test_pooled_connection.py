@@ -126,7 +126,9 @@ def test_document_query_tool_uses_exact_term_fallback_on_similarity_timeout(
 
     monkeypatch.setattr(tool, "_embed_query", lambda query: [0.1, 0.2, 0.3])
 
-    def _fake_similarity_search(conn, embedding, *, limit, keyword, settings):
+    def _fake_similarity_search(
+        conn, embedding, *, limit, keyword=None, filters=None, settings=None, intent="", **kwargs
+    ):
         similarity_calls.append(keyword)
         raise DBRetrievalError(
             "pgvector query timed out",
@@ -134,7 +136,7 @@ def test_document_query_tool_uses_exact_term_fallback_on_similarity_timeout(
         )
 
     monkeypatch.setattr(
-        "app.tools.document_query.similarity_search", _fake_similarity_search
+        "app.core.retrieval.similarity_search", _fake_similarity_search
     )
     monkeypatch.setattr(
         tool,

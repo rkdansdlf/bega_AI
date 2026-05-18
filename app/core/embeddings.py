@@ -29,6 +29,32 @@ from .http_clients import get_shared_httpx_client
 
 logger = logging.getLogger(__name__)
 
+# HuggingFace SentenceTransformer 모델 인스턴스 캐시.
+# `_embed_hf` 가 매 호출마다 SentenceTransformer(model_name) 으로 모델을 새로 만들면
+# 디스크 로드 + GPU/CPU 초기화 비용(수백ms~수초)이 매 요청에 발생한다.
+# 모델명이 동일하면 같은 인스턴스를 재사용하도록 모듈 레벨에서 캐싱한다.
+# 동시 초기화 race를 막기 위해 동기 lock을 둔다 (모델 로드는 sync 작업).
+import threading
+
+_HF_MODEL_CACHE: Dict[str, "object"] = {}
+_HF_MODEL_CACHE_LOCK = threading.Lock()
+
+
+def _get_hf_model(model_name: str):
+    """SentenceTransformer 모델을 캐시에서 반환하거나, 없으면 로드 후 캐싱한다."""
+    cached = _HF_MODEL_CACHE.get(model_name)
+    if cached is not None:
+        return cached
+    with _HF_MODEL_CACHE_LOCK:
+        cached = _HF_MODEL_CACHE.get(model_name)
+        if cached is not None:
+            return cached
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        logger.info("[Embeddings] Loading HF model %s (cached for reuse)", model_name)
+        model = SentenceTransformer(model_name)
+        _HF_MODEL_CACHE[model_name] = model
+        return model
+
 _QUERY_WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -96,11 +122,12 @@ async def _get_cached_query_embedding(cache_key: str) -> Optional[List[float]]:
     return await backend.get(cache_key)
 
 
-async def _set_cached_query_embedding(cache_key: str, embedding: List[float]) -> None:
-    from .embedding_cache import get_backend
+async def _set_cached_query_embedding(cache_key: str, embedding: List[float], *, query: str = "") -> None:
+    from .embedding_cache import get_backend, _calculate_embedding_ttl
 
     backend = await get_backend()
-    await backend.set(cache_key, embedding)
+    ttl = _calculate_embedding_ttl(query) if query else None
+    await backend.set(cache_key, embedding, ttl=ttl)
 
 
 def _ensure_dimension(
@@ -140,7 +167,8 @@ async def _embed_hf(
 ) -> List[List[float]]:
     """HuggingFace의 Sentence-Transformers 모델을 사용하여 텍스트를 임베딩합니다."""
     try:
-        from sentence_transformers import SentenceTransformer
+        # 패키지 존재만 빠르게 확인하고, 실제 모델 로드는 _get_hf_model 캐시로 위임한다.
+        import sentence_transformers  # noqa: F401
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise EmbeddingError(
             "sentence-transformers 패키지가 필요합니다. `pip install sentence-transformers` 후 다시 시도하세요."
@@ -152,8 +180,9 @@ async def _embed_hf(
     if batch_size <= 0:
         batch_size = len(texts) or 1
 
-    # 모델을 로드하고 임베딩을 생성합니다.
-    model = SentenceTransformer(model_name)
+    # 모델 로드는 캐싱: 첫 호출만 로드, 이후 캐시 인스턴스 재사용.
+    # 첫 로드 시 수백ms~수초 블로킹이 발생하므로 to_thread로 이벤트 루프 보호.
+    model = await asyncio.to_thread(_get_hf_model, model_name)
     embeddings = await asyncio.to_thread(
         model.encode,
         list(texts),
@@ -641,7 +670,7 @@ async def async_embed_query(
         return []
 
     embedding = vectors[0]
-    await _set_cached_query_embedding(cache_key, embedding)
+    await _set_cached_query_embedding(cache_key, embedding, query=query)
     return embedding
 
 
@@ -670,10 +699,26 @@ def embed_texts(
             )
             return future.result()
     else:
-        # 실행 중인 루프가 없으면 바로 실행
-        return asyncio.run(
-            async_embed_texts(texts, settings, max_concurrency=max_concurrency)
-        )
+        # 실행 중인 루프가 없으면 새 루프를 명시적으로 생성하여 실행
+        # Python 3.12+ 에서 asyncio.run() 호출 후 루프가 닫힌 상태로 남아
+        # 다음 호출 시 "Event loop is closed" 오류가 발생하는 경우를 방지한다.
+        # 또한 공유 httpx 클라이언트가 이전 루프에 묶여 있으면 오류가 발생하므로,
+        # 루프를 닫기 전에 공유 클라이언트를 먼저 정리한다.
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        try:
+            return new_loop.run_until_complete(
+                async_embed_texts(texts, settings, max_concurrency=max_concurrency)
+            )
+        finally:
+            # 공유 httpx 클라이언트를 현재 루프에서 정리하여 다음 루프가 깨끗하게 시작
+            from app.core.http_clients import close_shared_httpx_clients
+            try:
+                new_loop.run_until_complete(close_shared_httpx_clients())
+            except Exception:
+                pass
+            new_loop.close()
+            asyncio.set_event_loop(None)
 
 
 def _estimate_tokens(text: str) -> int:

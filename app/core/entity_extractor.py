@@ -28,6 +28,7 @@ class EntityFilter:
     movement_type: Optional[str] = None  # 이적 유형 (예: "fa", "trade")
     game_date: Optional[str] = None  # 경기 날짜 (예: "2025-05-10")
     position_code: Optional[str] = None  # 표준 포지션 코드 (예: "1B", "SS", "PH")
+    stat_leader: Optional[Dict[str, str]] = None  # 통계 리더 정보 (예: {"stat_name": "home_runs", "position": "batting"})
 
 
 # KBO 팀명 매핑 테이블 (사용자 입력 → 실제 DB team_id)
@@ -242,6 +243,9 @@ LEAGUE_TYPE_MAPPING = {
 }
 
 # 수상 유형 매핑 테이블 (사용자 입력 → 표준 수상명)
+# 주의: 통계 리더(홈런왕, 다승왕 등)는 STAT_LEADER_MAPPING으로 분리됨.
+# get_award_winners 툴(awards 테이블)이 아닌 get_leaderboard 툴로 라우팅해야 올바른
+# 결과를 반환하기 때문입니다.
 AWARD_MAPPING = {
     # 더 구체적인 MVP 계열을 먼저 매칭
     "한국시리즈 MVP": "korean_series_mvp",
@@ -261,7 +265,7 @@ AWARD_MAPPING = {
     "올스타 엠브이피": "all_star_mvp",
     "All-Star MVP": "all_star_mvp",
     "all-star mvp": "all_star_mvp",
-    # MVP
+    # MVP (정식 수상)
     "MVP": "mvp",
     "엠브이피": "mvp",
     "최우수선수": "mvp",
@@ -274,22 +278,74 @@ AWARD_MAPPING = {
     "골든글러브": "golden_glove",
     "골글": "golden_glove",
     "황금장갑": "golden_glove",
-    # 타이틀 홀더들
+    # 타이틀 (공식 수상 — 리그에서 수여하는 타격왕 트로피 등)
     "타격왕": "batting_title",
-    "타율왕": "batting_title",
-    "홈런왕": "hr_leader",
-    "장타왕": "hr_leader",
-    "타점왕": "rbi_leader",
-    "도루왕": "sb_leader",
-    "도루 1위": "sb_leader",
-    "다승왕": "wins_leader",
-    "다승": "wins_leader",
-    "방어율왕": "era_leader",
-    "방어율 1위": "era_leader",
-    "세이브왕": "saves_leader",
-    "세이브 1위": "saves_leader",
-    "탈삼진왕": "so_leader",
-    "탈삼진 1위": "so_leader",
+}
+
+# 통계 리더 매핑 테이블 (사용자 입력 → get_leaderboard 파라미터)
+# AWARD_MAPPING에서 분리된 이유: 해당 키워드들은 awards 테이블이 아닌
+# player_season_batting/pitching 테이블에서 조회해야 정확한 데이터를 반환합니다.
+# chat_intent_router.py 의 stat_leader fast-path 가 이 정보를 사용해
+# get_leaderboard 툴로 직접 라우팅합니다.
+STAT_LEADER_MAPPING: Dict[str, Dict[str, str]] = {
+    # ── 타자 부문 ────────────────────────────────────────────────────────────
+    # 홈런
+    "홈런왕":         {"stat_name": "home_runs",    "position": "batting"},
+    "홈런 1위":       {"stat_name": "home_runs",    "position": "batting"},
+    "홈런 가장 많이": {"stat_name": "home_runs",    "position": "batting"},
+    "최다 홈런":      {"stat_name": "home_runs",    "position": "batting"},
+    "최다홈런":       {"stat_name": "home_runs",    "position": "batting"},
+    # 타율
+    "타율왕":         {"stat_name": "avg",          "position": "batting"},
+    "타율 1위":       {"stat_name": "avg",          "position": "batting"},
+    "최고 타율":      {"stat_name": "avg",          "position": "batting"},
+    "타율 가장 높":   {"stat_name": "avg",          "position": "batting"},
+    # 타점
+    "타점왕":         {"stat_name": "rbi",          "position": "batting"},
+    "타점 1위":       {"stat_name": "rbi",          "position": "batting"},
+    "최다 타점":      {"stat_name": "rbi",          "position": "batting"},
+    "타점 가장 많이": {"stat_name": "rbi",          "position": "batting"},
+    # 도루
+    "도루왕":         {"stat_name": "stolen_bases", "position": "batting"},
+    "도루 1위":       {"stat_name": "stolen_bases", "position": "batting"},
+    "최다 도루":      {"stat_name": "stolen_bases", "position": "batting"},
+    "도루 가장 많이": {"stat_name": "stolen_bases", "position": "batting"},
+    # 안타
+    "안타왕":         {"stat_name": "hits",         "position": "batting"},
+    "안타 1위":       {"stat_name": "hits",         "position": "batting"},
+    "최다 안타":      {"stat_name": "hits",         "position": "batting"},
+    "안타 가장 많이": {"stat_name": "hits",         "position": "batting"},
+    # 기타 타자 지표
+    "장타왕":         {"stat_name": "slg",          "position": "batting"},
+    "출루율 1위":     {"stat_name": "obp",          "position": "batting"},
+    "OPS 1위":        {"stat_name": "ops",          "position": "batting"},
+    # ── 투수 부문 ────────────────────────────────────────────────────────────
+    # 승
+    "다승왕":         {"stat_name": "wins",         "position": "pitching"},
+    "다승 1위":       {"stat_name": "wins",         "position": "pitching"},
+    "최다승":         {"stat_name": "wins",         "position": "pitching"},
+    "최다 승":        {"stat_name": "wins",         "position": "pitching"},
+    # ERA / 방어율 / 평균자책점
+    "방어율왕":       {"stat_name": "era",          "position": "pitching"},
+    "방어율 1위":     {"stat_name": "era",          "position": "pitching"},
+    "평균자책점 1위": {"stat_name": "era",          "position": "pitching"},
+    "평균자책점 최저":{"stat_name": "era",          "position": "pitching"},
+    "최저 방어율":    {"stat_name": "era",          "position": "pitching"},
+    "최저 평균자책점":{"stat_name": "era",          "position": "pitching"},
+    "ERA 1위":        {"stat_name": "era",          "position": "pitching"},
+    # 탈삼진
+    "탈삼진왕":       {"stat_name": "strikeouts",   "position": "pitching"},
+    "탈삼진 1위":     {"stat_name": "strikeouts",   "position": "pitching"},
+    "최다 탈삼진":    {"stat_name": "strikeouts",   "position": "pitching"},
+    "탈삼진 가장 많이": {"stat_name": "strikeouts", "position": "pitching"},
+    # 세이브
+    "세이브왕":       {"stat_name": "saves",        "position": "pitching"},
+    "세이브 1위":     {"stat_name": "saves",        "position": "pitching"},
+    "최다 세이브":    {"stat_name": "saves",        "position": "pitching"},
+    "세이브 가장 많이": {"stat_name": "saves",      "position": "pitching"},
+    # 홀드
+    "홀드왕":         {"stat_name": "holds",        "position": "pitching"},
+    "최다 홀드":      {"stat_name": "holds",        "position": "pitching"},
 }
 
 # 선수 이동 유형 매핑 테이블 (사용자 입력 → 표준 이동 유형)
@@ -386,7 +442,17 @@ def extract_team(query: str) -> Optional[str]:
 
 def extract_stat_type(query: str) -> Optional[str]:
     """질문에서 통계 지표를 추출합니다."""
-    for stat_variant, standard_stat in STAT_MAPPING.items():
+    for stat_variant, standard_stat in sorted(
+        STAT_MAPPING.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        # 한 글자 또는 두 글자 약어인 경우 단어 경계 확인 (예: 'K', 'W', 'SV')
+        if len(stat_variant) <= 2 and stat_variant.isupper():
+            # KBO 내의 K 등은 무시하도록 단어 경계 또는 전후 맥락 확인
+            pattern = rf"\b{re.escape(stat_variant)}\b"
+            if re.search(pattern, query):
+                return standard_stat
+            continue
+
         if stat_variant in query:
             return standard_stat
     return None
@@ -510,6 +576,20 @@ def extract_award_type(query: str) -> Optional[str]:
     if re.search(r"(수상|상을?\s*받|상을?\s*탔)", query):
         return "any"  # 어떤 수상이든
 
+    return None
+
+
+def extract_stat_leader(query: str) -> Optional[Dict[str, str]]:
+    """통계 리더 쿼리 감지 → {"stat_name": ..., "position": ...} 반환.
+
+    STAT_LEADER_MAPPING에 정의된 키워드(홈런왕, 다승왕 등)가 포함된 경우
+    get_leaderboard 툴로 라우팅하기 위한 정보를 반환합니다.
+    awards 테이블이 아닌 player_season_batting/pitching 테이블 기반이므로
+    extract_award_type보다 우선 적용되어야 합니다.
+    """
+    for keyword, info in STAT_LEADER_MAPPING.items():
+        if keyword in query:
+            return info
     return None
 
 
@@ -1027,6 +1107,24 @@ def is_ranking_query(query: str) -> bool:
     return any(keyword in query for keyword in ranking_keywords)
 
 
+def is_regulation_query(query: str) -> bool:
+    """규정/제도/룰 관련 질문인지 판단합니다."""
+    regulation_keywords = [
+        "규정",
+        "제도",
+        "룰",
+        "규칙",
+        "법",
+        "가이드",
+        "매뉴얼",
+        "원칙",
+        "시스템",
+        "조항",
+        "쿼터",
+    ]
+    return any(keyword in query for keyword in regulation_keywords)
+
+
 def extract_ranking_count(query: str) -> Optional[int]:
     """순위 질문에서 요청된 개수를 추출합니다."""
     # "상위 5명", "10위까지", "톱 3" 등의 패턴
@@ -1069,6 +1167,9 @@ def extract_entities_from_query(query: str) -> EntityFilter:
     entity_filter.award_type = extract_award_type(query)
     entity_filter.movement_type = extract_movement_type(query)
     entity_filter.game_date = extract_game_date(query)
+    # stat_leader는 award_type보다 우선: 홈런왕/다승왕 등은 awards 테이블이 아닌
+    # player_season_batting/pitching 테이블에서 조회해야 합니다.
+    entity_filter.stat_leader = extract_stat_leader(query)
 
     # 로깅
     logger.info(
@@ -1080,6 +1181,7 @@ def extract_entities_from_query(query: str) -> EntityFilter:
         f"position={entity_filter.position_type}, "
         f"league={entity_filter.league_type}, "
         f"award={entity_filter.award_type}, "
+        f"stat_leader={entity_filter.stat_leader}, "
         f"movement={entity_filter.movement_type}, "
         f"game_date={entity_filter.game_date}, "
         f"position_code={entity_filter.position_code}"
@@ -1139,6 +1241,13 @@ def enhance_search_strategy(query: str) -> Dict[str, Any]:
     """
     entity_filter = extract_entities_from_query(query)
     db_filters = convert_to_db_filters(entity_filter)
+
+    # 규정 관련 질문이면 특정 테이블 및 메타데이터 필터링 해제 (문서 검색 허용)
+    if is_regulation_query(query):
+        logger.info(f"[EntityExtractor] Regulation query detected, unsetting restrictive filters: {query}")
+        db_filters.pop("source_table", None)
+        db_filters.pop("meta.movement_type", None)
+        db_filters.pop("meta.award_type", None)
 
     strategy = {
         "entity_filter": entity_filter,

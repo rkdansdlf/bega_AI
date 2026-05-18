@@ -9042,39 +9042,12 @@ class BaseballStatisticsAgent:
         )
 
     def _build_regulation_answer(self, data: Dict[str, Any]) -> Optional[str]:
-        regulations = data.get("regulations")
-        if not isinstance(regulations, list) or not regulations:
-            return None
-
-        top_entries = regulations[:3]
-        query_or_category = data.get("query") or data.get("category") or "규정"
-        lead = top_entries[0]
-        preview = " ".join(str(lead.get("content", "")).split())
-        preview = preview[:120] + ("..." if len(preview) > 120 else "")
-        rows = []
-        for entry in top_entries:
-            rows.append(
-                "| "
-                + f"{self._format_deterministic_metric(entry.get('regulation_code'))} | "
-                + f"{self._format_deterministic_metric(entry.get('title'))} | "
-                + f"{self._format_deterministic_metric(entry.get('category') or entry.get('document_type'))} |"
-            )
-
-        return (
-            "## 요약\n"
-            f"'{query_or_category}' 관련 규정은 DB 검색 기준으로 {len(regulations)}건 확인됐고, 우선순위가 가장 높은 조항부터 정리합니다.\n\n"
-            "## 상세 내역\n"
-            f"- 최상단 규정 제목은 {self._format_deterministic_metric(lead.get('title'))}입니다.\n"
-            f"- 본문 미리보기: {preview or '확인 불가'}\n\n"
-            "## 핵심 지표\n"
-            "| 규정 코드 | 제목 | 분류 |\n"
-            "| --- | --- | --- |\n"
-            f"{chr(10).join(rows)}\n\n"
-            "## 인사이트\n"
-            "- 규정 질문은 해석보다 원문 제목과 조항 코드를 먼저 확인하는 편이 안전합니다.\n"
-            "- 세부 적용 사례가 필요하면 같은 키워드로 조항 본문을 더 좁혀 재검색하는 방식이 좋습니다.\n"
-            "출처: DB 조회 결과"
-        )
+        """
+        KBO 규정 관련 답변을 생성합니다.
+        
+        에이전트 외부의 RAG 파이프라인이 검색 결과를 바탕으로 답변할 수 있도록 None을 반환합니다.
+        """
+        return None
 
     def _build_games_by_date_answer(self, data: Dict[str, Any]) -> Optional[str]:
         games = data.get("games")
@@ -9400,28 +9373,16 @@ class BaseballStatisticsAgent:
     def _build_regulation_chat_answer(
         self, query: str, data: Dict[str, Any]
     ) -> Optional[str]:
-        regulations = data.get("regulations") or []
-        if not regulations:
-            return None
-
+        """
+        KBO 규정 관련 답변을 생성합니다.
+        
+        기존의 하드코딩된 일반 답변 대신 None을 반환하여 에이전트 외부의 
+        RAG 파이프라인이 검색 결과를 바탕으로 유연하게 답변할 수 있도록 합니다.
+        """
         query_lower = query.lower()
-
-        if any(keyword in query_lower for keyword in ["fa", "보상선수", "보상 선수"]):
-            return (
-                "FA와 보상선수 기준은 선수 규정에서 핵심으로 다루는 항목입니다.\n\n"
-                "지금 붙은 규정 기준으로는 보상선수 여부와 보상 방식은 시즌별 공식 규정과 공시를 같이 봐야 안전합니다.\n\n"
-                "특히 연차, 등록일수, 등급별 보상 기준처럼 숫자로 끊기는 부분은 시즌마다 손볼 수 있어서, 그 수치를 여기서 단정하진 않겠습니다."
-            )
-
-        if any(
-            keyword in query_lower
-            for keyword in ["선수 등록", "등록 규정", "등록 현황", "등말소", "등·말소"]
-        ):
-            return (
-                "선수 등록 규정은 공식 선수 등록 현황과 선수 기록 페이지를 같이 보는 흐름으로 잡으면 됩니다.\n\n"
-                "지금 붙은 규정 기준으로도 구단별 등록 현황, 퓨처스 등록 현황, 선수별 엔트리 등록·말소 일수를 먼저 확인하고, 세부 숫자 기준은 시즌 공지와 규정 원문으로 다시 맞춰보라는 방향에 가깝습니다.\n\n"
-                "즉 화면에 보이는 등록 상태를 먼저 보고, 인원 기준이나 운영 세칙은 최신 시즌 규정으로 한 번 더 대조하는 방식이 가장 안전합니다."
-            )
+        regulations = data.get("regulations", [])
+        if not isinstance(regulations, list):
+            regulations = []
 
         if any(
             keyword in query_lower

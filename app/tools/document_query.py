@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from ..config import Settings
 from ..core.embeddings import embed_texts
 from ..core.exceptions import DBRetrievalError
-from ..core.retrieval import similarity_search
+from ..core.retrieval import similarity_search_with_fallback
 from .query_logging import (
     ACTION_SEARCH_DOCUMENTS,
     DOCUMENT_QUERY_COMPONENT,
@@ -366,15 +366,15 @@ class DocumentQueryTool:
         keyword: str | None,
     ) -> list[Dict[str, Any]]:
         try:
-            return self._filter_document_sources(
-                similarity_search(
-                    conn,
-                    embedding,
-                    limit=limit,
-                    keyword=keyword,
-                    settings=self.settings,
-                )
+            results, _level = similarity_search_with_fallback(
+                conn,
+                embedding,
+                limit=limit,
+                keyword=keyword,
+                settings=self.settings,
+                intent="",
             )
+            return self._filter_document_sources(results)
         except DBRetrievalError as exc:
             if not self._is_similarity_timeout(exc):
                 raise

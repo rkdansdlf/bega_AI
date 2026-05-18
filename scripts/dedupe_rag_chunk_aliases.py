@@ -290,7 +290,9 @@ def delete_alias_source_row_ids(
             if target.year == 0:
                 dest_cur.execute(
                     """
-                    DELETE FROM rag_chunks
+                    UPDATE rag_chunks
+                    SET is_active = false,
+                        updated_at = now()
                     WHERE source_table = %s
                       AND source_row_id = ANY(%s)
                     """,
@@ -299,7 +301,9 @@ def delete_alias_source_row_ids(
             else:
                 dest_cur.execute(
                     """
-                    DELETE FROM rag_chunks
+                    UPDATE rag_chunks
+                    SET is_active = false,
+                        updated_at = now()
                     WHERE source_table = %s
                       AND season_year = %s
                       AND source_row_id = ANY(%s)

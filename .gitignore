@@ -36,3 +36,4 @@ check_embedding.py
 test_diagnosis.py
 test_rag_search.py
 /reports
+/tests

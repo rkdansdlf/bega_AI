@@ -211,7 +211,12 @@ class Settings(BaseSettings):
     )
 
     # --- 검색(Retrieval) 관련 설정 ---
-    default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
+    # 200,000+ chunk 환경에서 top-k=3은 recall이 낮아 오답률을 높인다.
+    # 운영(.env)은 24로 오버라이드되어 있고, 본 기본값은 dev/test 시 합리적인 동작을 보장.
+    default_search_limit: int = Field(10, validation_alias="DEFAULT_SEARCH_LIMIT")
+    default_kbo_season_year: Optional[int] = Field(
+        None, validation_alias="DEFAULT_KBO_SEASON_YEAR"
+    )
     retrieval_single_query_for_strict_entity: bool = Field(
         True, validation_alias="RETRIEVAL_SINGLE_QUERY_FOR_STRICT_ENTITY"
     )
@@ -227,8 +232,19 @@ class Settings(BaseSettings):
     retrieval_fallback_limit_minimal: int = Field(
         25, validation_alias="RETRIEVAL_FALLBACK_LIMIT_MINIMAL"
     )
+    # 벡터 인덱스 타입 선택:
+    #   "hnsw"     - HNSW 세션 GUC(hnsw.ef_search)만 설정. 운영 HNSW 인덱스가 있을 때 사용.
+    #   "ivfflat"  - IVFFlat 세션 GUC(ivfflat.probes)만 설정. 레거시 인덱스 유지 시 사용.
+    #   "auto"     - 기동 시 pg_indexes에서 HNSW 존재 여부를 감지하여 자동 선택(기본값).
+    # 운영 전환 흐름: create_vector_index.py 실행(HNSW 생성) → AI_VECTOR_INDEX=hnsw 배포 → ivfflat 제거.
+    ai_vector_index: str = Field(
+        "auto", validation_alias="AI_VECTOR_INDEX"
+    )
+    # IVFFlat 인덱스(`idx_rag_chunks_embedding`, lists=644) 기준 probes=512는 79% 버킷 스캔을
+    # 의미하여 사실상 시퀀셜 스캔에 가깝다. 권장 운영치는 24~64 범위. dev/test 기본을 보수적으로
+    # 32로 설정하고, 정확도 회귀가 발견되면 RETRIEVAL_IVFFLAT_PROBES 환경변수로 조정한다.
     retrieval_ivfflat_probes: int = Field(
-        512, validation_alias="RETRIEVAL_IVFFLAT_PROBES"
+        32, validation_alias="RETRIEVAL_IVFFLAT_PROBES"
     )
     retrieval_hnsw_ef_search: int = Field(
         100, validation_alias="RETRIEVAL_HNSW_EF_SEARCH"
@@ -240,6 +256,23 @@ class Settings(BaseSettings):
     rag_chunk_max_chars: int = Field(900, validation_alias="RAG_CHUNK_MAX_CHARS")
     rag_chunk_min_chars: int = Field(180, validation_alias="RAG_CHUNK_MIN_CHARS")
     rag_chunk_overlap_chars: int = Field(80, validation_alias="RAG_CHUNK_OVERLAP_CHARS")
+    rag_storage_dedup_enabled: bool = Field(
+        True, validation_alias="RAG_STORAGE_DEDUP_ENABLED"
+    )
+    rag_quality_min_chars: int = Field(50, validation_alias="RAG_QUALITY_MIN_CHARS")
+    rag_embedding_version: int = Field(1, validation_alias="RAG_EMBEDDING_VERSION")
+    rag_chunking_version: int = Field(1, validation_alias="RAG_CHUNKING_VERSION")
+    rag_retrieval_active_filter_enabled: bool = Field(
+        True, validation_alias="RAG_RETRIEVAL_ACTIVE_FILTER_ENABLED"
+    )
+    rag_retrieval_event_logging_enabled: bool = Field(
+        True, validation_alias="RAG_RETRIEVAL_EVENT_LOGGING_ENABLED"
+    )
+    rag_rerank_enabled: bool = Field(False, validation_alias="RAG_RERANK_ENABLED")
+    rag_rerank_candidate_limit: int = Field(
+        20, validation_alias="RAG_RERANK_CANDIDATE_LIMIT"
+    )
+    rag_context_limit: int = Field(10, validation_alias="RAG_CONTEXT_LIMIT")
 
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
@@ -471,6 +504,11 @@ class Settings(BaseSettings):
         "rag_chunk_max_chars",
         "rag_chunk_min_chars",
         "rag_chunk_overlap_chars",
+        "rag_quality_min_chars",
+        "rag_embedding_version",
+        "rag_chunking_version",
+        "rag_rerank_candidate_limit",
+        "rag_context_limit",
         "chat_sse_ping_seconds",
         "chat_cached_stream_chunk_size",
         "chat_team_answer_cap_base",

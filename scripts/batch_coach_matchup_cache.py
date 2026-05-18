@@ -33,10 +33,22 @@ from app.core.coach_cache_contract import (
     build_coach_cache_identity,
 )
 from app.core.coach_cache_key import build_focus_signature, normalize_focus
-from app.deps import get_connection_pool
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
 logger = logging.getLogger(__name__)
+
+
+def _get_connection_pool():
+    """Thin lazy wrapper around app.deps.get_connection_pool.
+
+    Importing app.deps at module level pulls in heavy ML / RAG modules
+    (RAGPipeline, intent_router, agents) at import time, making test
+    collection ~60 s slower. This wrapper defers the import to the first
+    runtime call while remaining monkeypatchable via
+    ``monkeypatch.setattr(batch_module, "_get_connection_pool", ...)``.
+    """
+    from app.deps import get_connection_pool as _fn  # noqa: PLC0415
+    return _fn()
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -236,7 +248,7 @@ def _postseason_mismatch_error_message(mismatches: List[Any]) -> str:
 
 def _ensure_postseason_stage_integrity(years: List[int]) -> None:
     repair_module = _load_postseason_repair_module()
-    pool = get_connection_pool()
+    pool = _get_connection_pool()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             stages_by_year = repair_module.load_season_stages(cur, years)
@@ -528,7 +540,7 @@ def _fetch_cache_state(
     cache_key: str,
 ) -> CacheLookupResult:
     try:
-        with get_connection_pool().connection() as conn:
+        with _get_connection_pool().connection() as conn:
             row = conn.execute(
                 """
                 SELECT status, response_json, error_message, error_code, attempt_count,
@@ -574,7 +586,7 @@ def _fetch_cache_rows(
         return {}
 
     try:
-        with get_connection_pool().connection() as conn:
+        with _get_connection_pool().connection() as conn:
             rows = conn.execute(
                 """
                 SELECT cache_key, status, response_json, error_message, error_code,
@@ -924,7 +936,7 @@ def load_targets(
     status_bucket_filter: str = "ANY",
 ) -> List[MatchupTarget]:
     resolver = TeamCodeResolver()
-    pool = get_connection_pool()
+    pool = _get_connection_pool()
 
     where_parts = ["ks.season_year = ANY(%s)"]
     params: List[Any] = [years]
@@ -1097,7 +1109,7 @@ def force_rebuild_delete(cache_keys: List[str]) -> Dict[str, int]:
     if not cache_keys:
         return stats
 
-    pool = get_connection_pool()
+    pool = _get_connection_pool()
     with pool.connection() as conn:
         rows = conn.execute(
             """
@@ -1433,7 +1445,7 @@ def collect_matchup_integrity_metrics(
     years_alias: List[str] | None = None,
 ) -> tuple[int, int]:
     legacy_aliases = years_alias or []
-    pool = get_connection_pool()
+    pool = _get_connection_pool()
     with pool.connection() as conn:
         cache_invalid_year_count = conn.execute(
             """
