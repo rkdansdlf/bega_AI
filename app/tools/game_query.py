@@ -6,11 +6,18 @@
 """
 
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, TYPE_CHECKING
 import psycopg
 from psycopg.rows import dict_row
+from app.schemas.coach_tool_payload import (
+    ClutchMomentLine,
+    CoachMatchupPayload,
+)
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 from app.tools.team_display import resolve_team_display_name
+
+if TYPE_CHECKING:
+    from app.tools.database_query import DatabaseQueryTool
 from app.tools.team_mapping_loader import (
     fetch_team_mapping_rows,
     load_cached_team_mapping_rows,
@@ -1307,3 +1314,96 @@ class GameQueryTool:
                 cursor.close()
 
         return result
+
+    # ------------------------------------------------------------------
+    # Coach 전용 어댑터: head-to-head + clutch moments → 압축 페이로드
+    # ------------------------------------------------------------------
+
+    def build_coach_matchup_payload(
+        self,
+        home_team_id: str,
+        away_team_id: str,
+        year: Optional[int] = None,
+        *,
+        db_tool: Optional["DatabaseQueryTool"] = None,
+        game_id: Optional[str] = None,
+        head_to_head_limit: int = 5,
+        clutch_moments_limit: int = 3,
+        as_of_game_date: Optional[str] = None,
+        exclude_game_id: Optional[str] = None,
+    ) -> CoachMatchupPayload:
+        """양 팀 매치업의 핵심 정보를 압축한 페이로드를 생성한다.
+
+        ``db_tool``과 ``game_id``가 모두 제공된 경우에만 clutch moments를
+        조회한다. head-to-head는 본 도구의 ``get_head_to_head``를 호출한 뒤
+        recent N개와 summary 텍스트만 추출한다.
+        """
+        h2h_raw: Dict[str, Any] = {}
+        try:
+            h2h_raw = self.get_head_to_head(
+                home_team_id,
+                away_team_id,
+                year=year,
+                limit=head_to_head_limit,
+                as_of_game_date=as_of_game_date,
+                exclude_game_id=exclude_game_id,
+            ) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[GameQuery] head_to_head fetch failed for matchup payload: %s",
+                exc,
+            )
+
+        # head-to-head summary 텍스트 추출 (구조에 따라 다양한 키)
+        h2h_summary: Optional[str] = None
+        if isinstance(h2h_raw.get("summary"), str):
+            h2h_summary = h2h_raw["summary"]
+        elif isinstance(h2h_raw.get("summary"), dict):
+            summary_obj = h2h_raw["summary"]
+            wins = summary_obj.get("wins")
+            losses = summary_obj.get("losses")
+            if wins is not None and losses is not None:
+                h2h_summary = f"통산 {wins}승 {losses}패"
+
+        recent_games: List[Dict[str, Any]] = []
+        for source_key in ("recent", "games", "matchups"):
+            value = h2h_raw.get(source_key)
+            if isinstance(value, list):
+                recent_games = [item for item in value if isinstance(item, dict)]
+                break
+        recent_games = recent_games[:head_to_head_limit]
+
+        clutch_lines: List[ClutchMomentLine] = []
+        if db_tool is not None and game_id:
+            try:
+                clutch_raw = db_tool.get_clutch_moments(
+                    game_id, limit=clutch_moments_limit
+                ) or {}
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[GameQuery] clutch_moments fetch failed for matchup payload: %s",
+                    exc,
+                )
+                clutch_raw = {}
+
+            for item in (clutch_raw.get("moments") or [])[:clutch_moments_limit]:
+                if not isinstance(item, dict):
+                    continue
+                clutch_lines.append(
+                    ClutchMomentLine(
+                        inning_label=str(item.get("inning_label") or "이닝 미상"),
+                        outs=int(item.get("outs") or 0),
+                        bases_before=str(item.get("bases_before") or "-"),
+                        batter_name=str(item.get("batter_name") or "타자 미상"),
+                        wpa_delta_pct=item.get("wpa_delta_pct"),
+                        description=str(item.get("description") or ""),
+                    )
+                )
+
+        return CoachMatchupPayload(
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            head_to_head_summary=h2h_summary,
+            head_to_head_recent=recent_games,
+            clutch_moments=clutch_lines,
+        )

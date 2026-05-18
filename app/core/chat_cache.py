@@ -22,9 +22,18 @@ from typing import Any, Dict, List, Optional
 
 from fastapi.concurrency import run_in_threadpool
 
+from app.observability.metrics import AI_RESPONSE_CACHE_TOTAL
+
 from .chat_cache_key import get_ttl_seconds
 
 logger = logging.getLogger(__name__)
+
+
+def _record_response_cache(operation: str, result: str) -> None:
+    try:
+        AI_RESPONSE_CACHE_TOTAL.labels(operation=operation, result=result).inc()
+    except Exception:  # noqa: BLE001
+        pass
 
 # ─── DDL ────────────────────────────────────────────────────────────────────────
 # deps.py lifespan()에서 pool.connection()으로 실행합니다.
@@ -243,10 +252,13 @@ async def get_cached_response(conn, cache_key: str) -> Optional[Dict[str, Any]]:
         미스, 만료, 또는 오류 시 None (테이블 미존재 포함).
     """
     try:
-        return await run_in_threadpool(_get_sync, conn, cache_key)
+        result = await run_in_threadpool(_get_sync, conn, cache_key)
     except Exception as exc:
         logger.warning("[ChatCache] get failed for key %.8s: %s", cache_key, exc)
+        _record_response_cache("lookup", "error")
         return None  # 캐시 미스로 처리 — 챗봇 응답 흐름은 정상 진행
+    _record_response_cache("lookup", "hit" if result is not None else "miss")
+    return result
 
 
 async def save_to_cache(
@@ -279,6 +291,9 @@ async def save_to_cache(
     except Exception as exc:
         # 키 앞 8자만 로깅 (전체 해시 노출 방지)
         logger.warning("[ChatCache] save failed for key %.8s: %s", cache_key, exc)
+        _record_response_cache("store", "error")
+        return
+    _record_response_cache("store", "ok")
 
 
 async def update_hit_count(conn, cache_key: str) -> None:

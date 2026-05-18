@@ -22,6 +22,20 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from app.config import get_settings
 from app.core.chunking import smart_chunks
 from app.core.embeddings import async_embed_texts
+from app.core.rag_storage import (
+    RAG_CHUNKS_UPSERT_SQL,
+    base_source_row_id,
+    build_chunk_storage_fields,
+    build_upsert_tuple,
+    fetch_existing_embedding_texts,
+    infer_quality_score,
+    is_search_worthy_content,
+    scan_sensitive_content,
+    resolve_embedding_model,
+    resolve_embedding_version,
+    soft_deactivate_missing_parts,
+    vector_literal,
+)
 from scripts.ingest_from_kbo import (
     TABLE_PROFILES,
     build_static_chunk_meta,
@@ -40,6 +54,14 @@ TARGET_DIRS = [
 # 인덱싱할 파일 확장자
 FILE_EXTENSION = ".md"
 PGVECTOR_SEARCH_PATH = "public, extensions, security"
+
+
+def _sensitive_findings_from_error(exc: ValueError) -> list[str]:
+    message = str(exc)
+    if "sensitive content:" not in message:
+        raise exc
+    raw_findings = message.rsplit(":", 1)[-1]
+    return [finding.strip() for finding in raw_findings.split(",") if finding.strip()]
 
 
 def get_db_connection() -> Generator[psycopg.Connection, None, None]:
@@ -157,6 +179,25 @@ def infer_source_table(relative_path: str) -> str:
     return "markdown_docs"
 
 
+def infer_doc_source_type(source_table: str, relative_path: str) -> str:
+    normalized = relative_path.lower()
+    if source_table in {"kbo_regulations", "kbo_definitions"}:
+        return "official_rulebook"
+    if "kbo_rulebook" in normalized or "rulebook" in normalized:
+        return "official_rulebook"
+    return "markdown_doc"
+
+
+def infer_doc_quality_score(source_type: str) -> float:
+    return infer_quality_score(source_type, "")
+
+
+def infer_doc_topic_key(source_table: str, relative_path: str) -> str:
+    stem = relative_path[:-3] if relative_path.lower().endswith(".md") else relative_path
+    slug = re.sub(r"[^0-9a-z]+", "_", stem.lower()).strip("_")
+    return f"{source_table}:{slug or Path(relative_path).stem.lower()}"
+
+
 async def main():
     """메인 인덱싱 실행 함수."""
     settings = get_settings()
@@ -166,6 +207,7 @@ async def main():
     conn = next(conn_generator)
 
     total_chunks_ingested = 0
+    total_sensitive_skipped = 0
 
     try:
         with conn.cursor() as cur:
@@ -209,10 +251,20 @@ async def main():
                     metadata = infer_doc_metadata(relative_path)
                     metadata["source_file"] = str(Path(file_path).resolve())
                     metadata["source_path"] = relative_path
+                    metadata["source_uri"] = f"file:{relative_path}"
+                    metadata["source_type"] = infer_doc_source_type(
+                        source_table_name,
+                        relative_path,
+                    )
+                    metadata["topic_key"] = infer_doc_topic_key(
+                        source_table_name,
+                        relative_path,
+                    )
+                    metadata["source_version"] = "v1"
+                    metadata["visibility"] = "public"
 
                 # 청크 분할 및 임베딩 생성
                 chunks = smart_chunks(content, settings=settings)
-                embeddings = await async_embed_texts(chunks, settings)
 
                 source_profile = (
                     profile_match[0] if profile_match else source_table_name
@@ -230,25 +282,13 @@ async def main():
                     static_profile,
                 )
 
-                cur.execute(
-                    """
-                    DELETE FROM rag_chunks
-                    WHERE source_table = %s
-                      AND (source_row_id = %s OR source_row_id LIKE %s)
-                    """,
-                    (
-                        source_table_name,
-                        static_prefix,
-                        f"{static_prefix}#part%",
-                    ),
-                )
-
                 # 데이터베이스에 저장
                 total_chunks = len(chunks)
-                for i, (chunk, embedding) in enumerate(
-                    zip(chunks, embeddings), start=1
-                ):
-                    vector_literal = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
+                embedding_model = resolve_embedding_model(settings)
+                embedding_version = resolve_embedding_version(settings)
+                min_chars = int(getattr(settings, "rag_quality_min_chars", 50) or 50)
+                records = []
+                for i, chunk in enumerate(chunks, start=1):
                     source_row_id = build_static_source_row_id(
                         source_profile,
                         static_profile,
@@ -257,41 +297,149 @@ async def main():
                     )
                     chunk_meta = dict(metadata)
                     chunk_meta["chunk_index"] = i
+                    source_type = str(chunk_meta.get("source_type") or "markdown_doc")
+                    source_uri = str(
+                        chunk_meta.get("source_uri") or f"file:{relative_path}"
+                    )
+                    topic_key = str(
+                        chunk_meta.get("topic_key")
+                        or infer_doc_topic_key(source_table_name, relative_path)
+                    )
+                    quality_score = infer_doc_quality_score(source_type)
+                    sensitive_findings = sorted(
+                        set(
+                            scan_sensitive_content(chunk)
+                            + scan_sensitive_content(chunk_meta)
+                        )
+                    )
+                    if sensitive_findings:
+                        total_sensitive_skipped += 1
+                        print(
+                            "  - 민감정보 의심 청크를 건너뜁니다 "
+                            f"(findings={','.join(sensitive_findings)})"
+                        )
+                        continue
+                    if not is_search_worthy_content(chunk, min_chars=min_chars):
+                        continue
+                    try:
+                        storage_fields = build_chunk_storage_fields(
+                            settings=settings,
+                            source_table=source_table_name,
+                            source_row_id=source_row_id,
+                            content=chunk,
+                            meta=chunk_meta,
+                            source_type=source_type,
+                            source_uri=source_uri,
+                            topic_key=topic_key,
+                            valid_from=chunk_meta.get("valid_from"),
+                            valid_to=chunk_meta.get("valid_to"),
+                            expires_at=chunk_meta.get("expires_at"),
+                            embedding_model=embedding_model,
+                            embedding_version=embedding_version,
+                            quality_score=quality_score,
+                        )
+                    except ValueError as exc:
+                        findings = _sensitive_findings_from_error(exc)
+                        total_sensitive_skipped += 1
+                        print(
+                            "  - 민감정보 의심 청크를 건너뜁니다 "
+                            f"(findings={','.join(findings)})"
+                        )
+                        continue
+                    records.append((source_row_id, chunk, chunk_meta, storage_fields))
 
+                if not records:
+                    print("  - 검색 가치가 있는 청크가 없어 건너뜁니다.")
+                    continue
+
+                existing_embeddings = (
+                    fetch_existing_embedding_texts(
+                        cur,
+                        content_hashes=(record[3]["content_hash"] for record in records),
+                        embedding_model=embedding_model,
+                        embedding_dim=records[0][3]["embedding_dim"],
+                        embedding_version=embedding_version,
+                        chunking_version=records[0][3]["chunking_version"],
+                    )
+                    if bool(getattr(settings, "rag_storage_dedup_enabled", True))
+                    else {}
+                )
+                vector_literals: list[str | None] = [None] * len(records)
+                embed_indices: list[int] = []
+                embed_texts: list[str] = []
+                pending_hashes: dict[str, int] = {}
+                duplicate_links: list[tuple[int, int]] = []
+                for idx, record in enumerate(records):
+                    existing = existing_embeddings.get(record[3]["content_hash"])
+                    if existing:
+                        vector_literals[idx] = existing
+                        continue
+                    pending_idx = pending_hashes.get(record[3]["content_hash"])
+                    if pending_idx is not None:
+                        duplicate_links.append((idx, pending_idx))
+                        continue
+                    pending_hashes[record[3]["content_hash"]] = idx
+                    embed_indices.append(idx)
+                    embed_texts.append(record[1])
+                if embed_texts:
+                    embeddings = await async_embed_texts(embed_texts, settings)
+                    for idx, embedding in zip(embed_indices, embeddings):
+                        vector_literals[idx] = vector_literal(embedding)
+                    for duplicate_idx, original_idx in duplicate_links:
+                        vector_literals[duplicate_idx] = vector_literals[original_idx]
+
+                active_source_row_ids: list[str] = []
+                saved_count = 0
+                for record, embedding_text in zip(records, vector_literals):
+                    source_row_id, chunk, chunk_meta, storage_fields = record
+                    try:
+                        upsert_tuple = build_upsert_tuple(
+                            meta=chunk_meta,
+                            storage_fields=storage_fields,
+                            season_year=season_year,
+                            season_id=None,
+                            league_type_code=league_type_code,
+                            team_id=None,
+                            player_id=None,
+                            source_table=source_table_name,
+                            source_row_id=source_row_id,
+                            title=title,
+                            content=chunk,
+                            embedding_text=embedding_text,
+                        )
+                    except ValueError as exc:
+                        findings = _sensitive_findings_from_error(exc)
+                        total_sensitive_skipped += 1
+                        print(
+                            "  - 민감정보 의심 청크를 건너뜁니다 "
+                            f"(findings={','.join(findings)})"
+                        )
+                        continue
                     cur.execute(
-                        """
-                        INSERT INTO rag_chunks (season_year, league_type_code, source_table, source_row_id, title, content, meta, embedding)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector)
-                        ON CONFLICT (source_table, source_row_id)
-                        DO UPDATE SET 
-                            content = EXCLUDED.content, 
-                            meta = EXCLUDED.meta,
-                            embedding = EXCLUDED.embedding, 
-                            season_year = EXCLUDED.season_year,
-                            league_type_code = EXCLUDED.league_type_code,
-                            updated_at = now()
-                        """,
-                        (
-                            season_year,
-                            league_type_code,
-                            source_table_name,
-                            source_row_id,
-                            title,
-                            chunk,
-                            json.dumps(chunk_meta, ensure_ascii=False),
-                            vector_literal,
-                        ),
+                        RAG_CHUNKS_UPSERT_SQL,
+                        upsert_tuple,
+                    )
+                    active_source_row_ids.append(source_row_id)
+                    saved_count += 1
+                if active_source_row_ids:
+                    soft_deactivate_missing_parts(
+                        cur,
+                        source_table=source_table_name,
+                        source_prefix=base_source_row_id(static_prefix),
+                        active_source_row_ids=active_source_row_ids,
                     )
                 print(
-                    f"  - {len(chunks)}개의 청크를 데이터베이스에 저장했습니다. (Year: {season_year})"
+                    f"  - {saved_count}개의 청크를 데이터베이스에 저장했습니다. (Year: {season_year})"
                 )
-                total_chunks_ingested += len(chunks)
+                total_chunks_ingested += saved_count
 
     except Exception as e:
         print(f"데이터베이스 작업 중 오류 발생: {e}")
     finally:
         conn.close()
         print(f"\n총 {total_chunks_ingested}개의 청크를 성공적으로 인덱싱했습니다.")
+        if total_sensitive_skipped:
+            print(f"민감정보 의심으로 건너뛴 청크: {total_sensitive_skipped}개")
         print("인덱싱 작업 완료.")
 
 

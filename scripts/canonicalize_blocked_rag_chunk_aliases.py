@@ -576,7 +576,9 @@ def canonicalize_target(
                         if target.year == 0:
                             write_cur.execute(
                                 """
-                                DELETE FROM rag_chunks
+                                UPDATE rag_chunks
+                                SET is_active = false,
+                                    updated_at = now()
                                 WHERE source_table = %s
                                   AND source_row_id = ANY(%s)
                                 """,
@@ -585,7 +587,9 @@ def canonicalize_target(
                         else:
                             write_cur.execute(
                                 """
-                                DELETE FROM rag_chunks
+                                UPDATE rag_chunks
+                                SET is_active = false,
+                                    updated_at = now()
                                 WHERE source_table = %s
                                   AND season_year = %s
                                   AND source_row_id = ANY(%s)

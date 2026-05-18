@@ -5,15 +5,40 @@ from app.core.rag import MetaWrapper, _process_stat_doc_cached
 
 class TestRagCaching:
     def test_meta_wrapper_hash_equality(self):
-        """source_row_id가 같으면 다른 객체라도 같은 해시를 가져야 함"""
-        meta1 = {"source_row_id": "123", "player_name": "Kim"}
-        meta2 = {"source_row_id": "123", "player_name": "Kim", "extra": "ignored"}
+        """source_row_id와 content_hash가 같으면 같은 캐시 키를 가져야 함"""
+        meta1 = {"source_row_id": "123", "content_hash": "hash-a", "player_name": "Kim"}
+        meta2 = {
+            "source_row_id": "123",
+            "content_hash": "hash-a",
+            "player_name": "Kim",
+            "extra": "ignored",
+        }
 
         wrapper1 = MetaWrapper(meta1)
         wrapper2 = MetaWrapper(meta2)
 
         assert wrapper1 == wrapper2
         assert hash(wrapper1) == hash(wrapper2)
+
+    def test_meta_wrapper_hash_changes_when_content_hash_changes(self):
+        """같은 source_row_id라도 content_hash가 바뀌면 stale cache를 피해야 함"""
+        wrapper1 = MetaWrapper({"source_row_id": "123", "content_hash": "hash-a"})
+        wrapper2 = MetaWrapper({"source_row_id": "123", "content_hash": "hash-b"})
+
+        assert wrapper1 != wrapper2
+        assert hash(wrapper1) != hash(wrapper2)
+
+    def test_meta_wrapper_hash_changes_when_updated_at_changes(self):
+        """content_hash가 없더라도 updated_at 변경은 캐시 키를 바꿔야 함"""
+        wrapper1 = MetaWrapper(
+            {"source_row_id": "123", "updated_at": "2026-01-01T00:00:00Z"}
+        )
+        wrapper2 = MetaWrapper(
+            {"source_row_id": "123", "updated_at": "2026-01-02T00:00:00Z"}
+        )
+
+        assert wrapper1 != wrapper2
+        assert hash(wrapper1) != hash(wrapper2)
 
     def test_meta_wrapper_hash_fallback(self):
         """source_row_id가 없으면 전체 딕셔너리 내용을 기반으로 해시 생성"""
@@ -38,6 +63,7 @@ class TestRagCaching:
 
         meta = {
             "source_row_id": "cache_test_1",
+            "content_hash": "hash-1",
             "player_name": "Choi",
             "innings_pitched": 100,
             "era": 3.50,
@@ -52,7 +78,9 @@ class TestRagCaching:
 
         res1 = _process_stat_doc_cached("player_season_pitching", wrapper)
         res2 = _process_stat_doc_cached("player_season_pitching", wrapper)
-        wrapper_clone = MetaWrapper({"source_row_id": "cache_test_1", "other": "val"})
+        wrapper_clone = MetaWrapper(
+            {"source_row_id": "cache_test_1", "content_hash": "hash-1", "other": "val"}
+        )
         res3 = _process_stat_doc_cached("player_season_pitching", wrapper_clone)
 
         assert res1 == res2

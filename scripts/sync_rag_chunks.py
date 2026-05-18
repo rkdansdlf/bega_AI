@@ -22,11 +22,25 @@ except ModuleNotFoundError as exc:
     _PSYCOPG_IMPORT_ERROR = exc
 
 from app.config import Settings
-from scripts.ingest_from_kbo import UPSERT_SQL
 
 SELECT_COLUMNS = """
 SELECT
     meta,
+    metadata,
+    source_type,
+    source_uri,
+    topic_key,
+    content_hash,
+    chunk_hash,
+    embedding_model,
+    embedding_dim,
+    embedding_version,
+    chunking_version,
+    quality_score,
+    is_active,
+    valid_from,
+    valid_to,
+    expires_at,
     season_year,
     season_id,
     league_type_code,
@@ -43,6 +57,21 @@ PGVECTOR_SEARCH_PATH = "public, extensions, security"
 STAGE_TABLE_NAME = "rag_chunk_sync_stage"
 STAGE_COLUMNS = (
     "meta_json",
+    "metadata_json",
+    "source_type",
+    "source_uri",
+    "topic_key",
+    "content_hash",
+    "chunk_hash",
+    "embedding_model",
+    "embedding_dim",
+    "embedding_version",
+    "chunking_version",
+    "quality_score",
+    "is_active",
+    "valid_from",
+    "valid_to",
+    "expires_at",
     "season_year",
     "season_id",
     "league_type_code",
@@ -57,6 +86,21 @@ STAGE_COLUMNS = (
 MERGE_STAGE_SQL = f"""
 INSERT INTO rag_chunks (
     meta,
+    metadata,
+    source_type,
+    source_uri,
+    topic_key,
+    content_hash,
+    chunk_hash,
+    embedding_model,
+    embedding_dim,
+    embedding_version,
+    chunking_version,
+    quality_score,
+    is_active,
+    valid_from,
+    valid_to,
+    expires_at,
     season_year,
     season_id,
     league_type_code,
@@ -70,6 +114,21 @@ INSERT INTO rag_chunks (
 )
 SELECT
     CASE WHEN meta_json IS NULL THEN NULL ELSE meta_json::jsonb END,
+    CASE WHEN metadata_json IS NULL THEN '{{}}'::jsonb ELSE metadata_json::jsonb END,
+    source_type,
+    source_uri,
+    topic_key,
+    content_hash,
+    chunk_hash,
+    embedding_model,
+    embedding_dim,
+    embedding_version,
+    chunking_version,
+    quality_score,
+    COALESCE(is_active, true),
+    valid_from,
+    valid_to,
+    expires_at,
     season_year,
     season_id,
     league_type_code,
@@ -84,6 +143,83 @@ FROM {STAGE_TABLE_NAME}
 ON CONFLICT (source_table, source_row_id)
 DO UPDATE SET
     meta = EXCLUDED.meta,
+    metadata = EXCLUDED.metadata,
+    source_type = EXCLUDED.source_type,
+    source_uri = EXCLUDED.source_uri,
+    topic_key = EXCLUDED.topic_key,
+    content_hash = EXCLUDED.content_hash,
+    chunk_hash = EXCLUDED.chunk_hash,
+    embedding_model = EXCLUDED.embedding_model,
+    embedding_dim = EXCLUDED.embedding_dim,
+    embedding_version = EXCLUDED.embedding_version,
+    chunking_version = EXCLUDED.chunking_version,
+    quality_score = EXCLUDED.quality_score,
+    is_active = EXCLUDED.is_active,
+    valid_from = EXCLUDED.valid_from,
+    valid_to = EXCLUDED.valid_to,
+    expires_at = EXCLUDED.expires_at,
+    content = EXCLUDED.content,
+    embedding = COALESCE(EXCLUDED.embedding, rag_chunks.embedding),
+    season_year = COALESCE(EXCLUDED.season_year, rag_chunks.season_year),
+    season_id = COALESCE(EXCLUDED.season_id, rag_chunks.season_id),
+    league_type_code = COALESCE(EXCLUDED.league_type_code, rag_chunks.league_type_code),
+    team_id = COALESCE(EXCLUDED.team_id, rag_chunks.team_id),
+    player_id = COALESCE(EXCLUDED.player_id, rag_chunks.player_id),
+    title = EXCLUDED.title,
+    updated_at = now()
+"""
+
+UPSERT_SQL = """
+INSERT INTO rag_chunks (
+    meta,
+    metadata,
+    source_type,
+    source_uri,
+    topic_key,
+    content_hash,
+    chunk_hash,
+    embedding_model,
+    embedding_dim,
+    embedding_version,
+    chunking_version,
+    quality_score,
+    is_active,
+    valid_from,
+    valid_to,
+    expires_at,
+    season_year,
+    season_id,
+    league_type_code,
+    team_id,
+    player_id,
+    source_table,
+    source_row_id,
+    title,
+    content,
+    embedding
+) VALUES (
+    %s::jsonb, COALESCE(%s::jsonb, '{}'::jsonb), %s, %s, %s, %s, %s,
+    %s, %s, %s, %s, %s, COALESCE(%s, true), %s, %s, %s, %s, %s, %s, %s,
+    %s, %s, %s, %s, %s, %s::vector
+)
+ON CONFLICT (source_table, source_row_id)
+DO UPDATE SET
+    meta = EXCLUDED.meta,
+    metadata = EXCLUDED.metadata,
+    source_type = EXCLUDED.source_type,
+    source_uri = EXCLUDED.source_uri,
+    topic_key = EXCLUDED.topic_key,
+    content_hash = EXCLUDED.content_hash,
+    chunk_hash = EXCLUDED.chunk_hash,
+    embedding_model = EXCLUDED.embedding_model,
+    embedding_dim = EXCLUDED.embedding_dim,
+    embedding_version = EXCLUDED.embedding_version,
+    chunking_version = EXCLUDED.chunking_version,
+    quality_score = EXCLUDED.quality_score,
+    is_active = EXCLUDED.is_active,
+    valid_from = EXCLUDED.valid_from,
+    valid_to = EXCLUDED.valid_to,
+    expires_at = EXCLUDED.expires_at,
     content = EXCLUDED.content,
     embedding = COALESCE(EXCLUDED.embedding, rag_chunks.embedding),
     season_year = COALESCE(EXCLUDED.season_year, rag_chunks.season_year),
@@ -292,6 +428,7 @@ def _build_upsert_rows(rows: Sequence[Dict[str, Any]]) -> List[tuple[Any, ...]]:
     payload: List[tuple[Any, ...]] = []
     for row in rows:
         meta = row.get("meta")
+        metadata = row.get("metadata")
         payload.append(
             (
                 (
@@ -299,6 +436,25 @@ def _build_upsert_rows(rows: Sequence[Dict[str, Any]]) -> List[tuple[Any, ...]]:
                     if meta is not None
                     else None
                 ),
+                (
+                    json.dumps(metadata, ensure_ascii=False, default=str)
+                    if metadata is not None
+                    else None
+                ),
+                row.get("source_type"),
+                row.get("source_uri"),
+                row.get("topic_key"),
+                row.get("content_hash"),
+                row.get("chunk_hash"),
+                row.get("embedding_model"),
+                row.get("embedding_dim"),
+                row.get("embedding_version"),
+                row.get("chunking_version"),
+                row.get("quality_score"),
+                row.get("is_active"),
+                row.get("valid_from"),
+                row.get("valid_to"),
+                row.get("expires_at"),
                 row.get("season_year"),
                 row.get("season_id"),
                 row.get("league_type_code"),
@@ -330,6 +486,21 @@ def _prepare_stage_table(dest_cur: Any) -> None:
     dest_cur.execute(f"""
         CREATE TEMP TABLE IF NOT EXISTS {STAGE_TABLE_NAME} (
             meta_json text,
+            metadata_json text,
+            source_type text,
+            source_uri text,
+            topic_key text,
+            content_hash text,
+            chunk_hash text,
+            embedding_model text,
+            embedding_dim integer,
+            embedding_version integer,
+            chunking_version integer,
+            quality_score numeric,
+            is_active boolean,
+            valid_from timestamptz,
+            valid_to timestamptz,
+            expires_at timestamptz,
             season_year integer,
             season_id integer,
             league_type_code integer,

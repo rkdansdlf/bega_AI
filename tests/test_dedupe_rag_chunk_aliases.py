@@ -128,9 +128,9 @@ def test_dedupe_rag_chunk_aliases_execute_deletes_only_deletable(
     assert report["total_deleted_count"] == 2
     assert report["total_blocked_alias_row_count"] == 1
     assert dest_conn.commit_calls == 2
-    delete_queries = [
+    deactivate_queries = [
         query
         for query, _params in dest_delete_cur.executed
-        if "DELETE FROM rag_chunks" in query
+        if "UPDATE rag_chunks" in query and "is_active = false" in query
     ]
-    assert len(delete_queries) == 2
+    assert len(deactivate_queries) == 2

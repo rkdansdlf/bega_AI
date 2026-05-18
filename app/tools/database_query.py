@@ -23,6 +23,7 @@ from app.tools.team_mapping_snapshot import (
     load_team_mapping_snapshot,
     update_team_mapping_snapshot,
 )
+from app.schemas.coach_tool_payload import CoachTeamPayload
 
 logger = logging.getLogger(__name__)
 
@@ -1145,6 +1146,8 @@ class DatabaseQueryTool:
                     "wrc_plus": ("wrc_plus", "DESC", 100),
                     "도루": ("stolen_bases", "DESC", 0),
                     "stolen_bases": ("stolen_bases", "DESC", 0),
+                    "안타": ("hits", "DESC", 100),
+                    "hits": ("hits", "DESC", 100),
                     "득점권타율": ("scoring_position_avg", "DESC", 0),
                     "득점권 타율": ("scoring_position_avg", "DESC", 0),
                     "scoring_position_avg": ("scoring_position_avg", "DESC", 0),
@@ -4138,3 +4141,51 @@ class DatabaseQueryTool:
             "get_team_matchup_stats", team_name, year, result
         )
         return result
+
+    # ------------------------------------------------------------------
+    # Coach 전용 어댑터: 도구 호출 + 압축 페이로드
+    # ------------------------------------------------------------------
+
+    def build_coach_team_payload(
+        self,
+        team_name: str,
+        year: int,
+        *,
+        top_n: int = 3,
+        recent_form_limit: int = 10,
+        form_signals_top_n: int = 1,
+        as_of_game_date: Optional[str] = None,
+        exclude_game_id: Optional[str] = None,
+    ) -> CoachTeamPayload:
+        """기존 도구 메서드들을 호출해 Coach 컨텍스트 핵심 필드만 담는 페이로드를 생성한다.
+
+        DB 쿼리 자체는 기존 메서드를 재사용한다(thin adapter). DB 전송량 절감은
+        후속 PR에서 직접 SQL 작성으로 진행할 수 있다. 본 어댑터의 효과는
+        Coach 프롬프트 진입 단계에서 미사용 필드를 미리 잘라내 LLM 입력 토큰을
+        축소하는 것이다.
+        """
+        team_data = {
+            "summary": self.get_team_summary(team_name, year) or {},
+            "advanced": self.get_team_advanced_metrics(team_name, year) or {},
+            "recent": self.get_team_recent_form(
+                team_name,
+                year,
+                limit=recent_form_limit,
+                as_of_game_date=as_of_game_date,
+                exclude_game_id=exclude_game_id,
+            ) or {},
+            "player_form_signals": self.get_team_player_form_signals(
+                team_name,
+                year,
+                as_of_game_date=as_of_game_date,
+                exclude_game_id=exclude_game_id,
+            ) or {},
+        }
+        team_code = self.get_team_code(team_name, year) or team_name
+        return CoachTeamPayload.from_team_data_dict(
+            team_data,
+            team_id=team_code,
+            team_name_fallback=team_name,
+            top_n=top_n,
+            form_signals_top_n=form_signals_top_n,
+        )
