@@ -240,6 +240,9 @@ class Settings(BaseSettings):
     #   "auto"     - 기동 시 pg_indexes에서 HNSW 존재 여부를 감지하여 자동 선택(기본값).
     # 운영 전환 흐름: create_vector_index.py 실행(HNSW 생성) → AI_VECTOR_INDEX=hnsw 배포 → ivfflat 제거.
     ai_vector_index: str = Field("auto", validation_alias="AI_VECTOR_INDEX")
+    ai_vector_quantization: str = Field(
+        "none", validation_alias="AI_VECTOR_QUANTIZATION"
+    )
     # IVFFlat 인덱스(`idx_rag_chunks_embedding`, lists=644) 기준 probes=512는 79% 버킷 스캔을
     # 의미하여 사실상 시퀀셜 스캔에 가깝다. 권장 운영치는 24~64 범위. dev/test 기본을 보수적으로
     # 32로 설정하고, 정확도 회귀가 발견되면 RETRIEVAL_IVFFLAT_PROBES 환경변수로 조정한다.
@@ -260,7 +263,7 @@ class Settings(BaseSettings):
         True, validation_alias="RAG_STORAGE_DEDUP_ENABLED"
     )
     rag_quality_min_chars: int = Field(50, validation_alias="RAG_QUALITY_MIN_CHARS")
-    rag_embedding_version: int = Field(1, validation_alias="RAG_EMBEDDING_VERSION")
+    rag_embedding_version: int = Field(2, validation_alias="RAG_EMBEDDING_VERSION")
     rag_chunking_version: int = Field(1, validation_alias="RAG_CHUNKING_VERSION")
     rag_retrieval_active_filter_enabled: bool = Field(
         True, validation_alias="RAG_RETRIEVAL_ACTIVE_FILTER_ENABLED"
@@ -385,7 +388,7 @@ class Settings(BaseSettings):
 
     # --- 임베딩 설정 ---
     embed_batch_size: int = Field(32, validation_alias="EMBED_BATCH_SIZE")
-    embed_dim: int = Field(1536, validation_alias="EMBED_DIM")
+    embed_dim: int = Field(256, validation_alias="EMBED_DIM")
     hf_embed_model: str = Field(
         "intfloat/multilingual-e5-large", validation_alias="HF_EMBED_MODEL"
     )
