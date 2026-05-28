@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import openai
 import os
 import re
@@ -95,6 +96,11 @@ _NON_CACHEABLE_RESPONSE_MARKERS = (
     "답변 생성 중 오류가 발생했습니다",
     "서버 오류가 발생했습니다",
     "잠시 후 다시 시도해주세요",
+    # 제로히트/정보없음 응답: 데이터가 나중에 인제스트되면 캐시된 정보없음 응답이
+    # 계속 서빙되는 stale cache 문제를 방지한다. 서빙 시점에도 감지되면 캐시를 자동 삭제.
+    "저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다",
+    "현재 연결된 자료만으로는 질문에 대해 확인된 답을 만들지 못했습니다",
+    "추정하지 않고 확인된 범위에서만 말씀드리겠습니다",
 )
 
 
@@ -358,6 +364,8 @@ def _is_non_cacheable_response(response_text: str) -> bool:
 def _safe_serialize(obj: Any) -> Any:
     """JSON 직렬화 가능한 형태로 객체를 변환합니다."""
     if obj is None:
+        return None
+    if isinstance(obj, float) and not math.isfinite(obj):
         return None
     if isinstance(obj, (str, int, float, bool)):
         return obj

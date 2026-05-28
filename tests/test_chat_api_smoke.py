@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+import math
 from types import SimpleNamespace
 from typing import Any
 
@@ -33,6 +36,39 @@ class _FakeAgent:
         }
 
 
+class _FakePipeline:
+    """Minimal RAGPipeline stub for smoke tests.
+
+    chat_completion() now calls ``pipeline.run()`` (via Depends(get_rag_pipeline))
+    instead of ``agent.process_query()``, so we stub the new dependency here.
+    """
+
+    async def run(
+        self,
+        question: str,
+        filters: dict[str, Any] | None = None,
+        history: list | None = None,
+    ):
+        return {
+            "answer": "모의 응답: " + str(question),
+            "tool_calls": [],
+            "tool_results": [],
+            "data_sources": ["mock"],
+            "verified": True,
+            "visualizations": [],
+            "intent": "test",
+            "planner_mode": "default_llm_planner",
+            "planner_cache_hit": True,
+            "tool_execution_mode": "parallel",
+            "perf": {
+                "planner_cache_hit": True,
+                "tool_execution_mode": "parallel",
+                "tool_count": 2,
+            },
+            "error": None,
+        }
+
+
 @pytest.fixture
 def client(monkeypatch):
     test_app = FastAPI()
@@ -44,6 +80,7 @@ def client(monkeypatch):
     test_app.include_router(chat_stream.router)
 
     test_app.dependency_overrides[chat_stream.get_agent] = lambda: _FakeAgent()
+    test_app.dependency_overrides[chat_stream.get_rag_pipeline] = lambda: _FakePipeline()
     test_app.dependency_overrides[chat_stream.rate_limit_chat_dependency] = lambda: None
 
     monkeypatch.setattr(
@@ -81,6 +118,14 @@ def test_health_endpoint(client: TestClient):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_safe_serialize_replaces_non_finite_floats() -> None:
+    payload = chat_stream._safe_serialize(
+        {"citations": [{"similarity": math.nan}, {"similarity": math.inf}]}
+    )
+
+    assert payload == {"citations": [{"similarity": None}, {"similarity": None}]}
 
 
 def test_ai_chat_completion_requires_internal_token(client: TestClient):
@@ -142,3 +187,59 @@ def test_ai_chat_completion_cache_hit_sets_cache_planner_metadata(
     assert body["planner_cache_hit"] is False
     assert body["tool_execution_mode"] == "none"
     assert body["perf"]["planner_mode"] == "cache"
+
+
+@pytest.mark.asyncio
+async def test_chat_live_event_generator_emits_pipeline_answer_chunks():
+    async def stream():
+        yield {"type": "metadata", "data": {"intent": "freeform", "verified": True}}
+        yield {"type": "answer_chunk", "content": "HELLO"}
+
+    events = [
+        event
+        async for event in chat_stream._chat_live_event_generator(
+            request=None,
+            question="test",
+            filters=None,
+            style="markdown",
+            cache_key=None,
+            stream=stream(),
+        )
+    ]
+
+    message_events = [event for event in events if event["event"] == "message"]
+    assert len(message_events) == 1
+    assert json.loads(message_events[0]["data"]) == {"delta": "HELLO"}
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_get_passes_validated_question_and_history(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_stream_response(request, question, **kwargs):
+        captured["request"] = request
+        captured["question"] = question
+        captured.update(kwargs)
+        return {"ok": True}
+
+    history = [{"role": "user", "content": "이전 질문"}]
+    history_payload = base64.b64encode(
+        json.dumps(history, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    request = SimpleNamespace(query_params={"history": history_payload})
+    monkeypatch.setattr(chat_stream, "_stream_response", fake_stream_response)
+
+    result = await chat_stream.chat_stream_get(
+        q="  LG 흐름 알려줘  ",
+        style="markdown",
+        _=None,
+        __=None,
+        pipeline=object(),
+        request=request,
+    )
+
+    assert result == {"ok": True}
+    assert captured["question"] == "LG 흐름 알려줘"
+    assert captured["history"] == history
+    assert captured["filters"] is None
+    assert captured["cache_key"] is None

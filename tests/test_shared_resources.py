@@ -105,6 +105,15 @@ def test_rag_try_agent_first_runs_inside_runtime_request_context() -> None:
                 "tool_results": [],
                 "tool_calls": [],
                 "data_sources": [],
+                "planner_mode": "fast_path",
+                "planner_cache_hit": True,
+                "tool_execution_mode": "sequential",
+                "grounding_mode": "structured_kbo",
+                "source_tier": "database",
+                "answer_sources": [{"source_tier": "database", "ref": "mock"}],
+                "as_of_date": "2026-05-28",
+                "fallback_reason": None,
+                "perf": {"total_ms": 12},
             }
 
     class _FakeRuntime:
@@ -135,6 +144,73 @@ def test_rag_try_agent_first_runs_inside_runtime_request_context() -> None:
     assert captured["query"] == "테스트 질의"
     assert captured["context"]["intent"] == "stats_lookup"
     assert result["strategy"] == "verified_agent"
+    assert result["planner_mode"] == "fast_path"
+    assert result["planner_cache_hit"] is True
+    assert result["tool_execution_mode"] == "sequential"
+    assert result["grounding_mode"] == "structured_kbo"
+    assert result["source_tier"] == "database"
+    assert result["answer_sources"] == [{"source_tier": "database", "ref": "mock"}]
+    assert result["as_of_date"] == "2026-05-28"
+    assert result["perf"]["planner_mode"] == "fast_path"
+    assert result["perf"]["tool_execution_mode"] == "sequential"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_stream_generator_initializes_shared_client_with_timeout(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeStreamResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            yield "data: [DONE]"
+
+        async def aread(self):
+            return b""
+
+    class _FakeClient:
+        def stream(self, *args, **kwargs):
+            captured["stream_args"] = args
+            captured["stream_kwargs"] = kwargs
+            return _FakeStreamResponse()
+
+    def _fake_shared_client(name, **kwargs):
+        captured["client_name"] = name
+        captured["client_kwargs"] = kwargs
+        return _FakeClient()
+
+    monkeypatch.setattr("app.core.rag.get_shared_httpx_client", _fake_shared_client)
+
+    pipeline = RAGPipeline.__new__(RAGPipeline)
+    pipeline.settings = SimpleNamespace(
+        openrouter_api_key="test-key",
+        openrouter_referer="",
+        openrouter_app_title="",
+        openrouter_model="test-model",
+        max_output_tokens=16,
+        openrouter_base_url="https://openrouter.test/api/v1",
+    )
+
+    chunks = [
+        chunk
+        async for chunk in pipeline._generate_stream_with_openrouter(
+            [{"role": "user", "content": "hi"}]
+        )
+    ]
+
+    assert chunks == []
+    assert captured["client_name"] == "openrouter"
+    assert "timeout" in captured["client_kwargs"]
+    assert "limits" in captured["client_kwargs"]
+    assert captured["stream_kwargs"]["timeout"] == 60.0
 
 
 @pytest.mark.asyncio

@@ -61,6 +61,11 @@ async def test_run_passes_search_strategy_limit_to_multi_query(monkeypatch) -> N
         "_is_game_flow_narrative_query",
         lambda *_args, **_kwargs: False,
     )
+    monkeypatch.setattr(
+        pipeline,
+        "_should_force_agent_fast_path",
+        lambda *_args, **_kwargs: False,
+    )
 
     async def _fake_retrieve_with_multi_query(
         query,
@@ -156,6 +161,11 @@ async def test_run_uses_single_query_for_strict_player_entity(monkeypatch) -> No
     monkeypatch.setattr(
         pipeline,
         "_is_game_flow_narrative_query",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_should_force_agent_fast_path",
         lambda *_args, **_kwargs: False,
     )
 

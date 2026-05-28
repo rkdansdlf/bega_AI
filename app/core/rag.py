@@ -82,6 +82,608 @@ EMBEDDING_FAILED_PREFIX = (
     "아래 내용은 제한적인 참고 답변입니다."
 )
 ZERO_HIT_PREFIX = "저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다."
+_FORCE_AGENT_FAST_PATH_KEYWORDS = (
+    "홈런왕",
+    "홈런 1위",
+    "최다 홈런",
+    "최다홈런",
+    "최다안타",
+    "안타왕",
+    "안타 1위",
+    "승률 흐름",
+    "현재 순위",
+    "상대 전적",
+    "상대전적",
+    "유독 꼬이",
+    "수비 실책",
+    "실책 때문에",
+    "같은 포지션",
+)
+_FORCE_TEAM_ANALYSIS_FAST_PATH_KEYWORDS = (
+    "팀 타율",
+    "팀 평균자책점",
+    "팀 평균자책",
+    "팀 era",
+    "타선",
+    "마운드",
+    "선발진",
+    "선발",
+    "불펜",
+    "홈런 생산력",
+    "도루",
+    "주루",
+    "가을야구",
+    "플레이오프",
+    "플옵",
+    "홈 경기",
+    "원정 경기",
+    "승패 흐름",
+    "순위와 승패",
+    "패턴",
+    "최근",
+    "5경기",
+    "10경기",
+    "흐름",
+    "득점",
+    "강점",
+    "약점",
+    "전력",
+    "상태",
+    "페이스",
+    "폼",
+    "가능성",
+    "무너진",
+    "대표 경기",
+    "최다 득점",
+    "역전승",
+    "리드를 지킨",
+    "중심타선",
+)
+_FORCE_PLAYER_FAST_PATH_KEYWORDS = (
+    "시즌 성적",
+    "주요 기록",
+    "기록도",
+    "강점",
+    "약점",
+    "같은 포지션",
+    "타자야",
+    "투수야",
+    "타율",
+    "ops",
+    "홈런",
+    "안타",
+    "타점",
+    "도루",
+    "출루율",
+    "장타율",
+    "평균자책",
+    "평균 자책",
+    "era",
+    "whip",
+    "다승",
+    "세이브",
+    "홀드",
+    "탈삼진",
+)
+_STATIC_KBO_TEAMS = (
+    "LG 트윈스",
+    "KT 위즈",
+    "SSG 랜더스",
+    "KIA 타이거즈",
+    "삼성 라이온즈",
+    "두산 베어스",
+    "NC 다이노스",
+    "롯데 자이언츠",
+    "한화 이글스",
+    "키움 히어로즈",
+)
+_STATIC_TEAM_STADIUMS = {
+    "LG 트윈스": "잠실야구장",
+    "두산 베어스": "잠실야구장",
+    "KT 위즈": "수원 KT위즈파크",
+    "SSG 랜더스": "인천 SSG랜더스필드",
+    "KIA 타이거즈": "광주-KIA 챔피언스필드",
+    "삼성 라이온즈": "대구 삼성 라이온즈 파크",
+    "NC 다이노스": "창원NC파크",
+    "롯데 자이언츠": "사직야구장",
+    "한화 이글스": "대전 한화생명 볼파크",
+    "키움 히어로즈": "고척스카이돔",
+}
+_STATIC_TEAM_ALIAS_MAP = {
+    "lg": "LG 트윈스",
+    "lg 트윈스": "LG 트윈스",
+    "트윈스": "LG 트윈스",
+    "kt": "KT 위즈",
+    "kt 위즈": "KT 위즈",
+    "위즈": "KT 위즈",
+    "ssg": "SSG 랜더스",
+    "ssg 랜더스": "SSG 랜더스",
+    "랜더스": "SSG 랜더스",
+    "kia": "KIA 타이거즈",
+    "kia 타이거즈": "KIA 타이거즈",
+    "기아": "KIA 타이거즈",
+    "타이거즈": "KIA 타이거즈",
+    "삼성": "삼성 라이온즈",
+    "삼성 라이온즈": "삼성 라이온즈",
+    "라이온즈": "삼성 라이온즈",
+    "두산": "두산 베어스",
+    "두산 베어스": "두산 베어스",
+    "베어스": "두산 베어스",
+    "nc": "NC 다이노스",
+    "nc 다이노스": "NC 다이노스",
+    "다이노스": "NC 다이노스",
+    "롯데": "롯데 자이언츠",
+    "롯데 자이언츠": "롯데 자이언츠",
+    "자이언츠": "롯데 자이언츠",
+    "한화": "한화 이글스",
+    "한화 이글스": "한화 이글스",
+    "이글스": "한화 이글스",
+    "키움": "키움 히어로즈",
+    "키움 히어로즈": "키움 히어로즈",
+    "히어로즈": "키움 히어로즈",
+}
+_STATIC_EXPLAINER_ANSWERS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (
+        ("야구 규칙",),
+        "야구는 공격팀이 공을 치고 베이스를 돌아 득점하고, 수비팀은 타자와 주자를 아웃시켜 이닝을 끝내는 경기입니다. 한 이닝은 양 팀이 한 번씩 공격하며, 보통 9이닝 동안 더 많은 점수를 낸 팀이 이깁니다.",
+    ),
+    (
+        ("필승조",),
+        "필승조는 팀이 앞서 있거나 접전인 후반에 승리를 지키기 위해 우선 투입하는 핵심 불펜 묶음입니다. 보통 셋업맨과 마무리투수, 그리고 가장 믿을 수 있는 중간계투가 이 역할을 맡습니다.",
+    ),
+    (
+        ("오프너",),
+        "오프너 전략은 짧은 이닝만 던지는 투수를 먼저 내고, 이후 긴 이닝을 맡을 투수를 붙이는 투수 운용 방식입니다. 상대 상위 타순을 초반부터 맞춤형으로 막고 싶을 때 쓰입니다.",
+    ),
+    (
+        ("불펜 데이",),
+        "불펜 데이는 전통적인 선발투수 한 명에게 긴 이닝을 맡기지 않고 여러 불펜 투수가 나눠 던지는 경기 운영입니다. 선발 공백이나 일정 부담이 있을 때 선택하는 방식입니다.",
+    ),
+    (
+        ("수비 시프트", "시프트"),
+        "수비 시프트는 타자의 타구 방향 성향에 맞춰 야수 위치를 평소와 다르게 배치하는 전술입니다. 당겨 치는 타자나 특정 코스 타구가 많은 타자를 상대로 안타 확률을 낮추려는 목적이 큽니다.",
+    ),
+    (
+        ("더블헤더",),
+        "더블헤더는 같은 날 두 경기를 이어서 치르는 편성입니다. 우천 취소나 잔여 경기 압축 편성 때문에 생기는 경우가 많고, 투수 운용과 선수 체력 관리가 중요해집니다.",
+    ),
+    (
+        ("서스펜디드",),
+        "서스펜디드 게임은 경기가 중단된 뒤 나중에 같은 상황에서 이어서 재개되는 경기입니다. 일반 취소와 달리 이미 진행된 기록과 상황을 보존한다는 점이 핵심입니다.",
+    ),
+    (
+        ("우천 취소",),
+        "우천 취소는 날씨 때문에 경기를 정상 진행하기 어렵다고 판단될 때 경기를 열지 않거나 중단 후 취소하는 처리입니다. 취소된 경기는 잔여 경기 일정으로 다시 편성됩니다.",
+    ),
+    (
+        ("휴식일",),
+        "휴식일은 정규 편성, 이동 거리, 우천 취소 재편성, 구장 사용 조건을 함께 고려해 정해집니다. 시즌 중 실제 휴식일은 공식 일정 데이터 기준으로 확인해야 합니다.",
+    ),
+    (
+        ("원정 연전",),
+        "원정 연전은 이동과 숙소 생활이 이어져 체력 관리가 어려워지는 일정입니다. 특히 야간 경기 뒤 이동, 불펜 소모, 주전 휴식 배분이 팀 운영의 핵심 변수가 됩니다.",
+    ),
+    (
+        ("홈 연전",),
+        "홈 연전은 이동 부담이 적고 익숙한 구장 환경을 활용할 수 있다는 장점이 있습니다. 다만 실제로 언제 많은지는 시즌 일정 데이터가 필요합니다.",
+    ),
+    (
+        ("시리즈 마지막 경기",),
+        "시리즈 마지막 경기는 위닝시리즈 여부, 불펜 소모, 다음 이동 일정에 영향을 주기 때문에 중요합니다. 같은 1승이라도 연전 흐름을 바꾸는 의미가 커질 수 있습니다.",
+    ),
+    (
+        ("시즌 막판 일정",),
+        "시즌 막판 일정은 순위 경쟁, 잔여 경기 압축, 투수 체력, 부상 관리가 한꺼번에 걸려 중요합니다. 포스트시즌 경쟁권 팀일수록 한 경기의 가치가 커집니다.",
+    ),
+    (
+        ("스트라이크", "볼"),
+        "스트라이크와 볼은 투구 판정의 기본 단위입니다. 스트라이크는 타자가 치지 않았거나 헛스윙한 공이 스트라이크 존 조건을 만족한 경우이고, 볼은 그 조건을 벗어난 투구로 보면 됩니다.",
+    ),
+    (
+        ("아웃이 되는 경우",),
+        "아웃은 삼진, 뜬공 포구, 땅볼 뒤 베이스보다 먼저 송구, 태그 아웃처럼 공격 기회가 끝나는 판정입니다. 공격팀은 한 이닝에 아웃 3개를 당하면 수비로 전환합니다.",
+    ),
+    (
+        ("홈런",),
+        "홈런은 타자가 친 공이 페어 지역으로 담장을 넘어가거나 수비가 잡을 수 없는 방식으로 모든 베이스를 돌 수 있을 때 나오는 득점 플레이입니다. 주자가 있으면 주자까지 함께 득점합니다.",
+    ),
+    (
+        ("병살",),
+        "병살은 한 번의 플레이에서 아웃 두 개가 동시에 나오는 상황입니다. 주자가 있는 공격 기회가 한순간에 사라지기 때문에 흐름을 크게 끊는 결과가 됩니다.",
+    ),
+    (
+        ("도루",),
+        "도루는 타자의 타격 없이 주자가 다음 베이스를 훔치듯 진루하는 플레이입니다. 성공하면 득점권 기회를 만들 수 있지만 실패하면 아웃 하나를 잃는 고위험 선택입니다.",
+    ),
+    (
+        ("세이브",),
+        "세이브는 구원투수가 팀의 리드를 지키고 경기를 끝냈을 때 특정 조건에서 기록되는 투수 기록입니다. 접전 후반을 막아낸 마무리 성과를 보여주는 지표로 쓰입니다.",
+    ),
+    (
+        ("홀드",),
+        "홀드는 구원투수가 세이브 상황의 리드를 유지한 채 다음 투수에게 넘겼을 때 기록되는 지표입니다. 마무리 전 단계의 핵심 불펜 기여를 볼 때 사용합니다.",
+    ),
+    (
+        ("타점",),
+        "타점은 타자의 타격이나 희생플라이 등으로 주자가 홈을 밟아 득점했을 때 타자에게 기록되는 공격 지표입니다. 득점 생산에 직접 얼마나 관여했는지 볼 때 씁니다.",
+    ),
+    (
+        ("war",),
+        "WAR은 대체 선수와 비교해 팀 승리에 얼마나 더 기여했는지를 승수 단위로 보는 종합 가치 지표입니다. 타격, 주루, 수비, 투구 같은 여러 요소를 하나로 묶어 평가할 때 씁니다.",
+    ),
+    (
+        ("fip",),
+        "FIP는 투수가 통제하기 쉬운 홈런, 볼넷, 몸에 맞는 공, 삼진을 중심으로 투구 내용을 보는 지표입니다. 수비 영향을 줄이고 투수의 순수 투구력을 보려는 목적이 큽니다.",
+    ),
+    (
+        ("ops",),
+        "OPS는 출루율과 장타율을 더한 공격 지표입니다. 출루 능력과 장타 생산력을 함께 보기 때문에 타자의 전체 공격력을 빠르게 볼 때 많이 씁니다.",
+    ),
+    (
+        ("whip",),
+        "WHIP는 투수가 이닝당 허용한 안타와 볼넷의 합입니다. 값이 낮을수록 주자를 적게 내보냈다는 뜻이라 투수 안정성을 볼 때 유용합니다.",
+    ),
+    (
+        ("qs",),
+        "QS는 선발투수가 6이닝 이상을 던지면서 3자책점 이하로 막은 경기입니다. 선발이 경기를 무너지지 않게 책임졌는지를 보는 기본적인 안정성 지표입니다.",
+    ),
+    (
+        ("babip",),
+        "BABIP는 인플레이 타구가 안타가 되는 비율을 보는 지표입니다. 타구 질, 수비, 운이 함께 섞이기 때문에 다른 기록과 같이 해석해야 합니다.",
+    ),
+    (
+        ("수비율",),
+        "수비율은 수비 기회 중 실책 없이 아웃 처리나 보살을 기록한 비율을 보는 지표입니다. 단순히 높을수록 안정적이지만, 수비 범위나 어려운 타구 처리 능력까지 모두 설명하지는 못합니다.",
+    ),
+    (
+        ("인필드 플라이",),
+        "인필드 플라이는 특정 주자 상황에서 내야수가 평범하게 잡을 수 있는 뜬공에 대해 타자를 자동 아웃으로 선언하는 규칙입니다. 수비가 일부러 공을 떨어뜨려 병살을 노리는 것을 막기 위한 장치입니다.",
+    ),
+    (
+        ("태그업",),
+        "태그업은 플라이볼이 잡힌 뒤 주자가 원래 베이스를 다시 밟고 다음 베이스로 진루하는 플레이입니다. 공이 잡히기 전에 먼저 출발하면 아웃 위험이 생깁니다.",
+    ),
+    (
+        ("보크",),
+        "보크는 투수가 주자를 속이거나 투구 동작 규정을 어겼을 때 주자에게 진루권이 주어지는 반칙입니다. 주자가 있을 때 투수 동작의 일관성과 합법성을 보는 규정입니다.",
+    ),
+    (
+        ("체크 스윙", "체크스윙"),
+        "체크 스윙은 타자가 스윙을 하려다 멈춘 동작입니다. 배트가 충분히 돌았는지에 따라 스윙 여부를 판정하며, 상황에 따라 심판 합의나 판독 대상 논의가 생길 수 있습니다.",
+    ),
+    (
+        ("비디오판독", "비디오 판독"),
+        "비디오판독은 현장 판정이 애매한 장면을 영상으로 다시 확인해 바로잡는 절차입니다. 홈런 여부, 세이프와 아웃, 페어와 파울처럼 경기 결과에 직접 영향을 주는 장면이 핵심 대상입니다.",
+    ),
+    (
+        ("주루 방해",),
+        "주루 방해는 수비수가 공 처리와 무관하게 주자의 정상적인 주루를 막았는지 보는 규정입니다. 상황에 따라 심판이 방해가 없었다면 도달했을 베이스를 판단해 주자에게 진루권을 줍니다.",
+    ),
+    (
+        ("판정 번복",),
+        "판정 번복은 심판 합의나 비디오판독을 통해 기존 판정이 명확히 잘못됐다고 판단될 때 이뤄집니다. 실제 적용 범위와 절차는 해당 시즌 KBO 공식 규정 기준으로 확인해야 합니다.",
+    ),
+)
+_LIVE_MANUAL_DATA_TIME_TOKENS = (
+    "오늘",
+    "어제",
+    "내일",
+    "이번 주",
+    "지금",
+    "현재",
+    "최신",
+    "최근",
+    "금일",
+    "방금",
+)
+_VAGUE_GAME_DETAIL_TOKENS = (
+    "경기 스코어",
+    "경기 mvp",
+    "결승타",
+    "승리 투수",
+    "패전 투수",
+    "세이브는 누가",
+    "홀드는 누가",
+    "경기 하이라이트",
+    "경기 승부처",
+    "경기의 핵심 장면",
+    "오늘 최고의 선수",
+    "오늘 아쉬운 선수",
+    "오늘 경기의 분수령",
+    "오늘 경기의 포인트",
+    "다음 경기에서 볼 포인트",
+    "이번 시리즈에서 볼 포인트",
+    "이번 시즌 최대 관심사",
+    "이번 시즌 변수",
+    "이번 시즌 관전 포인트",
+    "오늘 우리 팀 이겨",
+    "우리 팀 순위",
+    "다음 경기 언제",
+    "오늘 누가 던져",
+    "오늘 누가 쳐",
+    "지금 경기 어때",
+    "왜 졌어",
+    "왜 이겼어",
+    "다음 경기 전망",
+    "이번 시즌 우승 가능",
+    "경기 실책",
+    "경기 홈런",
+    "경기 역전",
+    "오늘 선발",
+    "다음 경기 선발",
+    "주자는 몇 명",
+    "아웃카운트",
+    "누가 타석",
+    "다음 투수",
+    "다음 타자",
+    "득점권 상황",
+    "끝내기 상황",
+    "선발 투수",
+    "선발 매치업",
+    "팀별 선발 로테이션",
+    "에이스는 누구",
+    "팀 마무리 투수",
+    "팀 불펜 핵심",
+    "홀드왕 후보",
+    "세이브왕 후보",
+    "불펜 era",
+    "불펜 소모",
+    "셋업맨",
+)
+_LIVE_MANUAL_DATA_SUBJECT_TOKENS = (
+    "경기 일정",
+    "경기 결과",
+    "경기 예상",
+    "경기 승리",
+    "경기 핵심",
+    "경기 선발",
+    "경기 불펜",
+    "경기 타선",
+    "경기 수비",
+    "경기 후반",
+    "경기 홈 어드밴티지",
+    "예상 스코어",
+    "승리 확률",
+    "홈 어드밴티지",
+    "후반 집중력",
+    "점수",
+    "스코어",
+    "선발",
+    "라인업",
+    "엔트리",
+    "부상",
+    "트레이드",
+    "뉴스",
+    "이슈",
+    "소식",
+    "콜업",
+    "말소",
+    "계약",
+    "교체",
+    "감독 교체",
+    "연장 계약",
+    "은퇴",
+    "몇 회",
+    "주자",
+    "아웃카운트",
+    "타석",
+    "다음 투수",
+    "다음 타자",
+    "득점권",
+    "끝내기 상황",
+)
+_SCHEDULE_MANUAL_DATA_TOKENS = (
+    "개막일",
+    "개막전",
+    "올스타전",
+    "올스타 브레이크",
+    "시즌 종료",
+    "경기 일정",
+    "경기표",
+    "일정만",
+    "스코어보드",
+    "문자중계",
+    "중계",
+    "라디오",
+    "하이라이트",
+    "다시보기",
+    "경기 알림",
+    "알림 설정",
+)
+_FAN_EXPERIENCE_MANUAL_DATA_TOKENS = (
+    "야구장 티켓",
+    "티켓 예매",
+    "티켓 가격",
+    "매진 여부",
+    "취소표",
+    "할인 좌석",
+    "원정 응원석",
+    "원정 팬",
+    "가족 관람",
+    "어린이와 함께",
+    "가족석",
+    "테이블석",
+    "응원석",
+    "추천 좌석",
+    "좌석 추천",
+    "좌석 배치",
+    "초보 직관",
+    "야구장 주차",
+    "근처 주차장",
+    "대중교통",
+    "야구장 음식",
+    "근처 맛집",
+    "먹거리",
+    "사진 찍기",
+    "직관 이벤트",
+    "직관 준비물",
+    "홈구장 주소",
+    "휠체어석",
+    "입장 마감",
+    "팀별 응원가",
+    "팀별 응원 구호",
+    "잔여 경기 편성",
+    "경기 취소는 몇 시",
+)
+_LEAGUE_WIDE_CURRENT_DATA_TOKENS = (
+    "현재 kbo 순위",
+    "1위 팀",
+    "5강 경쟁",
+    "가을야구 가능성",
+    "최하위 팀",
+    "팀별 승패",
+    "팀별 승률",
+    "팀별 승차",
+    "최근 10경기",
+    "홈 승률",
+    "원정 승률",
+    "팀별 득점력",
+    "팀별 실점력",
+    "공격과 수비",
+    "연승 중인 팀",
+    "연패 중인 팀",
+)
+_LEADERBOARD_MANUAL_DATA_TOKENS = (
+    "장타율 1위",
+    "ops 1위",
+    "도루 1위",
+    "득점 1위",
+    "삼진이 많은 타자",
+    "완투",
+    "완봉",
+    "이닝 소화",
+    "피안타율",
+    "실책이 적은 팀",
+    "실책이 적은 선수",
+    "도루가 많은 팀",
+    "도루 성공률",
+    "포수 도루저지율",
+    "내야 수비가 좋은 팀",
+    "외야 수비가 좋은 팀",
+    "병살타가 많은 팀",
+    "구종별 성적",
+    "타구 속도",
+    "존별 타격",
+    "라인업 상성",
+)
+_ROSTER_EVALUATION_MANUAL_DATA_TOKENS = (
+    "이 팀의 대표 타자",
+    "이 팀의 에이스",
+    "이 팀의 마무리",
+    "이 팀의 유망주",
+    "이 팀의 외국인 타자",
+    "이 팀의 외국인 투수",
+    "부상 중인 핵심 선수",
+    "복귀가 기대되는 선수",
+    "신인왕 후보",
+    "mvp 후보",
+    "우승 후보",
+    "한국시리즈 진출 후보",
+    "플레이오프 진출 후보",
+    "준플레이오프 진출 후보",
+    "와일드카드 유리한 팀",
+    "다크호스 팀",
+    "돌풍을 일으킬 팀",
+    "반등할 팀",
+    "추락 가능성",
+    "단기전에서 강한 팀",
+    "두 선수 성적 비교",
+    "두 팀 전력 비교",
+    "lg와 kt를 비교",
+    "ssg와 kia를 비교",
+    "삼성과 두산을 비교",
+    "nc와 롯데를 비교",
+    "한화와 키움을 비교",
+    "타자끼리 비교",
+    "투수끼리 비교",
+    "선발진 비교",
+    "불펜 비교",
+    "타선 비교",
+    "수비 비교",
+    "주루 비교",
+    "최근 흐름 비교",
+    "팀별 경기당 평균 득점",
+    "팀별 경기당 평균 실점",
+    "팀별 홈런 수",
+    "팀별 도루 수",
+    "팀별 실책 수",
+    "팀별 타율",
+    "팀별 출루율",
+    "팀별 장타율",
+    "팀별 ops",
+    "팀별 era",
+    "타자 친화적 리그",
+    "투수 친화적 리그",
+    "홈런이 많은 시즌",
+    "도루가 많은 시즌",
+    "번트가 중요한 시즌",
+    "작전 야구",
+    "클러치 능력",
+    "선발 야구",
+    "불펜 야구",
+    "수비가 우승",
+    "휴식이 필요한 선수",
+    "부상자 명단",
+    "엔트리 변경",
+    "콜업된 선수",
+    "말소된 선수",
+    "외국인 선수 교체",
+    "감독 교체 소식",
+    "콜업 소식",
+    "말소 소식",
+    "연장 계약 소식",
+    "은퇴 소식",
+    "투수 혹사 위험",
+    "타자 체력 관리",
+    "장기 부상자",
+    "복귀 임박 선수",
+    "신인 육성",
+    "선발진이 좋은 팀",
+    "불펜이 좋은 팀",
+    "타선이 좋은 팀",
+    "수비가 좋은 팀",
+    "감독 운영이 좋은 팀",
+    "우승 가능성이 있는 팀",
+    "5강에 들 팀",
+    "리빌딩이 필요한 팀",
+    "반등이 필요한 팀",
+    "내년이 더 기대되는 팀",
+    "가장 안정적인 팀",
+    "가장 기복이 큰 팀",
+    "가장 젊은 팀",
+    "가장 베테랑이 많은 팀",
+    "가장 전력이 탄탄한 팀",
+    "kbo 우승이 가장 많은 팀",
+    "한국시리즈 경험이 많은 팀",
+    "명문 구단",
+    "인기 구단",
+    "라이벌 관계",
+    "잠실 라이벌",
+    "영남 라이벌",
+    "호남 라이벌",
+    "원정 팬이 많은 팀",
+    "전통이 강한 팀",
+)
+_TEAM_PAIR_COMPARISON_COMPACT_TOKENS = (
+    "lg와kt를비교",
+    "ssg와kia를비교",
+    "삼성과두산을비교",
+    "nc와롯데를비교",
+    "한화와키움을비교",
+)
+_REGULATION_MANUAL_DATA_TOKENS = (
+    "등록 인원",
+    "엔트리",
+    "광고 규정",
+    "판정 보완",
+    "광고 설치 규정",
+    "덕아웃 인원",
+    "외국 물질 검사",
+    "판독 오류 보정",
+    "경기장별 규정 차이",
+    "수비 시프트 위반",
+    "파울 라인 규정",
+)
 
 
 def _to_int(value: Any) -> int:
@@ -111,6 +713,425 @@ def _ensure_zero_hit_answer_prefix(answer: str) -> str:
     if not answer_text:
         return ZERO_HIT_PREFIX
     return f"{ZERO_HIT_PREFIX} {answer_text}"
+
+
+def _build_static_kbo_result(
+    answer: str,
+    *,
+    intent: str = "baseball_explainer",
+    strategy: str = "static_kbo_faq",
+    grounding_mode: str = "static_kbo_faq",
+    source_tier: str = "internal_static",
+    fallback_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "answer": answer,
+        "citations": [],
+        "intent": intent,
+        "retrieved": [],
+        "strategy": strategy,
+        "verified": True,
+        "tool_calls": [],
+        "tool_results": [],
+        "data_sources": [
+            {
+                "tool": strategy,
+                "verified": True,
+                "data_points": 1,
+            }
+        ],
+        "visualizations": [],
+        "planner_mode": "fast_path",
+        "planner_cache_hit": False,
+        "tool_execution_mode": "none",
+        "fallback_triggered": bool(fallback_reason),
+        "fallback_answer_used": False,
+        "grounding_mode": grounding_mode,
+        "source_tier": source_tier,
+        "answer_sources": [source_tier],
+        "as_of_date": None,
+        "fallback_reason": fallback_reason,
+        "perf": {
+            "total_ms": 0.0,
+            "analysis_ms": 0.0,
+            "tool_ms": 0.0,
+            "answer_ms": 0.0,
+            "first_token_ms": 0.0,
+            "tool_count": 0,
+            "tool_execution_mode": "none",
+            "planner_cache_hit": False,
+            "planner_mode": "fast_path",
+            "model": "static",
+        },
+    }
+
+
+def _manual_baseball_data_required_answer(query: str) -> str:
+    del query
+    return (
+        "MANUAL_BASEBALL_DATA_REQUIRED: 이 질문은 경기 당일 또는 시즌 중 변동 데이터가 필요합니다. "
+        "운영자가 기준 날짜, 경기 ID, 팀명, 경기 상태, 점수, 선발, 라인업, 엔트리 변동, 관련 기록 범위를 "
+        "내부 DB에 제공한 뒤 답변해야 합니다."
+    )
+
+
+def _is_live_manual_data_query(query: str) -> bool:
+    query_lower = query.lower()
+    query_compact = re.sub(r"[\s?.!,~]+", "", query_lower)
+    if any(token in query_lower for token in _REGULATION_MANUAL_DATA_TOKENS):
+        return True
+    if any(token in query_lower for token in _LEADERBOARD_MANUAL_DATA_TOKENS):
+        return True
+    if any(token in query_lower for token in _VAGUE_GAME_DETAIL_TOKENS):
+        return True
+    if any(token in query_lower for token in _LEAGUE_WIDE_CURRENT_DATA_TOKENS):
+        return True
+    if any(token in query_lower for token in _FAN_EXPERIENCE_MANUAL_DATA_TOKENS):
+        return True
+    if any(token in query_lower for token in _ROSTER_EVALUATION_MANUAL_DATA_TOKENS):
+        return True
+    if any(token in query_compact for token in _TEAM_PAIR_COMPARISON_COMPACT_TOKENS):
+        return True
+    if any(token in query_lower for token in _SCHEDULE_MANUAL_DATA_TOKENS):
+        if any(
+            marker in query_lower
+            for marker in (
+                "2026",
+                "오늘",
+                "내일",
+                "이번 주",
+                "어디서",
+                "언제",
+                "볼 수",
+                "들을",
+                "알려줘",
+                "보여줘",
+                "확인",
+            )
+        ):
+            return True
+    if not any(token.lower() in query_lower for token in _LIVE_MANUAL_DATA_TIME_TOKENS):
+        return False
+    if "순위" in query_lower and not any(
+        token in query_lower for token in ("뉴스", "이슈", "상황", "소식")
+    ):
+        return False
+    return any(token.lower() in query_lower for token in _LIVE_MANUAL_DATA_SUBJECT_TOKENS)
+
+
+def _extract_static_team_name(query: str) -> Optional[str]:
+    query_lower = query.lower()
+    for alias, team_name in sorted(
+        _STATIC_TEAM_ALIAS_MAP.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        if alias in query_lower:
+            return team_name
+    return None
+
+
+def _build_static_chatbot_meta_result(query: str) -> Optional[Dict[str, Any]]:
+    query_lower = query.lower()
+
+    if "데이터" in query_lower and any(
+        token in query_lower for token in ("어디서 가져와", "출처", "소스")
+    ):
+        return _build_static_kbo_result(
+            "이 서비스의 KBO 답변은 내부 DB와 운영자가 제공한 신뢰 데이터 기준으로 생성해야 합니다. "
+            "일정, 중계, 부상, 뉴스처럼 실시간으로 바뀌는 항목은 운영자가 기준일과 원천 데이터를 넣은 뒤 답변하는 구조가 맞습니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if "kbo api" in query_lower and any(
+        token in query_lower for token in ("설계", "구성", "어떻게")
+    ):
+        return _build_static_kbo_result(
+            "KBO API는 일정/경기, 팀, 선수, 기록, 순위, RAG 문서, 운영자 제공 데이터 상태를 분리해 설계하는 것이 좋습니다. 실시간성 데이터는 기준일과 근거 상태를 함께 내려주고, 누락 시에는 수동 데이터 필요 계약을 반환하도록 둬야 합니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if "챗봇" in query_lower and any(
+        token in query_lower
+        for token in (
+            "기능",
+            "메뉴",
+            "대화 흐름",
+            "faq",
+            "프롬프트",
+            "테스트 질문",
+            "성능 점검",
+            "정확도 확인",
+            "안내 문구",
+            "문구",
+            "환영 문구",
+            "응답 포맷",
+            "상태 관리",
+            "검색 기능",
+            "알림 기능",
+            "캐싱",
+            "성능 최적화",
+            "추천 시스템",
+            "로그 설계",
+            "말투",
+            "답변 샘플",
+            "질문 샘플",
+            "시나리오",
+            "일정",
+            "순위",
+            "선수 기록",
+            "경기 분석",
+            "예측",
+            "응원 문구",
+            "요약 답변",
+            "표로 정리",
+            "알림 문구",
+            "대화형",
+        )
+    ):
+        return _build_static_kbo_result(
+            "KBO 챗봇은 기록 조회, 팀/선수 요약, 경기 전후 체크리스트, 규정 설명, 직관 안내, 응원 문구를 메뉴로 나누는 구성이 적합합니다. "
+            "실시간 일정, 부상, 뉴스, 중계 정보는 내부 DB에 기준일과 원천 데이터가 들어온 경우에만 답변하도록 제한해야 합니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if any(token in query_lower for token in ("경기 알림 설정", "응원팀 알림")):
+        return _build_static_kbo_result(
+            "알림 관련 질문은 챗봇이 경기 일정과 응원팀 기준을 설명할 수는 있지만, 실제 푸시 알림 설정 여부는 앱의 알림 기능과 운영 설정을 확인해야 합니다. 기능형 답변은 야구 기록 데이터와 분리해 처리하는 것이 맞습니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if "질문" in query_lower and any(
+        token in query_lower
+        for token in (
+            "만들어",
+            "묶어",
+            "나눠",
+            "바꿔",
+            "다듬어",
+            "변환",
+            "정리",
+            "faq",
+            "서비스용",
+            "앱용",
+            "사이트용",
+            "테스트용",
+            "운영 매뉴얼",
+            "꼭 필요한",
+            "가장 많이 묻는",
+            "꼭 알아야",
+            "꼭 볼",
+        )
+    ):
+        return _build_static_kbo_result(
+            "질문은 일정/결과, 순위, 팀 전력, 선수 기록, 경기 분석, 규정, 직관, 응원, 데이터 근거로 나누면 운영하기 쉽습니다. "
+            "예시는 '오늘 경기 일정 알려줘', 'LG 최근 승률 흐름은 어때?', '홈런 현재 선두는 누구야?', '비디오판독은 언제 가능해?'처럼 구체화하는 방식이 좋습니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if "faq" in query_lower and any(
+        token in query_lower for token in ("만들어", "완성", "변환", "구성")
+    ):
+        return _build_static_kbo_result(
+            "KBO FAQ는 초보자용 규칙, 일정/결과 확인, 순위와 승률, 선수 기록, 팀 전력, 경기 분석, 직관, 응원, 데이터 근거 항목으로 구성하면 됩니다. 실시간 일정과 뉴스성 항목은 기준일 데이터가 있을 때만 답하도록 분리해야 합니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if any(
+        token in query_lower
+        for token in (
+            "답변 예시",
+            "문구 예시",
+            "설명 예시",
+            "안내 예시",
+            "응답 예시",
+            "유도 예시",
+            "메시지",
+            "멘트 추천",
+            "쓸 문구",
+        )
+    ):
+        return _build_static_kbo_result(
+            "예시는 짧은 핵심 문장 뒤에 근거를 붙이는 형식이 적합합니다. 응원 문구라면 '오늘 흐름은 아직 살아 있어요. 다음 이닝 한 번 더 밀어붙이면 됩니다.'처럼 팀명과 상황을 넣어 자연스럽게 바꾸면 됩니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if any(token in query_lower for token in ("직관 팁", "비 오는 날", "여름 직관")):
+        return _build_static_kbo_result(
+            "직관 안내는 날씨와 구장 공지를 먼저 확인하고, 우천 가능성이 있으면 우비와 방수 보관용 봉투, 여름 경기라면 물과 모자, 보조 배터리를 챙기는 식으로 답하면 됩니다. 좌석, 입장, 이벤트 정보는 구장별 공지가 필요합니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if "야구장 응원 예절" in query_lower:
+        return _build_static_kbo_result(
+            "야구장 응원은 주변 시야를 가리지 않고, 통로를 막지 않으며, 상대 팀과 선수에게 모욕적인 표현을 쓰지 않는 것이 기본입니다. 큰 응원 도구나 이벤트 참여 방식은 구장 공지를 확인하는 편이 안전합니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    if any(token in query_lower for token in ("응원 톤", "짧게 답", "자세히 답", "표로 답", "한 줄로 답", "초보자 기준", "데이터 중심", "팬 입장", "중립적으로", "재미있게")):
+        return _build_static_kbo_result(
+            "답변 톤은 질문 목적에 맞춰 바꾸면 됩니다. 경기 기록 질문은 수치와 기준일을 먼저 쓰고, 초보자 질문은 용어를 풀어 설명하며, 팬덤형 질문은 단정 대신 현재 흐름과 관전 포인트를 중심으로 답하는 방식이 안전합니다.",
+            intent="chatbot_meta",
+            strategy="static_chatbot_meta",
+            grounding_mode="static_chatbot_meta",
+        )
+
+    return None
+
+
+def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
+    query_lower = query.lower().strip()
+    compact = re.sub(r"[\s?.!,~]+", "", query_lower)
+    static_team_name = _extract_static_team_name(query)
+
+    chatbot_meta_result = _build_static_chatbot_meta_result(query)
+    if chatbot_meta_result is not None:
+        return chatbot_meta_result
+
+    if _is_live_manual_data_query(query):
+        return _build_static_kbo_result(
+            _manual_baseball_data_required_answer(query),
+            intent="manual_data_request",
+            strategy="manual_baseball_data_required",
+            grounding_mode="manual_data_request",
+            source_tier="none",
+            fallback_reason="manual_baseball_data_required",
+        )
+
+    for tokens, answer in _STATIC_EXPLAINER_ANSWERS:
+        if any(token in query_lower for token in tokens):
+            return _build_static_kbo_result(
+                answer,
+                intent="baseball_explainer",
+                grounding_mode="static_baseball_explainer",
+            )
+
+    if ("kbo" in query_lower and "리그" in query_lower and "어떤" in query_lower) or (
+        "kbo가뭔지" in compact
+    ):
+        return _build_static_kbo_result(
+            "KBO 리그는 한국의 최상위 프로야구 리그입니다. 10개 구단이 정규시즌을 치르고, 상위권 팀들이 포스트시즌을 거쳐 한국시리즈 우승을 다투는 구조로 보면 됩니다."
+        )
+
+    if "kbo" in query_lower and any(token in query_lower for token in ("언제 시작", "시작했")):
+        return _build_static_kbo_result(
+            "KBO 리그는 1982년에 출범했습니다. 한국 프로야구의 1군 최상위 리그로 시작해 지금은 10개 구단 체제로 운영됩니다."
+        )
+
+    if "kbo" in query_lower and any(token in query_lower for token in ("몇 개 팀", "몇개 팀", "10개 구단")):
+        teams = ", ".join(_STATIC_KBO_TEAMS)
+        return _build_static_kbo_result(
+            f"KBO 리그는 현재 10개 구단 체제입니다. 구단은 {teams}입니다."
+        )
+
+    if static_team_name and any(token in query_lower for token in ("어떤 팀", "무슨 팀")):
+        stadium = _STATIC_TEAM_STADIUMS.get(static_team_name)
+        stadium_text = f" 홈구장은 {stadium}입니다." if stadium else ""
+        return _build_static_kbo_result(
+            f"{static_team_name}는 KBO 리그의 10개 구단 중 하나입니다.{stadium_text} 더 정확한 시즌 전력이나 최근 성적은 순위, 승패, 타격, 투구처럼 질문 축을 좁히면 DB 기록 기준으로 이어서 볼 수 있습니다.",
+            intent="team_profile",
+            grounding_mode="team_profile_static",
+        )
+
+    if "각 팀" in query_lower and "홈구장" in query_lower:
+        stadium_text = ", ".join(
+            f"{team}는 {stadium}"
+            for team, stadium in _STATIC_TEAM_STADIUMS.items()
+        )
+        return _build_static_kbo_result(
+            f"KBO 10개 구단 홈구장은 {stadium_text}입니다.",
+            intent="team_profile",
+            grounding_mode="team_profile_static",
+        )
+
+    if "각 팀" in query_lower and any(token in query_lower for token in ("감독", "대표 선수")):
+        return _build_static_kbo_result(
+            _manual_baseball_data_required_answer(query),
+            intent="manual_data_request",
+            strategy="manual_baseball_data_required",
+            grounding_mode="manual_data_request",
+            source_tier="none",
+            fallback_reason="manual_baseball_data_required",
+        )
+
+    if "각 팀" in query_lower and "팀 컬러" in query_lower:
+        return _build_static_kbo_result(
+            "팀 컬러는 보통 구단 역사, 홈구장 분위기, 팬덤 문화, 최근 전력 성향을 묶어서 설명합니다. 정확한 시즌별 팀 컬러를 비교하려면 팀별 순위, 타격, 투구, 수비 지표를 같은 기준일로 맞춰 보는 게 좋습니다.",
+            intent="team_profile",
+            grounding_mode="team_profile_static",
+        )
+
+    if "정규시즌" in query_lower and any(token in query_lower for token in ("몇 경기", "몇경기")):
+        return _build_static_kbo_result(
+            "KBO 정규시즌은 보통 팀당 144경기로 운영됩니다. 그래서 순위와 승률 흐름을 볼 때는 긴 시즌 누적 성적과 최근 흐름을 함께 봐야 합니다."
+        )
+
+    if "순위" in query_lower and (
+        any(token in query_lower for token in ("결정", "산정"))
+        or ("정" in query_lower and any(token in query_lower for token in ("어떻게", "기준")))
+        or "순위를정" in compact
+    ):
+        return _build_static_kbo_result(
+            "KBO 정규시즌 순위는 기본적으로 승률을 먼저 봅니다. 승률이 같으면 상대 전적, 동률 팀 간 득점, 전년도 순위 같은 타이브레이크 기준을 차례로 적용하는 구조입니다."
+        )
+
+    if "승률" in query_lower and any(token in query_lower for token in ("계산", "어떻게")):
+        return _build_static_kbo_result(
+            "KBO 승률은 승수 / (승수 + 패수)로 계산합니다. 무승부는 승률 분모에 넣지 않기 때문에, 같은 승수라도 패수가 적은 팀이 승률에서 유리해질 수 있습니다."
+        )
+
+    if "무승부" in query_lower and any(token in query_lower for token in ("순위", "반영", "규정")):
+        return _build_static_kbo_result(
+            "KBO 순위에서 무승부는 승률 계산의 분모에서 제외됩니다. 예를 들어 승률은 승수 / (승수 + 패수)로 보며, 동률 상황은 별도 타이브레이크 기준을 함께 적용합니다."
+        )
+
+    if "포스트시즌" in query_lower and any(token in query_lower for token in ("어떻게", "진행")):
+        return _build_static_kbo_result(
+            "KBO 포스트시즌은 정규시즌 상위 팀들이 단계적으로 맞붙는 토너먼트입니다. 와일드카드 결정전에서 시작해 준플레이오프, 플레이오프를 거쳐 한국시리즈에서 최종 우승팀을 가립니다."
+        )
+
+    if "한국시리즈" in query_lower and any(token in query_lower for token in ("몇 경기", "몇경기")):
+        return _build_static_kbo_result(
+            "KBO 한국시리즈는 7전 4선승제입니다. 먼저 4승을 거둔 팀이 그 시즌 최종 우승팀이 됩니다."
+        )
+
+    if "와일드카드" in query_lower and any(token in query_lower for token in ("어떻게", "결정", "유리")):
+        return _build_static_kbo_result(
+            "KBO 와일드카드 결정전은 정규시즌 4위와 5위가 맞붙는 첫 관문입니다. 4위 팀이 유리한 조건에서 시작하고, 5위 팀은 연속으로 이겨야 다음 단계에 올라가는 구조입니다."
+        )
+
+    if "연장전" in query_lower and any(token in query_lower for token in ("몇 회", "몇회", "규정")):
+        return _build_static_kbo_result(
+            "2026년 KBO 정규시즌 연장전은 11회까지로 보는 규정 변경이 반영되어 있습니다. 연장에서도 승부가 나지 않으면 무승부로 처리됩니다."
+        )
+
+    if "아시아 쿼터" in query_lower:
+        return _build_static_kbo_result(
+            "2026년 KBO 아시아 쿼터는 기존 외국인 선수 운용에 아시아 국적 선수 슬롯을 더해 선수 수급 폭을 넓히는 제도입니다. 시스템에서는 외국인 선수 4명 체계와 함께 시즌 규정으로 분리해 다루는 항목입니다."
+        )
+
+    if "외국인 선수" in query_lower and any(token in query_lower for token in ("몇 명", "몇명", "규정")):
+        return _build_static_kbo_result(
+            "2026년 KBO 외국인 선수 운용은 외국인 4명 체계로 보는 규정 변경이 반영되어 있습니다. 세부 등록과 출장 조건은 시즌 규정 항목으로 따로 관리해야 합니다."
+        )
+
+    return None
 
 
 def _build_retrieval_event_filter(
@@ -303,6 +1324,13 @@ _STAT_CORE_INDICATORS = frozenset(
         "방어율",
     }
 )
+# 규정 청크가 저장된 source_table 목록. similarity_search의 source_table_in 필터에 사용.
+_REGULATION_SOURCES: frozenset[str] = frozenset({
+    "markdown_docs",
+    "kbo_regulations",
+    "kbo_definitions",
+})
+
 _REGULATION_KEYWORDS = frozenset(
     {
         "규정",
@@ -363,13 +1391,9 @@ _REGULATION_KEYWORDS = frozenset(
         "홈런왕",
         "득점왕",
         "순위",
-        "wrc+",
-        "ops",
-        "era",
-        "whip",
-        "babip",
-        "war",
-        "fip",
+        # 통계 지표(wrc+, ops, era, whip, babip, war, fip)는 제거:
+        # → _STATISTICAL_KEYWORDS에 이미 포함되어 있고,
+        #   규정 쿼리 오탐 시 source_table_in 필터로 통계 청크가 제외되는 문제 방지.
     }
 )
 _GAME_KEYWORDS = frozenset(
@@ -1214,6 +2238,7 @@ class RAGPipeline:
     def _should_use_single_query_retrieval(
         self,
         *,
+        query: str = "",
         search_strategy: Dict[str, Any],
         entity_filter: Any,
         final_filters: Dict[str, Any],
@@ -1225,7 +2250,11 @@ class RAGPipeline:
         if bool(search_strategy.get("is_ranking_query")):
             return False
         if getattr(entity_filter, "player_name", None):
-            return True
+            query_lower = query.lower()
+            return any(
+                keyword in query_lower
+                for keyword in _FORCE_PLAYER_FAST_PATH_KEYWORDS
+            )
         if final_filters.get("source_table"):
             return True
         if getattr(entity_filter, "team_id", None):
@@ -1382,6 +2411,117 @@ class RAGPipeline:
                 f"모든 LLM 제공자가 실패했습니다. 주 제공자({provider}): {e}"
             )
 
+    async def _generate_stream(self, messages: Sequence[Dict[str, str]]) -> Iterator[str]:
+        """스트리밍 모드로 답변을 생성합니다."""
+        provider = self.settings.llm_provider
+
+        try:
+            if provider == "gemini":
+                async for chunk in self._generate_stream_with_gemini(messages):
+                    yield chunk
+            elif provider == "openrouter":
+                async for chunk in self._generate_stream_with_openrouter(messages):
+                    yield chunk
+            else:
+                # 스트리밍 미지원 시 일반 생성 결과 반환
+                yield await self._generate(messages)
+        except Exception as e:
+            logger.error(f"[RAG] Stream generation failed ({type(e).__name__}): {e}. Falling back to completion.")
+            try:
+                yield await self._generate(messages)
+            except Exception as fe:
+                logger.error(f"[RAG] Completion fallback also failed: {fe}")
+                yield "죄송합니다. 답변 생성 중 오류가 발생했습니다."
+
+    async def _generate_stream_with_gemini(self, messages: Sequence[Dict[str, str]]) -> Iterator[str]:
+        """Gemini API를 사용하여 스트리밍 답변을 생성합니다."""
+        if not self.settings.gemini_api_key:
+            raise RuntimeError("Gemini API 키가 없습니다.")
+
+        gemini_contents = []
+        system_instructions = ""
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                system_instructions += content + "\n\n"
+            elif role == "user":
+                user_content = content
+                if system_instructions and not gemini_contents:
+                    user_content = f"System Instruction:\n{system_instructions}\n\nUser Question:\n{content}"
+                gemini_contents.append({"role": "user", "parts": [{"text": user_content}]})
+            elif role == "assistant":
+                gemini_contents.append({"role": "model", "parts": [{"text": content}]})
+
+        model = self.settings.gemini_model or "gemini-1.5-flash"
+        url = f"https://generativelanguage.googleapis.com/v1/models/{model}:streamGenerateContent"
+        params = {"key": self.settings.gemini_api_key, "alt": "sse"}
+
+        payload = {
+            "contents": gemini_contents,
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": self.settings.max_output_tokens}
+        }
+
+        client = get_shared_httpx_client(
+            "gemini",
+            timeout=httpx.Timeout(60.0, connect=10.0, read=60.0, pool=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+        async with client.stream("POST", url, json=payload, params=params, timeout=60.0) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                        chunk = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                        if chunk:
+                            yield chunk
+                    except Exception:
+                        continue
+
+    async def _generate_stream_with_openrouter(self, messages: Sequence[Dict[str, str]]) -> Iterator[str]:
+        """OpenRouter API를 사용하여 스트리밍 답변을 생성합니다."""
+        if not self.settings.openrouter_api_key:
+            raise RuntimeError("OpenRouter API 키가 없습니다.")
+
+        headers = {
+            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": self.settings.openrouter_referer or "",
+            "X-Title": self.settings.openrouter_app_title or "",
+        }
+        payload = {
+            "model": self.settings.openrouter_model,
+            "messages": list(messages),
+            "stream": True,
+            "max_tokens": self.settings.max_output_tokens,
+        }
+
+        url = f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions"
+        client = get_shared_httpx_client(
+            "openrouter",
+            timeout=httpx.Timeout(60.0, connect=10.0, read=60.0, pool=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+
+        async with client.stream("POST", url, json=payload, headers=headers, timeout=60.0) as response:
+            if response.status_code != 200:
+                body = await response.aread()
+                logger.error(f"[RAG] OpenRouter stream error {response.status_code}: {body[:300]!r}")
+                response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line.startswith("data: "):
+                    if line == "data: [DONE]":
+                        break
+                    try:
+                        data = json.loads(line[6:])
+                        chunk = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        if chunk:
+                            yield chunk
+                    except Exception:
+                        continue
+
     @llm_retry
     async def _generate_with_openrouter(
         self, messages: Sequence[Dict[str, str]]
@@ -1401,6 +2541,7 @@ class RAGPipeline:
             "model": self.settings.openrouter_model,
             "messages": list(messages),
             "max_tokens": self.settings.max_output_tokens,
+            "temperature": 0.1,
         }
 
         client = get_shared_httpx_client(
@@ -1474,7 +2615,7 @@ class RAGPipeline:
             "contents": gemini_contents,
             "generationConfig": {
                 "maxOutputTokens": self.settings.max_output_tokens,
-                "temperature": 0.7,
+                "temperature": 0.1,
             },
         }
 
@@ -1566,7 +2707,12 @@ class RAGPipeline:
         질문이 KBO 규정 관련인지 판단합니다.
         """
         query_lower = query.lower()
-        return any(keyword in query_lower for keyword in _REGULATION_KEYWORDS)
+        # 공백 제거 버전도 확인: "비디오 판독" → "비디오판독" 등 복합어 매칭
+        query_nospace = query_lower.replace(" ", "")
+        return any(
+            keyword in query_lower or keyword in query_nospace
+            for keyword in _REGULATION_KEYWORDS
+        )
 
     def _is_game_query(self, query: str) -> bool:
         """
@@ -1588,6 +2734,29 @@ class RAGPipeline:
     def _is_game_flow_narrative_query(self, query: str) -> bool:
         query_lower = query.lower()
         return any(keyword in query_lower for keyword in _GAME_FLOW_NARRATIVE_KEYWORDS)
+
+    def _should_force_agent_fast_path(self, query: str, entity_filter) -> bool:
+        """Questions with dedicated DB tools should not pay the RAG embedding cost first."""
+        if getattr(entity_filter, "stat_leader", None):
+            return True
+        query_lower = query.lower()
+        if (
+            getattr(entity_filter, "player_name", None)
+            and not getattr(entity_filter, "team_id", None)
+            and any(
+                keyword in query_lower
+                for keyword in _FORCE_PLAYER_FAST_PATH_KEYWORDS
+            )
+        ):
+            return True
+        if getattr(entity_filter, "team_id", None) and any(
+            keyword in query_lower
+            for keyword in _FORCE_TEAM_ANALYSIS_FAST_PATH_KEYWORDS
+        ):
+            return True
+        return any(
+            keyword in query_lower for keyword in _FORCE_AGENT_FAST_PATH_KEYWORDS
+        )
 
     def _is_general_conversation(self, query: str) -> bool:
         """
@@ -1623,13 +2792,38 @@ class RAGPipeline:
             ):
                 agent_result = await self.baseball_agent.process_query(
                     query,
-                    {"intent": intent, "filters": filters, "history": history},
+                    {
+                        "intent": intent,
+                        "filters": filters,
+                        "history": history,
+                        "request_mode": "completion",
+                        "persona": "chat",
+                    },
                 )
 
             if agent_result["verified"] and not agent_result.get("error"):
                 logger.info(
                     f"[RAG] Agent successfully handled query with verified data"
                 )
+                perf = agent_result.get("perf") or {}
+                if not isinstance(perf, dict):
+                    perf = {}
+                planner_mode = agent_result.get("planner_mode") or "verified_agent"
+                planner_cache_hit = bool(agent_result.get("planner_cache_hit", False))
+                tool_execution_mode = (
+                    agent_result.get("tool_execution_mode")
+                    or perf.get("tool_execution_mode")
+                    or "unknown"
+                )
+                if isinstance(perf, dict):
+                    perf = {
+                        **perf,
+                        "planner_mode": perf.get("planner_mode") or planner_mode,
+                        "planner_cache_hit": bool(
+                            perf.get("planner_cache_hit", planner_cache_hit)
+                        ),
+                        "tool_execution_mode": tool_execution_mode,
+                    }
                 return {
                     "answer": agent_result["answer"],
                     "citations": [],  # 에이전트는 DB 직접 조회하므로 citations 불필요
@@ -1638,7 +2832,24 @@ class RAGPipeline:
                     "strategy": "verified_agent",
                     "verified": True,
                     "tool_calls": agent_result.get("tool_calls", []),
+                    "tool_results": agent_result.get("tool_results", []),
                     "data_sources": agent_result.get("data_sources", []),
+                    "visualizations": agent_result.get("visualizations", []),
+                    "planner_mode": planner_mode,
+                    "planner_cache_hit": planner_cache_hit,
+                    "tool_execution_mode": tool_execution_mode,
+                    "fallback_triggered": bool(
+                        agent_result.get("fallback_triggered", False)
+                    ),
+                    "fallback_answer_used": bool(
+                        agent_result.get("fallback_answer_used", False)
+                    ),
+                    "grounding_mode": agent_result.get("grounding_mode"),
+                    "source_tier": agent_result.get("source_tier"),
+                    "answer_sources": agent_result.get("answer_sources", []),
+                    "as_of_date": agent_result.get("as_of_date"),
+                    "fallback_reason": agent_result.get("fallback_reason"),
+                    "perf": perf,
                 }
             else:
                 logger.warning(
@@ -1704,10 +2915,10 @@ class RAGPipeline:
 
         # 기본 응답 (아무 키워드도 매칭되지 않을 때만)
         logger.info(f"[RAG] _handle_general_conversation fallback for query: {query}")
-        default_response = """안녕하세요! 저는 KBO 리그 데이터 분석가 'BEGA'입니다. 
+        default_response = """안녕하세요! 저는 KBO 리그 데이터 분석가 'BEGA'입니다.
 
 KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니다:
-- "2025년 김도영 타율은?" 
+- "2025년 김도영 타율은?"
 - "홈런왕 TOP 5는?"
 - "LG 트윈스 주요 선수는?"
 - "OPS가 뭐야?"
@@ -1723,6 +2934,213 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             "verified": True,
         }
 
+    async def run_stream(
+        self,
+        query: str,
+        *,
+        intent: str = "freeform",
+        filters: Optional[Dict[str, Any]] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        RAG 파이프라인을 스트리밍 모드로 실행합니다.
+
+        Returns:
+            각 단계별 진행 상황 및 최종 답변 조각을 포함하는 비동기 제너레이터
+        """
+        # 1. 전처리 및 검색 (run 메소드의 로직과 동일하게 진행하되 결과만 다르게 구성)
+        query = full_normalize(query)
+        logger.info(f"[RAG] Processing query (stream): {query}")
+        retrieval_state = _new_retrieval_state()
+        static_kbo_result = _build_static_kbo_faq_result(query)
+        if static_kbo_result is not None:
+            logger.info("[RAG] Static KBO FAQ fast-path (stream): %s", query)
+            yield {
+                "type": "metadata",
+                "data": {
+                    key: value
+                    for key, value in static_kbo_result.items()
+                    if key != "answer"
+                },
+            }
+            yield {
+                "type": "answer_chunk",
+                "content": static_kbo_result["answer"],
+            }
+            return
+
+        if intent == "freeform":
+            from ..ml.intent_router import predict_intent
+            intent = predict_intent(query)
+            logger.info(f"[RAG] Predicted intent: {intent}")
+
+        search_strategy = enhance_search_strategy(query)
+        entity_filter = search_strategy["entity_filter"]
+        extracted_filters = search_strategy["db_filters"]
+
+        is_game_query = self._is_game_query(query)
+        is_game_flow_narrative = self._is_game_flow_narrative_query(query)
+        is_statistical = self._is_statistical_query(query, entity_filter)
+        is_regulation = self._is_regulation_query(query)
+        force_agent_fast_path = self._should_force_agent_fast_path(
+            query, entity_filter
+        )
+
+        if is_regulation and intent == "freeform":
+            intent = "explanatory"
+
+        # 메타데이터 이벤트 우선 발송
+        yield {
+            "type": "metadata",
+            "data": {
+                "intent": intent,
+                "entity_filter": {
+                    "season_year": entity_filter.season_year,
+                    "team_id": entity_filter.team_id,
+                    "player_name": entity_filter.player_name,
+                    "stat_type": entity_filter.stat_type,
+                    "position_type": entity_filter.position_type,
+                },
+            }
+        }
+
+        # 에이전트 우선 처리 로직 (스트리밍 지원하는 경우)
+        # is_statistical 제외: 통계 게임 쿼리도 BaseballStatisticsAgent 경로를 사용
+        if force_agent_fast_path or (
+            not is_regulation and is_game_query and not is_game_flow_narrative
+        ):
+            # 경기 데이터 질문은 에이전트 스트리밍 시도
+            # process_query_stream is on BaseballStatisticsAgent (self.baseball_agent),
+            # not on BaseballAgentRuntime — use the correct reference and establish
+            # request_context so DB resources resolve inside the agent.
+            if hasattr(self.baseball_agent, "process_query_stream"):
+                logger.info("[RAG] Agent fast-path query detected, trying agent stream first")
+                try:
+                    with self._checkout_conn() as conn, \
+                         self.agent_runtime.request_context(conn):
+                        async for event in self.baseball_agent.process_query_stream(
+                            query,
+                            context={
+                                "filters": filters,
+                                "history": history,
+                                "request_mode": "stream",
+                                "persona": "chat",
+                            },
+                        ):
+                            yield event
+                    return
+                except Exception as e:
+                    logger.error("[RAG] Agent stream error: %s", e)
+
+        # 기존 RAG 방식으로 진행
+        final_filters = {**extracted_filters, **(filters or {})}
+        if is_game_query or entity_filter.game_date:
+            final_filters.pop("team_id", None)
+        if is_game_flow_narrative:
+            final_filters["source_table"] = "game_flow_summary"
+
+        year = (
+            final_filters.get("season_year")
+            or entity_filter.season_year
+            or _resolve_default_season_year(self.settings)
+        )
+
+        search_limit = self.settings.default_search_limit
+        if is_regulation:
+            search_limit = max(search_limit, 20)
+            logger.info(f"[RAG] Regulation query (stream): increasing search_limit to {search_limit}")
+
+        # 문서 검색 (규정 쿼리는 2-패스 전략으로 규정 소스 우선 확보)
+        if is_regulation:
+            reg_filters = {**final_filters, "source_table_in": list(_REGULATION_SOURCES)}
+            reg_docs = await self.retrieve(query, filters=reg_filters, entity_filter=entity_filter,
+                                           limit=20, retrieval_state=retrieval_state)
+            if len(reg_docs) >= 8:
+                docs = reg_docs
+            else:
+                general_docs = await self.retrieve(query, filters=final_filters,
+                                                   entity_filter=entity_filter,
+                                                   limit=search_limit, retrieval_state=retrieval_state)
+                seen = {d["id"] for d in reg_docs}
+                docs = reg_docs + [d for d in general_docs if d["id"] not in seen]
+            logger.info(f"[RAG] Regulation 2-pass retrieval (stream): {len(docs)} docs (reg_docs={len(reg_docs)})")
+        else:
+            docs = await self.retrieve(query, filters=final_filters, entity_filter=entity_filter,
+                                       limit=search_limit, retrieval_state=retrieval_state)
+
+        # 검색 결과가 없으면 폴백 시도
+        if not docs and final_filters:
+            fallback_filters = dict(final_filters)
+            if "source_table" in fallback_filters:
+                fallback_filters.pop("source_table")
+                docs = await self.retrieve(query, filters=fallback_filters, limit=search_limit, retrieval_state=retrieval_state)
+
+        # 문서 정렬: markdown_docs를 우선적으로 배치 (규정/지식 답변 품질 향상)
+        docs.sort(key=lambda d: 0 if d.get("source_table") == "markdown_docs" else 1)
+
+        # 규정 쿼리: LLM에 전달 전 비규정 청크 제거로 환각 억제
+        if is_regulation and docs:
+            regulation_sources = _REGULATION_SOURCES
+            filtered = [d for d in docs if d.get("source_table") in regulation_sources]
+            if filtered:
+                docs = filtered[:8]
+
+        # --- DB 연결 장애 스트림 폴백 ---
+        # run()과 동일한 Baseball Data Policy 적용: DB 장애 시 LLM 스트림을 생성하지 않는다.
+        if retrieval_state.get("db_error") is not None and not docs:
+            logger.warning(
+                "[RAG] DB was unavailable during stream retrieval. cause=%s",
+                retrieval_state.get("db_error"),
+            )
+            answer = (
+                DB_UNAVAILABLE_PREFIX
+                + "\n\n현재 KBO 통계 데이터베이스에 접속할 수 없어 답변을 제공할 수 없습니다. "
+                "잠시 후 다시 시도해 주세요."
+            )
+            yield {"type": "answer_chunk", "content": answer}
+            yield {"type": "metadata", "data": {"strategy": "db_unavailable", "citations": []}}
+            return
+        # --- DB 연결 장애 스트림 폴백 끝 ---
+
+        processed_data = await self._process_and_enrich_docs(docs, year)
+        formatted_context = self.context_formatter.format_context(
+            processed_data, intent, query, entity_filter, year
+        )
+
+        if not docs:
+            formatted_context = self.context_formatter.format_zero_hit_guidance(
+                query, entity_filter, year, final_filters
+            )
+
+        history_block = _history_context_block(history)
+        if history_block:
+            formatted_context = history_block + "\n\n" + formatted_context
+
+        prompt = FOLLOWUP_PROMPT.format(question=query, context=formatted_context)
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "당신은 KBO 리그 야구 전문가 'BEGA'입니다. "
+                    "반드시 주어진 검색 컨텍스트만 근거로 답하십시오. "
+                    "컨텍스트에 없는 내용을 추론하거나 생성하지 마십시오. "
+                    "2026년 규정 변화(외국인 4명, 아시아 쿼터, 11회 연장, 수비 시프트 등)가 "
+                    "컨텍스트에 있으면 그것을 최신 공식 정보로 간주하여 상세히 답하십시오. "
+                    "정보가 없으면 '컨텍스트에서 확인되지 않습니다'라고만 답하십시오."
+                ),
+            }
+        ]
+        messages.extend(_history_for_messages(history))
+        messages.append({"role": "user", "content": prompt})
+
+        # 스트리밍 답변 생성
+        async for chunk in self._generate_stream(messages):
+            yield {
+                "type": "answer_chunk",
+                "content": chunk,
+            }
+
     async def run(
         self,
         query: str,
@@ -1735,6 +3153,16 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         query = full_normalize(query)  # 특수문자 제거, 한영 정규화, 공백 정리
         logger.info(f"[RAG] Processing query: {query}")
         retrieval_state = _new_retrieval_state()
+        static_kbo_result = _build_static_kbo_faq_result(query)
+        if static_kbo_result is not None:
+            logger.info("[RAG] Static KBO FAQ fast-path: %s", query)
+            return static_kbo_result
+
+        # 의도가 지정되지 않았거나 freeform이면 예측 시도
+        if intent == "freeform":
+            from ..ml.intent_router import predict_intent
+            intent = predict_intent(query)
+            logger.info(f"[RAG] Predicted intent: {intent}")
 
         # Extract entities and enhance search strategy
         search_strategy = enhance_search_strategy(query)
@@ -1745,13 +3173,36 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             search_limit = self.settings.default_search_limit
         else:
             search_limit = max(1, int(raw_search_limit))
+
+        # 2. 통계/규정/게임 질문 여부 판별 (검색 전략에 영향)
+        is_statistical = self._is_statistical_query(query, entity_filter)
+        is_regulation = self._is_regulation_query(query)
         is_game_query = self._is_game_query(query)
         is_game_flow_narrative = self._is_game_flow_narrative_query(query)
+        force_agent_fast_path = self._should_force_agent_fast_path(
+            query, entity_filter
+        )
 
-        # 2. 통계 질문인지 먼저 확인 (최우선)
-        is_statistical = self._is_statistical_query(query, entity_filter)
-        logger.info(f"[RAG] Is statistical query: {is_statistical}")
-        logger.info(f"[RAG] Entity filter: {entity_filter}")
+        # 규정 질문이면 검색 제한을 늘려 관련 상세 조항들이 더 많이 포함되도록 함
+        if is_regulation:
+            search_limit = max(search_limit, 20)
+            logger.info(f"[RAG] Regulation query: increasing search_limit to {search_limit}")
+
+        # 규정 질문이면 의도를 explanatory로 강화
+        if is_regulation and intent == "freeform":
+            intent = "explanatory"
+
+        logger.info(f"[RAG] Path decision: is_statistical={is_statistical}, is_regulation={is_regulation}, is_game_query={is_game_query}, intent={intent}")
+
+        if force_agent_fast_path:
+            logger.info("[RAG] Dedicated DB fast-path query detected, trying agent first")
+            agent_result = await self._try_agent_first(
+                query, intent=intent, filters=filters, history=history
+            )
+            if agent_result is not None:
+                return agent_result
+            logger.info("[RAG] Dedicated DB fast-path failed, falling back to RAG")
+
         if is_statistical:
             logger.info(
                 f"[RAG] Statistical query detected, using traditional RAG directly"
@@ -1765,17 +3216,10 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             return await self._handle_general_conversation(query)
 
         # 4. 규정 질문인지 확인
-        elif self._is_regulation_query(query):
-            logger.info(f"[RAG] Regulation query detected, trying agent first")
-            agent_result = await self._try_agent_first(
-                query, intent=intent, filters=filters, history=history
-            )
-            if agent_result is not None:
-                return agent_result
-            else:
-                logger.info(
-                    f"[RAG] Regulation agent failed, falling back to traditional RAG"
-                )
+        elif is_regulation:
+            logger.info(f"[RAG] Regulation query detected, using traditional RAG directly")
+            # 에이전트 대신 RAG를 직접 사용하여 벡터 검색 성능을 활용
+            pass  # 6단계로 진행
 
         # 5. 경기 데이터 질문인지 확인
         elif is_game_query:
@@ -1890,6 +3334,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 actual_filters = dict(final_filters)
 
         elif (not is_game_flow_narrative) and self._should_use_single_query_retrieval(
+            query=query,
             search_strategy=search_strategy,
             entity_filter=entity_filter,
             final_filters=final_filters,
@@ -1992,23 +3437,36 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         logger.info(f"[RAG] Final retrieval result: {len(docs)} documents")
 
+        # 규정 쿼리: 규정 소스 청크가 부족하면 타겟 검색으로 보충
+        if is_regulation and docs:
+            markdown_count = sum(1 for d in docs if d.get("source_table") in _REGULATION_SOURCES)
+            if markdown_count < 5:
+                reg_filters = {**final_filters, "source_table_in": list(_REGULATION_SOURCES)}
+                try:
+                    top_up_docs = await _run_retrieve(query, filters=reg_filters,
+                                                      entity_filter=entity_filter, limit=15)
+                    seen = {d["id"] for d in docs}
+                    new_docs = [d for d in top_up_docs if d["id"] not in seen]
+                    docs = new_docs + docs
+                    logger.info(f"[RAG] Regulation top-up: added {len(new_docs)} markdown_docs chunks")
+                except Exception as e:
+                    logger.warning(f"[RAG] Regulation top-up failed: {e}")
+
         # --- DB 연결 장애 폴백 ---
         # docs가 있으면 일부 검색이 성공한 것이므로 에러가 있어도 폴백하지 않음
         if retrieval_state.get("db_error") is not None and not docs:
             logger.warning(
-                "[RAG] DB was unavailable during retrieval, using LLM knowledge fallback. cause=%s",
+                "[RAG] DB was unavailable during retrieval. cause=%s",
                 retrieval_state.get("db_error"),
             )
-            db_down_context = _build_db_unavailable_context(query, entity_filter, year)
-            history_block = _history_context_block(history)
-            if history_block:
-                db_down_context = history_block + "\n\n" + db_down_context
-            prompt = FOLLOWUP_PROMPT.format(question=query, context=db_down_context)
-            db_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            db_messages.extend(_history_for_messages(history))
-            db_messages.append({"role": "user", "content": prompt})
-            answer = await self._generate(db_messages)
-            answer = _ensure_answer_prefix(answer, DB_UNAVAILABLE_PREFIX)
+            # Baseball Data Policy: all data must come from the internal DB.
+            # Do NOT generate an answer from LLM training knowledge — return a
+            # hard unavailable response instead.
+            answer = (
+                DB_UNAVAILABLE_PREFIX
+                + "\n\n현재 KBO 통계 데이터베이스에 접속할 수 없어 답변을 제공할 수 없습니다. "
+                "잠시 후 다시 시도해 주세요."
+            )
             self._record_retrieval_event(
                 query=query,
                 intent=intent,
@@ -2027,7 +3485,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 "citations": [],
                 "intent": intent,
                 "retrieved": [],
-                "strategy": "llm_knowledge_db_unavailable",
+                "strategy": "db_unavailable",
                 "entity_filter": {
                     "season_year": entity_filter.season_year,
                     "team_id": entity_filter.team_id,
@@ -2108,6 +3566,16 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             fallback_stage=fallback_stage,
         )
 
+        # 문서 정렬: markdown_docs를 우선적으로 배치 (규정/지식 답변 품질 향상)
+        docs.sort(key=lambda d: 0 if d.get("source_table") == "markdown_docs" else 1)
+
+        # 규정 쿼리: LLM에 전달 전 비규정 청크 제거로 환각 억제
+        if is_regulation and docs:
+            regulation_sources = _REGULATION_SOURCES
+            filtered = [d for d in docs if d.get("source_table") in regulation_sources]
+            if filtered:
+                docs = filtered[:8]
+
         # 2. 데이터 처리 및 보강
         processed_data = await self._process_and_enrich_docs(docs, year)
 
@@ -2137,10 +3605,22 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         logger.info(f"[RAG_DEBUG] Question: {query}")
         logger.info(f"[RAG_DEBUG] Formatted context length: {len(formatted_context)}")
         logger.info(
-            f"[RAG_DEBUG] Formatted context preview: {formatted_context[:500]}..."
+            f"[RAG_DEBUG] Formatted context content: {formatted_context}"
         )
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "당신은 KBO 리그 야구 전문가 'BEGA'입니다. "
+                    "반드시 주어진 검색 컨텍스트만 근거로 답하십시오. "
+                    "컨텍스트에 없는 내용을 추론하거나 생성하지 마십시오. "
+                    "2026년 규정 변화(외국인 4명, 아시아 쿼터, 11회 연장, 수비 시프트 등)가 "
+                    "컨텍스트에 있으면 그것을 최신 공식 정보로 간주하여 상세히 답하십시오. "
+                    "정보가 없으면 '컨텍스트에서 확인되지 않습니다'라고만 답하십시오."
+                ),
+            }
+        ]
         messages.extend(_history_for_messages(history))
         messages.append({"role": "user", "content": prompt})
 
