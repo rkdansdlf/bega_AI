@@ -176,6 +176,10 @@ def infer_source_table(relative_path: str) -> str:
         return "kbo_regulations"
     if normalized.endswith("kbo_metrics_explained.md"):
         return "kbo_definitions"
+    # 파일명(stem)에 "regulation"이 포함된 문서는 규정 콘텐츠로 분류
+    # 예: docs/kbo_knowledge/2026_regulation_changes.md → kbo_regulations
+    if "regulation" in Path(normalized).stem:
+        return "kbo_regulations"
     return "markdown_docs"
 
 
