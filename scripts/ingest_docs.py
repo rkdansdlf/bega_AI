@@ -176,6 +176,10 @@ def infer_source_table(relative_path: str) -> str:
         return "kbo_regulations"
     if normalized.endswith("kbo_metrics_explained.md"):
         return "kbo_definitions"
+    # 파일명(stem)에 "regulation"이 포함된 문서는 규정 콘텐츠로 분류
+    # 예: docs/kbo_knowledge/2026_regulation_changes.md → kbo_regulations
+    if "regulation" in Path(normalized).stem:
+        return "kbo_regulations"
     return "markdown_docs"
 
 
@@ -193,7 +197,9 @@ def infer_doc_quality_score(source_type: str) -> float:
 
 
 def infer_doc_topic_key(source_table: str, relative_path: str) -> str:
-    stem = relative_path[:-3] if relative_path.lower().endswith(".md") else relative_path
+    stem = (
+        relative_path[:-3] if relative_path.lower().endswith(".md") else relative_path
+    )
     slug = re.sub(r"[^0-9a-z]+", "_", stem.lower()).strip("_")
     return f"{source_table}:{slug or Path(relative_path).stem.lower()}"
 
@@ -355,7 +361,9 @@ async def main():
                 existing_embeddings = (
                     fetch_existing_embedding_texts(
                         cur,
-                        content_hashes=(record[3]["content_hash"] for record in records),
+                        content_hashes=(
+                            record[3]["content_hash"] for record in records
+                        ),
                         embedding_model=embedding_model,
                         embedding_dim=records[0][3]["embedding_dim"],
                         embedding_version=embedding_version,

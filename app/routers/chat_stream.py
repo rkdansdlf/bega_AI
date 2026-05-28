@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import openai
 import os
 import re
@@ -36,7 +37,12 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from ..config import get_settings
-from ..deps import get_agent, get_connection_pool, require_ai_internal_token
+from ..deps import (
+    get_agent,
+    get_connection_pool,
+    get_rag_pipeline,
+    require_ai_internal_token,
+)
 from ..agents.baseball_agent import BaseballStatisticsAgent
 from ..core.ratelimit import (
     rate_limit_chat_dependency,
@@ -61,6 +67,7 @@ def _record_cache_by_intent(intent: str, result: str) -> None:
         ).inc()
     except Exception:  # noqa: BLE001
         pass
+
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -95,6 +102,11 @@ _NON_CACHEABLE_RESPONSE_MARKERS = (
     "답변 생성 중 오류가 발생했습니다",
     "서버 오류가 발생했습니다",
     "잠시 후 다시 시도해주세요",
+    # 제로히트/정보없음 응답: 데이터가 나중에 인제스트되면 캐시된 정보없음 응답이
+    # 계속 서빙되는 stale cache 문제를 방지한다. 서빙 시점에도 감지되면 캐시를 자동 삭제.
+    "저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다",
+    "현재 연결된 자료만으로는 질문에 대해 확인된 답을 만들지 못했습니다",
+    "추정하지 않고 확인된 범위에서만 말씀드리겠습니다",
 )
 
 
@@ -358,6 +370,8 @@ def _is_non_cacheable_response(response_text: str) -> bool:
 def _safe_serialize(obj: Any) -> Any:
     """JSON 직렬화 가능한 형태로 객체를 변환합니다."""
     if obj is None:
+        return None
+    if isinstance(obj, float) and not math.isfinite(obj):
         return None
     if isinstance(obj, (str, int, float, bool)):
         return obj
@@ -1016,6 +1030,7 @@ async def _stream_response(
     style: str,
     history: Optional[List[Dict[str, str]]],
     agent: BaseballStatisticsAgent,
+    pipeline: Any = None,
     cache_key: Optional[str] = None,
 ):
     """질문에 대한 답변을 생성하고 SSE 스트림으로 반환하는 핵심 로직입니다.
@@ -1023,6 +1038,8 @@ async def _stream_response(
     cache_key가 전달된 경우, 스트리밍 완료 후 응답 텍스트를 DB 캐시에 저장합니다.
     캐싱 조건(history-free & 실시간 키워드 없음)은 호출자(chat_stream_post)에서 판단합니다.
     """
+    del pipeline
+
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
@@ -1466,6 +1483,7 @@ async def chat_stream_get(
     q: str = Query("", description="질문 텍스트"),
     style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
     agent: BaseballStatisticsAgent = Depends(get_agent),
+    pipeline: Any = Depends(get_rag_pipeline),
     __: None = Depends(rate_limit_chat_dependency),
     _: None = Depends(require_ai_internal_token),
     request: Request = None,
@@ -1487,6 +1505,7 @@ async def chat_stream_get(
         style=style,
         history=history,
         agent=agent,
+        pipeline=pipeline,
         cache_key=None,
     )
 

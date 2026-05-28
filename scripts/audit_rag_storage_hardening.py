@@ -376,7 +376,10 @@ def build_recommendations(report: Dict[str, Any]) -> List[str]:
         recommendations.append(
             "Review manual_lineup_issues; re-ingest verified operator rows so source_type/source_uri/quality_score are preserved."
         )
-    if int(summary.get("active_past_valid_to") or 0) > 0 or int(summary.get("active_expired") or 0) > 0:
+    if (
+        int(summary.get("active_past_valid_to") or 0) > 0
+        or int(summary.get("active_expired") or 0) > 0
+    ):
         recommendations.append(
             "Investigate active rows past valid_to/expires_at; retrieval filters hide them, but storage should be cleaned up."
         )
@@ -385,7 +388,9 @@ def build_recommendations(report: Dict[str, Any]) -> List[str]:
             "Check active future-valid rows; retrieval filters hide them until valid_from, but source metadata should be intentional."
         )
     if not recommendations:
-        recommendations.append("No immediate storage hardening issue found in the audited scope.")
+        recommendations.append(
+            "No immediate storage hardening issue found in the audited scope."
+        )
     return recommendations
 
 

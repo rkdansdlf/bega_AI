@@ -28,7 +28,9 @@ class EntityFilter:
     movement_type: Optional[str] = None  # 이적 유형 (예: "fa", "trade")
     game_date: Optional[str] = None  # 경기 날짜 (예: "2025-05-10")
     position_code: Optional[str] = None  # 표준 포지션 코드 (예: "1B", "SS", "PH")
-    stat_leader: Optional[Dict[str, str]] = None  # 통계 리더 정보 (예: {"stat_name": "home_runs", "position": "batting"})
+    stat_leader: Optional[Dict[str, str]] = (
+        None  # 통계 리더 정보 (예: {"stat_name": "home_runs", "position": "batting"})
+    )
 
 
 # KBO 팀명 매핑 테이블 (사용자 입력 → 실제 DB team_id)
@@ -290,62 +292,63 @@ AWARD_MAPPING = {
 STAT_LEADER_MAPPING: Dict[str, Dict[str, str]] = {
     # ── 타자 부문 ────────────────────────────────────────────────────────────
     # 홈런
-    "홈런왕":         {"stat_name": "home_runs",    "position": "batting"},
-    "홈런 1위":       {"stat_name": "home_runs",    "position": "batting"},
-    "홈런 가장 많이": {"stat_name": "home_runs",    "position": "batting"},
-    "최다 홈런":      {"stat_name": "home_runs",    "position": "batting"},
-    "최다홈런":       {"stat_name": "home_runs",    "position": "batting"},
+    "홈런왕": {"stat_name": "home_runs", "position": "batting"},
+    "홈런 1위": {"stat_name": "home_runs", "position": "batting"},
+    "홈런 가장 많이": {"stat_name": "home_runs", "position": "batting"},
+    "최다 홈런": {"stat_name": "home_runs", "position": "batting"},
+    "최다홈런": {"stat_name": "home_runs", "position": "batting"},
     # 타율
-    "타율왕":         {"stat_name": "avg",          "position": "batting"},
-    "타율 1위":       {"stat_name": "avg",          "position": "batting"},
-    "최고 타율":      {"stat_name": "avg",          "position": "batting"},
-    "타율 가장 높":   {"stat_name": "avg",          "position": "batting"},
+    "타율왕": {"stat_name": "avg", "position": "batting"},
+    "타율 1위": {"stat_name": "avg", "position": "batting"},
+    "최고 타율": {"stat_name": "avg", "position": "batting"},
+    "타율 가장 높": {"stat_name": "avg", "position": "batting"},
     # 타점
-    "타점왕":         {"stat_name": "rbi",          "position": "batting"},
-    "타점 1위":       {"stat_name": "rbi",          "position": "batting"},
-    "최다 타점":      {"stat_name": "rbi",          "position": "batting"},
-    "타점 가장 많이": {"stat_name": "rbi",          "position": "batting"},
+    "타점왕": {"stat_name": "rbi", "position": "batting"},
+    "타점 1위": {"stat_name": "rbi", "position": "batting"},
+    "최다 타점": {"stat_name": "rbi", "position": "batting"},
+    "타점 가장 많이": {"stat_name": "rbi", "position": "batting"},
     # 도루
-    "도루왕":         {"stat_name": "stolen_bases", "position": "batting"},
-    "도루 1위":       {"stat_name": "stolen_bases", "position": "batting"},
-    "최다 도루":      {"stat_name": "stolen_bases", "position": "batting"},
+    "도루왕": {"stat_name": "stolen_bases", "position": "batting"},
+    "도루 1위": {"stat_name": "stolen_bases", "position": "batting"},
+    "최다 도루": {"stat_name": "stolen_bases", "position": "batting"},
     "도루 가장 많이": {"stat_name": "stolen_bases", "position": "batting"},
     # 안타
-    "안타왕":         {"stat_name": "hits",         "position": "batting"},
-    "안타 1위":       {"stat_name": "hits",         "position": "batting"},
-    "최다 안타":      {"stat_name": "hits",         "position": "batting"},
-    "안타 가장 많이": {"stat_name": "hits",         "position": "batting"},
+    "안타왕": {"stat_name": "hits", "position": "batting"},
+    "안타 1위": {"stat_name": "hits", "position": "batting"},
+    "최다 안타": {"stat_name": "hits", "position": "batting"},
+    "최다안타": {"stat_name": "hits", "position": "batting"},
+    "안타 가장 많이": {"stat_name": "hits", "position": "batting"},
     # 기타 타자 지표
-    "장타왕":         {"stat_name": "slg",          "position": "batting"},
-    "출루율 1위":     {"stat_name": "obp",          "position": "batting"},
-    "OPS 1위":        {"stat_name": "ops",          "position": "batting"},
+    "장타왕": {"stat_name": "slg", "position": "batting"},
+    "출루율 1위": {"stat_name": "obp", "position": "batting"},
+    "OPS 1위": {"stat_name": "ops", "position": "batting"},
     # ── 투수 부문 ────────────────────────────────────────────────────────────
     # 승
-    "다승왕":         {"stat_name": "wins",         "position": "pitching"},
-    "다승 1위":       {"stat_name": "wins",         "position": "pitching"},
-    "최다승":         {"stat_name": "wins",         "position": "pitching"},
-    "최다 승":        {"stat_name": "wins",         "position": "pitching"},
+    "다승왕": {"stat_name": "wins", "position": "pitching"},
+    "다승 1위": {"stat_name": "wins", "position": "pitching"},
+    "최다승": {"stat_name": "wins", "position": "pitching"},
+    "최다 승": {"stat_name": "wins", "position": "pitching"},
     # ERA / 방어율 / 평균자책점
-    "방어율왕":       {"stat_name": "era",          "position": "pitching"},
-    "방어율 1위":     {"stat_name": "era",          "position": "pitching"},
-    "평균자책점 1위": {"stat_name": "era",          "position": "pitching"},
-    "평균자책점 최저":{"stat_name": "era",          "position": "pitching"},
-    "최저 방어율":    {"stat_name": "era",          "position": "pitching"},
-    "최저 평균자책점":{"stat_name": "era",          "position": "pitching"},
-    "ERA 1위":        {"stat_name": "era",          "position": "pitching"},
+    "방어율왕": {"stat_name": "era", "position": "pitching"},
+    "방어율 1위": {"stat_name": "era", "position": "pitching"},
+    "평균자책점 1위": {"stat_name": "era", "position": "pitching"},
+    "평균자책점 최저": {"stat_name": "era", "position": "pitching"},
+    "최저 방어율": {"stat_name": "era", "position": "pitching"},
+    "최저 평균자책점": {"stat_name": "era", "position": "pitching"},
+    "ERA 1위": {"stat_name": "era", "position": "pitching"},
     # 탈삼진
-    "탈삼진왕":       {"stat_name": "strikeouts",   "position": "pitching"},
-    "탈삼진 1위":     {"stat_name": "strikeouts",   "position": "pitching"},
-    "최다 탈삼진":    {"stat_name": "strikeouts",   "position": "pitching"},
+    "탈삼진왕": {"stat_name": "strikeouts", "position": "pitching"},
+    "탈삼진 1위": {"stat_name": "strikeouts", "position": "pitching"},
+    "최다 탈삼진": {"stat_name": "strikeouts", "position": "pitching"},
     "탈삼진 가장 많이": {"stat_name": "strikeouts", "position": "pitching"},
     # 세이브
-    "세이브왕":       {"stat_name": "saves",        "position": "pitching"},
-    "세이브 1위":     {"stat_name": "saves",        "position": "pitching"},
-    "최다 세이브":    {"stat_name": "saves",        "position": "pitching"},
-    "세이브 가장 많이": {"stat_name": "saves",      "position": "pitching"},
+    "세이브왕": {"stat_name": "saves", "position": "pitching"},
+    "세이브 1위": {"stat_name": "saves", "position": "pitching"},
+    "최다 세이브": {"stat_name": "saves", "position": "pitching"},
+    "세이브 가장 많이": {"stat_name": "saves", "position": "pitching"},
     # 홀드
-    "홀드왕":         {"stat_name": "holds",        "position": "pitching"},
-    "최다 홀드":      {"stat_name": "holds",        "position": "pitching"},
+    "홀드왕": {"stat_name": "holds", "position": "pitching"},
+    "최다 홀드": {"stat_name": "holds", "position": "pitching"},
 }
 
 # 선수 이동 유형 매핑 테이블 (사용자 입력 → 표준 이동 유형)
@@ -826,6 +829,8 @@ _PLAYER_NAME_COMMON_TERMS = {
     "전망",
     "예상",
     "분석",
+    "강점",
+    "약점",
     "소식",
     "뉴스",
     "발표",
@@ -883,6 +888,7 @@ _PLAYER_NAME_COMMON_TERMS = {
     "한국시리즈",
     "와일드카드",
     "얼마나",
+    "어때",
     "어떠니",
     "궁금해",
     "그려줘",
@@ -893,11 +899,26 @@ _PLAYER_NAME_COMMON_TERMS = {
     "위가",
     "묶어서",
     "각각",
+    "같은",
     "같이",
     "보면",
     "유형",
+    "포지션",
+    "비교하면",
+    "데이터",
+    "기준",
+    "기준으",
 }
 _PLAYER_NAME_INVALID_SUFFIXES = ("해줘", "해주세요", "해봐", "일까", "인가")
+
+
+def _strip_player_name_particle(candidate: str) -> str:
+    if candidate in _FOREIGN_PLAYERS:
+        return candidate
+    for particle in sorted(_KOREAN_PARTICLES, key=len, reverse=True):
+        if candidate.endswith(particle) and len(candidate) > len(particle) + 1:
+            return candidate[: -len(particle)]
+    return candidate
 
 
 def extract_player_names(query: str, limit: int = 4) -> List[str]:
@@ -928,16 +949,17 @@ def extract_player_names(query: str, limit: int = 4) -> List[str]:
     player_names: List[str] = []
     seen: set[str] = set()
     for _, match in ordered_matches:
+        candidate = _strip_player_name_particle(match)
         if (
-            match in seen
-            or match in TEAM_MAPPING
-            or match in STAT_MAPPING
-            or match in _PLAYER_NAME_COMMON_TERMS
-            or match.endswith(_PLAYER_NAME_INVALID_SUFFIXES)
+            candidate in seen
+            or candidate in TEAM_MAPPING
+            or candidate in STAT_MAPPING
+            or candidate in _PLAYER_NAME_COMMON_TERMS
+            or candidate.endswith(_PLAYER_NAME_INVALID_SUFFIXES)
         ):
             continue
-        player_names.append(match)
-        seen.add(match)
+        player_names.append(candidate)
+        seen.add(candidate)
         if len(player_names) >= limit:
             break
 
@@ -1244,7 +1266,9 @@ def enhance_search_strategy(query: str) -> Dict[str, Any]:
 
     # 규정 관련 질문이면 특정 테이블 및 메타데이터 필터링 해제 (문서 검색 허용)
     if is_regulation_query(query):
-        logger.info(f"[EntityExtractor] Regulation query detected, unsetting restrictive filters: {query}")
+        logger.info(
+            f"[EntityExtractor] Regulation query detected, unsetting restrictive filters: {query}"
+        )
         db_filters.pop("source_table", None)
         db_filters.pop("meta.movement_type", None)
         db_filters.pop("meta.award_type", None)

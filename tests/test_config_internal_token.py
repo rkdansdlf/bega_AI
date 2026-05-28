@@ -47,6 +47,17 @@ def test_settings_warns_when_openrouter_llm_and_openai_embeddings_are_mixed(
     assert "Embeddings will call OpenAI directly, not OpenRouter." in caplog.text
 
 
+def test_settings_default_embeddings_use_openrouter(monkeypatch):
+    monkeypatch.delenv("EMBED_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENROUTER_EMBED_MODEL", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.embed_provider == "openrouter"
+    assert settings.openrouter_embed_model == "openai/text-embedding-3-small"
+    assert settings.embed_dim == 256
+
+
 def test_cors_origins_accepts_json_array(monkeypatch):
     monkeypatch.setenv(
         "CORS_ORIGINS",
@@ -81,3 +92,22 @@ def test_chat_planner_cache_ttl_defaults_to_60_seconds(monkeypatch):
     settings = Settings()
 
     assert settings.chat_planner_cache_ttl_seconds == 60
+
+
+def test_source_db_url_prefers_oci_over_postgres(monkeypatch):
+    monkeypatch.setenv("OCI_DB_URL", "postgresql://oci/source")
+    monkeypatch.setenv("POSTGRES_DB_URL", "postgresql://postgres/fallback")
+
+    settings = Settings()
+
+    assert settings.source_db_url == "postgresql://oci/source"
+    assert settings.database_url == "postgresql://oci/source"
+
+
+def test_source_db_url_falls_back_to_postgres(monkeypatch):
+    monkeypatch.setenv("OCI_DB_URL", "")
+    monkeypatch.setenv("POSTGRES_DB_URL", "postgresql://postgres/fallback")
+
+    settings = Settings()
+
+    assert settings.source_db_url == "postgresql://postgres/fallback"

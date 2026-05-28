@@ -146,7 +146,9 @@ async def _run_single(
         expanded_variations, ms = _measure_sync(
             transformer.expand_query_with_rules, query, entity_filter
         )
-        expanded = [v.query for v in expanded_variations] if expanded_variations else [query]
+        expanded = (
+            [v.query for v in expanded_variations] if expanded_variations else [query]
+        )
         run.stages.append(StageMeasurement("query_transform_ms", ms, True))
     except Exception as exc:
         run.stages.append(StageMeasurement("query_transform_ms", 0, False, str(exc)))
@@ -167,10 +169,13 @@ async def _run_single(
             from app.core.retrieval import retrieve_chunks
 
             from app.core.entity_extractor import convert_to_db_filters
+
             filters = convert_to_db_filters(entity_filter)
 
             chunks, ms = await _measure_async(
-                retrieve_chunks(embed_query, top_k=5, filters=filters, settings=settings)
+                retrieve_chunks(
+                    embed_query, top_k=5, filters=filters, settings=settings
+                )
             )
             run.stages.append(StageMeasurement("vector_search_ms", ms, True))
         except Exception as exc:
@@ -232,7 +237,9 @@ async def run_benchmark(
     return _build_report(all_results, runs=runs, with_db=with_db)
 
 
-def _build_report(results: List[RunResult], *, runs: int, with_db: bool) -> Dict[str, Any]:
+def _build_report(
+    results: List[RunResult], *, runs: int, with_db: bool
+) -> Dict[str, Any]:
     stage_names = [
         "entity_extraction_ms",
         "query_transform_ms",
@@ -267,7 +274,8 @@ def _build_report(results: List[RunResult], *, runs: int, with_db: bool) -> Dict
             "p50_ms": _percentile(total_latencies, 0.5),
             "p99_ms": _percentile(total_latencies, 0.99),
             "target_ms": LATENCY_TARGETS_MS["total_ms"],
-            "pass": _percentile(total_latencies, 0.99) <= LATENCY_TARGETS_MS["total_ms"],
+            "pass": _percentile(total_latencies, 0.99)
+            <= LATENCY_TARGETS_MS["total_ms"],
         },
         "errors": errors[:10],
     }
@@ -325,7 +333,9 @@ def _print_report(report: Dict[str, Any]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="RAG 파이프라인 단계별 레이턴시 벤치마크")
+    parser = argparse.ArgumentParser(
+        description="RAG 파이프라인 단계별 레이턴시 벤치마크"
+    )
     parser.add_argument(
         "--runs",
         type=int,
@@ -353,13 +363,14 @@ async def main_async() -> int:
     if args.output:
         out = Path(args.output).expanduser().resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        out.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         print(f"Wrote: {out}")
 
     # 에러 없이 모든 측정 완료 → 0, 실패 스테이지 있으면 1
     has_fail = any(
-        m.get("pass") is False
-        for m in report.get("stages", {}).values()
+        m.get("pass") is False for m in report.get("stages", {}).values()
     ) or not report.get("total", {}).get("pass", True)
     return 1 if has_fail else 0
 
