@@ -13,7 +13,7 @@ create table if not exists rag_chunks (
   title text,
   content text not null,
   content_tsv tsvector generated always as (to_tsvector('simple', coalesce(content, ''))) stored,
-  embedding vector(1536),
+  embedding vector(256),
   meta jsonb default '{}'::jsonb,
   metadata jsonb default '{}'::jsonb,
   source_type text,
@@ -23,7 +23,7 @@ create table if not exists rag_chunks (
   chunk_hash text,
   embedding_model text,
   embedding_dim int,
-  embedding_version int default 1,
+  embedding_version int default 2,
   chunking_version int default 1,
   quality_score numeric default 0.50,
   is_active boolean default true,
@@ -43,7 +43,7 @@ alter table rag_chunks add column if not exists content_hash text;
 alter table rag_chunks add column if not exists chunk_hash text;
 alter table rag_chunks add column if not exists embedding_model text;
 alter table rag_chunks add column if not exists embedding_dim int;
-alter table rag_chunks add column if not exists embedding_version int default 1;
+alter table rag_chunks add column if not exists embedding_version int default 2;
 alter table rag_chunks add column if not exists chunking_version int default 1;
 alter table rag_chunks add column if not exists quality_score numeric default 0.50;
 alter table rag_chunks add column if not exists is_active boolean default true;
