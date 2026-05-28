@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     )
 
     # --- 데이터베이스 설정 ---
-    # 운영 기본 경로
+    # 운영 Source DB 경로
+    oci_db_url: Optional[str] = Field(None, validation_alias="OCI_DB_URL")
+    # RAG/로컬 fallback 경로
     postgres_db_url: Optional[str] = Field(None, validation_alias="POSTGRES_DB_URL")
     # 하위 호환 경로 (deprecated)
     legacy_source_db_url: Optional[str] = Field(
@@ -75,7 +77,7 @@ class Settings(BaseSettings):
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
     llm_provider: str = Field("gemini", validation_alias="LLM_PROVIDER")
-    embed_provider: str = Field("gemini", validation_alias="EMBED_PROVIDER")
+    embed_provider: str = Field("openrouter", validation_alias="EMBED_PROVIDER")
     embed_model: str = Field(
         "", validation_alias="EMBED_MODEL"
     )  # 특정 모델을 지정할 때 사용
@@ -128,7 +130,7 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_APP_TITLE"
     )
     openrouter_embed_model: Optional[str] = Field(
-        None, validation_alias="OPENROUTER_EMBED_MODEL"
+        "openai/text-embedding-3-small", validation_alias="OPENROUTER_EMBED_MODEL"
     )
     vision_model: str = Field(
         "google/gemini-2.0-flash-001", validation_alias="VISION_MODEL"
@@ -237,8 +239,9 @@ class Settings(BaseSettings):
     #   "ivfflat"  - IVFFlat 세션 GUC(ivfflat.probes)만 설정. 레거시 인덱스 유지 시 사용.
     #   "auto"     - 기동 시 pg_indexes에서 HNSW 존재 여부를 감지하여 자동 선택(기본값).
     # 운영 전환 흐름: create_vector_index.py 실행(HNSW 생성) → AI_VECTOR_INDEX=hnsw 배포 → ivfflat 제거.
-    ai_vector_index: str = Field(
-        "auto", validation_alias="AI_VECTOR_INDEX"
+    ai_vector_index: str = Field("auto", validation_alias="AI_VECTOR_INDEX")
+    ai_vector_quantization: str = Field(
+        "none", validation_alias="AI_VECTOR_QUANTIZATION"
     )
     # IVFFlat 인덱스(`idx_rag_chunks_embedding`, lists=644) 기준 probes=512는 79% 버킷 스캔을
     # 의미하여 사실상 시퀀셜 스캔에 가깝다. 권장 운영치는 24~64 범위. dev/test 기본을 보수적으로
@@ -260,7 +263,7 @@ class Settings(BaseSettings):
         True, validation_alias="RAG_STORAGE_DEDUP_ENABLED"
     )
     rag_quality_min_chars: int = Field(50, validation_alias="RAG_QUALITY_MIN_CHARS")
-    rag_embedding_version: int = Field(1, validation_alias="RAG_EMBEDDING_VERSION")
+    rag_embedding_version: int = Field(2, validation_alias="RAG_EMBEDDING_VERSION")
     rag_chunking_version: int = Field(1, validation_alias="RAG_CHUNKING_VERSION")
     rag_retrieval_active_filter_enabled: bool = Field(
         True, validation_alias="RAG_RETRIEVAL_ACTIVE_FILTER_ENABLED"
@@ -385,7 +388,7 @@ class Settings(BaseSettings):
 
     # --- 임베딩 설정 ---
     embed_batch_size: int = Field(32, validation_alias="EMBED_BATCH_SIZE")
-    embed_dim: int = Field(1536, validation_alias="EMBED_DIM")
+    embed_dim: int = Field(256, validation_alias="EMBED_DIM")
     hf_embed_model: str = Field(
         "intfloat/multilingual-e5-large", validation_alias="HF_EMBED_MODEL"
     )
@@ -624,9 +627,13 @@ class Settings(BaseSettings):
         """배치/마이그레이션 스크립트용 Source DB URL을 반환합니다.
 
         우선순위:
-        1) POSTGRES_DB_URL
-        2) SUPABASE_DB_URL (deprecated fallback)
+        1) OCI_DB_URL
+        2) POSTGRES_DB_URL
+        3) SUPABASE_DB_URL (deprecated fallback)
         """
+        if self.oci_db_url:
+            return self.oci_db_url
+
         if self.postgres_db_url:
             return self.postgres_db_url
 
@@ -638,7 +645,7 @@ class Settings(BaseSettings):
                 self._legacy_source_db_warned = True
             return self.legacy_source_db_url
 
-        raise RuntimeError("POSTGRES_DB_URL is not configured.")
+        raise RuntimeError("OCI_DB_URL or POSTGRES_DB_URL is not configured.")
 
     @property
     def function_calling_model(self) -> str:

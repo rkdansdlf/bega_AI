@@ -170,7 +170,11 @@ async def ingest_document(
             source_prefix=base_source_row_id(payload.source_row_id),
             active_source_row_ids=active_source_row_ids,
         )
-    return {"status": "ok", "chunks": len(records), "skipped": chunk_count - len(records)}
+    return {
+        "status": "ok",
+        "chunks": len(records),
+        "skipped": chunk_count - len(records),
+    }
 
 
 class RunIngestPayload(BaseModel):

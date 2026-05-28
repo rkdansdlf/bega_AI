@@ -169,15 +169,19 @@ class ToolCaller:
             "get_leaderboard",
             "get_team_summary",
             "get_team_advanced_metrics",
+            "get_team_tough_matchups",
+            "get_team_fielding_error_games",
             "get_team_rank",
             "get_team_by_rank",
             "get_team_last_game",
+            "get_recent_games_by_team",
             "get_korean_series_winner",
             "get_award_winners",
             "get_team_basic_info",
             "get_player_stats",
             "get_career_stats",
             "validate_player",
+            "get_player_position_average_comparison",
         }
 
         if param_name == "year" and tool_name in year_defaults:

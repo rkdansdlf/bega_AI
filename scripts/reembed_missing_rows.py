@@ -41,7 +41,11 @@ from scripts.ingest_from_kbo import (
     flush_chunks,
     get_primary_key_columns,
 )
-from scripts.sync_rag_chunks import UPSERT_SQL, _build_upsert_rows, _load_settings_from_env_file
+from scripts.sync_rag_chunks import (
+    UPSERT_SQL,
+    _build_upsert_rows,
+    _load_settings_from_env_file,
+)
 
 if TYPE_CHECKING:
     from scripts.verify_embedding_coverage import CoverageTarget

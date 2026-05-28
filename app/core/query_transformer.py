@@ -320,9 +320,7 @@ async def multi_query_retrieval(
             ),
             **({"intent": intent} if supports_intent and intent else {}),
             **(
-                {"retrieval_state": retrieval_state}
-                if supports_retrieval_state
-                else {}
+                {"retrieval_state": retrieval_state} if supports_retrieval_state else {}
             ),
         )
         for variation in query_variations

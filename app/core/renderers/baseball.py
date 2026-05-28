@@ -1170,6 +1170,123 @@ def render_team_pitching_season(
     return "\n".join([tl_dr, core, detail_block, f"[META] {meta}", source_line])
 
 
+def _alias_values(value: Any) -> List[str]:
+    if value in NUMBER_SENTINELS:
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return [value] if value.strip() else []
+    else:
+        parsed = value
+
+    if isinstance(parsed, dict):
+        return [str(item) for item in parsed.values() if item not in NUMBER_SENTINELS]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if item not in NUMBER_SENTINELS]
+    return [str(parsed)] if parsed not in NUMBER_SENTINELS else []
+
+
+def _dedupe_aliases(values: Iterable[Any]) -> List[str]:
+    aliases: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in NUMBER_SENTINELS:
+            continue
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        aliases.append(text)
+    return aliases
+
+
+def render_team_profile(
+    row: Dict[str, Any],
+    *,
+    league_avg: Optional[Dict[str, Any]] = None,
+    percentiles: Optional[Dict[str, Any]] = None,
+    today_str: Optional[str],
+) -> str:
+    del league_avg, percentiles
+
+    today = _today_fallback(today_str)
+    team_id = str(row.get("team_id") or "").strip()
+    team_name = str(row.get("team_name") or team_id or "구단 정보 미상").strip()
+    profile = str(row.get("profile") or "").strip() or "정보 없음"
+
+    tl_dr = _tl_dr([f"{team_name} 프로필: {_truncate_text(profile, 140)}"])
+    core = f"[핵심 문장] {team_name} 프로필은 {profile}"
+    detail_block = _detailed_lines(
+        [
+            f"팀 ID: {team_id}" if team_id else "",
+            f"프로필 요약: {profile}",
+        ]
+    )
+    aliases = _dedupe_aliases([team_name, team_id, *_alias_values(row.get("aliases"))])
+    meta = make_meta(
+        row,
+        kind="team_profile",
+        aliases=aliases,
+        extra_stats={"team_id": team_id},
+    )
+    source_line = f"[출처] KBO 구단 프로필 (team_profiles#{team_id}) / 기준일 {today}"
+    return "\n".join([tl_dr, core, detail_block, f"[META] {meta}", source_line])
+
+
+def render_teams(
+    row: Dict[str, Any],
+    *,
+    league_avg: Optional[Dict[str, Any]] = None,
+    percentiles: Optional[Dict[str, Any]] = None,
+    today_str: Optional[str],
+) -> str:
+    del league_avg, percentiles
+
+    today = _today_fallback(today_str)
+    team_id = str(row.get("team_id") or "").strip()
+    team_name = str(row.get("team_name") or team_id or "구단 정보 미상").strip()
+    short_name = str(row.get("team_short_name") or "").strip()
+    city = str(row.get("city") or "").strip()
+    stadium = str(row.get("stadium_name") or "").strip()
+    founded_year = row.get("founded_year")
+    color = str(row.get("color") or "").strip()
+
+    summary_parts = [team_name]
+    if city:
+        summary_parts.append(city)
+    if stadium:
+        summary_parts.append(stadium)
+    if founded_year not in NUMBER_SENTINELS:
+        summary_parts.append(f"{_coerce_int(founded_year)}년 창단")
+
+    tl_dr = _tl_dr(summary_parts)
+    core = f"[핵심 문장] {team_name} 기본 정보입니다."
+    detailed = [
+        f"연고지: {city}" if city else "",
+        f"홈구장: {stadium}" if stadium else "",
+        (
+            f"창단 연도: {_coerce_int(founded_year)}년"
+            if founded_year not in NUMBER_SENTINELS
+            else ""
+        ),
+        f"대표 색상: {color}" if color else "",
+    ]
+    detail_block = _detailed_lines(detailed)
+    aliases = _dedupe_aliases(
+        [team_name, short_name, team_id, *_alias_values(row.get("aliases"))]
+    )
+    meta = make_meta(
+        row,
+        kind="team_basic",
+        aliases=aliases,
+        extra_stats={"team_id": team_id, "city": city, "stadium_name": stadium},
+    )
+    source_line = f"[출처] KBO 구단 기본 정보 (teams#{team_id}) / 기준일 {today}"
+    return "\n".join([tl_dr, core, detail_block, f"[META] {meta}", source_line])
+
+
 METRIC_LABELS = {
     "batting_avg": "타율",
     "home_runs": "홈런",

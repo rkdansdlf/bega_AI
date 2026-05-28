@@ -103,8 +103,7 @@ def _build_select(
             quality_score
         FROM rag_chunks
     """
-    where_parts = [
-        """(
+    where_parts = ["""(
             metadata IS NULL OR metadata = '{}'::jsonb
             OR source_type IS NULL OR btrim(source_type) = ''
             OR source_uri IS NULL OR btrim(source_uri) = ''
@@ -120,8 +119,7 @@ def _build_select(
                 quality_score <= 0.50
                 AND source_type = ANY(%s)
             )
-        )"""
-    ]
+        )"""]
     params.append(sorted(QUALITY_RECOMPUTE_SOURCE_TYPES))
     if source_tables:
         where_parts.append("source_table = ANY(%s)")
@@ -159,8 +157,7 @@ def _quality_score_for_backfill(row: Dict[str, Any]) -> Any:
 def _write_payload_bulk(conn: Any, payload: Sequence[tuple[Any, ...]]) -> None:
     with conn.cursor() as write_cur:
         write_cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH}")
-        write_cur.execute(
-            """
+        write_cur.execute("""
             CREATE TEMP TABLE rag_backfill_payload (
                 metadata jsonb,
                 source_type text,
@@ -175,10 +172,8 @@ def _write_payload_bulk(conn: Any, payload: Sequence[tuple[Any, ...]]) -> None:
                 quality_score numeric,
                 id bigint
             ) ON COMMIT DROP
-            """
-        )
-        with write_cur.copy(
-            """
+            """)
+        with write_cur.copy("""
             COPY rag_backfill_payload (
                 metadata,
                 source_type,
@@ -193,12 +188,10 @@ def _write_payload_bulk(conn: Any, payload: Sequence[tuple[Any, ...]]) -> None:
                 quality_score,
                 id
             ) FROM STDIN
-            """
-        ) as copy:
+            """) as copy:
             for row in payload:
                 copy.write_row(row)
-        write_cur.execute(
-            """
+        write_cur.execute("""
             UPDATE rag_chunks AS target
             SET metadata = payload.metadata,
                 source_type = payload.source_type,
@@ -215,8 +208,7 @@ def _write_payload_bulk(conn: Any, payload: Sequence[tuple[Any, ...]]) -> None:
                 updated_at = now()
             FROM rag_backfill_payload AS payload
             WHERE target.id = payload.id
-            """
-        )
+            """)
 
 
 def _write_payload_rowwise(conn: Any, payload: Sequence[tuple[Any, ...]]) -> None:
