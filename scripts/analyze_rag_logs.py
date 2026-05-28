@@ -85,6 +85,7 @@ def _all_none(fields_str: str) -> bool:
 
 # ── 파서 ──────────────────────────────────────────────────────────────────────
 
+
 def parse_log_lines(
     lines,
     *,
@@ -92,12 +93,12 @@ def parse_log_lines(
 ) -> Dict[str, Any]:
     """로그 라인 시퀀스를 파싱하여 분석 데이터를 수집한다."""
     data: Dict[str, Any] = {
-        "queries": [],          # (query_text, latency_ms)
+        "queries": [],  # (query_text, latency_ms)
         "entity_failures": 0,  # 엔티티 추출 전부 None인 횟수
         "entity_total": 0,
-        "fallback_levels": Counter(),    # level → count
-        "fallback_retries": Counter(),   # removed_key → count
-        "cache_results": Counter(),      # hit/miss
+        "fallback_levels": Counter(),  # level → count
+        "fallback_retries": Counter(),  # removed_key → count
+        "cache_results": Counter(),  # hit/miss
         "errors": [],
         "total_lines": 0,
     }
@@ -129,11 +130,13 @@ def parse_log_lines(
         # 검색 레이턴시
         s_match = _SEARCH_LATENCY.search(msg)
         if s_match and current_query:
-            data["queries"].append((
-                current_query,
-                float(s_match.group("ms")),
-                int(s_match.group("results")),
-            ))
+            data["queries"].append(
+                (
+                    current_query,
+                    float(s_match.group("ms")),
+                    int(s_match.group("results")),
+                )
+            )
             current_query = None
             continue
 
@@ -172,6 +175,7 @@ def parse_log_lines(
 
 # ── 리포트 생성 ────────────────────────────────────────────────────────────────
 
+
 def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
     queries = data["queries"]
     queries_sorted = sorted(queries, key=lambda x: x[1], reverse=True)
@@ -179,7 +183,9 @@ def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
     # 캐시 통계
     cache = data["cache_results"]
     cache_total = cache.get("hit", 0) + cache.get("miss", 0)
-    cache_hit_rate = round(cache.get("hit", 0) / cache_total * 100, 1) if cache_total else None
+    cache_hit_rate = (
+        round(cache.get("hit", 0) / cache_total * 100, 1) if cache_total else None
+    )
 
     # 엔티티 추출 실패율
     entity_fail_rate = (
@@ -191,7 +197,11 @@ def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
     # 평균 검색 레이턴시
     latencies = [q[1] for q in queries]
     avg_latency = round(sum(latencies) / len(latencies), 1) if latencies else None
-    p99_latency = sorted(latencies)[int(len(latencies) * 0.99) - 1] if len(latencies) >= 2 else latencies[0] if latencies else None
+    p99_latency = (
+        sorted(latencies)[int(len(latencies) * 0.99) - 1]
+        if len(latencies) >= 2
+        else latencies[0] if latencies else None
+    )
 
     return {
         "summary": {
@@ -227,18 +237,30 @@ def _print_report(report: Dict[str, Any]) -> None:
     print(f"  추적된 검색 횟수   : {s['total_queries_tracked']}")
 
     print(f"\n[검색 레이턴시]")
-    print(f"  평균   : {s['avg_search_latency_ms']}ms" if s['avg_search_latency_ms'] else "  데이터 없음")
-    print(f"  P99    : {s['p99_search_latency_ms']}ms" if s['p99_search_latency_ms'] else "")
+    print(
+        f"  평균   : {s['avg_search_latency_ms']}ms"
+        if s["avg_search_latency_ms"]
+        else "  데이터 없음"
+    )
+    print(
+        f"  P99    : {s['p99_search_latency_ms']}ms"
+        if s["p99_search_latency_ms"]
+        else ""
+    )
 
     print(f"\n[캐시]")
     if s["cache_hit_rate_pct"] is not None:
-        print(f"  히트율 : {s['cache_hit_rate_pct']}%  (hit={s['cache_hit_total']}, miss={s['cache_miss_total']})")
+        print(
+            f"  히트율 : {s['cache_hit_rate_pct']}%  (hit={s['cache_hit_total']}, miss={s['cache_miss_total']})"
+        )
     else:
         print("  캐시 로그 없음")
 
     print(f"\n[엔티티 추출]")
     if s["entity_failure_rate_pct"] is not None:
-        print(f"  실패율 : {s['entity_failure_rate_pct']}%  ({s['entity_failures']} / {s['entity_total']})")
+        print(
+            f"  실패율 : {s['entity_failure_rate_pct']}%  ({s['entity_failures']} / {s['entity_total']})"
+        )
     else:
         print("  엔티티 로그 없음")
 
@@ -258,7 +280,9 @@ def _print_report(report: Dict[str, Any]) -> None:
     if slow:
         print(f"\n[가장 느린 쿼리 TOP {len(slow)}]")
         for i, item in enumerate(slow, 1):
-            print(f"  {i:2d}. [{item['latency_ms']}ms, results={item['results']}] {item['query']}")
+            print(
+                f"  {i:2d}. [{item['latency_ms']}ms, results={item['results']}] {item['query']}"
+            )
 
     errors = report["recent_errors"]
     if errors:

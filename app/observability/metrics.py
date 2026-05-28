@@ -65,7 +65,12 @@ except ImportError:  # pragma: no cover — runtime fallback
     def make_asgi_app(*_args: Any, **_kwargs: Any) -> Any:
         async def _empty_app(scope: Any, receive: Any, send: Any) -> None:
             await send({"type": "http.response.start", "status": 503, "headers": []})
-            await send({"type": "http.response.body", "body": b"prometheus_client not installed"})
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"prometheus_client not installed",
+                }
+            )
 
         return _empty_app
 

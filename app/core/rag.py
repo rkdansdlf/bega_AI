@@ -816,7 +816,9 @@ def _is_live_manual_data_query(query: str) -> bool:
         token in query_lower for token in ("뉴스", "이슈", "상황", "소식")
     ):
         return False
-    return any(token.lower() in query_lower for token in _LIVE_MANUAL_DATA_SUBJECT_TOKENS)
+    return any(
+        token.lower() in query_lower for token in _LIVE_MANUAL_DATA_SUBJECT_TOKENS
+    )
 
 
 def _extract_static_team_name(query: str) -> Optional[str]:
@@ -984,7 +986,21 @@ def _build_static_chatbot_meta_result(query: str) -> Optional[Dict[str, Any]]:
             grounding_mode="static_chatbot_meta",
         )
 
-    if any(token in query_lower for token in ("응원 톤", "짧게 답", "자세히 답", "표로 답", "한 줄로 답", "초보자 기준", "데이터 중심", "팬 입장", "중립적으로", "재미있게")):
+    if any(
+        token in query_lower
+        for token in (
+            "응원 톤",
+            "짧게 답",
+            "자세히 답",
+            "표로 답",
+            "한 줄로 답",
+            "초보자 기준",
+            "데이터 중심",
+            "팬 입장",
+            "중립적으로",
+            "재미있게",
+        )
+    ):
         return _build_static_kbo_result(
             "답변 톤은 질문 목적에 맞춰 바꾸면 됩니다. 경기 기록 질문은 수치와 기준일을 먼저 쓰고, 초보자 질문은 용어를 풀어 설명하며, 팬덤형 질문은 단정 대신 현재 흐름과 관전 포인트를 중심으로 답하는 방식이 안전합니다.",
             intent="chatbot_meta",
@@ -1029,18 +1045,24 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
             "KBO 리그는 한국의 최상위 프로야구 리그입니다. 10개 구단이 정규시즌을 치르고, 상위권 팀들이 포스트시즌을 거쳐 한국시리즈 우승을 다투는 구조로 보면 됩니다."
         )
 
-    if "kbo" in query_lower and any(token in query_lower for token in ("언제 시작", "시작했")):
+    if "kbo" in query_lower and any(
+        token in query_lower for token in ("언제 시작", "시작했")
+    ):
         return _build_static_kbo_result(
             "KBO 리그는 1982년에 출범했습니다. 한국 프로야구의 1군 최상위 리그로 시작해 지금은 10개 구단 체제로 운영됩니다."
         )
 
-    if "kbo" in query_lower and any(token in query_lower for token in ("몇 개 팀", "몇개 팀", "10개 구단")):
+    if "kbo" in query_lower and any(
+        token in query_lower for token in ("몇 개 팀", "몇개 팀", "10개 구단")
+    ):
         teams = ", ".join(_STATIC_KBO_TEAMS)
         return _build_static_kbo_result(
             f"KBO 리그는 현재 10개 구단 체제입니다. 구단은 {teams}입니다."
         )
 
-    if static_team_name and any(token in query_lower for token in ("어떤 팀", "무슨 팀")):
+    if static_team_name and any(
+        token in query_lower for token in ("어떤 팀", "무슨 팀")
+    ):
         stadium = _STATIC_TEAM_STADIUMS.get(static_team_name)
         stadium_text = f" 홈구장은 {stadium}입니다." if stadium else ""
         return _build_static_kbo_result(
@@ -1051,8 +1073,7 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
 
     if "각 팀" in query_lower and "홈구장" in query_lower:
         stadium_text = ", ".join(
-            f"{team}는 {stadium}"
-            for team, stadium in _STATIC_TEAM_STADIUMS.items()
+            f"{team}는 {stadium}" for team, stadium in _STATIC_TEAM_STADIUMS.items()
         )
         return _build_static_kbo_result(
             f"KBO 10개 구단 홈구장은 {stadium_text}입니다.",
@@ -1060,7 +1081,9 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
             grounding_mode="team_profile_static",
         )
 
-    if "각 팀" in query_lower and any(token in query_lower for token in ("감독", "대표 선수")):
+    if "각 팀" in query_lower and any(
+        token in query_lower for token in ("감독", "대표 선수")
+    ):
         return _build_static_kbo_result(
             _manual_baseball_data_required_answer(query),
             intent="manual_data_request",
@@ -1077,46 +1100,63 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
             grounding_mode="team_profile_static",
         )
 
-    if "정규시즌" in query_lower and any(token in query_lower for token in ("몇 경기", "몇경기")):
+    if "정규시즌" in query_lower and any(
+        token in query_lower for token in ("몇 경기", "몇경기")
+    ):
         return _build_static_kbo_result(
             "KBO 정규시즌은 보통 팀당 144경기로 운영됩니다. 그래서 순위와 승률 흐름을 볼 때는 긴 시즌 누적 성적과 최근 흐름을 함께 봐야 합니다."
         )
 
     if "순위" in query_lower and (
         any(token in query_lower for token in ("결정", "산정"))
-        or ("정" in query_lower and any(token in query_lower for token in ("어떻게", "기준")))
+        or (
+            "정" in query_lower
+            and any(token in query_lower for token in ("어떻게", "기준"))
+        )
         or "순위를정" in compact
     ):
         return _build_static_kbo_result(
             "KBO 정규시즌 순위는 기본적으로 승률을 먼저 봅니다. 승률이 같으면 상대 전적, 동률 팀 간 득점, 전년도 순위 같은 타이브레이크 기준을 차례로 적용하는 구조입니다."
         )
 
-    if "승률" in query_lower and any(token in query_lower for token in ("계산", "어떻게")):
+    if "승률" in query_lower and any(
+        token in query_lower for token in ("계산", "어떻게")
+    ):
         return _build_static_kbo_result(
             "KBO 승률은 승수 / (승수 + 패수)로 계산합니다. 무승부는 승률 분모에 넣지 않기 때문에, 같은 승수라도 패수가 적은 팀이 승률에서 유리해질 수 있습니다."
         )
 
-    if "무승부" in query_lower and any(token in query_lower for token in ("순위", "반영", "규정")):
+    if "무승부" in query_lower and any(
+        token in query_lower for token in ("순위", "반영", "규정")
+    ):
         return _build_static_kbo_result(
             "KBO 순위에서 무승부는 승률 계산의 분모에서 제외됩니다. 예를 들어 승률은 승수 / (승수 + 패수)로 보며, 동률 상황은 별도 타이브레이크 기준을 함께 적용합니다."
         )
 
-    if "포스트시즌" in query_lower and any(token in query_lower for token in ("어떻게", "진행")):
+    if "포스트시즌" in query_lower and any(
+        token in query_lower for token in ("어떻게", "진행")
+    ):
         return _build_static_kbo_result(
             "KBO 포스트시즌은 정규시즌 상위 팀들이 단계적으로 맞붙는 토너먼트입니다. 와일드카드 결정전에서 시작해 준플레이오프, 플레이오프를 거쳐 한국시리즈에서 최종 우승팀을 가립니다."
         )
 
-    if "한국시리즈" in query_lower and any(token in query_lower for token in ("몇 경기", "몇경기")):
+    if "한국시리즈" in query_lower and any(
+        token in query_lower for token in ("몇 경기", "몇경기")
+    ):
         return _build_static_kbo_result(
             "KBO 한국시리즈는 7전 4선승제입니다. 먼저 4승을 거둔 팀이 그 시즌 최종 우승팀이 됩니다."
         )
 
-    if "와일드카드" in query_lower and any(token in query_lower for token in ("어떻게", "결정", "유리")):
+    if "와일드카드" in query_lower and any(
+        token in query_lower for token in ("어떻게", "결정", "유리")
+    ):
         return _build_static_kbo_result(
             "KBO 와일드카드 결정전은 정규시즌 4위와 5위가 맞붙는 첫 관문입니다. 4위 팀이 유리한 조건에서 시작하고, 5위 팀은 연속으로 이겨야 다음 단계에 올라가는 구조입니다."
         )
 
-    if "연장전" in query_lower and any(token in query_lower for token in ("몇 회", "몇회", "규정")):
+    if "연장전" in query_lower and any(
+        token in query_lower for token in ("몇 회", "몇회", "규정")
+    ):
         return _build_static_kbo_result(
             "2026년 KBO 정규시즌 연장전은 11회까지로 보는 규정 변경이 반영되어 있습니다. 연장에서도 승부가 나지 않으면 무승부로 처리됩니다."
         )
@@ -1126,7 +1166,9 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
             "2026년 KBO 아시아 쿼터는 기존 외국인 선수 운용에 아시아 국적 선수 슬롯을 더해 선수 수급 폭을 넓히는 제도입니다. 시스템에서는 외국인 선수 4명 체계와 함께 시즌 규정으로 분리해 다루는 항목입니다."
         )
 
-    if "외국인 선수" in query_lower and any(token in query_lower for token in ("몇 명", "몇명", "규정")):
+    if "외국인 선수" in query_lower and any(
+        token in query_lower for token in ("몇 명", "몇명", "규정")
+    ):
         return _build_static_kbo_result(
             "2026년 KBO 외국인 선수 운용은 외국인 4명 체계로 보는 규정 변경이 반영되어 있습니다. 세부 등록과 출장 조건은 시즌 규정 항목으로 따로 관리해야 합니다."
         )
@@ -1161,7 +1203,8 @@ def _build_citations(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "source_row_id": doc.get("source_row_id"),
             "source_type": doc.get("source_type"),
             "source_uri": doc.get("source_uri"),
-            "topic_key": doc.get("topic_key") or (doc.get("meta") or {}).get("topic_key"),
+            "topic_key": doc.get("topic_key")
+            or (doc.get("meta") or {}).get("topic_key"),
             "similarity": doc.get("similarity"),
             "combined_score": doc.get("combined_score"),
             "quality_score": doc.get("quality_score"),
@@ -1169,7 +1212,9 @@ def _build_citations(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "valid_to": doc.get("valid_to"),
             "expires_at": doc.get("expires_at"),
         }
-        citations.append({key: value for key, value in citation.items() if value is not None})
+        citations.append(
+            {key: value for key, value in citation.items() if value is not None}
+        )
     return citations
 
 
@@ -1325,11 +1370,13 @@ _STAT_CORE_INDICATORS = frozenset(
     }
 )
 # 규정 청크가 저장된 source_table 목록. similarity_search의 source_table_in 필터에 사용.
-_REGULATION_SOURCES: frozenset[str] = frozenset({
-    "markdown_docs",
-    "kbo_regulations",
-    "kbo_definitions",
-})
+_REGULATION_SOURCES: frozenset[str] = frozenset(
+    {
+        "markdown_docs",
+        "kbo_regulations",
+        "kbo_definitions",
+    }
+)
 
 _REGULATION_KEYWORDS = frozenset(
     {
@@ -2109,7 +2156,9 @@ class RAGPipeline:
         try:
             embedding = await async_embed_query(search_query, self.settings)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("[RAG] Query embedding failed; returning zero retrieval results")
+            logger.exception(
+                "[RAG] Query embedding failed; returning zero retrieval results"
+            )
             _record_retrieval_state_error(
                 retrieval_state,
                 error_type="embedding_failed",
@@ -2252,8 +2301,7 @@ class RAGPipeline:
         if getattr(entity_filter, "player_name", None):
             query_lower = query.lower()
             return any(
-                keyword in query_lower
-                for keyword in _FORCE_PLAYER_FAST_PATH_KEYWORDS
+                keyword in query_lower for keyword in _FORCE_PLAYER_FAST_PATH_KEYWORDS
             )
         if final_filters.get("source_table"):
             return True
@@ -2268,7 +2316,9 @@ class RAGPipeline:
         candidate_limit = max(
             1, int(getattr(self.settings, "rag_rerank_candidate_limit", 20) or 20)
         )
-        context_limit = max(1, int(getattr(self.settings, "rag_context_limit", 10) or 10))
+        context_limit = max(
+            1, int(getattr(self.settings, "rag_context_limit", 10) or 10)
+        )
         candidates = docs[:candidate_limit]
         candidates.sort(
             key=lambda doc: (
@@ -2298,9 +2348,7 @@ class RAGPipeline:
     ) -> None:
         selected = selected_docs if selected_docs is not None else docs
         rewritten_queries = [
-            str(doc.get("_source_query"))
-            for doc in docs
-            if doc.get("_source_query")
+            str(doc.get("_source_query")) for doc in docs if doc.get("_source_query")
         ]
         seen_queries: set[str] = set()
         unique_rewritten_queries: List[str] = []
@@ -2328,7 +2376,9 @@ class RAGPipeline:
         else:
             metadata_filter = _build_retrieval_event_filter(
                 original_filters or final_filters,
-                actual_filters=actual_filters if actual_filters is not None else final_filters,
+                actual_filters=(
+                    actual_filters if actual_filters is not None else final_filters
+                ),
                 fallback_used=fallback_used,
                 fallback_stage=fallback_stage,
             )
@@ -2411,7 +2461,9 @@ class RAGPipeline:
                 f"모든 LLM 제공자가 실패했습니다. 주 제공자({provider}): {e}"
             )
 
-    async def _generate_stream(self, messages: Sequence[Dict[str, str]]) -> Iterator[str]:
+    async def _generate_stream(
+        self, messages: Sequence[Dict[str, str]]
+    ) -> Iterator[str]:
         """스트리밍 모드로 답변을 생성합니다."""
         provider = self.settings.llm_provider
 
@@ -2426,14 +2478,18 @@ class RAGPipeline:
                 # 스트리밍 미지원 시 일반 생성 결과 반환
                 yield await self._generate(messages)
         except Exception as e:
-            logger.error(f"[RAG] Stream generation failed ({type(e).__name__}): {e}. Falling back to completion.")
+            logger.error(
+                f"[RAG] Stream generation failed ({type(e).__name__}): {e}. Falling back to completion."
+            )
             try:
                 yield await self._generate(messages)
             except Exception as fe:
                 logger.error(f"[RAG] Completion fallback also failed: {fe}")
                 yield "죄송합니다. 답변 생성 중 오류가 발생했습니다."
 
-    async def _generate_stream_with_gemini(self, messages: Sequence[Dict[str, str]]) -> Iterator[str]:
+    async def _generate_stream_with_gemini(
+        self, messages: Sequence[Dict[str, str]]
+    ) -> Iterator[str]:
         """Gemini API를 사용하여 스트리밍 답변을 생성합니다."""
         if not self.settings.gemini_api_key:
             raise RuntimeError("Gemini API 키가 없습니다.")
@@ -2450,7 +2506,9 @@ class RAGPipeline:
                 user_content = content
                 if system_instructions and not gemini_contents:
                     user_content = f"System Instruction:\n{system_instructions}\n\nUser Question:\n{content}"
-                gemini_contents.append({"role": "user", "parts": [{"text": user_content}]})
+                gemini_contents.append(
+                    {"role": "user", "parts": [{"text": user_content}]}
+                )
             elif role == "assistant":
                 gemini_contents.append({"role": "model", "parts": [{"text": content}]})
 
@@ -2460,7 +2518,10 @@ class RAGPipeline:
 
         payload = {
             "contents": gemini_contents,
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": self.settings.max_output_tokens}
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": self.settings.max_output_tokens,
+            },
         }
 
         client = get_shared_httpx_client(
@@ -2468,19 +2529,28 @@ class RAGPipeline:
             timeout=httpx.Timeout(60.0, connect=10.0, read=60.0, pool=10.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
-        async with client.stream("POST", url, json=payload, params=params, timeout=60.0) as response:
+        async with client.stream(
+            "POST", url, json=payload, params=params, timeout=60.0
+        ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if line.startswith("data: "):
                     try:
                         data = json.loads(line[6:])
-                        chunk = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                        chunk = (
+                            data.get("candidates", [{}])[0]
+                            .get("content", {})
+                            .get("parts", [{}])[0]
+                            .get("text", "")
+                        )
                         if chunk:
                             yield chunk
                     except Exception:
                         continue
 
-    async def _generate_stream_with_openrouter(self, messages: Sequence[Dict[str, str]]) -> Iterator[str]:
+    async def _generate_stream_with_openrouter(
+        self, messages: Sequence[Dict[str, str]]
+    ) -> Iterator[str]:
         """OpenRouter API를 사용하여 스트리밍 답변을 생성합니다."""
         if not self.settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API 키가 없습니다.")
@@ -2505,10 +2575,14 @@ class RAGPipeline:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
 
-        async with client.stream("POST", url, json=payload, headers=headers, timeout=60.0) as response:
+        async with client.stream(
+            "POST", url, json=payload, headers=headers, timeout=60.0
+        ) as response:
             if response.status_code != 200:
                 body = await response.aread()
-                logger.error(f"[RAG] OpenRouter stream error {response.status_code}: {body[:300]!r}")
+                logger.error(
+                    f"[RAG] OpenRouter stream error {response.status_code}: {body[:300]!r}"
+                )
                 response.raise_for_status()
             async for line in response.aiter_lines():
                 if line.startswith("data: "):
@@ -2516,7 +2590,11 @@ class RAGPipeline:
                         break
                     try:
                         data = json.loads(line[6:])
-                        chunk = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        chunk = (
+                            data.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
                         if chunk:
                             yield chunk
                     except Exception:
@@ -2744,8 +2822,7 @@ class RAGPipeline:
             getattr(entity_filter, "player_name", None)
             and not getattr(entity_filter, "team_id", None)
             and any(
-                keyword in query_lower
-                for keyword in _FORCE_PLAYER_FAST_PATH_KEYWORDS
+                keyword in query_lower for keyword in _FORCE_PLAYER_FAST_PATH_KEYWORDS
             )
         ):
             return True
@@ -2971,6 +3048,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         if intent == "freeform":
             from ..ml.intent_router import predict_intent
+
             intent = predict_intent(query)
             logger.info(f"[RAG] Predicted intent: {intent}")
 
@@ -2982,9 +3060,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         is_game_flow_narrative = self._is_game_flow_narrative_query(query)
         is_statistical = self._is_statistical_query(query, entity_filter)
         is_regulation = self._is_regulation_query(query)
-        force_agent_fast_path = self._should_force_agent_fast_path(
-            query, entity_filter
-        )
+        force_agent_fast_path = self._should_force_agent_fast_path(query, entity_filter)
 
         if is_regulation and intent == "freeform":
             intent = "explanatory"
@@ -3001,7 +3077,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     "stat_type": entity_filter.stat_type,
                     "position_type": entity_filter.position_type,
                 },
-            }
+            },
         }
 
         # 에이전트 우선 처리 로직 (스트리밍 지원하는 경우)
@@ -3014,10 +3090,13 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             # not on BaseballAgentRuntime — use the correct reference and establish
             # request_context so DB resources resolve inside the agent.
             if hasattr(self.baseball_agent, "process_query_stream"):
-                logger.info("[RAG] Agent fast-path query detected, trying agent stream first")
+                logger.info(
+                    "[RAG] Agent fast-path query detected, trying agent stream first"
+                )
                 try:
-                    with self._checkout_conn() as conn, \
-                         self.agent_runtime.request_context(conn):
+                    with self._checkout_conn() as conn, self.agent_runtime.request_context(
+                        conn
+                    ):
                         async for event in self.baseball_agent.process_query_stream(
                             query,
                             context={
@@ -3048,32 +3127,58 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         search_limit = self.settings.default_search_limit
         if is_regulation:
             search_limit = max(search_limit, 20)
-            logger.info(f"[RAG] Regulation query (stream): increasing search_limit to {search_limit}")
+            logger.info(
+                f"[RAG] Regulation query (stream): increasing search_limit to {search_limit}"
+            )
 
         # 문서 검색 (규정 쿼리는 2-패스 전략으로 규정 소스 우선 확보)
         if is_regulation:
-            reg_filters = {**final_filters, "source_table_in": list(_REGULATION_SOURCES)}
-            reg_docs = await self.retrieve(query, filters=reg_filters, entity_filter=entity_filter,
-                                           limit=20, retrieval_state=retrieval_state)
+            reg_filters = {
+                **final_filters,
+                "source_table_in": list(_REGULATION_SOURCES),
+            }
+            reg_docs = await self.retrieve(
+                query,
+                filters=reg_filters,
+                entity_filter=entity_filter,
+                limit=20,
+                retrieval_state=retrieval_state,
+            )
             if len(reg_docs) >= 8:
                 docs = reg_docs
             else:
-                general_docs = await self.retrieve(query, filters=final_filters,
-                                                   entity_filter=entity_filter,
-                                                   limit=search_limit, retrieval_state=retrieval_state)
+                general_docs = await self.retrieve(
+                    query,
+                    filters=final_filters,
+                    entity_filter=entity_filter,
+                    limit=search_limit,
+                    retrieval_state=retrieval_state,
+                )
                 seen = {d["id"] for d in reg_docs}
                 docs = reg_docs + [d for d in general_docs if d["id"] not in seen]
-            logger.info(f"[RAG] Regulation 2-pass retrieval (stream): {len(docs)} docs (reg_docs={len(reg_docs)})")
+            logger.info(
+                f"[RAG] Regulation 2-pass retrieval (stream): {len(docs)} docs (reg_docs={len(reg_docs)})"
+            )
         else:
-            docs = await self.retrieve(query, filters=final_filters, entity_filter=entity_filter,
-                                       limit=search_limit, retrieval_state=retrieval_state)
+            docs = await self.retrieve(
+                query,
+                filters=final_filters,
+                entity_filter=entity_filter,
+                limit=search_limit,
+                retrieval_state=retrieval_state,
+            )
 
         # 검색 결과가 없으면 폴백 시도
         if not docs and final_filters:
             fallback_filters = dict(final_filters)
             if "source_table" in fallback_filters:
                 fallback_filters.pop("source_table")
-                docs = await self.retrieve(query, filters=fallback_filters, limit=search_limit, retrieval_state=retrieval_state)
+                docs = await self.retrieve(
+                    query,
+                    filters=fallback_filters,
+                    limit=search_limit,
+                    retrieval_state=retrieval_state,
+                )
 
         # 문서 정렬: markdown_docs를 우선적으로 배치 (규정/지식 답변 품질 향상)
         docs.sort(key=lambda d: 0 if d.get("source_table") == "markdown_docs" else 1)
@@ -3098,7 +3203,10 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 "잠시 후 다시 시도해 주세요."
             )
             yield {"type": "answer_chunk", "content": answer}
-            yield {"type": "metadata", "data": {"strategy": "db_unavailable", "citations": []}}
+            yield {
+                "type": "metadata",
+                "data": {"strategy": "db_unavailable", "citations": []},
+            }
             return
         # --- DB 연결 장애 스트림 폴백 끝 ---
 
@@ -3161,6 +3269,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         # 의도가 지정되지 않았거나 freeform이면 예측 시도
         if intent == "freeform":
             from ..ml.intent_router import predict_intent
+
             intent = predict_intent(query)
             logger.info(f"[RAG] Predicted intent: {intent}")
 
@@ -3179,23 +3288,27 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         is_regulation = self._is_regulation_query(query)
         is_game_query = self._is_game_query(query)
         is_game_flow_narrative = self._is_game_flow_narrative_query(query)
-        force_agent_fast_path = self._should_force_agent_fast_path(
-            query, entity_filter
-        )
+        force_agent_fast_path = self._should_force_agent_fast_path(query, entity_filter)
 
         # 규정 질문이면 검색 제한을 늘려 관련 상세 조항들이 더 많이 포함되도록 함
         if is_regulation:
             search_limit = max(search_limit, 20)
-            logger.info(f"[RAG] Regulation query: increasing search_limit to {search_limit}")
+            logger.info(
+                f"[RAG] Regulation query: increasing search_limit to {search_limit}"
+            )
 
         # 규정 질문이면 의도를 explanatory로 강화
         if is_regulation and intent == "freeform":
             intent = "explanatory"
 
-        logger.info(f"[RAG] Path decision: is_statistical={is_statistical}, is_regulation={is_regulation}, is_game_query={is_game_query}, intent={intent}")
+        logger.info(
+            f"[RAG] Path decision: is_statistical={is_statistical}, is_regulation={is_regulation}, is_game_query={is_game_query}, intent={intent}"
+        )
 
         if force_agent_fast_path:
-            logger.info("[RAG] Dedicated DB fast-path query detected, trying agent first")
+            logger.info(
+                "[RAG] Dedicated DB fast-path query detected, trying agent first"
+            )
             agent_result = await self._try_agent_first(
                 query, intent=intent, filters=filters, history=history
             )
@@ -3217,7 +3330,9 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         # 4. 규정 질문인지 확인
         elif is_regulation:
-            logger.info(f"[RAG] Regulation query detected, using traditional RAG directly")
+            logger.info(
+                f"[RAG] Regulation query detected, using traditional RAG directly"
+            )
             # 에이전트 대신 RAG를 직접 사용하여 벡터 검색 성능을 활용
             pass  # 6단계로 진행
 
@@ -3439,16 +3554,27 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         # 규정 쿼리: 규정 소스 청크가 부족하면 타겟 검색으로 보충
         if is_regulation and docs:
-            markdown_count = sum(1 for d in docs if d.get("source_table") in _REGULATION_SOURCES)
+            markdown_count = sum(
+                1 for d in docs if d.get("source_table") in _REGULATION_SOURCES
+            )
             if markdown_count < 5:
-                reg_filters = {**final_filters, "source_table_in": list(_REGULATION_SOURCES)}
+                reg_filters = {
+                    **final_filters,
+                    "source_table_in": list(_REGULATION_SOURCES),
+                }
                 try:
-                    top_up_docs = await _run_retrieve(query, filters=reg_filters,
-                                                      entity_filter=entity_filter, limit=15)
+                    top_up_docs = await _run_retrieve(
+                        query,
+                        filters=reg_filters,
+                        entity_filter=entity_filter,
+                        limit=15,
+                    )
                     seen = {d["id"] for d in docs}
                     new_docs = [d for d in top_up_docs if d["id"] not in seen]
                     docs = new_docs + docs
-                    logger.info(f"[RAG] Regulation top-up: added {len(new_docs)} markdown_docs chunks")
+                    logger.info(
+                        f"[RAG] Regulation top-up: added {len(new_docs)} markdown_docs chunks"
+                    )
                 except Exception as e:
                     logger.warning(f"[RAG] Regulation top-up failed: {e}")
 
@@ -3604,9 +3730,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         # DEBUG: 컨텍스트 로깅
         logger.info(f"[RAG_DEBUG] Question: {query}")
         logger.info(f"[RAG_DEBUG] Formatted context length: {len(formatted_context)}")
-        logger.info(
-            f"[RAG_DEBUG] Formatted context content: {formatted_context}"
-        )
+        logger.info(f"[RAG_DEBUG] Formatted context content: {formatted_context}")
 
         messages = [
             {

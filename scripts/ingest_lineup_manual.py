@@ -114,11 +114,7 @@ def _load_payload(path: Path) -> List[Dict[str, Any]]:
 
 
 def _parse_row(raw: Dict[str, Any], index: int) -> ManualLineupRow:
-    missing = sorted(
-        field
-        for field in REQUIRED_FIELDS
-        if raw.get(field) in (None, "")
-    )
+    missing = sorted(field for field in REQUIRED_FIELDS if raw.get(field) in (None, ""))
     if missing:
         raise ManualBaseballDataRequired(
             f"MANUAL_BASEBALL_DATA_REQUIRED: row {index} missing {','.join(missing)}"
@@ -148,7 +144,9 @@ def _parse_row(raw: Dict[str, Any], index: int) -> ManualLineupRow:
 
 
 def load_manual_rows(path: Path) -> List[ManualLineupRow]:
-    return [_parse_row(row, idx) for idx, row in enumerate(_load_payload(path), start=1)]
+    return [
+        _parse_row(row, idx) for idx, row in enumerate(_load_payload(path), start=1)
+    ]
 
 
 def _fetch_rows(cur: Any) -> List[Any]:
@@ -181,8 +179,13 @@ def lookup_player_id(cur: Any, player_name: str) -> str:
     return str(player_id)
 
 
-def resolve_lineups(cur: Any, rows: Sequence[ManualLineupRow]) -> List[ResolvedLineupRow]:
-    return [ResolvedLineupRow(row=row, player_id=lookup_player_id(cur, row.player_name)) for row in rows]
+def resolve_lineups(
+    cur: Any, rows: Sequence[ManualLineupRow]
+) -> List[ResolvedLineupRow]:
+    return [
+        ResolvedLineupRow(row=row, player_id=lookup_player_id(cur, row.player_name))
+        for row in rows
+    ]
 
 
 def _table_columns(cur: Any) -> set[str]:
@@ -281,8 +284,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Safely ingest verified operator-provided game_lineups rows."
     )
-    parser.add_argument("--input", required=True, help="Operator-provided CSV or JSON file.")
-    parser.add_argument("--apply", action="store_true", help="Persist rows. Default is dry-run.")
+    parser.add_argument(
+        "--input", required=True, help="Operator-provided CSV or JSON file."
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Persist rows. Default is dry-run."
+    )
     parser.add_argument(
         "--db-url",
         default="",

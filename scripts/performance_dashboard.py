@@ -113,7 +113,9 @@ def _fetch_prometheus_metric(base_url: str, metric: str) -> Optional[float]:
     return None
 
 
-def collect_embedding_cache_metrics(prometheus_url: Optional[str] = None) -> Dict[str, Any]:
+def collect_embedding_cache_metrics(
+    prometheus_url: Optional[str] = None,
+) -> Dict[str, Any]:
     """임베딩 캐시 히트율 수집."""
     metrics: Dict[str, Any] = {"source": "unavailable"}
 
@@ -132,7 +134,9 @@ def collect_embedding_cache_metrics(prometheus_url: Optional[str] = None) -> Dic
     return metrics
 
 
-def collect_chat_cache_metrics(db_url: Optional[str], prometheus_url: Optional[str]) -> Dict[str, Any]:
+def collect_chat_cache_metrics(
+    db_url: Optional[str], prometheus_url: Optional[str]
+) -> Dict[str, Any]:
     """채팅 응답 캐시 지표 수집."""
     result: Dict[str, Any] = {}
 
@@ -222,7 +226,9 @@ def _print_dashboard(data: Dict[str, Any]) -> None:
         p = chat["prometheus"]
         print(f"  hit_rate : {p.get('hit_rate_pct', 'N/A')}%")
     if "by_intent" in chat:
-        print(f"  {'intent':<25} {'total':>6} {'completed':>10} {'active':>7} {'avg_ttl':>9}")
+        print(
+            f"  {'intent':<25} {'total':>6} {'completed':>10} {'active':>7} {'avg_ttl':>9}"
+        )
         print(f"  {'-'*55}")
         for row in chat["by_intent"]:
             print(
@@ -240,7 +246,9 @@ def _print_dashboard(data: Dict[str, Any]) -> None:
         print(f"  DB 오류: {coach['error']}")
     elif coach:
         print(f"  total     : {coach.get('total', 0)}")
-        print(f"  completed : {coach.get('completed', 0)} ({coach.get('completed_rate_pct', 0)}%)")
+        print(
+            f"  completed : {coach.get('completed', 0)} ({coach.get('completed_rate_pct', 0)}%)"
+        )
         print(f"  pending   : {coach.get('pending', 0)}")
         print(f"  failed    : {coach.get('failed', 0)}")
     else:
@@ -283,7 +291,10 @@ def main() -> int:
     if args.db:
         db_url = os.getenv("POSTGRES_DB_URL", "")
         if not db_url:
-            print("ERROR: --db 옵션 사용 시 POSTGRES_DB_URL 환경변수가 필요합니다.", file=sys.stderr)
+            print(
+                "ERROR: --db 옵션 사용 시 POSTGRES_DB_URL 환경변수가 필요합니다.",
+                file=sys.stderr,
+            )
             return 1
 
     prometheus_url = args.prometheus or None

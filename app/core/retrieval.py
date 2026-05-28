@@ -74,14 +74,12 @@ def _detect_active_index(conn: psycopg.Connection) -> str:
         return _detected_vector_index
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT indexdef
                 FROM pg_indexes
                 WHERE tablename = 'rag_chunks'
                   AND indexname LIKE '%embedding%'
-                """
-            )
+                """)
             rows = cur.fetchall()
             for row in rows:
                 idx_def = (row[0] or "").lower()
@@ -98,7 +96,9 @@ def _detect_active_index(conn: psycopg.Connection) -> str:
             "falling back to ivfflat.probes session GUC."
         )
     except Exception as exc:
-        logger.debug("[VectorIndex] auto-detect failed (%s); defaulting to ivfflat.", exc)
+        logger.debug(
+            "[VectorIndex] auto-detect failed (%s); defaulting to ivfflat.", exc
+        )
         _detected_vector_index = "ivfflat"
     return _detected_vector_index  # type: ignore[return-value]
 
@@ -412,9 +412,9 @@ def similarity_search(
 
 # intent별 RRF k 값: 낮을수록 상위 결과에 집중, 높을수록 더 넓은 풀
 _RRF_K_BY_INTENT: Dict[str, int] = {
-    "player_profile": 30,   # 특정 선수 데이터 → 상위 결과 집중
-    "stats_lookup": 40,     # 통계 순위 → 약간 더 넓은 풀
-    "comparison": 50,       # 비교 쌍 검색 → 균형
+    "player_profile": 30,  # 특정 선수 데이터 → 상위 결과 집중
+    "stats_lookup": 40,  # 통계 순위 → 약간 더 넓은 풀
+    "comparison": 50,  # 비교 쌍 검색 → 균형
 }
 
 
@@ -453,7 +453,10 @@ def similarity_search_with_fallback(
     base_filters = dict(filters) if filters else {}
 
     # 내부(private) 필터는 모든 레벨에서 유지
-    internal_keys = {_INTERNAL_FILTER_INCLUDE_INNING_SCORES, _INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES}
+    internal_keys = {
+        _INTERNAL_FILTER_INCLUDE_INNING_SCORES,
+        _INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES,
+    }
     internal_filters = {k: v for k, v in base_filters.items() if k in internal_keys}
 
     # 사용자 필터에서 단계별로 제거할 키 목록

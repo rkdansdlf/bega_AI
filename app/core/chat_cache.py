@@ -35,6 +35,7 @@ def _record_response_cache(operation: str, result: str) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+
 # ─── DDL ────────────────────────────────────────────────────────────────────────
 # deps.py lifespan()에서 pool.connection()으로 실행합니다.
 # scripts/create_chat_cache_table.sql과 동일한 스키마입니다.

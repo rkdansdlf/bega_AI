@@ -60,9 +60,7 @@ def _parse_version(version_str: str) -> Tuple[int, ...]:
 
 def _get_pgvector_version(cur: psycopg.Cursor) -> Optional[str]:
     try:
-        cur.execute(
-            "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
-        )
+        cur.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
         row = cur.fetchone()
         return row[0] if row else None
     except Exception:
@@ -106,9 +104,7 @@ def _print_current_indexes(cur: psycopg.Cursor) -> None:
         print(f"\n{TABLE_NAME}에 embedding 인덱스가 없습니다.")
 
 
-def _verify_hnsw_usage(
-    cur: psycopg.Cursor, embed_dim: int, ef_search: int
-) -> bool:
+def _verify_hnsw_usage(cur: psycopg.Cursor, embed_dim: int, ef_search: int) -> bool:
     """EXPLAIN ANALYZE로 HNSW 인덱스 사용 여부를 검증합니다."""
     vector_str = "[" + ",".join("0.0" for _ in range(embed_dim)) + "]"
     cur.execute(f"SET hnsw.ef_search = {ef_search}")
@@ -227,7 +223,9 @@ def run(
                         print("IVFFlat 인덱스 제거 완료!")
                         ivfflat_exists = False
             elif drop_ivfflat and not ivfflat_exists:
-                print(f"\n[SKIP] IVFFlat 인덱스 '{IVFFLAT_INDEX_NAME}'가 이미 없습니다.")
+                print(
+                    f"\n[SKIP] IVFFlat 인덱스 '{IVFFLAT_INDEX_NAME}'가 이미 없습니다."
+                )
 
             # 6. 최종 인덱스 상태
             print("\n--- 최종 인덱스 상태 ---")

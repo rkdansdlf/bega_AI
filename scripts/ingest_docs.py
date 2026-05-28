@@ -197,7 +197,9 @@ def infer_doc_quality_score(source_type: str) -> float:
 
 
 def infer_doc_topic_key(source_table: str, relative_path: str) -> str:
-    stem = relative_path[:-3] if relative_path.lower().endswith(".md") else relative_path
+    stem = (
+        relative_path[:-3] if relative_path.lower().endswith(".md") else relative_path
+    )
     slug = re.sub(r"[^0-9a-z]+", "_", stem.lower()).strip("_")
     return f"{source_table}:{slug or Path(relative_path).stem.lower()}"
 
@@ -359,7 +361,9 @@ async def main():
                 existing_embeddings = (
                     fetch_existing_embedding_texts(
                         cur,
-                        content_hashes=(record[3]["content_hash"] for record in records),
+                        content_hashes=(
+                            record[3]["content_hash"] for record in records
+                        ),
                         embedding_model=embedding_model,
                         embedding_dim=records[0][3]["embedding_dim"],
                         embedding_version=embedding_version,
