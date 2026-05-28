@@ -11,6 +11,13 @@ from . import kbo_metrics
 
 logger = logging.getLogger(__name__)
 
+# 규정 소스 테이블 집합 — rag.py의 _REGULATION_SOURCES와 동기화 유지
+_REGULATION_SOURCE_TABLES: frozenset = frozenset({
+    "markdown_docs",
+    "kbo_regulations",
+    "kbo_definitions",
+})
+
 
 class ContextFormatter:
     """질문 의도에 따른 컨텍스트 포맷터 클래스"""
@@ -39,6 +46,25 @@ class ContextFormatter:
             year: 분석 대상 연도
         """
         logger.info(f"[ContextFormatter] Formatting context for intent: {intent}")
+
+        # rag.py가 regulation 라우팅을 이미 결정한 경우 early-return 분기보다 먼저 처리한다.
+        # is_regulation_query()=True일 때만 markdown_docs가 2개 이상 선별되므로,
+        # reg_doc_count >= 2이면 포맷터도 explanatory를 우선한다.
+        # stat_type/player_name이 있으면 통계/프로필 쿼리이므로 가로채지 않는다.
+        _raw_docs_pre = processed_data.get("raw_docs", [])
+        _reg_doc_count = sum(
+            1 for d in _raw_docs_pre if d.get("source_table") in _REGULATION_SOURCE_TABLES
+        )
+        if (
+            _reg_doc_count >= 2
+            and not entity_filter.stat_type
+            and not entity_filter.player_name
+        ):
+            _knowledge_ctx = self._format_explanatory_content(
+                processed_data, query, entity_filter, year
+            )
+            if "요청하신 리그 정보에 대한 구체적인 내용을" not in _knowledge_ctx:
+                return _knowledge_ctx
 
         # 수상 관련 질문
         if intent == "award_lookup" or entity_filter.award_type:
@@ -639,6 +665,15 @@ class ContextFormatter:
                 if game_time:
                     context_parts.append(f"- 경기 시간: {game_time}")
         else:
+            # game DB 레코드가 없을 때 → 규정 문서가 있으면 explanatory로 폴백
+            _reg_docs = [
+                d for d in processed_data.get("raw_docs", [])
+                if d.get("source_table") in _REGULATION_SOURCE_TABLES
+            ]
+            if _reg_docs:
+                return self._format_explanatory_content(
+                    processed_data, query, entity_filter, year
+                )
             if game_date:
                 context_parts.append(f"\n{game_date} 경기 정보를 찾을 수 없습니다.")
             else:
@@ -820,6 +855,15 @@ class ContextFormatter:
                     if remarks:
                         context_parts.append(f"  {remarks}")
         else:
+            # movement DB 레코드가 없을 때 → 규정 문서가 있으면 explanatory로 폴백
+            _reg_docs = [
+                d for d in processed_data.get("raw_docs", [])
+                if d.get("source_table") in _REGULATION_SOURCE_TABLES
+            ]
+            if _reg_docs:
+                return self._format_explanatory_content(
+                    processed_data, query, entity_filter, year
+                )
             context_parts.append(f"\n{year}년 선수 이동 기록을 찾을 수 없습니다.")
 
         return "\n".join(context_parts)

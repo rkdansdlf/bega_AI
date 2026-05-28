@@ -32,6 +32,9 @@ class _StubAgent:
     def _normalize_chatbot_answer_text(self, text: str) -> str:
         return text
 
+    def _extract_leaderboard_value(self, entry, stat_name):
+        return entry.get("stat_value") or entry.get(stat_name) or "확인 불가"
+
 
 def test_render_low_data_team_analysis_uses_query_without_unboundlocalerror() -> None:
     registry = ChatRendererRegistry(_StubAgent())
@@ -177,3 +180,57 @@ def test_render_game_flow_filters_multiple_games_by_query_team() -> None:
     assert "어떤 경기를" not in rendered
     assert "KT 위즈" in rendered
     assert "OB 베어스" not in rendered
+
+
+def test_render_current_home_run_king_uses_current_leader_wording() -> None:
+    registry = ChatRendererRegistry(_StubAgent())
+    decision = IntentDecision(intent=ChatIntent.LEADERBOARD_LOOKUP)
+
+    rendered = registry.render_leaderboard(
+        "2026년 홈런왕은 누구야?",
+        {
+            "year": 2026,
+            "stat_name": "home_runs",
+            "leaderboard": [
+                {
+                    "player_name": "데일",
+                    "team_name": "KIA",
+                    "stat_value": 16,
+                    "home_runs": 16,
+                }
+            ],
+        },
+        decision,
+    )
+
+    assert "최종 홈런왕은 확정 전" in rendered
+    assert "현재 홈런 선두" in rendered
+    assert "데일" in rendered
+    assert "Unknown" not in rendered
+
+
+def test_render_hits_leader_uses_hits_unit() -> None:
+    registry = ChatRendererRegistry(_StubAgent())
+    decision = IntentDecision(intent=ChatIntent.LEADERBOARD_LOOKUP)
+
+    rendered = registry.render_leaderboard(
+        "2026년 최다안타 1위는 누구야?",
+        {
+            "year": 2026,
+            "stat_name": "hits",
+            "leaderboard": [
+                {
+                    "player_name": "최원준",
+                    "team_name": "KT",
+                    "stat_value": 69,
+                    "hits": 69,
+                }
+            ],
+        },
+        decision,
+    )
+
+    assert "최원준(KT 위즈)" in rendered
+    assert "안타 기록은" in rendered
+    assert "안타은" not in rendered
+    assert "69안타" in rendered
