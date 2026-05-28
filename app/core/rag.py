@@ -1030,6 +1030,12 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
             fallback_reason="manual_baseball_data_required",
         )
 
+    if "홈런" in query_lower and any(
+        token in query_lower
+        for token in ("왕", "1위", "최다", "선두", "누구", "몇 개", "몇개", "순위", "기록")
+    ):
+        return None
+
     for tokens, answer in _STATIC_EXPLAINER_ANSWERS:
         if any(token in query_lower for token in tokens):
             return _build_static_kbo_result(
@@ -2012,6 +2018,7 @@ class RAGPipeline:
             settings
         )
         self.baseball_agent = self.agent_runtime.shared_agent
+        self._agent_fast_path_enabled = agent_runtime is not None or pool is not None
         self.wpa_calculator = wpa_calculator or WPACalculator()
 
     @contextmanager
@@ -3289,6 +3296,11 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         is_game_query = self._is_game_query(query)
         is_game_flow_narrative = self._is_game_flow_narrative_query(query)
         force_agent_fast_path = self._should_force_agent_fast_path(query, entity_filter)
+        agent_fast_path_enabled = bool(
+            getattr(self, "_agent_fast_path_enabled", False)
+        )
+        if is_game_flow_narrative:
+            force_agent_fast_path = False
 
         # 규정 질문이면 검색 제한을 늘려 관련 상세 조항들이 더 많이 포함되도록 함
         if is_regulation:
@@ -3305,7 +3317,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             f"[RAG] Path decision: is_statistical={is_statistical}, is_regulation={is_regulation}, is_game_query={is_game_query}, intent={intent}"
         )
 
-        if force_agent_fast_path:
+        if force_agent_fast_path and agent_fast_path_enabled:
             logger.info(
                 "[RAG] Dedicated DB fast-path query detected, trying agent first"
             )
@@ -3342,7 +3354,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 logger.info(
                     "[RAG] Narrative game-flow query detected, skipping agent-first"
                 )
-            else:
+            elif agent_fast_path_enabled:
                 logger.info(f"[RAG] Game query detected, trying agent first")
                 agent_result = await self._try_agent_first(
                     query, intent=intent, filters=filters, history=history
@@ -3353,6 +3365,8 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     logger.info(
                         f"[RAG] Game agent failed, falling back to traditional RAG"
                     )
+            else:
+                logger.info("[RAG] Game agent fast-path disabled, using RAG")
 
         # 6. 기존 RAG 방식으로 폴백 또는 일반 질문 처리
 
@@ -3585,14 +3599,22 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 "[RAG] DB was unavailable during retrieval. cause=%s",
                 retrieval_state.get("db_error"),
             )
-            # Baseball Data Policy: all data must come from the internal DB.
-            # Do NOT generate an answer from LLM training knowledge — return a
-            # hard unavailable response instead.
-            answer = (
-                DB_UNAVAILABLE_PREFIX
-                + "\n\n현재 KBO 통계 데이터베이스에 접속할 수 없어 답변을 제공할 수 없습니다. "
-                "잠시 후 다시 시도해 주세요."
+            db_unavailable_context = _build_db_unavailable_context(
+                query, entity_filter, year
             )
+            history_block = _history_context_block(history)
+            if history_block:
+                db_unavailable_context = (
+                    history_block + "\n\n" + db_unavailable_context
+                )
+            prompt = FOLLOWUP_PROMPT.format(
+                question=query, context=db_unavailable_context
+            )
+            db_unavailable_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            db_unavailable_messages.extend(_history_for_messages(history))
+            db_unavailable_messages.append({"role": "user", "content": prompt})
+            answer = await self._generate(db_unavailable_messages)
+            answer = _ensure_answer_prefix(answer, DB_UNAVAILABLE_PREFIX)
             self._record_retrieval_event(
                 query=query,
                 intent=intent,
@@ -3611,7 +3633,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 "citations": [],
                 "intent": intent,
                 "retrieved": [],
-                "strategy": "db_unavailable",
+                "strategy": "llm_knowledge_db_unavailable",
                 "entity_filter": {
                     "season_year": entity_filter.season_year,
                     "team_id": entity_filter.team_id,

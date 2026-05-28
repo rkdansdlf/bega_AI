@@ -103,6 +103,23 @@ def _detect_active_index(conn: psycopg.Connection) -> str:
     return _detected_vector_index  # type: ignore[return-value]
 
 
+def _embedding_distance_sql(
+    settings: Settings,
+    *,
+    table_alias: Optional[str] = None,
+) -> str:
+    column = f"{table_alias}.embedding" if table_alias else "embedding"
+    quantization = (
+        str(getattr(settings, "ai_vector_quantization", "none") or "none")
+        .lower()
+        .strip()
+    )
+    if quantization == "halfvec":
+        embed_dim = max(1, int(getattr(settings, "embed_dim", 256) or 256))
+        return f"{column}::halfvec({embed_dim}) <=> %s::halfvec({embed_dim})"
+    return f"{column} <=> %s::vector"
+
+
 def _ensure_pgvector_session(
     conn: psycopg.Connection,
     settings: Optional[Settings] = None,
@@ -267,6 +284,8 @@ def similarity_search(
 
     # 벡터를 SQL 쿼리에 직접 삽입할 수 있는 문자열 형태로 변환합니다.
     vector_str = _vector_literal(embedding)
+    embedding_distance = _embedding_distance_sql(active_settings)
+    row_embedding_distance = _embedding_distance_sql(active_settings, table_alias="r")
 
     # 최종 SQL 쿼리를 구성합니다.
     # <=> 연산자: pgvector에서 코사인 거리(1 - 코사인 유사도)를 계산합니다.
@@ -281,7 +300,7 @@ def similarity_search(
         vector_search AS (
             SELECT
                 id,
-                ROW_NUMBER() OVER (ORDER BY embedding <=> %s::vector ASC) AS vector_rank
+                ROW_NUMBER() OVER (ORDER BY {embedding_distance} ASC) AS vector_rank
             FROM rag_chunks
             WHERE {where_clause}
             LIMIT %s * 2
@@ -318,7 +337,7 @@ def similarity_search(
             r.expires_at,
             r.updated_at,
             r.quality_score,
-            (1 - (r.embedding <=> %s::vector)) AS similarity,
+            (1 - ({row_embedding_distance})) AS similarity,
             COALESCE(k.ts_rank_val, 0) AS keyword_rank_val,
             (
                 COALESCE(1.0 / ({rrf_k} + v.vector_rank), 0) +
@@ -362,10 +381,10 @@ def similarity_search(
                expires_at,
                updated_at,
                quality_score,
-               (1 - (embedding <=> %s::vector)) as similarity
+               (1 - ({embedding_distance})) as similarity
         FROM rag_chunks
         WHERE {where_clause}
-        ORDER BY embedding <=> %s::vector ASC
+        ORDER BY {embedding_distance} ASC
         LIMIT %s
         """
         final_params = [vector_str] + filter_params + [vector_str, limit]
