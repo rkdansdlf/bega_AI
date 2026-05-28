@@ -238,7 +238,8 @@ FastAPI Application (8001)
     ```env
     # --- LLM/임베딩 프로바이더 선택 ---
     LLM_PROVIDER=openrouter          # openrouter(기본), gemini
-    EMBED_PROVIDER=openai            # openai(기본), openrouter, gemini, hf, local
+    EMBED_PROVIDER=openrouter        # openrouter(기본), gemini, hf, local, openai
+    EMBED_DIM=256
     
     # --- OpenRouter 설정 (기본) ---
     OPENROUTER_API_KEY=sk-or-...
