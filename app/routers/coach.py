@@ -1564,6 +1564,11 @@ def _is_completed_review(evidence: GameEvidence) -> bool:
     return _is_completed_review_bucket(evidence.game_status_bucket)
 
 
+def _should_include_auto_brief_clutch(evidence: GameEvidence) -> bool:
+    """auto_brief cache generation should include WPA moments for completed games."""
+    return _is_completed_review(evidence)
+
+
 def _has_game_row_context(evidence: GameEvidence) -> bool:
     if getattr(evidence, "game_row_found", False):
         return True
@@ -1950,6 +1955,17 @@ def _build_manual_data_request(
                 "분석에 필요한 선발 라인업 정보가 부족합니다.",
                 "team_code, batting_order, player_name",
             )
+    elif (
+        _normalize_game_status_bucket(evidence_game_status) == "SCHEDULED"
+        and not _is_starter_announcement_pending(evidence)
+        and not (assessment.home_pitcher_present and assessment.away_pitcher_present)
+    ):
+        add_item(
+            "starters",
+            "선발 정보",
+            "선발 발표 예정 시간(경기 전일 18시)이 지났으나 선발 정보가 입력되지 않았습니다.",
+            "home_pitcher, away_pitcher",
+        )
 
     if not missing_items:
         return None
@@ -2100,6 +2116,11 @@ def _ensure_stream_meta_contract(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized["supported_fact_count"] = max(
         0, int(normalized.get("supported_fact_count") or 0)
     )
+    raw_prob = normalized.get("win_probability_home")
+    if isinstance(raw_prob, (int, float)) and 0.0 <= float(raw_prob) <= 1.0:
+        normalized["win_probability_home"] = round(float(raw_prob), 3)
+    else:
+        normalized.pop("win_probability_home", None)
     return normalized
 
 
@@ -3128,6 +3149,208 @@ async def _cancel_heartbeat_task(task: Optional[asyncio.Task]) -> None:
         await task
     except asyncio.CancelledError:
         pass
+
+
+async def _generate_auto_brief_cache_background(
+    *,
+    pool: ConnectionPool,
+    cache_key: str,
+    lease_owner: str,
+    home_team_canonical: str,
+    away_team_canonical: str,
+    home_name: str,
+    away_name: str,
+    year: int,
+    resolved_focus: List[str],
+    game_evidence: Any,
+    evidence_assessment: Any,
+    coach_model_name: str,
+    cache_attempt_count: int,
+) -> None:
+    """auto_brief 캐시를 백그라운드에서 결정론적으로 생성합니다.
+
+    MISS_GENERATE 상태에서 SSE 스트림을 블로킹하지 않고 캐시를 생성합니다.
+    완료 시 DB에 COMPLETED로 저장되며, 다음 요청은 HIT를 받게 됩니다.
+    """
+    lease_lost_event = asyncio.Event()
+    heartbeat_task: Optional[asyncio.Task] = asyncio.create_task(
+        _heartbeat_cache_lease(
+            pool=pool,
+            cache_key=cache_key,
+            lease_owner=lease_owner,
+            lease_lost_event=lease_lost_event,
+        )
+    )
+    try:
+        tool_results = await _execute_coach_tools_parallel(
+            pool,
+            home_team_canonical,
+            year,
+            resolved_focus,
+            away_team_canonical,
+            as_of_game_date=game_evidence.game_date,
+            exclude_game_id=game_evidence.game_id,
+            matchup_season_id=(
+                game_evidence.season_id
+                if game_evidence.stage_label not in {"REGULAR", "UNKNOWN"}
+                else None
+            ),
+            game_id=game_evidence.game_id,
+            include_clutch=_should_include_auto_brief_clutch(game_evidence),
+        )
+
+        if lease_lost_event.is_set():
+            logger.warning(
+                "[AutoBriefBG] Lease lost before completion cache_key=%s", cache_key
+            )
+            return
+
+        if tool_results.get("matchup"):
+            tool_results["matchup"] = _sanitize_matchup_result_for_evidence(
+                game_evidence, tool_results["matchup"]
+            )
+
+        allowed_names = _collect_allowed_entity_names(game_evidence, tool_results)
+        used_evidence = list(game_evidence.used_evidence)
+        for src_key, label in (
+            ("home.summary", "team_summary"),
+            ("home.advanced", "team_advanced_metrics"),
+            ("home.player_form_signals", "team_player_form_signals"),
+            ("home.recent", "team_recent_form"),
+            ("matchup", "head_to_head"),
+            ("away.summary", "opponent_team_summary"),
+            ("away.advanced", "opponent_team_advanced_metrics"),
+            ("away.player_form_signals", "opponent_player_form_signals"),
+            ("away.recent", "opponent_recent_form"),
+        ):
+            parts = src_key.split(".")
+            obj = tool_results
+            for p in parts:
+                obj = obj.get(p, {}) if isinstance(obj, dict) else {}
+            if isinstance(obj, dict) and obj.get("found"):
+                used_evidence.append(label)
+        used_evidence = list(dict.fromkeys(used_evidence))
+
+        dependency_degraded = _collect_dependency_degraded(tool_results)
+        dependency_degraded_reasons = _collect_dependency_degraded_reasons(tool_results)
+        data_quality = _determine_data_quality(game_evidence, tool_results)
+        fact_sheet = _build_coach_fact_sheet(
+            game_evidence, tool_results, allowed_names, evidence_assessment
+        )
+        grounding_reasons = list(fact_sheet.reasons)
+        grounding_warnings = list(fact_sheet.warnings)
+        if dependency_degraded and dependency_degraded_reasons:
+            grounding_reasons.append(COACH_OCI_MAPPING_DEGRADED_ERROR_CODE)
+            grounding_warnings.append(
+                "매핑 조회는 복구 경로로 이어졌습니다: "
+                + ", ".join(dependency_degraded_reasons)
+            )
+        grounding_reasons = _normalize_grounding_reasons(grounding_reasons)
+        grounding_warnings = _merge_grounding_warnings(grounding_warnings, grounding_reasons)
+
+        response_payload = _build_deterministic_coach_response(
+            game_evidence,
+            tool_results,
+            resolved_focus=resolved_focus,
+            grounding_warnings=grounding_warnings,
+        )
+        response_payload = _postprocess_coach_response_payload(
+            response_payload,
+            evidence=game_evidence,
+            used_evidence=used_evidence,
+            grounding_reasons=grounding_reasons,
+            grounding_warnings=grounding_warnings,
+            tool_results=tool_results,
+            resolved_focus=resolved_focus,
+        )
+        _ensure_detailed_markdown(
+            response_payload,
+            resolved_focus,
+            grounding_warnings=grounding_warnings,
+            evidence=game_evidence,
+            tool_results=tool_results,
+        )
+        _ensure_completed_review_markdown_sections(
+            response_payload,
+            evidence=game_evidence,
+        )
+
+        meta_defaults = _build_meta_payload_defaults(
+            generation_mode="deterministic_auto",
+            data_quality=data_quality,
+            used_evidence=used_evidence,
+            cache_key=cache_key,
+            resolved_cache_key=cache_key,
+            expected_cache_key=None,
+            prompt_version=COACH_CACHE_PROMPT_VERSION,
+            starter_signature=None,
+            lineup_signature=None,
+            cache_key_mismatch=False,
+            game_status_bucket=game_evidence.game_status_bucket,
+            grounding_warnings=grounding_warnings,
+            grounding_reasons=grounding_reasons,
+            supported_fact_count=fact_sheet.supported_fact_count,
+            dependency_degraded=dependency_degraded,
+            attempt_count=cache_attempt_count,
+            cache_row_missing=False,
+            recovered_from_missing_row=False,
+            lease_lost=lease_lost_event.is_set(),
+        )
+        if game_evidence.game_status_bucket == "SCHEDULED":
+            pre_game_prob = _calculate_pre_game_win_probability(tool_results)
+            if pre_game_prob is not None:
+                meta_defaults["win_probability_home"] = pre_game_prob
+
+        _store_completed_cache(
+            pool=pool,
+            cache_key=cache_key,
+            lease_owner=lease_owner,
+            team_id=home_team_canonical,
+            year=year,
+            prompt_version=COACH_CACHE_PROMPT_VERSION,
+            model_name=coach_model_name,
+            response_payload=response_payload,
+            meta_defaults=meta_defaults,
+        )
+        logger.info(
+            "[AutoBriefBG] Cache stored cache_key=%s home=%s away=%s",
+            cache_key,
+            home_team_canonical,
+            away_team_canonical,
+        )
+    except Exception as exc:
+        failed_data_quality = _determine_data_quality(game_evidence)
+        logger.error(
+            "[AutoBriefBG] Generation failed game_id=%s cache_key=%s "
+            "cache_state=%s error_code=%s data_quality=%s: %s",
+            getattr(game_evidence, "game_id", None),
+            cache_key,
+            "BACKGROUND_GENERATE",
+            "auto_brief_bg_error",
+            failed_data_quality,
+            exc,
+        )
+        try:
+            _store_failed_cache(
+                pool=pool,
+                cache_key=cache_key,
+                lease_owner=lease_owner,
+                team_id=home_team_canonical,
+                year=year,
+                prompt_version=COACH_CACHE_PROMPT_VERSION,
+                model_name=coach_model_name,
+                attempt_count=cache_attempt_count,
+                error_code="auto_brief_bg_error",
+                error_message=str(exc),
+            )
+        except Exception as store_exc:
+            logger.warning(
+                "[AutoBriefBG] Failed to store error state cache_key=%s: %s",
+                cache_key,
+                store_exc,
+            )
+    finally:
+        await _cancel_heartbeat_task(heartbeat_task)
 
 
 def _claim_cache_generation_once(
@@ -4398,13 +4621,30 @@ def _focus_has_support(
     if focus == "starter":
         return bool(evidence.home_pitcher and evidence.away_pitcher)
     if focus == "bullpen":
-        return any(
+        if any(
             value is not None
             for value in (
                 home_adv.get("fatigue_index", {}).get("bullpen_share"),
                 away_adv.get("fatigue_index", {}).get("bullpen_share"),
             )
-        )
+        ):
+            return True
+        if any(
+            value is not None
+            for value in (
+                home_adv.get("fatigue_index", {}).get("avg_era"),
+                away_adv.get("fatigue_index", {}).get("avg_era"),
+            )
+        ):
+            return True
+        for data in (home_data, away_data):
+            for pitcher in data.get("player_form_signals", {}).get("pitchers", []):
+                if (
+                    pitcher.get("role") == "reliever"
+                    and pitcher.get("season_metrics", {}).get("era") is not None
+                ):
+                    return True
+        return False
     if focus == "batting":
         return (
             any(
@@ -4740,6 +4980,41 @@ def _recent_win_rate(summary: Dict[str, Any]) -> Optional[float]:
     if total_games <= 0:
         return None
     return (wins + 0.5 * draws) / total_games
+
+
+def _calculate_pre_game_win_probability(
+    tool_results: Dict[str, Any],
+    *,
+    home_advantage: float = 0.04,
+) -> Optional[float]:
+    """Log5-based pre-game win probability for the home team.
+
+    Uses recent-form win rate (last ~10 games) as the base statistic.
+    Returns None if either team has < 3 recent games (insufficient data).
+    Clamped to [0.30, 0.75] to prevent extreme outliers.
+    """
+    home_data = tool_results.get("home") or {}
+    away_data = tool_results.get("away") or {}
+    home_recent_summary = _recent_summary(home_data)
+    away_recent_summary = _recent_summary(away_data)
+    home_games = _recent_sample_size(home_data)
+    away_games = _recent_sample_size(away_data)
+
+    if home_games < 3 or away_games < 3:
+        return None
+
+    hw = _recent_win_rate(home_recent_summary)
+    aw = _recent_win_rate(away_recent_summary)
+
+    if hw is None or aw is None:
+        return None
+
+    # Log5 formula
+    denom = hw * (1.0 - aw) + aw * (1.0 - hw) + 1e-9
+    p = hw * (1.0 - aw) / denom
+    p += home_advantage
+
+    return max(0.30, min(0.75, round(p, 3)))
 
 
 def _scheduled_recent_edge_delta(
@@ -5566,9 +5841,29 @@ def _build_scheduled_team_level_deterministic_analysis(
         "라인업 미발표라 타순 기반 세부 매치업은 경기 직전까지 달라질 수 있습니다."
     )
     if not evidence.home_pitcher or not evidence.away_pitcher:
-        uncertainty.append(
-            "공식 선발 발표 전이라 초반 흐름 해석은 보수적으로 봐야 합니다."
+        due_at = _starter_announcement_due_at_kst(evidence.game_date)
+        if due_at is not None:
+            due_label = due_at.strftime("%-m월 %-d일 %H시")
+            uncertainty.append(
+                f"선발은 {due_label}(KST) 발표 예정이며, 발표 전까지 초반 흐름 해석은 보수적으로 봐야 합니다."
+            )
+        else:
+            uncertainty.append(
+                "공식 선발 발표 전이라 초반 흐름 해석은 보수적으로 봐야 합니다."
+            )
+        swing_factors.append(
+            "선발 발표 후 투구 스타일 매치업에 따라 초반 유리 팀이 바뀔 수 있습니다."
         )
+        home_pitcher_form = _best_form_signal(home_data, "pitchers")
+        away_pitcher_form = _best_form_signal(away_data, "pitchers")
+        if home_pitcher_form or away_pitcher_form:
+            watch_points.append(
+                "선발 발표 전이라 양 팀 불펜 투수의 최근 등판 흐름이 초반 전략 단서가 됩니다."
+            )
+        else:
+            watch_points.append(
+                "선발 미확정이므로 경기 직전 발표되는 선발과 불펜 대기 구성을 확인할 필요가 있습니다."
+            )
 
     summary: str
     verdict: str
@@ -10427,6 +10722,92 @@ async def analyze_team(
                     return
 
                 wait_result: Optional[Dict[str, Any]] = None
+
+                # [AutoBriefBG] auto_brief MISS_GENERATE → 백그라운드 생성 후 즉시 PENDING 반환
+                if _should_generate_from_gate(cache_state) and is_auto_brief:
+                    auto_brief_data_quality = _determine_data_quality(game_evidence)
+                    logger.info(
+                        "[AutoBriefBG] Cache miss generation start game_id=%s "
+                        "cache_key=%s cache_state=%s error_code=%s data_quality=%s",
+                        game_evidence.game_id,
+                        cache_key,
+                        cache_state,
+                        cache_error_code,
+                        auto_brief_data_quality,
+                    )
+                    asyncio.create_task(
+                        _generate_auto_brief_cache_background(
+                            pool=pool,
+                            cache_key=cache_key,
+                            lease_owner=cache_lease_owner,
+                            home_team_canonical=home_team_canonical,
+                            away_team_canonical=away_team_canonical,
+                            home_name=home_name,
+                            away_name=away_name,
+                            year=year,
+                            resolved_focus=resolved_focus,
+                            game_evidence=game_evidence,
+                            evidence_assessment=evidence_assessment,
+                            coach_model_name=coach_model_name,
+                            cache_attempt_count=cache_attempt_count,
+                        )
+                    )
+                    bg_pending_payload = _cache_status_response(
+                        headline=f"{home_name} 브리핑을 준비하고 있습니다",
+                        coach_note="잠시 후 자동으로 업데이트됩니다.",
+                        detail=(
+                            "## 브리핑 생성 중\n\n"
+                            "경기 데이터를 수집하고 분석 중입니다. 잠시 후 다시 시도해 주세요."
+                        ),
+                    )
+                    bg_meta = _build_meta_payload_defaults(
+                        generation_mode="evidence_fallback",
+                        data_quality=auto_brief_data_quality,
+                        used_evidence=game_evidence.used_evidence,
+                        **cache_contract_meta,
+                        game_status_bucket=game_evidence.game_status_bucket,
+                        grounding_warnings=[],
+                        grounding_reasons=evidence_assessment.root_causes,
+                        supported_fact_count=0,
+                        attempt_count=cache_attempt_count,
+                    )
+                    yield {
+                        "event": "status",
+                        "data": json.dumps(
+                            {"message": "브리핑 생성을 시작합니다..."},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {
+                        "event": "message",
+                        "data": json.dumps(
+                            {
+                                "delta": json.dumps(
+                                    bg_pending_payload, ensure_ascii=False
+                                )
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {
+                        "event": "meta",
+                        "data": json.dumps(
+                            _build_stream_meta(
+                                {
+                                    "validation_status": "fallback",
+                                    "fast_path": True,
+                                    "cached": False,
+                                    "cache_state": "PENDING_WAIT",
+                                    "in_progress": True,
+                                    **bg_meta,
+                                }
+                            ),
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {"event": "done", "data": "[DONE]"}
+                    return
+
                 if not _should_generate_from_gate(cache_state):
                     if cache_state == "PENDING_WAIT":
                         wait_result = await _wait_for_cache_terminal_state(
@@ -11011,6 +11392,11 @@ async def analyze_team(
                         recovered_from_missing_row=cache_state == "ROW_RECREATED",
                         lease_lost=lease_lost_event.is_set(),
                     )
+                    # Add pre-game win probability for SCHEDULED auto-brief responses
+                    if is_auto_brief and game_evidence.game_status_bucket == "SCHEDULED":
+                        pre_game_prob = _calculate_pre_game_win_probability(tool_results)
+                        if pre_game_prob is not None:
+                            meta_defaults["win_probability_home"] = pre_game_prob
                     finalize_result = _store_completed_cache(
                         pool=pool,
                         cache_key=cache_key,

@@ -14,6 +14,14 @@ request_mode="auto_brief" / focus=["recent_form"] 으로 호출합니다.
       --delay-seconds 2.0 \
       --timeout 120 \
       --quality-report reports/coach_2025_auto_brief_50.json
+
+운영 재생성 예:
+    python scripts/batch_coach_auto_brief.py \
+      --years 2026 \
+      --date-window 2026-05-22 \
+      --eligible-only \
+      --prioritize-unresolved \
+      --quality-report reports/coach_auto_brief_prewarm_2026-05-22.json
 """
 
 from __future__ import annotations
