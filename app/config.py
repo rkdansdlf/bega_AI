@@ -239,9 +239,7 @@ class Settings(BaseSettings):
     #   "ivfflat"  - IVFFlat 세션 GUC(ivfflat.probes)만 설정. 레거시 인덱스 유지 시 사용.
     #   "auto"     - 기동 시 pg_indexes에서 HNSW 존재 여부를 감지하여 자동 선택(기본값).
     # 운영 전환 흐름: create_vector_index.py 실행(HNSW 생성) → AI_VECTOR_INDEX=hnsw 배포 → ivfflat 제거.
-    ai_vector_index: str = Field(
-        "auto", validation_alias="AI_VECTOR_INDEX"
-    )
+    ai_vector_index: str = Field("auto", validation_alias="AI_VECTOR_INDEX")
     # IVFFlat 인덱스(`idx_rag_chunks_embedding`, lists=644) 기준 probes=512는 79% 버킷 스캔을
     # 의미하여 사실상 시퀀셜 스캔에 가깝다. 권장 운영치는 24~64 범위. dev/test 기본을 보수적으로
     # 32로 설정하고, 정확도 회귀가 발견되면 RETRIEVAL_IVFFLAT_PROBES 환경변수로 조정한다.

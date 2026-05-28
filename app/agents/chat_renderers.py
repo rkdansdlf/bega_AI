@@ -217,9 +217,7 @@ class ChatRendererRegistry:
             stat_value = resolved_agent._format_deterministic_metric(
                 resolved_agent._extract_leaderboard_value(entry, raw_stat_name)
             )
-            stat_value_label = self._metric_value_label(
-                stat_key, stat_name, stat_value
-            )
+            stat_value_label = self._metric_value_label(stat_key, stat_name, stat_value)
             lines.append(
                 f"{index}위는 {player_name}이고, {stat_name} 기록은 {stat_value_label}입니다."
             )

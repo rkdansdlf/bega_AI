@@ -167,16 +167,20 @@ class ChatIntentRouter:
             return IntentDecision(
                 intent=ChatIntent.LEADERBOARD_LOOKUP,
                 planner_mode="fast_path",
-                tool_calls=[ToolCall(
-                    "get_leaderboard",
-                    {
-                        "stat_name": _stat_leader["stat_name"],
-                        "year": season_year,
-                        "position": _stat_leader["position"],
-                        "limit": 10,
-                    },
-                )],
-                subject_type="pitcher" if _stat_leader["position"] == "pitching" else "batter",
+                tool_calls=[
+                    ToolCall(
+                        "get_leaderboard",
+                        {
+                            "stat_name": _stat_leader["stat_name"],
+                            "year": season_year,
+                            "position": _stat_leader["position"],
+                            "limit": 10,
+                        },
+                    )
+                ],
+                subject_type=(
+                    "pitcher" if _stat_leader["position"] == "pitching" else "batter"
+                ),
                 season_year=season_year,
                 metric_policy=f"stat_leader_{_stat_leader['stat_name']}",
                 confidence=0.97,
@@ -863,8 +867,7 @@ class ChatIntentRouter:
             return now.strftime("%Y-%m-%d")
 
         if "내일" in query_lower and any(
-            keyword in query_lower
-            for keyword in ["경기", "일정", "중계", "예매"]
+            keyword in query_lower for keyword in ["경기", "일정", "중계", "예매"]
         ):
             return (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -983,7 +986,9 @@ class ChatIntentRouter:
             "장타율",
             "안타",
         ]
-        has_pitching_signal = any(token in query_lower for token in pitching_stat_tokens)
+        has_pitching_signal = any(
+            token in query_lower for token in pitching_stat_tokens
+        )
         has_batting_signal = any(token in query_lower for token in batting_stat_tokens)
         if has_pitching_signal and has_batting_signal:
             return "both"
@@ -1309,7 +1314,9 @@ class ChatIntentRouter:
         has_team_context = bool(team_name) or any(
             token in query_lower for token in team_context_tokens
         )
-        return has_team_context and any(token in query_lower for token in team_metric_tokens)
+        return has_team_context and any(
+            token in query_lower for token in team_metric_tokens
+        )
 
     def _is_team_analysis_query(
         self,

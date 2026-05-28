@@ -2251,9 +2251,7 @@ class BaseballStatisticsAgent:
     ) -> ToolResult:
         """상대전적상 까다로운 팀 조회 도구"""
         try:
-            result = self.db_query_tool.get_team_tough_matchups(
-                team_name, year, limit
-            )
+            result = self.db_query_tool.get_team_tough_matchups(team_name, year, limit)
             if result.get("error"):
                 return ToolResult(
                     success=False,
@@ -7900,7 +7898,11 @@ class BaseballStatisticsAgent:
         if recent_rate is not None:
             recent_bits.append(f"승률 {recent_rate}")
         if run_diff is not None:
-            recent_bits.append(f"득실 {run_diff:+d}" if isinstance(run_diff, int) else f"득실 {run_diff}")
+            recent_bits.append(
+                f"득실 {run_diff:+d}"
+                if isinstance(run_diff, int)
+                else f"득실 {run_diff}"
+            )
         recent_text = ", ".join(recent_bits) if recent_bits else "최근 경기 흐름 집계"
 
         season_record = f"{wins}승 {losses}패"
@@ -8008,8 +8010,7 @@ class BaseballStatisticsAgent:
         if chat_mode:
             return (
                 f"{year}년 {team_name} 수비 실책 관련 경기 요약은 {len(games)}건 잡혀 있습니다.\n\n"
-                f"{lead_line}\n\n"
-                + "\n".join(game_lines)
+                f"{lead_line}\n\n" + "\n".join(game_lines)
             )
 
         return (
@@ -8041,9 +8042,13 @@ class BaseballStatisticsAgent:
             avg_value = self._format_deterministic_metric(average.get(key))
             delta = deltas.get(key)
             delta_text = (
-                f"{delta:+.3f}" if isinstance(delta, float) else self._format_deterministic_metric(delta)
+                f"{delta:+.3f}"
+                if isinstance(delta, float)
+                else self._format_deterministic_metric(delta)
             )
-            return f"{label}: {player_value} / 포지션 평균 {avg_value} / 차이 {delta_text}"
+            return (
+                f"{label}: {player_value} / 포지션 평균 {avg_value} / 차이 {delta_text}"
+            )
 
         ops_line = _metric_line("OPS", "ops")
         avg_line = _metric_line("타율", "avg")
@@ -9466,7 +9471,7 @@ class BaseballStatisticsAgent:
     def _build_regulation_answer(self, data: Dict[str, Any]) -> Optional[str]:
         """
         KBO 규정 관련 답변을 생성합니다.
-        
+
         에이전트 외부의 RAG 파이프라인이 검색 결과를 바탕으로 답변할 수 있도록 None을 반환합니다.
         """
         return None
@@ -9801,8 +9806,8 @@ class BaseballStatisticsAgent:
     ) -> Optional[str]:
         """
         KBO 규정 관련 답변을 생성합니다.
-        
-        기존의 하드코딩된 일반 답변 대신 None을 반환하여 에이전트 외부의 
+
+        기존의 하드코딩된 일반 답변 대신 None을 반환하여 에이전트 외부의
         RAG 파이프라인이 검색 결과를 바탕으로 유연하게 답변할 수 있도록 합니다.
         """
         query_lower = query.lower()

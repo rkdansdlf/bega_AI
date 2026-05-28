@@ -41,7 +41,9 @@ def _calculate_embedding_ttl(query: str) -> Optional[int]:
 class EmbeddingCacheBackend(Protocol):
     async def get(self, key: str) -> Optional[List[float]]: ...
 
-    async def set(self, key: str, embedding: List[float], *, ttl: Optional[int] = None) -> None: ...
+    async def set(
+        self, key: str, embedding: List[float], *, ttl: Optional[int] = None
+    ) -> None: ...
 
 
 class InMemoryLRUBackend:
@@ -67,7 +69,9 @@ class InMemoryLRUBackend:
         _record_cache_result(self.backend_label, hit=True)
         return value
 
-    async def set(self, key: str, embedding: List[float], *, ttl: Optional[int] = None) -> None:
+    async def set(
+        self, key: str, embedding: List[float], *, ttl: Optional[int] = None
+    ) -> None:
         # ttl is ignored — LRU eviction only
         if self._max_size <= 0:
             return
@@ -110,7 +114,9 @@ class RedisEmbeddingBackend:
         _record_cache_result(self.backend_label, hit=True)
         return value
 
-    async def set(self, key: str, embedding: List[float], *, ttl: Optional[int] = None) -> None:
+    async def set(
+        self, key: str, embedding: List[float], *, ttl: Optional[int] = None
+    ) -> None:
         try:
             payload = json.dumps(embedding)
             effective_ttl = ttl if ttl is not None else self._ttl

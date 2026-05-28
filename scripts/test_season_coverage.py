@@ -7,6 +7,7 @@ test_season_coverage.py
   python scripts/test_season_coverage.py
   python scripts/test_season_coverage.py --base-url http://localhost:8001 --timeout 60
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,7 +24,10 @@ import httpx
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8001"
 TIMEOUT = 60.0
-TOKEN = os.getenv("AI_INTERNAL_TOKEN", "ef9c322a0d4105d5f520328cfc29e2197952609776df75eee0fcfab23497bb4f")
+TOKEN = os.getenv(
+    "AI_INTERNAL_TOKEN",
+    "ef9c322a0d4105d5f520328cfc29e2197952609776df75eee0fcfab23497bb4f",
+)
 HEADERS = {"X-Internal-Api-Key": TOKEN, "Content-Type": "application/json"}
 REQUEST_DELAY = 2.0  # rate limit (60req/min) 회피용 요청 간 대기(초)
 
@@ -59,7 +63,6 @@ TEST_CASES: list[dict[str, Any]] = [
         "expect_keywords": ["두산"],
         "data_note": "2026 두산 팀 성적",
     },
-
     # ── 2025 ──────────────────────────────────────────────────────────────────
     {
         "season": 2025,
@@ -85,7 +88,6 @@ TEST_CASES: list[dict[str, Any]] = [
         "expect_keywords": ["2025"],
         "data_note": "2025 투수 다승 1위",
     },
-
     # ── 2024 ──────────────────────────────────────────────────────────────────
     {
         "season": 2024,
@@ -111,7 +113,6 @@ TEST_CASES: list[dict[str, Any]] = [
         "expect_keywords": ["KIA", "2024"],
         "data_note": "2024 KIA 타격 성적",
     },
-
     # ── 2023 ──────────────────────────────────────────────────────────────────
     {
         "season": 2023,
@@ -137,7 +138,6 @@ TEST_CASES: list[dict[str, Any]] = [
         "expect_keywords": ["LG", "2023"],
         "data_note": "2023 한국시리즈",
     },
-
     # ── 2022 ──────────────────────────────────────────────────────────────────
     {
         "season": 2022,
@@ -163,7 +163,6 @@ TEST_CASES: list[dict[str, Any]] = [
         "expect_keywords": ["2022"],
         "data_note": "2022 ERA 1위",
     },
-
     # ── 2021 (시즌통계만 — 게임 단위 통계 없음) ────────────────────────────
     {
         "season": 2021,
@@ -181,7 +180,6 @@ TEST_CASES: list[dict[str, Any]] = [
         "expect_keywords": ["2021"],
         "data_note": "2021 시즌 타격 랭킹",
     },
-
     # ── 2020 (시즌통계만 — 게임 단위 통계 없음) ────────────────────────────
     {
         "season": 2020,
@@ -223,8 +221,15 @@ def check_response(answer: str, expect_keywords: list[str]) -> tuple[bool, str]:
         return False, f"응답 너무 짧음 ({len(answer)}자)"
 
     FAIL_PHRASES = [
-        "찾을 수 없", "알 수 없", "모르겠", "제공되지 않", "확인할 수 없",
-        "데이터가 없", "정보가 없", "죄송합니다", "오류가 발생",
+        "찾을 수 없",
+        "알 수 없",
+        "모르겠",
+        "제공되지 않",
+        "확인할 수 없",
+        "데이터가 없",
+        "정보가 없",
+        "죄송합니다",
+        "오류가 발생",
         "MANUAL_BASEBALL_DATA_REQUIRED",
     ]
     for phrase in FAIL_PHRASES:
@@ -311,7 +316,10 @@ def print_results(results: list[TestResult]) -> None:
         total_fail += s_fail
 
         status_icon = "✅" if s_fail == 0 else ("⚠️ " if s_pass > 0 else "❌")
-        print(f"\n── {season}년 {status_icon}  ({s_pass}/{len(season_results)} 통과) " + "-" * 40)
+        print(
+            f"\n── {season}년 {status_icon}  ({s_pass}/{len(season_results)} 통과) "
+            + "-" * 40
+        )
 
         for r in season_results:
             icon = "✅" if r.passed else "❌"
@@ -347,10 +355,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="시즌별 챗봇 커버리지 테스트")
     parser.add_argument("--base-url", default=BASE_URL)
     parser.add_argument("--timeout", type=float, default=TIMEOUT)
-    parser.add_argument("--season", type=int, default=None,
-                        help="특정 시즌만 테스트 (예: 2026)")
-    parser.add_argument("--output", default=None,
-                        help="JSON 결과 파일 경로")
+    parser.add_argument(
+        "--season", type=int, default=None, help="특정 시즌만 테스트 (예: 2026)"
+    )
+    parser.add_argument("--output", default=None, help="JSON 결과 파일 경로")
     args = parser.parse_args()
 
     BASE_URL = args.base_url  # type: ignore[assignment]
@@ -363,8 +371,10 @@ def main() -> int:
             print(f"ERROR: {args.season}년 테스트 케이스가 없습니다.")
             return 1
 
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-          f"챗봇 커버리지 테스트 시작 — {len(cases)}건")
+    print(
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"챗봇 커버리지 테스트 시작 — {len(cases)}건"
+    )
     print(f"  대상 서버: {BASE_URL}")
     print(f"  타임아웃: {TIMEOUT}s")
 
@@ -379,8 +389,12 @@ def main() -> int:
     results: list[TestResult] = []
     with httpx.Client() as client:
         for i, case in enumerate(cases, 1):
-            print(f"  [{i:02d}/{len(cases)}] {case['season']}년 {case['category']}: "
-                  f"{case['question'][:50]}...", end=" ", flush=True)
+            print(
+                f"  [{i:02d}/{len(cases)}] {case['season']}년 {case['category']}: "
+                f"{case['question'][:50]}...",
+                end=" ",
+                flush=True,
+            )
             r = run_test(client, case)
             results.append(r)
             print("✅" if r.passed else f"❌ ({r.reason[:50]})")

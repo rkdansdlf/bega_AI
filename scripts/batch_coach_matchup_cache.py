@@ -48,7 +48,10 @@ def _get_connection_pool():
     ``monkeypatch.setattr(batch_module, "_get_connection_pool", ...)``.
     """
     from app.deps import get_connection_pool as _fn  # noqa: PLC0415
+
     return _fn()
+
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )

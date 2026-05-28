@@ -1340,14 +1340,17 @@ class GameQueryTool:
         """
         h2h_raw: Dict[str, Any] = {}
         try:
-            h2h_raw = self.get_head_to_head(
-                home_team_id,
-                away_team_id,
-                year=year,
-                limit=head_to_head_limit,
-                as_of_game_date=as_of_game_date,
-                exclude_game_id=exclude_game_id,
-            ) or {}
+            h2h_raw = (
+                self.get_head_to_head(
+                    home_team_id,
+                    away_team_id,
+                    year=year,
+                    limit=head_to_head_limit,
+                    as_of_game_date=as_of_game_date,
+                    exclude_game_id=exclude_game_id,
+                )
+                or {}
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[GameQuery] head_to_head fetch failed for matchup payload: %s",
@@ -1376,9 +1379,10 @@ class GameQueryTool:
         clutch_lines: List[ClutchMomentLine] = []
         if db_tool is not None and game_id:
             try:
-                clutch_raw = db_tool.get_clutch_moments(
-                    game_id, limit=clutch_moments_limit
-                ) or {}
+                clutch_raw = (
+                    db_tool.get_clutch_moments(game_id, limit=clutch_moments_limit)
+                    or {}
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[GameQuery] clutch_moments fetch failed for matchup payload: %s",

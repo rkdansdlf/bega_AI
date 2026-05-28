@@ -3246,7 +3246,9 @@ async def _generate_auto_brief_cache_background(
                 + ", ".join(dependency_degraded_reasons)
             )
         grounding_reasons = _normalize_grounding_reasons(grounding_reasons)
-        grounding_warnings = _merge_grounding_warnings(grounding_warnings, grounding_reasons)
+        grounding_warnings = _merge_grounding_warnings(
+            grounding_warnings, grounding_reasons
+        )
 
         response_payload = _build_deterministic_coach_response(
             game_evidence,
@@ -9869,7 +9871,9 @@ async def _execute_coach_tools_parallel(
                     compressed = payload.to_factsheet_dict()
                     # _dependency_degraded 플래그는 보존
                     if team_data.get("_dependency_degraded"):
-                        compressed["_dependency_degraded"] = team_data["_dependency_degraded"]
+                        compressed["_dependency_degraded"] = team_data[
+                            "_dependency_degraded"
+                        ]
                         compressed["_dependency_degraded_reason"] = team_data.get(
                             "_dependency_degraded_reason"
                         )
@@ -11393,8 +11397,13 @@ async def analyze_team(
                         lease_lost=lease_lost_event.is_set(),
                     )
                     # Add pre-game win probability for SCHEDULED auto-brief responses
-                    if is_auto_brief and game_evidence.game_status_bucket == "SCHEDULED":
-                        pre_game_prob = _calculate_pre_game_win_probability(tool_results)
+                    if (
+                        is_auto_brief
+                        and game_evidence.game_status_bucket == "SCHEDULED"
+                    ):
+                        pre_game_prob = _calculate_pre_game_win_probability(
+                            tool_results
+                        )
                         if pre_game_prob is not None:
                             meta_defaults["win_probability_home"] = pre_game_prob
                     finalize_result = _store_completed_cache(

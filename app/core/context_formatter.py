@@ -12,11 +12,13 @@ from . import kbo_metrics
 logger = logging.getLogger(__name__)
 
 # 규정 소스 테이블 집합 — rag.py의 _REGULATION_SOURCES와 동기화 유지
-_REGULATION_SOURCE_TABLES: frozenset = frozenset({
-    "markdown_docs",
-    "kbo_regulations",
-    "kbo_definitions",
-})
+_REGULATION_SOURCE_TABLES: frozenset = frozenset(
+    {
+        "markdown_docs",
+        "kbo_regulations",
+        "kbo_definitions",
+    }
+)
 
 
 class ContextFormatter:
@@ -53,7 +55,9 @@ class ContextFormatter:
         # stat_type/player_name이 있으면 통계/프로필 쿼리이므로 가로채지 않는다.
         _raw_docs_pre = processed_data.get("raw_docs", [])
         _reg_doc_count = sum(
-            1 for d in _raw_docs_pre if d.get("source_table") in _REGULATION_SOURCE_TABLES
+            1
+            for d in _raw_docs_pre
+            if d.get("source_table") in _REGULATION_SOURCE_TABLES
         )
         if (
             _reg_doc_count >= 2
@@ -667,7 +671,8 @@ class ContextFormatter:
         else:
             # game DB 레코드가 없을 때 → 규정 문서가 있으면 explanatory로 폴백
             _reg_docs = [
-                d for d in processed_data.get("raw_docs", [])
+                d
+                for d in processed_data.get("raw_docs", [])
                 if d.get("source_table") in _REGULATION_SOURCE_TABLES
             ]
             if _reg_docs:
@@ -857,7 +862,8 @@ class ContextFormatter:
         else:
             # movement DB 레코드가 없을 때 → 규정 문서가 있으면 explanatory로 폴백
             _reg_docs = [
-                d for d in processed_data.get("raw_docs", [])
+                d
+                for d in processed_data.get("raw_docs", [])
                 if d.get("source_table") in _REGULATION_SOURCE_TABLES
             ]
             if _reg_docs:

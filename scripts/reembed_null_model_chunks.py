@@ -60,8 +60,8 @@ except ModuleNotFoundError as exc:
 from app.config import get_settings
 from app.core.embeddings import async_embed_texts
 
-
 # ── 재시도 래퍼 (async) ──────────────────────────────────────────────────────
+
 
 async def _embed_with_retry(
     texts: List[str],
@@ -72,11 +72,13 @@ async def _embed_with_retry(
     """async_embed_texts 를 재시도 래퍼로 감싼다."""
     for attempt in range(max_attempts):
         try:
-            return await async_embed_texts(texts, settings, max_concurrency=max_concurrency)
+            return await async_embed_texts(
+                texts, settings, max_concurrency=max_concurrency
+            )
         except Exception as exc:
             if attempt == max_attempts - 1:
                 raise
-            wait = 2 ** attempt + random.uniform(0, 1)
+            wait = 2**attempt + random.uniform(0, 1)
             print(
                 f"  [WARN] embed failed (attempt {attempt + 1}/{max_attempts}), "
                 f"retrying in {wait:.1f}s: {exc}",
@@ -87,6 +89,7 @@ async def _embed_with_retry(
 
 
 # ── 메인 로직 (async) ────────────────────────────────────────────────────────
+
 
 def _build_where_clause(
     model_filter: str,
@@ -322,58 +325,80 @@ async def _main_async() -> int:
         description="rag_chunks 를 임베딩 후 UPDATE [v2 async] — NULL 청크 재임베딩 및 월별 local→openrouter 업그레이드 지원"
     )
     parser.add_argument(
-        "--batch-size", type=int, default=256,
+        "--batch-size",
+        type=int,
+        default=256,
         help="임베딩 배치 크기 (기본: 256)",
     )
     parser.add_argument(
-        "--commit-interval", type=int, default=2000,
+        "--commit-interval",
+        type=int,
+        default=2000,
         help="커밋 간격 — 청크 수 (기본: 2000)",
     )
     parser.add_argument(
-        "--max-concurrency", type=int, default=8,
+        "--max-concurrency",
+        type=int,
+        default=8,
         help="임베딩 API 동시 요청 수 (기본: 8)",
     )
     parser.add_argument(
-        "--source-table", default="",
+        "--source-table",
+        default="",
         help="특정 source_table 만 처리 (기본: 전체)",
     )
     parser.add_argument(
-        "--season-year", type=int, default=None,
+        "--season-year",
+        type=int,
+        default=None,
         help="특정 시즌만 처리 (예: 2026). 미지정 시 전체.",
     )
     parser.add_argument(
-        "--max-game-date", default="",
+        "--max-game-date",
+        default="",
         help="game_date 상한 YYYY-MM-DD (예: 2026-04-30). "
-             "game_date 없는 청크(season stats 등)는 이 필터와 무관하게 포함.",
+        "game_date 없는 청크(season stats 등)는 이 필터와 무관하게 포함.",
     )
     parser.add_argument(
-        "--min-game-date", default="",
+        "--min-game-date",
+        default="",
         help="game_date 하한 YYYY-MM-DD (예: 2026-05-01). "
-             "game_date 없는 청크는 이 필터로 제외됨.",
+        "game_date 없는 청크는 이 필터로 제외됨.",
     )
     parser.add_argument(
-        "--model-filter", choices=("null", "local"), default="null",
+        "--model-filter",
+        choices=("null", "local"),
+        default="null",
         help="처리할 청크 필터: null=embedding_model IS NULL (기본), "
-             "local=embedding_model LIKE 'local:%%' (월말 업그레이드용)",
+        "local=embedding_model LIKE 'local:%%' (월말 업그레이드용)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="임베딩 API 호출 없이 시뮬레이션 (DB 쓰기 없음)",
     )
     parser.add_argument(
-        "--db-url", default="",
+        "--db-url",
+        default="",
         help="대상 DB URL (기본: POSTGRES_DB_URL 환경변수)",
     )
     args = parser.parse_args()
 
     # ── 날짜 형식 검증 ───────────────────────────────────────────────────────
     from datetime import datetime as _dt
-    for flag, val in [("--max-game-date", args.max_game_date), ("--min-game-date", args.min_game_date)]:
+
+    for flag, val in [
+        ("--max-game-date", args.max_game_date),
+        ("--min-game-date", args.min_game_date),
+    ]:
         if val:
             try:
                 _dt.strptime(val, "%Y-%m-%d")
             except ValueError:
-                print(f"ERROR: {flag} 는 YYYY-MM-DD 형식이어야 합니다: {val!r}", file=sys.stderr)
+                print(
+                    f"ERROR: {flag} 는 YYYY-MM-DD 형식이어야 합니다: {val!r}",
+                    file=sys.stderr,
+                )
                 return 1
 
     settings = get_settings()

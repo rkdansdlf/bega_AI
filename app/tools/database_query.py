@@ -4281,9 +4281,13 @@ class DatabaseQueryTool:
                 away_team = game.get("away_team")
                 is_home = home_team in team_variants
                 opponent_name = (
-                    game.get("away_team_name") if is_home else game.get("home_team_name")
+                    game.get("away_team_name")
+                    if is_home
+                    else game.get("home_team_name")
                 )
-                team_score = game.get("home_score") if is_home else game.get("away_score")
+                team_score = (
+                    game.get("home_score") if is_home else game.get("away_score")
+                )
                 opponent_score = (
                     game.get("away_score") if is_home else game.get("home_score")
                 )
@@ -4384,7 +4388,9 @@ class DatabaseQueryTool:
             cursor.execute(target_query, (f"%{player_name}%", year))
             target_row = cursor.fetchone()
             if not target_row:
-                result["error"] = f"선수 '{player_name}'의 {year}년 타격 기록을 찾을 수 없습니다."
+                result["error"] = (
+                    f"선수 '{player_name}'의 {year}년 타격 기록을 찾을 수 없습니다."
+                )
                 return result
 
             target = dict(target_row)
@@ -4448,7 +4454,9 @@ class DatabaseQueryTool:
             average_row = cursor.fetchone()
             if not average_row or self.safe_int(average_row.get("sample_size")) == 0:
                 result["target"] = target
-                result["error"] = f"{year}년 {position_id} 포지션 평균 표본을 찾을 수 없습니다."
+                result["error"] = (
+                    f"{year}년 {position_id} 포지션 평균 표본을 찾을 수 없습니다."
+                )
                 return result
 
             average = dict(average_row)
@@ -4532,13 +4540,15 @@ class DatabaseQueryTool:
                 limit=recent_form_limit,
                 as_of_game_date=as_of_game_date,
                 exclude_game_id=exclude_game_id,
-            ) or {},
+            )
+            or {},
             "player_form_signals": self.get_team_player_form_signals(
                 team_name,
                 year,
                 as_of_game_date=as_of_game_date,
                 exclude_game_id=exclude_game_id,
-            ) or {},
+            )
+            or {},
         }
         team_code = self.get_team_code(team_name, year) or team_name
         return CoachTeamPayload.from_team_data_dict(

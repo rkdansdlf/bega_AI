@@ -63,6 +63,7 @@ def _record_cache_by_intent(intent: str, result: str) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+
 logger = logging.getLogger(__name__)
 load_dotenv()
 router = APIRouter(prefix="/ai/chat", tags=["chat"])

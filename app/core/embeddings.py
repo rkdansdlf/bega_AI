@@ -50,10 +50,12 @@ def _get_hf_model(model_name: str):
         if cached is not None:
             return cached
         from sentence_transformers import SentenceTransformer  # type: ignore
+
         logger.info("[Embeddings] Loading HF model %s (cached for reuse)", model_name)
         model = SentenceTransformer(model_name)
         _HF_MODEL_CACHE[model_name] = model
         return model
+
 
 _QUERY_WHITESPACE_RE = re.compile(r"\s+")
 
@@ -122,7 +124,9 @@ async def _get_cached_query_embedding(cache_key: str) -> Optional[List[float]]:
     return await backend.get(cache_key)
 
 
-async def _set_cached_query_embedding(cache_key: str, embedding: List[float], *, query: str = "") -> None:
+async def _set_cached_query_embedding(
+    cache_key: str, embedding: List[float], *, query: str = ""
+) -> None:
     from .embedding_cache import get_backend, _calculate_embedding_ttl
 
     backend = await get_backend()
@@ -713,6 +717,7 @@ def embed_texts(
         finally:
             # 공유 httpx 클라이언트를 현재 루프에서 정리하여 다음 루프가 깨끗하게 시작
             from app.core.http_clients import close_shared_httpx_clients
+
             try:
                 new_loop.run_until_complete(close_shared_httpx_clients())
             except Exception:

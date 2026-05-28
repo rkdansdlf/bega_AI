@@ -134,7 +134,9 @@ def normalize_romanized_player_names(text: str) -> str:
         return text
 
     lower_text = text.lower()
-    for romanized, korean in sorted(_ROMANIZED_PLAYER_NAMES.items(), key=lambda x: -len(x[0])):
+    for romanized, korean in sorted(
+        _ROMANIZED_PLAYER_NAMES.items(), key=lambda x: -len(x[0])
+    ):
         if romanized in lower_text:
             # 대소문자 무관하게 교체
             pattern = re.compile(re.escape(romanized), re.IGNORECASE)
@@ -157,7 +159,9 @@ def normalize_english_stats(text: str) -> str:
         return text
 
     lower_text = text.lower()
-    for english, korean in sorted(_ENGLISH_STAT_TO_KOREAN.items(), key=lambda x: -len(x[0])):
+    for english, korean in sorted(
+        _ENGLISH_STAT_TO_KOREAN.items(), key=lambda x: -len(x[0])
+    ):
         if english in lower_text:
             pattern = re.compile(re.escape(english), re.IGNORECASE)
             text = pattern.sub(korean, text)

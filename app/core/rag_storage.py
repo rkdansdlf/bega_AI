@@ -16,10 +16,16 @@ _SOURCE_LINE_RE = re.compile(r"(?m)^\s*(?:출처|source)\s*:.*$")
 _URL_RE = re.compile(r"https?://\S+")
 _MEANINGFUL_RE = re.compile(r"[0-9A-Za-z가-힣]")
 _PART_SUFFIX_RE = re.compile(r"#part(\d+)$")
-_API_PATH_RE = re.compile(r"(?:^|[\s`'\"(])/(?:api/)?[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+")
+_API_PATH_RE = re.compile(
+    r"(?:^|[\s`'\"(])/(?:api/)?[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+"
+)
 _OAUTH_URI_RE = re.compile(r"https?://\S*(?:oauth2|redirect_uri|/login/)\S*")
-_ERROR_CODE_RE = re.compile(r"\b(?:[45]\d{2}|ERR_[A-Z0-9_]+|[A-Z][A-Z0-9_]{2,}|[A-Za-z]+Error)\b")
-_CONFIG_KEY_RE = re.compile(r"\b(?:[a-z][a-z0-9_]*(?:\.[a-z0-9_-]+)+|[A-Z][A-Z0-9_]{2,})\b")
+_ERROR_CODE_RE = re.compile(
+    r"\b(?:[45]\d{2}|ERR_[A-Z0-9_]+|[A-Z][A-Z0-9_]{2,}|[A-Za-z]+Error)\b"
+)
+_CONFIG_KEY_RE = re.compile(
+    r"\b(?:[a-z][a-z0-9_]*(?:\.[a-z0-9_-]+)+|[A-Z][A-Z0-9_]{2,})\b"
+)
 _KBO_TEAM_RE = re.compile(
     r"\b(?:KIA|KT|LG|NC|SSG|롯데|삼성|한화|두산|키움|기아|케이티|엔씨)\b",
     re.IGNORECASE,
@@ -29,7 +35,9 @@ _SEAT_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _RAW_CHAT_SOURCE_TYPES = {"raw_chat", "raw_chat_log"}
-_RAW_CHAT_TRANSCRIPT_RE = re.compile(r"(?mi)^\s*(?:사용자|user|ai|assistant|챗봇)\s*[:：]")
+_RAW_CHAT_TRANSCRIPT_RE = re.compile(
+    r"(?mi)^\s*(?:사용자|user|ai|assistant|챗봇)\s*[:：]"
+)
 _CHAT_MEMORY_SUMMARY_MARKERS = (
     "[문제]",
     "[결론]",
@@ -103,7 +111,9 @@ _SENSITIVE_PATTERNS = (
     ),
     (
         "db_url_credential",
-        re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|oracle)://[^/\s:@]+:[^@\s]+@"),
+        re.compile(
+            r"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|oracle)://[^/\s:@]+:[^@\s]+@"
+        ),
     ),
     (
         "database_url",
@@ -431,7 +441,9 @@ def normalize_metadata(
     return metadata
 
 
-def guard_raw_chat_source(source_table: str, source_type: str, content: str = "") -> None:
+def guard_raw_chat_source(
+    source_table: str, source_type: str, content: str = ""
+) -> None:
     if source_type in _RAW_CHAT_SOURCE_TYPES:
         raise ValueError(
             "raw chat rows must not be embedded directly; store summarized "
@@ -448,9 +460,13 @@ def guard_raw_chat_source(source_table: str, source_type: str, content: str = ""
 
 def _guard_chat_memory_summary(content: str) -> None:
     normalized = normalize_content_for_hash(content)
-    has_summary_marker = any(marker in normalized for marker in _CHAT_MEMORY_SUMMARY_MARKERS)
+    has_summary_marker = any(
+        marker in normalized for marker in _CHAT_MEMORY_SUMMARY_MARKERS
+    )
     if _RAW_CHAT_TRANSCRIPT_RE.search(content) and not has_summary_marker:
-        raise ValueError("chat_memory chunks must be summarized memory, not raw transcript")
+        raise ValueError(
+            "chat_memory chunks must be summarized memory, not raw transcript"
+        )
     if not has_summary_marker:
         raise ValueError("chat_memory chunks must include a summary marker")
 
@@ -478,7 +494,9 @@ def build_chunk_storage_fields(
     resolved_source_type = infer_source_type(source_table, meta, source_type)
     _raise_if_sensitive_storage_payload(content=content, meta=meta)
     guard_raw_chat_source(source_table, resolved_source_type, content)
-    resolved_source_uri = source_uri or infer_source_uri(source_table, source_row_id, meta)
+    resolved_source_uri = source_uri or infer_source_uri(
+        source_table, source_row_id, meta
+    )
     resolved_topic_key = infer_topic_key(source_table, source_row_id, meta, topic_key)
     resolved_metadata = normalize_metadata(
         meta,
@@ -503,7 +521,8 @@ def build_chunk_storage_fields(
             content_hash_value=hash_value,
         ),
         "embedding_model": embedding_model or resolve_embedding_model(settings),
-        "embedding_dim": embedding_dim or int(getattr(settings, "embed_dim", 1536) or 1536),
+        "embedding_dim": embedding_dim
+        or int(getattr(settings, "embed_dim", 1536) or 1536),
         "embedding_version": embedding_version or resolve_embedding_version(settings),
         "chunking_version": chunking_version or resolve_chunking_version(settings),
         "quality_score": infer_quality_score(
@@ -746,8 +765,7 @@ def soft_deactivate_missing_source_rows(
             valid_to = COALESCE(valid_to, now()),
             updated_at = now()
         WHERE
-        """
-        + predicate,
+        """ + predicate,
         params,
     )
     return int(getattr(cur, "rowcount", 0) or 0)

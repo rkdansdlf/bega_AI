@@ -89,7 +89,7 @@ def _embed_with_retry(
         except Exception as exc:
             if attempt == max_attempts - 1:
                 raise
-            wait = 2 ** attempt + random.uniform(0, 1)
+            wait = 2**attempt + random.uniform(0, 1)
             _ingest_logger.warning(
                 "Embed batch failed (attempt %d/%d), retrying in %.1fs: %s",
                 attempt + 1,
@@ -99,6 +99,8 @@ def _embed_with_retry(
             )
             time.sleep(wait)
     raise RuntimeError("unreachable")
+
+
 from app.core.rag_storage import (
     RAG_CHUNKS_UPSERT_SQL,
     base_source_row_id,
@@ -1315,8 +1317,7 @@ def build_static_chunk_meta(
     source_type = _static_source_type(source_table, relative_path, profile)
     source_uri = str(profile.get("source_uri") or f"file:{relative_path}")
     topic_key = str(
-        profile.get("topic_key")
-        or build_static_source_row_prefix(profile_key, profile)
+        profile.get("topic_key") or build_static_source_row_prefix(profile_key, profile)
     )
     return {
         "source_file": str(Path(profile["source_file"]).resolve()),
@@ -1858,12 +1859,12 @@ def _build_chunk_payload_dicts_for_row(
         return []
 
     manual_meta = (
-        _manual_lineup_notes_meta(row)
-        if target_source_table == "game_lineups"
-        else {}
+        _manual_lineup_notes_meta(row) if target_source_table == "game_lineups" else {}
     )
     source_type = str(profile.get("source_type") or "kbo_db_table")
-    source_uri = str(profile.get("source_uri") or f"db:{target_source_table}:{source_row_id}")
+    source_uri = str(
+        profile.get("source_uri") or f"db:{target_source_table}:{source_row_id}"
+    )
     if manual_meta:
         source_type = "manual_lineup"
         source_uri = str(manual_meta.get("source_url") or source_uri)
@@ -2093,11 +2094,15 @@ def flush_chunks(
         if "sensitive content:" not in message:
             raise exc
         raw_findings = message.rsplit(":", 1)[-1]
-        return [finding.strip() for finding in raw_findings.split(",") if finding.strip()]
+        return [
+            finding.strip() for finding in raw_findings.split(",") if finding.strip()
+        ]
 
     for item in buffer:
         sensitive_findings = sorted(
-            set(scan_sensitive_content(item.content) + scan_sensitive_content(item.meta))
+            set(
+                scan_sensitive_content(item.content) + scan_sensitive_content(item.meta)
+            )
         )
         if sensitive_findings:
             _record_sensitive_skip(sensitive_findings)
