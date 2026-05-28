@@ -143,6 +143,7 @@ class BaseballAgentRuntime:
         chat_stream_first_token_retry_max_attempts: int = 0,
         tool_definitions: tuple[ToolDefinition, ...] | None = None,
         tool_description_text: str | None = None,
+        latest_baseball_tool: Any = None,
     ) -> None:
         global _AGENT_RUNTIME_COUNTER
 
@@ -237,6 +238,7 @@ class BaseballAgentRuntime:
             if tool_description_text is not None
             else ToolCaller.describe_definitions(self.tool_definitions)
         )
+        self.latest_baseball_tool = latest_baseball_tool
         self.chat_intent_router = ChatIntentRouter(
             fast_path_enabled=self.fast_path_enabled,
             fast_path_scope=self.fast_path_scope,
@@ -475,12 +477,18 @@ INVALID_PLAYER_NAME_TOKENS = {
     "약점",
     "리스크",
     "페이스",
+    "어때",
     "가을야구",
     "플레이오프",
     "분석",
     "시즌",
     "최근",
     "젊은",
+    "포지션",
+    "비교하면",
+    "데이터",
+    "기준",
+    "기준으",
 }
 
 PLAYER_NAME_NORMALIZATION_SUFFIXES = (
@@ -522,12 +530,15 @@ TEAM_LLM_ALLOWED_TOOLS = {
     "get_team_advanced_metrics",
     "get_team_rank",
     "get_team_last_game",
+    "get_team_tough_matchups",
+    "get_team_fielding_error_games",
 }
 
 PLAYER_LLM_ALLOWED_TOOLS = {
     "validate_player",
     "get_player_stats",
     "get_career_stats",
+    "get_player_position_average_comparison",
 }
 
 MULTI_PLAYER_EXPANDABLE_TOOLS = {
@@ -555,10 +566,14 @@ REFERENCE_YEAR_DEFAULT_TOOLS = {
     "get_pitcher_starting_win_rate",
     "get_player_stats",
     "get_player_wpa_stats",
+    "get_recent_games_by_team",
     "get_team_advanced_metrics",
+    "get_team_fielding_error_games",
     "get_team_last_game",
     "get_team_rank",
     "get_team_summary",
+    "get_team_tough_matchups",
+    "get_player_position_average_comparison",
     "get_velocity_data",
     "validate_player",
 }
@@ -576,13 +591,17 @@ SERIAL_DB_TOOL_NAMES = {
     "get_pitcher_starting_win_rate",
     "get_player_game_performance",
     "get_player_stats",
+    "get_recent_games_by_team",
     "get_season_final_game_date",
     "get_team_advanced_metrics",
     "get_team_by_rank",
+    "get_team_fielding_error_games",
     "get_team_last_game",
     "get_team_rank",
     "get_team_summary",
+    "get_team_tough_matchups",
     "get_velocity_data",
+    "get_player_position_average_comparison",
     "get_player_wpa_stats",
     "search_documents",
     "search_regulations",
@@ -1170,6 +1189,28 @@ class BaseballStatisticsAgent:
             self._tool_get_team_advanced_metrics,
         )
 
+        self.tool_caller.register_tool(
+            "get_team_tough_matchups",
+            "팀이 해당 시즌 상대전적에서 가장 고전한 상대를 조회합니다. '누구만 만나면 꼬이는지', '까다로운 팀' 질문에 사용하세요.",
+            {
+                "team_name": "팀명 (KIA, LG, 두산 등)",
+                "year": "시즌 년도",
+                "limit": "상위 몇 팀까지 (선택적, 기본 3팀)",
+            },
+            self._tool_get_team_tough_matchups,
+        )
+
+        self.tool_caller.register_tool(
+            "get_team_fielding_error_games",
+            "팀의 실책/수비 관련 경기 요약 장면을 조회합니다. 수비 실책 때문에 흔들린 경기 질문에 사용하세요.",
+            {
+                "team_name": "팀명 (KIA, LG, 두산 등)",
+                "year": "시즌 년도",
+                "limit": "상위 몇 경기까지 (선택적, 기본 5경기)",
+            },
+            self._tool_get_team_fielding_error_games,
+        )
+
         # 포지션 정보 조회 도구
         self.tool_caller.register_tool(
             "get_position_info",
@@ -1217,6 +1258,17 @@ class BaseballStatisticsAgent:
                 "position": "batting(타자), pitching(투수), 또는 both(둘다, 기본값)",
             },
             self._tool_get_advanced_stats,
+        )
+
+        self.tool_caller.register_tool(
+            "get_player_position_average_comparison",
+            "선수의 시즌 기록을 같은 주 포지션 선수 평균과 비교합니다. '같은 포지션 선수와 비교' 질문에 사용하세요.",
+            {
+                "player_name": "선수명",
+                "year": "시즌 년도",
+                "min_plate_appearances": "포지션 평균 표본 최소 타석 (선택적, 기본 100)",
+            },
+            self._tool_get_player_position_average_comparison,
         )
 
         # KBO 규정 검색 도구
@@ -2194,6 +2246,68 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
+    def _tool_get_team_tough_matchups(
+        self, team_name: str, year: int, limit: int = 3
+    ) -> ToolResult:
+        """상대전적상 까다로운 팀 조회 도구"""
+        try:
+            result = self.db_query_tool.get_team_tough_matchups(
+                team_name, year, limit
+            )
+            if result.get("error"):
+                return ToolResult(
+                    success=False,
+                    data=result,
+                    message=f"상대전적 조회 오류: {result['error']}",
+                )
+            if not result.get("found"):
+                return ToolResult(
+                    success=True,
+                    data=result,
+                    message=f"{year}년 {team_name} 상대전적 난적 데이터를 찾을 수 없습니다.",
+                )
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"{year}년 {team_name}의 까다로운 상대전적 팀을 조회했습니다.",
+            )
+        except Exception as e:
+            logger.error(f"Team tough matchup tool error: {e}")
+            return ToolResult(
+                success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
+            )
+
+    def _tool_get_team_fielding_error_games(
+        self, team_name: str, year: int, limit: int = 5
+    ) -> ToolResult:
+        """수비 실책 기반 경기 장면 조회 도구"""
+        try:
+            result = self.db_query_tool.get_team_fielding_error_games(
+                team_name, year, limit
+            )
+            if result.get("error"):
+                return ToolResult(
+                    success=False,
+                    data=result,
+                    message=f"실책 경기 조회 오류: {result['error']}",
+                )
+            if not result.get("found"):
+                return ToolResult(
+                    success=True,
+                    data=result,
+                    message=f"{year}년 {team_name} 실책 관련 경기 요약을 찾을 수 없습니다.",
+                )
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"{year}년 {team_name} 실책 관련 경기 요약을 조회했습니다.",
+            )
+        except Exception as e:
+            logger.error(f"Team fielding error tool error: {e}")
+            return ToolResult(
+                success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
+            )
+
     def _tool_get_position_info(self, position_abbr: str) -> ToolResult:
         """포지션 정보 조회 도구"""
         try:
@@ -2523,6 +2637,42 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"고급 통계 도구 실행 중 오류 발생: {e}"
             )
 
+    def _tool_get_player_position_average_comparison(
+        self,
+        player_name: str,
+        year: int,
+        min_plate_appearances: int = 100,
+    ) -> ToolResult:
+        """같은 포지션 평균 대비 선수 기록 비교 도구"""
+        try:
+            result = self.db_query_tool.get_player_position_average_comparison(
+                player_name,
+                year,
+                min_plate_appearances=min_plate_appearances,
+            )
+            if result.get("error"):
+                return ToolResult(
+                    success=False,
+                    data=result,
+                    message=f"포지션 평균 비교 조회 오류: {result['error']}",
+                )
+            if not result.get("found"):
+                return ToolResult(
+                    success=True,
+                    data=result,
+                    message=f"{year}년 {player_name} 포지션 평균 비교 데이터를 찾을 수 없습니다.",
+                )
+            return ToolResult(
+                success=True,
+                data=result,
+                message=f"{year}년 {player_name}의 같은 포지션 평균 비교를 조회했습니다.",
+            )
+        except Exception as e:
+            logger.error(f"Player position average comparison tool error: {e}")
+            return ToolResult(
+                success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
+            )
+
     def _tool_get_head_to_head(
         self, team1: str, team2: str, year: int = None, limit: int = 10
     ) -> ToolResult:
@@ -2712,6 +2862,7 @@ class BaseballStatisticsAgent:
                             "season_rank": rank_result["rank"],
                             "wins": rank_result["wins"],
                             "losses": rank_result["losses"],
+                            "draws": rank_result.get("draws", 0),
                             "year": year,
                             "found": True,
                         },
@@ -4716,6 +4867,11 @@ class BaseballStatisticsAgent:
                 "whip",
                 "세이브",
                 "홀드",
+                "강점",
+                "약점",
+                "핵심",
+                "데이터",
+                "비교",
             ]
             if any(keyword in query_lower for keyword in player_stat_keywords):
                 return {
@@ -7250,6 +7406,7 @@ class BaseballStatisticsAgent:
         metric_label = {
             "ops": "OPS",
             "home_runs": "홈런",
+            "hits": "안타",
             "avg": "타율",
             "rbi": "타점",
             "era": "ERA",
@@ -7644,6 +7801,13 @@ class BaseballStatisticsAgent:
         *,
         chat_mode: bool,
     ) -> Optional[str]:
+        team_rank_form_answer = self._build_team_rank_form_answer(
+            tool_results,
+            chat_mode=chat_mode,
+        )
+        if team_rank_form_answer:
+            return team_rank_form_answer
+
         team_bundle_answer = self._build_team_bundle_answer(
             query,
             tool_results,
@@ -7658,10 +7822,268 @@ class BaseballStatisticsAgent:
 
         return self._build_player_bundle_answer(tool_results)
 
+    def _build_team_rank_form_answer(
+        self, tool_results: List[ToolResult], *, chat_mode: bool
+    ) -> Optional[str]:
+        rank_data: Optional[Dict[str, Any]] = None
+        recent_data: Optional[Dict[str, Any]] = None
+
+        for result in tool_results:
+            if not result.success or not isinstance(result.data, dict):
+                continue
+            data = result.data
+            if data.get("team_rank") is not None or data.get("season_rank") is not None:
+                rank_data = data
+            elif "games" in data and data.get("team_name"):
+                recent_data = data
+
+        if rank_data is None or recent_data is None:
+            return None
+
+        team_name = self._format_team_display_name(rank_data.get("team_name"))
+        year = self._format_deterministic_metric(rank_data.get("year"))
+        team_rank = rank_data.get("team_rank") or rank_data.get("season_rank")
+        if team_name == "확인 불가" or year == "확인 불가" or not team_rank:
+            return None
+
+        def _int_value(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        wins = _int_value(rank_data.get("wins"))
+        losses = _int_value(rank_data.get("losses"))
+        draws = _int_value(rank_data.get("draws"))
+        decided = wins + losses
+        season_win_rate = round(wins / decided, 3) if decided else None
+
+        games = recent_data.get("games") or []
+        summary = recent_data.get("summary") or {}
+        recent_wins = _int_value(summary.get("wins"))
+        recent_losses = _int_value(summary.get("losses"))
+        recent_draws = _int_value(summary.get("draws"))
+        run_diff = summary.get("run_diff")
+        if not summary and games:
+            run_diff_total = 0
+            recent_team_code = str(recent_data.get("team_code") or "")
+            for game in games:
+                result_label = str(game.get("team_result") or "").lower()
+                if result_label == "win":
+                    recent_wins += 1
+                elif result_label == "draw":
+                    recent_draws += 1
+                elif result_label == "loss":
+                    recent_losses += 1
+
+                home_score = game.get("home_score")
+                away_score = game.get("away_score")
+                if isinstance(home_score, int) and isinstance(away_score, int):
+                    is_home = recent_team_code == str(
+                        game.get("home_team") or game.get("home_team_code") or ""
+                    )
+                    if is_home:
+                        run_diff_total += home_score - away_score
+                    else:
+                        run_diff_total += away_score - home_score
+            run_diff = run_diff_total
+        recent_decided = recent_wins + recent_losses
+        recent_rate = summary.get("win_rate")
+        if recent_rate is None and recent_decided:
+            recent_rate = round(recent_wins / recent_decided, 3)
+        sample_size = len(games)
+        recent_bits = []
+        if recent_wins or recent_losses or recent_draws:
+            recent_bits.append(f"{recent_wins}승 {recent_losses}패")
+            if recent_draws:
+                recent_bits[-1] += f" {recent_draws}무"
+        if recent_rate is not None:
+            recent_bits.append(f"승률 {recent_rate}")
+        if run_diff is not None:
+            recent_bits.append(f"득실 {run_diff:+d}" if isinstance(run_diff, int) else f"득실 {run_diff}")
+        recent_text = ", ".join(recent_bits) if recent_bits else "최근 경기 흐름 집계"
+
+        season_record = f"{wins}승 {losses}패"
+        if draws:
+            season_record += f" {draws}무"
+        if season_win_rate is not None:
+            season_record += f", 승률 {season_win_rate:.3f}"
+
+        if chat_mode:
+            return (
+                f"{year}년 {team_name}는 현재 정규시즌 {team_rank}위이고, 시즌 기록은 {season_record}입니다.\n\n"
+                f"최근 {sample_size}경기 흐름은 {recent_text}로 잡힙니다.\n\n"
+                "순위 자체는 시즌 누적 승률이고, 최근 흐름은 직전 경기 묶음이라 둘을 나눠 보면 현재 페이스가 더 선명합니다."
+            )
+
+        return (
+            "## 요약\n"
+            f"{year}년 {team_name}는 정규시즌 {team_rank}위, 시즌 기록은 {season_record}입니다.\n\n"
+            "## 상세 내역\n"
+            f"- 최근 {sample_size}경기 흐름은 {recent_text}입니다.\n"
+            "- 순위는 시즌 누적, 흐름은 최근 경기 표본 기준입니다.\n\n"
+            "## 핵심 지표\n"
+            "| 항목 | 값 |\n"
+            "| --- | --- |\n"
+            f"| 순위 | {team_rank}위 |\n"
+            f"| 시즌 기록 | {season_record} |\n"
+            f"| 최근 경기 | {recent_text} |\n\n"
+            "출처: DB 조회 결과"
+        )
+
+    def _build_team_tough_matchup_answer(
+        self, data: Dict[str, Any], *, chat_mode: bool
+    ) -> Optional[str]:
+        matchups = data.get("tough_matchups") or []
+        if not isinstance(matchups, list) or not matchups:
+            return None
+
+        team_name = self._format_team_display_name(data.get("team_name"))
+        year = self._format_deterministic_metric(data.get("year"))
+        top = matchups[0]
+        opponent = self._format_team_display_name(top.get("opponent"))
+        if opponent == "확인 불가":
+            opponent = self._format_deterministic_metric(top.get("opponent"))
+        games = self._format_deterministic_metric(top.get("games"))
+        wins = self._format_deterministic_metric(top.get("wins"))
+        losses = self._format_deterministic_metric(top.get("losses"))
+        draws = self._format_deterministic_metric(top.get("draws"))
+        win_rate = self._format_deterministic_metric(top.get("win_rate"))
+
+        ranked_lines = []
+        for index, row in enumerate(matchups[:3], start=1):
+            row_opponent = self._format_team_display_name(row.get("opponent"))
+            if row_opponent == "확인 불가":
+                row_opponent = self._format_deterministic_metric(row.get("opponent"))
+            ranked_lines.append(
+                f"{index}순위 {row_opponent}: {row.get('wins', 0)}승 {row.get('losses', 0)}패 {row.get('draws', 0)}무, 승률 {row.get('win_rate', 0)}"
+            )
+
+        if chat_mode:
+            return (
+                f"{year}년 {team_name}가 상대전적상 가장 까다롭게 만난 팀은 {opponent}입니다.\n\n"
+                f"맞대결 {games}경기에서 {wins}승 {losses}패 {draws}무, 승률 {win_rate}로 잡혀서 이 상대가 우선 표시됩니다.\n\n"
+                + "\n".join(ranked_lines)
+            )
+
+        return (
+            "## 요약\n"
+            f"{year}년 {team_name} 기준 가장 까다로운 상대는 {opponent}입니다.\n\n"
+            "## 상세 내역\n"
+            f"- 맞대결 {games}경기, {wins}승 {losses}패 {draws}무입니다.\n"
+            f"- 승률은 {win_rate}로 집계됩니다.\n\n"
+            "## 핵심 지표\n"
+            + "\n".join(f"- {line}" for line in ranked_lines)
+            + "\n\n출처: DB 조회 결과"
+        )
+
+    def _build_team_fielding_error_games_answer(
+        self, data: Dict[str, Any], *, chat_mode: bool
+    ) -> Optional[str]:
+        games = data.get("fielding_error_games") or []
+        if not isinstance(games, list) or not games:
+            return None
+
+        team_name = self._format_team_display_name(data.get("team_name"))
+        year = self._format_deterministic_metric(data.get("year"))
+        lead = games[0]
+        opponent = self._format_team_display_name(lead.get("opponent"))
+        if opponent == "확인 불가":
+            opponent = self._format_deterministic_metric(lead.get("opponent"))
+        detail = self._shorten_chat_excerpt(lead.get("detail_text"), limit=130)
+        lead_line = (
+            f"{lead.get('game_date')} {opponent}전 {lead.get('score')} "
+            f"{lead.get('result')} 경기의 장면이 먼저 잡힙니다. {detail}"
+        )
+        game_lines = []
+        for index, row in enumerate(games[:3], start=1):
+            row_opponent = self._format_team_display_name(row.get("opponent"))
+            if row_opponent == "확인 불가":
+                row_opponent = self._format_deterministic_metric(row.get("opponent"))
+            game_lines.append(
+                f"{index}. {row.get('game_date')} {row_opponent}전 {row.get('score')} {row.get('result')}: "
+                f"{self._shorten_chat_excerpt(row.get('detail_text'), limit=90)}"
+            )
+
+        if chat_mode:
+            return (
+                f"{year}년 {team_name} 수비 실책 관련 경기 요약은 {len(games)}건 잡혀 있습니다.\n\n"
+                f"{lead_line}\n\n"
+                + "\n".join(game_lines)
+            )
+
+        return (
+            "## 요약\n"
+            f"{year}년 {team_name} 수비 실책 관련 경기 요약은 {len(games)}건입니다.\n\n"
+            "## 상세 내역\n"
+            + "\n".join(f"- {line}" for line in game_lines)
+            + "\n\n출처: DB 조회 결과"
+        )
+
+    def _build_position_average_comparison_answer(
+        self, data: Dict[str, Any], *, chat_mode: bool
+    ) -> Optional[str]:
+        target = data.get("target") or {}
+        average = data.get("position_average") or {}
+        deltas = data.get("deltas") or {}
+        if not target or not average:
+            return None
+
+        player_name = self._format_deterministic_metric(data.get("player_name"))
+        year = self._format_deterministic_metric(data.get("year"))
+        position_name = self._format_deterministic_metric(
+            data.get("position_name") or data.get("position_id")
+        )
+        sample_size = self._format_deterministic_metric(data.get("sample_size"))
+
+        def _metric_line(label: str, key: str) -> str:
+            player_value = self._format_deterministic_metric(target.get(key))
+            avg_value = self._format_deterministic_metric(average.get(key))
+            delta = deltas.get(key)
+            delta_text = (
+                f"{delta:+.3f}" if isinstance(delta, float) else self._format_deterministic_metric(delta)
+            )
+            return f"{label}: {player_value} / 포지션 평균 {avg_value} / 차이 {delta_text}"
+
+        ops_line = _metric_line("OPS", "ops")
+        avg_line = _metric_line("타율", "avg")
+        hr_line = _metric_line("홈런", "home_runs")
+        hits_line = _metric_line("안타", "hits")
+
+        if chat_mode:
+            return (
+                f"{year}년 {player_name}을 같은 포지션({position_name}) 평균과 비교하면 OPS와 타격 생산성부터 보는 게 좋습니다.\n\n"
+                f"{ops_line}\n\n{avg_line}\n\n{hr_line}\n\n"
+                f"비교 표본은 {position_name} 주 포지션 선수 {sample_size}명입니다."
+            )
+
+        return (
+            "## 요약\n"
+            f"{year}년 {player_name}의 같은 포지션({position_name}) 평균 비교입니다.\n\n"
+            "## 핵심 지표\n"
+            f"- {ops_line}\n"
+            f"- {avg_line}\n"
+            f"- {hr_line}\n"
+            f"- {hits_line}\n\n"
+            f"출처: DB 조회 결과, 표본 {sample_size}명"
+        )
+
     def _build_fast_path_answer(
         self, query: str, tool_results: List[ToolResult], chat_mode: bool = False
     ) -> Optional[str]:
         """Fast-path 팀 질문은 LLM 없이 DB 결과만으로 즉시 답변을 생성합니다."""
+        for result in tool_results:
+            if not result.success or not isinstance(result.data, dict):
+                continue
+            data = result.data
+            if "batting_stats" in data or "pitching_stats" in data:
+                if chat_mode:
+                    answer = self._build_player_stats_chat_answer(data)
+                else:
+                    answer = self._build_player_stats_answer(data)
+                if answer:
+                    return answer
+
         summary_data: Dict[str, Any] = {}
         advanced_data: Dict[str, Any] = {}
         recent_data: Dict[str, Any] = {}
@@ -9268,6 +9690,7 @@ class BaseballStatisticsAgent:
             "ops",
             "era",
             "home_runs",
+            "hits",
             "rbi",
             "saves",
             "holds",
@@ -9304,6 +9727,9 @@ class BaseballStatisticsAgent:
             "ops": "OPS",
             "hr": "홈런",
             "homeruns": "홈런",
+            "home_runs": "홈런",
+            "hits": "안타",
+            "안타": "안타",
             "rbi": "타점",
             "wins": "다승",
             "win": "다승",
@@ -9843,6 +10269,25 @@ class BaseballStatisticsAgent:
 
             data = result.data
 
+            if "tough_matchups" in data:
+                answer = self._build_team_tough_matchup_answer(data, chat_mode=True)
+                if answer:
+                    return answer
+
+            if "fielding_error_games" in data:
+                answer = self._build_team_fielding_error_games_answer(
+                    data, chat_mode=True
+                )
+                if answer:
+                    return answer
+
+            if "position_average" in data and "target" in data:
+                answer = self._build_position_average_comparison_answer(
+                    data, chat_mode=True
+                )
+                if answer:
+                    return answer
+
             if "batting_stats" in data or "pitching_stats" in data:
                 answer = self._build_player_stats_chat_answer(data)
                 if answer:
@@ -9932,6 +10377,25 @@ class BaseballStatisticsAgent:
                 continue
 
             data = result.data
+
+            if "tough_matchups" in data:
+                answer = self._build_team_tough_matchup_answer(data, chat_mode=False)
+                if answer:
+                    return answer
+
+            if "fielding_error_games" in data:
+                answer = self._build_team_fielding_error_games_answer(
+                    data, chat_mode=False
+                )
+                if answer:
+                    return answer
+
+            if "position_average" in data and "target" in data:
+                answer = self._build_position_average_comparison_answer(
+                    data, chat_mode=False
+                )
+                if answer:
+                    return answer
 
             if "batting_stats" in data or "pitching_stats" in data:
                 answer = self._build_player_stats_answer(data)

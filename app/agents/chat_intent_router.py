@@ -183,6 +183,78 @@ class ChatIntentRouter:
                 analysis=f"stat_leader_fast_path:{_stat_leader['stat_name']}",
             )
 
+        if team_name and self._is_team_rank_flow_query(query_lower):
+            return IntentDecision(
+                intent=ChatIntent.TEAM_ANALYSIS,
+                planner_mode="fast_path_bundle",
+                tool_calls=[
+                    ToolCall(
+                        "get_team_rank",
+                        {"team_name": team_name, "year": season_year},
+                    ),
+                    ToolCall(
+                        "get_recent_games_by_team",
+                        {"team_name": team_name, "year": season_year, "limit": 10},
+                    ),
+                ],
+                subject_type="team_rank_form",
+                season_year=season_year,
+                metric_policy="team_rank_win_rate_flow",
+                confidence=0.97,
+                analysis="팀 순위와 승률 흐름을 함께 묻는 질의로 판단되어 rank+recent fast-path를 사용합니다.",
+            )
+
+        if team_name and self._is_team_tough_matchup_query(query_lower):
+            return IntentDecision(
+                intent=ChatIntent.TEAM_ANALYSIS,
+                planner_mode="fast_path",
+                tool_calls=[
+                    ToolCall(
+                        "get_team_tough_matchups",
+                        {"team_name": team_name, "year": season_year, "limit": 3},
+                    )
+                ],
+                subject_type="team_tough_matchup",
+                season_year=season_year,
+                metric_policy="team_tough_matchup",
+                confidence=0.97,
+                analysis="까다로운 상대전적 팀을 묻는 질의로 판단되어 matchup fast-path를 사용합니다.",
+            )
+
+        if team_name and self._is_team_fielding_error_query(query_lower):
+            return IntentDecision(
+                intent=ChatIntent.TEAM_ANALYSIS,
+                planner_mode="fast_path",
+                tool_calls=[
+                    ToolCall(
+                        "get_team_fielding_error_games",
+                        {"team_name": team_name, "year": season_year, "limit": 5},
+                    )
+                ],
+                subject_type="team_fielding_error_games",
+                season_year=season_year,
+                metric_policy="team_fielding_error_games",
+                confidence=0.97,
+                analysis="수비 실책 기반 경기 질의로 판단되어 fielding-error fast-path를 사용합니다.",
+            )
+
+        if player_name and self._is_same_position_comparison_query(query_lower):
+            return IntentDecision(
+                intent=ChatIntent.PLAYER_LOOKUP,
+                planner_mode="fast_path",
+                tool_calls=[
+                    ToolCall(
+                        "get_player_position_average_comparison",
+                        {"player_name": player_name, "year": season_year},
+                    )
+                ],
+                subject_type="position_average_comparison",
+                season_year=season_year,
+                metric_policy="player_position_average_comparison",
+                confidence=0.97,
+                analysis="단일 선수를 같은 포지션 평균과 비교하는 질의로 판단되어 position-average fast-path를 사용합니다.",
+            )
+
         comparison_tool_calls = self._build_player_comparison_tool_calls(
             query=query,
             query_lower=query_lower,
@@ -911,9 +983,13 @@ class ChatIntentRouter:
             "장타율",
             "안타",
         ]
-        if any(token in query_lower for token in pitching_stat_tokens):
+        has_pitching_signal = any(token in query_lower for token in pitching_stat_tokens)
+        has_batting_signal = any(token in query_lower for token in batting_stat_tokens)
+        if has_pitching_signal and has_batting_signal:
+            return "both"
+        if has_pitching_signal:
             return "pitching"
-        if any(token in query_lower for token in batting_stat_tokens):
+        if has_batting_signal:
             return "batting"
         return "both"
 
@@ -1095,11 +1171,71 @@ class ChatIntentRouter:
             parameters["year"] = season_year
         return [ToolCall("compare_players", parameters)]
 
+    def _is_same_position_comparison_query(self, query_lower: str) -> bool:
+        return any(
+            phrase in query_lower
+            for phrase in [
+                "같은 포지션",
+                "동일 포지션",
+                "포지션 평균",
+                "포지션 선수와 비교",
+                "포지션 대비",
+            ]
+        ) and any(token in query_lower for token in ["비교", "어때", "대비"])
+
+    def _is_team_rank_flow_query(self, query_lower: str) -> bool:
+        has_rank = any(token in query_lower for token in ["순위", "몇 위", "몇위"])
+        has_flow = any(
+            token in query_lower
+            for token in ["승률", "흐름", "페이스", "최근", "요즘", "승패"]
+        )
+        return has_rank and has_flow
+
+    def _is_team_tough_matchup_query(self, query_lower: str) -> bool:
+        return any(
+            token in query_lower for token in ["상대 전적", "상대전적", "맞대결"]
+        ) and any(
+            token in query_lower
+            for token in ["꼬이", "까다로", "어렵", "약한", "고전", "유독"]
+        )
+
+    def _is_team_fielding_error_query(self, query_lower: str) -> bool:
+        return any(token in query_lower for token in ["실책", "수비"]) and any(
+            token in query_lower
+            for token in ["날린", "뼈아픈", "경기", "장면", "실점", "패배"]
+        )
+
     def _normalize_player_candidate(self, raw_name: str) -> str:
         cleaned = re.sub(r"\s+", "", str(raw_name or "").strip())
         cleaned = re.sub(r"(선수|타자|투수)$", "", cleaned)
         cleaned = re.sub(r"(은|는|이|가|을|를)$", "", cleaned)
         return cleaned
+
+    def _is_non_player_comparison_candidate(self, candidate: str) -> bool:
+        normalized = self._normalize_player_candidate(candidate)
+        if len(normalized) < 2:
+            return True
+        blocked_exact = {
+            "경기",
+            "원정",
+            "홈경기",
+            "원정경기",
+            "패턴",
+            "막히",
+            "막히는",
+            "흐름",
+            "차이",
+            "생산력",
+            "포지션",
+            "비교",
+            "비교하면",
+            "데이터",
+            "기록",
+            "성적",
+        }
+        if normalized in blocked_exact:
+            return True
+        return normalized.endswith(("경기", "패턴", "흐름", "생산력", "포지션"))
 
     def _extract_player_comparison_names(self, query: str) -> Optional[tuple[str, str]]:
         normalized_query = query.replace("VS", "vs").replace("Vs", "vs")
@@ -1119,6 +1255,8 @@ class ChatIntentRouter:
                 or candidate1 == candidate2
                 or extract_team(candidate1)
                 or extract_team(candidate2)
+                or self._is_non_player_comparison_candidate(candidate1)
+                or self._is_non_player_comparison_candidate(candidate2)
             ):
                 continue
             return candidate1, candidate2
@@ -1168,9 +1306,10 @@ class ChatIntentRouter:
             "투수진",
             "마운드",
         ]
-        return any(token in query_lower for token in team_context_tokens) and any(
-            token in query_lower for token in team_metric_tokens
+        has_team_context = bool(team_name) or any(
+            token in query_lower for token in team_context_tokens
         )
+        return has_team_context and any(token in query_lower for token in team_metric_tokens)
 
     def _is_team_analysis_query(
         self,
@@ -1456,6 +1595,11 @@ class ChatIntentRouter:
                 "탈삼진",
                 "다승",
                 "war",
+                "강점",
+                "약점",
+                "핵심",
+                "데이터",
+                "비교",
             ]
         )
 
