@@ -103,6 +103,24 @@ def test_extract_player_names_preserves_multi_player_query_order() -> None:
     assert extract_player_names(query, limit=3) == ["김도영", "문보경", "노시환"]
 
 
+def test_extract_player_names_does_not_treat_role_word_as_player() -> None:
+    query = "2026년 KBO 타율 1위 타자는 누구야?"
+
+    assert extract_player_names(query, limit=3) == []
+
+
+def test_extract_player_names_ignores_same_position_noise() -> None:
+    query = "2026년 김도영를 같은 포지션 선수와 비교하면 어때?"
+
+    assert extract_player_names(query, limit=4) == ["김도영"]
+
+
+def test_extract_player_names_ignores_data_keyword_noise() -> None:
+    query = "2026년 양의지의 강점과 약점을 데이터 기준으로 정리해줘."
+
+    assert extract_player_names(query, limit=4) == ["양의지"]
+
+
 def test_extract_llm_planner_player_names_normalizes_suffixes_and_order() -> None:
     agent = _build_agent()
     query = "안현민, 윤도현, 김도영처럼 젊은 타자를 볼 때 성장 신호 순서를 설명해줘"

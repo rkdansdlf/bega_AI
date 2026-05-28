@@ -314,6 +314,7 @@ STAT_LEADER_MAPPING: Dict[str, Dict[str, str]] = {
     "안타왕":         {"stat_name": "hits",         "position": "batting"},
     "안타 1위":       {"stat_name": "hits",         "position": "batting"},
     "최다 안타":      {"stat_name": "hits",         "position": "batting"},
+    "최다안타":       {"stat_name": "hits",         "position": "batting"},
     "안타 가장 많이": {"stat_name": "hits",         "position": "batting"},
     # 기타 타자 지표
     "장타왕":         {"stat_name": "slg",          "position": "batting"},
@@ -826,6 +827,8 @@ _PLAYER_NAME_COMMON_TERMS = {
     "전망",
     "예상",
     "분석",
+    "강점",
+    "약점",
     "소식",
     "뉴스",
     "발표",
@@ -883,6 +886,7 @@ _PLAYER_NAME_COMMON_TERMS = {
     "한국시리즈",
     "와일드카드",
     "얼마나",
+    "어때",
     "어떠니",
     "궁금해",
     "그려줘",
@@ -893,11 +897,26 @@ _PLAYER_NAME_COMMON_TERMS = {
     "위가",
     "묶어서",
     "각각",
+    "같은",
     "같이",
     "보면",
     "유형",
+    "포지션",
+    "비교하면",
+    "데이터",
+    "기준",
+    "기준으",
 }
 _PLAYER_NAME_INVALID_SUFFIXES = ("해줘", "해주세요", "해봐", "일까", "인가")
+
+
+def _strip_player_name_particle(candidate: str) -> str:
+    if candidate in _FOREIGN_PLAYERS:
+        return candidate
+    for particle in sorted(_KOREAN_PARTICLES, key=len, reverse=True):
+        if candidate.endswith(particle) and len(candidate) > len(particle) + 1:
+            return candidate[: -len(particle)]
+    return candidate
 
 
 def extract_player_names(query: str, limit: int = 4) -> List[str]:
@@ -928,16 +947,17 @@ def extract_player_names(query: str, limit: int = 4) -> List[str]:
     player_names: List[str] = []
     seen: set[str] = set()
     for _, match in ordered_matches:
+        candidate = _strip_player_name_particle(match)
         if (
-            match in seen
-            or match in TEAM_MAPPING
-            or match in STAT_MAPPING
-            or match in _PLAYER_NAME_COMMON_TERMS
-            or match.endswith(_PLAYER_NAME_INVALID_SUFFIXES)
+            candidate in seen
+            or candidate in TEAM_MAPPING
+            or candidate in STAT_MAPPING
+            or candidate in _PLAYER_NAME_COMMON_TERMS
+            or candidate.endswith(_PLAYER_NAME_INVALID_SUFFIXES)
         ):
             continue
-        player_names.append(match)
-        seen.add(match)
+        player_names.append(candidate)
+        seen.add(candidate)
         if len(player_names) >= limit:
             break
 

@@ -540,3 +540,40 @@ def test_team_code_resolver_sync_preserves_korean_display_name():
 
     assert resolver.code_to_name["KT"] == "KT 위즈"
     assert resolver.display_name("kt wiz") == "KT 위즈"
+
+
+def test_team_code_resolver_sync_does_not_overwrite_modern_ssg_with_dissolved_team():
+    resolver = TeamCodeResolver()
+
+    resolver.sync_from_team_rows(
+        [
+            {
+                "team_id": "SSG",
+                "team_name": "SSG 랜더스",
+                "franchise_id": 8,
+                "founded_year": 2021,
+                "is_active": True,
+                "current_code": "SSG",
+            },
+            {
+                "team_id": "SK",
+                "team_name": "SK 와이번스",
+                "franchise_id": 8,
+                "founded_year": 2000,
+                "is_active": False,
+                "current_code": "SSG",
+            },
+            {
+                "team_id": "SL",
+                "team_name": "쌍방울 레이더스",
+                "franchise_id": 12,
+                "founded_year": 1990,
+                "is_active": False,
+                "current_code": "SL",
+            },
+        ]
+    )
+
+    assert resolver.display_name("SSG") == "SSG 랜더스"
+    assert resolver.display_name("SL") == "쌍방울 레이더스"
+    assert resolver.display_name("SK", 2026) == "SSG 랜더스"

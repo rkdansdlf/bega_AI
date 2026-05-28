@@ -544,8 +544,8 @@ class DatabaseQueryTool:
         """
         return self.team_resolver.query_variants(team_input, season_year)
 
-    def get_team_name(self, team_code: str) -> str:
-        return self.team_resolver.display_name(team_code)
+    def get_team_name(self, team_code: str, season_year: int | None = None) -> str:
+        return self.team_resolver.display_name(team_code, season_year)
 
     def safe_float(self, value: Any, default: float = 0.0) -> float:
         """NULL 값을 안전하게 float로 변환합니다."""
@@ -1376,7 +1376,7 @@ class DatabaseQueryTool:
                 total_qualified_players = rows[0].get("total_qualified_players")
                 for row in rows:
                     team_code = row.get("team_code")
-                    display_team_name = self.get_team_name(team_code) or team_code
+                    display_team_name = self.get_team_name(team_code, year) or team_code
 
                     player_data = dict(row)
                     player_data.pop("total_qualified_players", None)
@@ -4140,6 +4140,365 @@ class DatabaseQueryTool:
         self._record_team_query_result(
             "get_team_matchup_stats", team_name, year, result
         )
+        return result
+
+    def get_team_tough_matchups(
+        self, team_name: str, year: int, limit: int = 3
+    ) -> Dict[str, Any]:
+        """상대전적 기준으로 가장 까다로웠던 팀을 정렬해 반환합니다."""
+        result = {
+            "team_name": team_name,
+            "year": year,
+            "tough_matchups": [],
+            "found": False,
+            "error": None,
+        }
+
+        matchup_result = self.get_team_matchup_stats(team_name, year)
+        result["team_name"] = matchup_result.get("team_name") or team_name
+        if matchup_result.get("error"):
+            result["error"] = matchup_result["error"]
+            self._record_team_query_result(
+                "get_team_tough_matchups", team_name, year, result
+            )
+            return result
+
+        matchups = matchup_result.get("matchups") or {}
+        rows: List[Dict[str, Any]] = []
+        for opponent, data in matchups.items():
+            if not isinstance(data, dict):
+                continue
+            wins = self.safe_int(data.get("wins"))
+            losses = self.safe_int(data.get("losses"))
+            draws = self.safe_int(data.get("draws"))
+            games = self.safe_int(data.get("games"), wins + losses + draws)
+            decided_games = wins + losses
+            win_rate = round(wins / decided_games, 3) if decided_games else 0.0
+            rows.append(
+                {
+                    "opponent": opponent,
+                    "games": games,
+                    "wins": wins,
+                    "losses": losses,
+                    "draws": draws,
+                    "win_rate": win_rate,
+                }
+            )
+
+        rows.sort(
+            key=lambda row: (
+                row["win_rate"],
+                -row["losses"],
+                -row["games"],
+                str(row["opponent"]),
+            )
+        )
+        result["tough_matchups"] = rows[: max(1, int(limit or 3))]
+        result["found"] = bool(result["tough_matchups"])
+        self._record_team_query_result(
+            "get_team_tough_matchups", team_name, year, result
+        )
+        return result
+
+    def get_team_fielding_error_games(
+        self, team_name: str, year: int, limit: int = 5
+    ) -> Dict[str, Any]:
+        """game_summary에 기록된 실책/수비 관련 경기 장면을 조회합니다."""
+        result = {
+            "team_name": team_name,
+            "year": year,
+            "fielding_error_games": [],
+            "found": False,
+            "error": None,
+        }
+        if not self._is_regular_analysis_team(team_name):
+            result["error"] = "unsupported_team_for_regular_analysis"
+            result["reason"] = "unsupported_team_for_regular_analysis"
+            self._record_team_query_result(
+                "get_team_fielding_error_games", team_name, year, result
+            )
+            return result
+
+        team_code = self.get_team_code(team_name, year)
+        team_variants = self.get_team_variants(team_name, year)
+        result["team_name"] = self.get_team_name(team_code)
+        limit = max(1, int(limit or 5))
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            query = """
+                SELECT
+                    g.game_id,
+                    g.game_date,
+                    g.home_team,
+                    g.away_team,
+                    ht.team_name AS home_team_name,
+                    at.team_name AS away_team_name,
+                    g.home_score,
+                    g.away_score,
+                    g.winning_team,
+                    gs.summary_type,
+                    gs.player_name,
+                    gs.detail_text
+                FROM game_summary gs
+                JOIN game g ON g.game_id = gs.game_id
+                LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+                LEFT JOIN teams ht ON ht.team_id = g.home_team
+                LEFT JOIN teams at ON at.team_id = g.away_team
+                WHERE (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
+                  AND (
+                    ks.season_year = %s
+                    OR (ks.season_year IS NULL AND EXTRACT(YEAR FROM g.game_date) = %s)
+                  )
+                  AND (
+                    COALESCE(gs.summary_type, '') ILIKE %s
+                    OR COALESCE(gs.summary_type, '') ILIKE %s
+                    OR COALESCE(gs.detail_text, '') ILIKE %s
+                    OR COALESCE(gs.detail_text, '') ILIKE %s
+                  )
+                ORDER BY g.game_date DESC, g.game_id DESC, gs.id
+                LIMIT %s
+            """
+            cursor.execute(
+                query,
+                (
+                    team_variants,
+                    team_variants,
+                    year,
+                    year,
+                    "%실책%",
+                    "%수비%",
+                    "%실책%",
+                    "%수비%",
+                    limit,
+                ),
+            )
+            rows = cursor.fetchall()
+
+            for row in rows:
+                game = dict(row)
+                home_team = game.get("home_team")
+                away_team = game.get("away_team")
+                is_home = home_team in team_variants
+                opponent_name = (
+                    game.get("away_team_name") if is_home else game.get("home_team_name")
+                )
+                team_score = game.get("home_score") if is_home else game.get("away_score")
+                opponent_score = (
+                    game.get("away_score") if is_home else game.get("home_score")
+                )
+                winning_team = game.get("winning_team")
+                if winning_team in team_variants:
+                    result_label = "Win"
+                elif winning_team is None and team_score == opponent_score:
+                    result_label = "Draw"
+                else:
+                    result_label = "Loss"
+
+                game_date = game.get("game_date")
+                if hasattr(game_date, "strftime"):
+                    game_date = game_date.strftime("%Y-%m-%d")
+
+                result["fielding_error_games"].append(
+                    {
+                        "game_id": game.get("game_id"),
+                        "game_date": game_date,
+                        "opponent": opponent_name,
+                        "score": f"{team_score}:{opponent_score}",
+                        "result": result_label,
+                        "summary_type": game.get("summary_type"),
+                        "player_name": game.get("player_name"),
+                        "detail_text": game.get("detail_text"),
+                    }
+                )
+
+            result["found"] = bool(result["fielding_error_games"])
+        except Exception as e:
+            logger.error(f"[DatabaseQuery] Error querying fielding error games: {e}")
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        self._record_team_query_result(
+            "get_team_fielding_error_games", team_name, year, result
+        )
+        return result
+
+    def get_player_position_average_comparison(
+        self, player_name: str, year: int, min_plate_appearances: int = 100
+    ) -> Dict[str, Any]:
+        """선수의 시즌 타격 기록을 같은 주 포지션 평균과 비교합니다."""
+        result = {
+            "player_name": player_name,
+            "year": year,
+            "position_id": None,
+            "position_name": None,
+            "target": None,
+            "position_average": None,
+            "deltas": {},
+            "sample_size": 0,
+            "found": False,
+            "error": None,
+        }
+        position_names = {
+            "P": "투수",
+            "C": "포수",
+            "1B": "1루수",
+            "2B": "2루수",
+            "3B": "3루수",
+            "SS": "유격수",
+            "LF": "좌익수",
+            "CF": "중견수",
+            "RF": "우익수",
+            "OF": "외야수",
+            "DH": "지명타자",
+        }
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            target_query = """
+                SELECT
+                    pb.player_id,
+                    pb.name AS player_name,
+                    t.team_name,
+                    psb.team_code,
+                    psb.season AS season_year,
+                    psb.plate_appearances,
+                    psb.at_bats,
+                    psb.hits,
+                    psb.home_runs,
+                    psb.rbi,
+                    psb.avg,
+                    psb.obp,
+                    psb.slg,
+                    psb.ops
+                FROM player_season_batting psb
+                JOIN player_basic pb ON pb.player_id = psb.player_id
+                LEFT JOIN teams t ON t.team_id = psb.team_code
+                WHERE LOWER(pb.name) LIKE LOWER(%s)
+                  AND psb.season = %s
+                ORDER BY psb.plate_appearances DESC
+                LIMIT 1
+            """
+            cursor.execute(target_query, (f"%{player_name}%", year))
+            target_row = cursor.fetchone()
+            if not target_row:
+                result["error"] = f"선수 '{player_name}'의 {year}년 타격 기록을 찾을 수 없습니다."
+                return result
+
+            target = dict(target_row)
+            result["player_name"] = target.get("player_name") or player_name
+
+            position_query = """
+                SELECT position_id, games, innings
+                FROM player_season_fielding
+                WHERE player_id = %s
+                  AND year = %s
+                ORDER BY COALESCE(games, 0) DESC, COALESCE(innings, 0) DESC
+                LIMIT 1
+            """
+            cursor.execute(position_query, (target["player_id"], year))
+            position_row = cursor.fetchone()
+            if not position_row:
+                result["target"] = target
+                result["error"] = (
+                    f"{year}년 {result['player_name']}의 주 포지션 수비 기록을 찾을 수 없습니다."
+                )
+                return result
+
+            position_id = str(position_row["position_id"] or "").strip()
+            result["position_id"] = position_id
+            result["position_name"] = position_names.get(position_id, position_id)
+
+            average_query = """
+                WITH primary_positions AS (
+                    SELECT
+                        player_id,
+                        position_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY player_id
+                            ORDER BY COALESCE(games, 0) DESC, COALESCE(innings, 0) DESC
+                        ) AS rn
+                    FROM player_season_fielding
+                    WHERE year = %s
+                )
+                SELECT
+                    COUNT(*) AS sample_size,
+                    ROUND(AVG(psb.plate_appearances)::numeric, 1) AS plate_appearances,
+                    ROUND(AVG(psb.hits)::numeric, 1) AS hits,
+                    ROUND(AVG(psb.home_runs)::numeric, 1) AS home_runs,
+                    ROUND(AVG(psb.rbi)::numeric, 1) AS rbi,
+                    ROUND(AVG(psb.avg)::numeric, 3) AS avg,
+                    ROUND(AVG(psb.obp)::numeric, 3) AS obp,
+                    ROUND(AVG(psb.slg)::numeric, 3) AS slg,
+                    ROUND(AVG(psb.ops)::numeric, 3) AS ops
+                FROM player_season_batting psb
+                JOIN primary_positions pp
+                  ON pp.player_id = psb.player_id
+                 AND pp.rn = 1
+                WHERE psb.season = %s
+                  AND pp.position_id = %s
+                  AND psb.plate_appearances >= %s
+            """
+            cursor.execute(
+                average_query,
+                (year, year, position_id, max(0, int(min_plate_appearances or 0))),
+            )
+            average_row = cursor.fetchone()
+            if not average_row or self.safe_int(average_row.get("sample_size")) == 0:
+                result["target"] = target
+                result["error"] = f"{year}년 {position_id} 포지션 평균 표본을 찾을 수 없습니다."
+                return result
+
+            average = dict(average_row)
+            result["sample_size"] = self.safe_int(average.get("sample_size"))
+            result["target"] = {
+                key: target.get(key)
+                for key in [
+                    "player_name",
+                    "team_name",
+                    "plate_appearances",
+                    "hits",
+                    "home_runs",
+                    "rbi",
+                    "avg",
+                    "obp",
+                    "slg",
+                    "ops",
+                ]
+            }
+            result["position_average"] = {
+                key: average.get(key)
+                for key in [
+                    "plate_appearances",
+                    "hits",
+                    "home_runs",
+                    "rbi",
+                    "avg",
+                    "obp",
+                    "slg",
+                    "ops",
+                ]
+            }
+            for key in ["hits", "home_runs", "rbi", "avg", "obp", "slg", "ops"]:
+                target_value = target.get(key)
+                average_value = average.get(key)
+                if target_value is None or average_value is None:
+                    continue
+                result["deltas"][key] = round(
+                    self.safe_float(target_value) - self.safe_float(average_value), 3
+                )
+            result["found"] = True
+        except Exception as e:
+            logger.error(
+                "[DatabaseQuery] Error querying position average comparison: %s", e
+            )
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
         return result
 
     # ------------------------------------------------------------------

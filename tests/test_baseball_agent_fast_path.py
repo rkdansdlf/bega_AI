@@ -299,6 +299,41 @@ def test_games_by_date_query_still_uses_schedule_fast_path() -> None:
     assert plan["tool_calls"][0].parameters == {"date": "2025-05-01"}
 
 
+def test_player_stats_fast_path_renders_without_llm() -> None:
+    agent = _build_agent_for_fast_path()
+
+    answer = agent._build_fast_path_answer(
+        "2026년 구자욱 시즌 성적 핵심만 알려줘.",
+        [
+            ToolResult(
+                success=True,
+                data={
+                    "player_name": "구자욱",
+                    "year": 2026,
+                    "batting_stats": {
+                        "team_name": "삼성 라이온즈",
+                        "avg": 0.333,
+                        "ops": 0.705,
+                        "home_runs": 0,
+                        "rbi": 25,
+                    },
+                    "pitching_stats": None,
+                    "found": True,
+                },
+                message="ok",
+            )
+        ],
+        chat_mode=True,
+    )
+
+    assert answer is not None
+    assert "2026년" in answer
+    assert "구자욱" in answer
+    assert "타율 0.333" in answer
+    assert "출처" not in answer
+    assert "다른 출처" not in answer
+
+
 def test_game_flow_query_does_not_collapse_to_schedule_fast_path() -> None:
     agent = _build_agent_for_fast_path()
     query = "2025년 5월 1일 경기 흐름 요약해줘"
