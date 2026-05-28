@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     )
 
     # --- 데이터베이스 설정 ---
-    # 운영 기본 경로
+    # 운영 Source DB 경로
+    oci_db_url: Optional[str] = Field(None, validation_alias="OCI_DB_URL")
+    # RAG/로컬 fallback 경로
     postgres_db_url: Optional[str] = Field(None, validation_alias="POSTGRES_DB_URL")
     # 하위 호환 경로 (deprecated)
     legacy_source_db_url: Optional[str] = Field(
@@ -75,7 +77,7 @@ class Settings(BaseSettings):
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
     llm_provider: str = Field("gemini", validation_alias="LLM_PROVIDER")
-    embed_provider: str = Field("gemini", validation_alias="EMBED_PROVIDER")
+    embed_provider: str = Field("openrouter", validation_alias="EMBED_PROVIDER")
     embed_model: str = Field(
         "", validation_alias="EMBED_MODEL"
     )  # 특정 모델을 지정할 때 사용
@@ -128,7 +130,7 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_APP_TITLE"
     )
     openrouter_embed_model: Optional[str] = Field(
-        None, validation_alias="OPENROUTER_EMBED_MODEL"
+        "openai/text-embedding-3-small", validation_alias="OPENROUTER_EMBED_MODEL"
     )
     vision_model: str = Field(
         "google/gemini-2.0-flash-001", validation_alias="VISION_MODEL"
@@ -624,9 +626,13 @@ class Settings(BaseSettings):
         """배치/마이그레이션 스크립트용 Source DB URL을 반환합니다.
 
         우선순위:
-        1) POSTGRES_DB_URL
-        2) SUPABASE_DB_URL (deprecated fallback)
+        1) OCI_DB_URL
+        2) POSTGRES_DB_URL
+        3) SUPABASE_DB_URL (deprecated fallback)
         """
+        if self.oci_db_url:
+            return self.oci_db_url
+
         if self.postgres_db_url:
             return self.postgres_db_url
 
@@ -638,7 +644,7 @@ class Settings(BaseSettings):
                 self._legacy_source_db_warned = True
             return self.legacy_source_db_url
 
-        raise RuntimeError("POSTGRES_DB_URL is not configured.")
+        raise RuntimeError("OCI_DB_URL or POSTGRES_DB_URL is not configured.")
 
     @property
     def function_calling_model(self) -> str:
