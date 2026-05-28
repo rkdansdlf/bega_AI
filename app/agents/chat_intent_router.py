@@ -1444,7 +1444,8 @@ class ChatIntentRouter:
         )
 
     def _is_runner_up_query(self, query_lower: str) -> bool:
-        return any(
+        compact = query_lower.replace(" ", "")
+        explicit_runner_up = any(
             keyword in query_lower
             for keyword in [
                 "준우승",
@@ -1453,6 +1454,11 @@ class ChatIntentRouter:
                 "한국시리즈 2등",
             ]
         )
+        series_opponent = (
+            ("한국시리즈" in compact or "코시" in compact)
+            and ("상대" in compact or "상대팀" in compact)
+        )
+        return explicit_runner_up or series_opponent
 
     def _is_champion_query(self, query_lower: str) -> bool:
         champion_keywords = [

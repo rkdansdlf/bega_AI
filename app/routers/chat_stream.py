@@ -37,7 +37,12 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from ..config import get_settings
-from ..deps import get_agent, get_connection_pool, require_ai_internal_token
+from ..deps import (
+    get_agent,
+    get_connection_pool,
+    get_rag_pipeline,
+    require_ai_internal_token,
+)
 from ..agents.baseball_agent import BaseballStatisticsAgent
 from ..core.ratelimit import (
     rate_limit_chat_dependency,
@@ -1025,6 +1030,7 @@ async def _stream_response(
     style: str,
     history: Optional[List[Dict[str, str]]],
     agent: BaseballStatisticsAgent,
+    pipeline: Any = None,
     cache_key: Optional[str] = None,
 ):
     """질문에 대한 답변을 생성하고 SSE 스트림으로 반환하는 핵심 로직입니다.
@@ -1032,6 +1038,8 @@ async def _stream_response(
     cache_key가 전달된 경우, 스트리밍 완료 후 응답 텍스트를 DB 캐시에 저장합니다.
     캐싱 조건(history-free & 실시간 키워드 없음)은 호출자(chat_stream_post)에서 판단합니다.
     """
+    del pipeline
+
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
@@ -1475,6 +1483,7 @@ async def chat_stream_get(
     q: str = Query("", description="질문 텍스트"),
     style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
     agent: BaseballStatisticsAgent = Depends(get_agent),
+    pipeline: Any = Depends(get_rag_pipeline),
     __: None = Depends(rate_limit_chat_dependency),
     _: None = Depends(require_ai_internal_token),
     request: Request = None,
@@ -1496,6 +1505,7 @@ async def chat_stream_get(
         style=style,
         history=history,
         agent=agent,
+        pipeline=pipeline,
         cache_key=None,
     )
 

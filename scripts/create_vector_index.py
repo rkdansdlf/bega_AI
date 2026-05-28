@@ -36,10 +36,12 @@ import psycopg
 # 기본값
 # ---------------------------------------------------------------------------
 HNSW_INDEX_NAME = "idx_rag_chunks_embedding_hnsw"
+HALFVEC_HNSW_INDEX_NAME = "idx_rag_chunks_embedding_halfvec_hnsw"
 IVFFLAT_INDEX_NAME = "idx_rag_chunks_embedding"
 TABLE_NAME = "rag_chunks"
 
 _PGVECTOR_MIN_VERSION_HNSW = (0, 5, 0)  # HNSW가 도입된 버전
+_PGVECTOR_MIN_VERSION_HALFVEC = (0, 7, 0)  # halfvec 타입/연산자 지원 버전
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +58,41 @@ def _parse_version(version_str: str) -> Tuple[int, ...]:
         except ValueError:
             break
     return tuple(parts)
+
+
+def _version_at_least(actual: Tuple[int, ...], minimum: Tuple[int, ...]) -> bool:
+    max_len = max(len(actual), len(minimum))
+    padded_actual = actual + (0,) * (max_len - len(actual))
+    padded_minimum = minimum + (0,) * (max_len - len(minimum))
+    return padded_actual >= padded_minimum
+
+
+def _required_pgvector_version(quantization: str = "none") -> Tuple[int, ...]:
+    if (quantization or "none").lower().strip() == "halfvec":
+        return _PGVECTOR_MIN_VERSION_HALFVEC
+    return _PGVECTOR_MIN_VERSION_HNSW
+
+
+def _build_hnsw_create_sql(
+    *,
+    quantization: str = "none",
+    embed_dim: int,
+    m: int,
+    ef_construction: int,
+) -> str:
+    if (quantization or "none").lower().strip() == "halfvec":
+        return (
+            f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {HALFVEC_HNSW_INDEX_NAME} "
+            f"ON {TABLE_NAME} "
+            f"USING hnsw ((embedding::halfvec({embed_dim})) halfvec_cosine_ops) "
+            f"WITH (m = {m}, ef_construction = {ef_construction})"
+        )
+    return (
+        f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {HNSW_INDEX_NAME} "
+        f"ON {TABLE_NAME} "
+        f"USING hnsw (embedding vector_cosine_ops) "
+        f"WITH (m = {m}, ef_construction = {ef_construction})"
+    )
 
 
 def _get_pgvector_version(cur: psycopg.Cursor) -> Optional[str]:
@@ -116,7 +153,9 @@ def _verify_hnsw_usage(cur: psycopg.Cursor, embed_dim: int, ef_search: int) -> b
     )
     plan_rows = cur.fetchall()
     plan = "\n".join(row[0] for row in plan_rows)
-    uses_hnsw = "Index Scan" in plan and HNSW_INDEX_NAME in plan
+    uses_hnsw = "Index Scan" in plan and (
+        HNSW_INDEX_NAME in plan or HALFVEC_HNSW_INDEX_NAME in plan
+    )
     print("\nEXPLAIN (처음 5줄):")
     for line in plan.splitlines()[:5]:
         print(f"  {line}")
@@ -145,6 +184,12 @@ def run(
     settings = get_settings()
     dsn = settings.database_url
     embed_dim: int = getattr(settings, "embed_dim", 1536)
+    quantization = getattr(settings, "ai_vector_quantization", "none")
+    hnsw_index_name = (
+        HALFVEC_HNSW_INDEX_NAME
+        if str(quantization).lower().strip() == "halfvec"
+        else HNSW_INDEX_NAME
+    )
 
     print(f"데이터베이스 연결 중...")
     try:
@@ -161,10 +206,11 @@ def run(
                 print("[ERROR] pgvector 확장이 설치되어 있지 않습니다.")
                 return 1
             pgvec_ver = _parse_version(pgvec_ver_str)
-            if pgvec_ver < _PGVECTOR_MIN_VERSION_HNSW:
+            required_pgvector = _required_pgvector_version(quantization)
+            if not _version_at_least(pgvec_ver, required_pgvector):
                 print(
                     f"[ERROR] pgvector {pgvec_ver_str}는 HNSW를 지원하지 않습니다. "
-                    f"pgvector >= {'.'.join(str(v) for v in _PGVECTOR_MIN_VERSION_HNSW)} 필요."
+                    f"pgvector >= {'.'.join(str(v) for v in required_pgvector)} 필요."
                 )
                 return 1
             print(f"pgvector 버전: {pgvec_ver_str} ✓")
@@ -176,18 +222,18 @@ def run(
             # 3. 현재 인덱스 상태 출력
             _print_current_indexes(cur)
 
-            hnsw_exists = _index_exists(cur, HNSW_INDEX_NAME)
+            hnsw_exists = _index_exists(cur, hnsw_index_name)
             ivfflat_exists = _index_exists(cur, IVFFLAT_INDEX_NAME)
 
             # 4. HNSW 인덱스 생성
             if hnsw_exists:
-                print(f"\n[SKIP] HNSW 인덱스 '{HNSW_INDEX_NAME}'가 이미 존재합니다.")
+                print(f"\n[SKIP] HNSW 인덱스 '{hnsw_index_name}'가 이미 존재합니다.")
             else:
-                hnsw_sql = (
-                    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {HNSW_INDEX_NAME} "
-                    f"ON {TABLE_NAME} "
-                    f"USING hnsw (embedding vector_cosine_ops) "
-                    f"WITH (m = {m}, ef_construction = {ef_construction})"
+                hnsw_sql = _build_hnsw_create_sql(
+                    quantization=quantization,
+                    embed_dim=embed_dim,
+                    m=m,
+                    ef_construction=ef_construction,
                 )
                 if dry_run:
                     print(f"\n[DRY-RUN] 실행 예정 SQL:\n  {hnsw_sql}")
