@@ -11,7 +11,7 @@ from .coach_cache_key import (
 )
 
 COACH_CACHE_SCHEMA_VERSION = "v5"
-COACH_CACHE_PROMPT_VERSION = "v88_grounded_copy_quality"
+COACH_CACHE_PROMPT_VERSION = "v89_quality_v2"  # 2차 품질 개선: 900자 MD, temperature 0.2, FACT SHEET 대비
 
 
 def _normalize_optional_signature(value: Optional[str]) -> Optional[str]:
