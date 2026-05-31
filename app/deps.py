@@ -561,8 +561,8 @@ def get_coach_llm_generator():
                     "model": model,
                     "messages": messages,
                     "stream": True,
-                    "temperature": 0.1,
-                    "top_p": 0.5,
+                    "temperature": 0.2,
+                    "top_p": 0.6,
                     "max_tokens": effective_max_tokens,
                 }
 

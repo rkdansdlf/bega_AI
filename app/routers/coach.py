@@ -972,6 +972,77 @@ def _build_compact_coach_note(parts: List[str], *, max_length: int = 220) -> str
     return _truncate_text_naturally(" ".join(selected), max_length=max_length)
 
 
+def _append_team_comparison_fact_lines(
+    fact_lines: List[str],
+    numeric_tokens: Set[str],
+    tool_results: Dict[str, Any],
+    home_name: str,
+    away_name: str,
+) -> None:
+    """홈 vs 원정 핵심 지표를 한 줄 대비 형식으로 추가합니다.
+
+    LLM이 두 팀 수치를 따로 읽고 요약하는 대신 직접 비교하도록
+    "홈 X vs 원정 Y (우위 ±Z)" 형태의 fact line을 생성합니다.
+    """
+    home_data = tool_results.get("home", {}) or {}
+    away_data = tool_results.get("away", {}) or {}
+    home_adv = _advanced_metrics(home_data)
+    away_adv = _advanced_metrics(away_data)
+    home_recent = _recent_summary(home_data)
+    away_recent = _recent_summary(away_data)
+
+    # OPS 대비
+    home_ops_raw = home_adv.get("metrics", {}).get("batting", {}).get("ops")
+    away_ops_raw = away_adv.get("metrics", {}).get("batting", {}).get("ops")
+    if home_ops_raw is not None and away_ops_raw is not None:
+        try:
+            h = float(home_ops_raw)
+            a = float(away_ops_raw)
+            diff = h - a
+            edge_label = f"{home_name} +{diff:.3f}" if diff >= 0 else f"{away_name} +{abs(diff):.3f}"
+            fact = _build_fact_line(
+                "OPS 대비",
+                f"{home_name} {h:.3f} vs {away_name} {a:.3f} ({edge_label})",
+            )
+            if fact:
+                fact_lines.append(fact)
+                extend_numeric_tokens([fact], numeric_tokens)
+        except (TypeError, ValueError):
+            pass
+
+    # 최근 흐름 대비
+    if home_recent and away_recent:
+        hw = _safe_int_value(home_recent.get("wins"))
+        hl = _safe_int_value(home_recent.get("losses"))
+        hd = _safe_int_value(home_recent.get("run_diff"))
+        aw = _safe_int_value(away_recent.get("wins"))
+        al = _safe_int_value(away_recent.get("losses"))
+        ad = _safe_int_value(away_recent.get("run_diff"))
+        h_str = f"{hw}승{hl}패 득실{'+' if hd >= 0 else ''}{hd}"
+        a_str = f"{aw}승{al}패 득실{'+' if ad >= 0 else ''}{ad}"
+        fact = _build_fact_line(
+            "최근 흐름 대비",
+            f"{home_name} {h_str} vs {away_name} {a_str}",
+        )
+        if fact:
+            fact_lines.append(fact)
+            extend_numeric_tokens([fact], numeric_tokens)
+
+    # 불펜 비중 대비
+    home_bs = home_adv.get("fatigue_index", {}).get("bullpen_share")
+    away_bs = away_adv.get("fatigue_index", {}).get("bullpen_share")
+    if home_bs is not None and away_bs is not None:
+        league_avg = home_adv.get("league_averages", {}).get("bullpen_share")
+        avg_str = f" 리그평균 {league_avg}%" if league_avg is not None else ""
+        fact = _build_fact_line(
+            "불펜 비중 대비",
+            f"{home_name} {home_bs}% vs {away_name} {away_bs}%{avg_str}",
+        )
+        if fact:
+            fact_lines.append(fact)
+            extend_numeric_tokens([fact], numeric_tokens)
+
+
 def _append_team_fact_lines(
     fact_lines: List[str],
     numeric_tokens: Set[str],
@@ -1167,6 +1238,11 @@ def _build_coach_fact_sheet(
     if not evidence.summary_items:
         caveat_lines.append("경기 요약 근거가 부족합니다.")
 
+    # 홈 vs 원정 핵심 지표 직접 대비 (LLM 비교 분석 유도)
+    _append_team_comparison_fact_lines(
+        fact_lines, numeric_tokens, tool_results, evidence.home_team_name, evidence.away_team_name
+    )
+    # 팀별 상세 지표 (선수 폼, 주요 타자/투수)
     _append_team_fact_lines(
         fact_lines, numeric_tokens, tool_results, "away", evidence.away_team_name
     )

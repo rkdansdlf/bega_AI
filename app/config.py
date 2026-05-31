@@ -152,8 +152,8 @@ class Settings(BaseSettings):
 
     coach_llm_provider: str = Field("openrouter", validation_alias="COACH_LLM_PROVIDER")
     coach_max_output_tokens: int = Field(
-        2000, validation_alias="COACH_MAX_OUTPUT_TOKENS"
-    )  # 2000 tokens recommended per COACH_PROMPT_V2
+        2500, validation_alias="COACH_MAX_OUTPUT_TOKENS"
+    )  # 2500 tokens: detailed_markdown 900자 + coach_note 200자 허용에 맞춰 상향
     coach_openrouter_model: str = Field(
         "openrouter/free", validation_alias="COACH_OPENROUTER_MODEL"
     )
