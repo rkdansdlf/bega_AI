@@ -77,7 +77,7 @@ MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
 
 # 캐시 스키마 버전. 프롬프트 또는 정규화 방식 변경 시 올리면
 # 기존 캐시가 자동으로 미스 처리됩니다.
-CHAT_CACHE_SCHEMA_VERSION = "v9"
+CHAT_CACHE_SCHEMA_VERSION = "v10"
 MAX_CHAT_QUESTION_LENGTH = 1200
 MAX_CHAT_HISTORY_ENTRY_LENGTH = 2000
 MAX_CHAT_REQUEST_BYTES = 12 * 1024
@@ -107,6 +107,10 @@ _NON_CACHEABLE_RESPONSE_MARKERS = (
     "저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다",
     "현재 연결된 자료만으로는 질문에 대해 확인된 답을 만들지 못했습니다",
     "추정하지 않고 확인된 범위에서만 말씀드리겠습니다",
+    "현재 연결된 자료",
+    "자료만으로는",
+    "단정하기 어렵",
+    "Unknown",
 )
 
 

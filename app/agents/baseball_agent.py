@@ -8253,7 +8253,8 @@ class BaseballStatisticsAgent:
                 chat_lines.append(recent_line)
             if unavailable_topics:
                 chat_lines.append(
-                    f"다만 {', '.join(unavailable_topics)} 쪽은 지금 붙은 fast-path 데이터만으로는 단정하기 어렵습니다."
+                    f"{', '.join(unavailable_topics)} 세부 항목은 이 요약 경로에서 별도 판정하지 않고, "
+                    "최근 흐름·선발·불펜·타선 지표 중심으로 읽겠습니다."
                 )
 
             if ops_rank and era_rank:

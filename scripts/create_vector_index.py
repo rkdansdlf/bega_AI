@@ -200,6 +200,8 @@ def run(
 
     try:
         with conn.cursor() as cur:
+            cur.execute("SET search_path TO public, extensions")
+
             # 1. pgvector 버전 확인
             pgvec_ver_str = _get_pgvector_version(cur)
             if pgvec_ver_str is None:

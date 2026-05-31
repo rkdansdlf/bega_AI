@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from datetime import date
+
 from app.core.chat_cache_key import (
     CHAT_CACHE_SCHEMA_VERSION,
     DEFAULT_TTL_SECONDS,
@@ -84,6 +86,9 @@ class TestHasTemporalKeyword:
 
     def test_year_only_no_date_returns_false(self):
         assert has_temporal_keyword("2024 시즌 ERA 순위") is False
+
+    def test_current_year_leaderboard_returns_true(self):
+        assert has_temporal_keyword(f"{date.today().year}년 홈런왕은 누구야?") is True
 
     def test_empty_string_returns_false(self):
         assert has_temporal_keyword("") is False

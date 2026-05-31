@@ -5,6 +5,7 @@
 실제 DB에서 정확한 데이터만을 조회하여 반환합니다.
 """
 
+from datetime import date
 from typing import Dict, List, Any, Optional, Tuple
 import logging
 import time
@@ -35,6 +36,15 @@ FORM_MIN_RECENT_BATTER_PA = 15
 FORM_BATTER_RECENT_GAMES = 7
 FORM_STARTER_RECENT_GAMES = 3
 FORM_RELIEVER_RECENT_GAMES = 5
+_DUPLICATE_PLAYER_ID_CANONICAL_MAP = {59359: 56632}
+
+
+def _canonical_player_id_expr(column: str) -> str:
+    cases = " ".join(
+        f"WHEN {int(duplicate_id)} THEN {int(canonical_id)}"
+        for duplicate_id, canonical_id in _DUPLICATE_PLAYER_ID_CANONICAL_MAP.items()
+    )
+    return f"(CASE {column} {cases} ELSE {column} END)"
 
 
 def _clamp_score(
@@ -1135,8 +1145,8 @@ class DatabaseQueryTool:
                     "ops": ("ops", "DESC", 100),  # (컬럼명, 정렬순서, 최소 타석)
                     "타율": ("avg", "DESC", 100),
                     "avg": ("avg", "DESC", 100),
-                    "홈런": ("home_runs", "DESC", 100),
-                    "home_runs": ("home_runs", "DESC", 100),
+                    "홈런": ("home_runs", "DESC", 0),
+                    "home_runs": ("home_runs", "DESC", 0),
                     "타점": ("rbi", "DESC", 100),
                     "rbi": ("rbi", "DESC", 100),
                     "출루율": ("obp", "DESC", 100),
@@ -1146,8 +1156,8 @@ class DatabaseQueryTool:
                     "wrc_plus": ("wrc_plus", "DESC", 100),
                     "도루": ("stolen_bases", "DESC", 0),
                     "stolen_bases": ("stolen_bases", "DESC", 0),
-                    "안타": ("hits", "DESC", 100),
-                    "hits": ("hits", "DESC", 100),
+                    "안타": ("hits", "DESC", 0),
+                    "hits": ("hits", "DESC", 0),
                     "득점권타율": ("scoring_position_avg", "DESC", 0),
                     "득점권 타율": ("scoring_position_avg", "DESC", 0),
                     "scoring_position_avg": ("scoring_position_avg", "DESC", 0),
@@ -1220,10 +1230,23 @@ class DatabaseQueryTool:
 
                 params.extend([min_pa, limit])
 
+                canonical_player_expr = _canonical_player_id_expr("psb.player_id")
                 query = f"""
-                    WITH latest_batting AS (
-                        SELECT DISTINCT ON (player_id, team_code)
-                            player_id,
+                    WITH normalized_batting AS (
+                        SELECT
+                            psb.*,
+                            {canonical_player_expr} AS canonical_player_id,
+                            CASE
+                                WHEN psb.player_id = {canonical_player_expr} THEN 0
+                                ELSE 1
+                            END AS duplicate_priority
+                        FROM player_season_batting psb
+                        WHERE psb.season = %s
+                          AND psb.league = 'REGULAR'
+                    ),
+                    latest_batting AS (
+                        SELECT DISTINCT ON (canonical_player_id, team_code)
+                            canonical_player_id AS player_id,
                             team_code,
                             plate_appearances,
                             avg,
@@ -1233,12 +1256,18 @@ class DatabaseQueryTool:
                             home_runs,
                             rbi,
                             {db_column} as stat_value
-                        FROM player_season_batting
-                        WHERE season = %s
-                        ORDER BY player_id, team_code, plate_appearances DESC
+                        FROM normalized_batting
+                        ORDER BY
+                            canonical_player_id,
+                            team_code,
+                            duplicate_priority,
+                            plate_appearances DESC NULLS LAST,
+                            updated_at DESC NULLS LAST,
+                            id DESC
                     ),
                     qualified_batting AS (
                         SELECT
+                            lb.player_id,
                             pb.name as player_name,
                             lb.team_code,
                             lb.stat_value,
@@ -1314,10 +1343,23 @@ class DatabaseQueryTool:
 
                 params.extend([min_ip, limit])
 
+                canonical_player_expr = _canonical_player_id_expr("psp.player_id")
                 query = f"""
-                    WITH latest_pitching AS (
-                        SELECT DISTINCT ON (player_id, team_code)
-                            player_id,
+                    WITH normalized_pitching AS (
+                        SELECT
+                            psp.*,
+                            {canonical_player_expr} AS canonical_player_id,
+                            CASE
+                                WHEN psp.player_id = {canonical_player_expr} THEN 0
+                                ELSE 1
+                            END AS duplicate_priority
+                        FROM player_season_pitching psp
+                        WHERE psp.season = %s
+                          AND psp.league = 'REGULAR'
+                    ),
+                    latest_pitching AS (
+                        SELECT DISTINCT ON (canonical_player_id, team_code)
+                            canonical_player_id AS player_id,
                             team_code,
                             innings_pitched,
                             era,
@@ -1328,12 +1370,18 @@ class DatabaseQueryTool:
                             strikeouts,
                             quality_starts,
                             {db_column} as stat_value
-                        FROM player_season_pitching
-                        WHERE season = %s
-                        ORDER BY player_id, team_code, innings_pitched DESC
+                        FROM normalized_pitching
+                        ORDER BY
+                            canonical_player_id,
+                            team_code,
+                            duplicate_priority,
+                            innings_pitched DESC NULLS LAST,
+                            updated_at DESC NULLS LAST,
+                            id DESC
                     ),
                     qualified_pitching AS (
                         SELECT
+                            lp.player_id,
                             pb.name as player_name,
                             lp.team_code,
                             lp.stat_value,
@@ -1786,6 +1834,83 @@ class DatabaseQueryTool:
         )
         return result
 
+    def _get_current_team_rank_from_standings_daily(
+        self, team_name: str, year: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return latest in-season rank from team_standings_daily when available."""
+        if year < date.today().year:
+            return None
+
+        team_variants = self.get_team_variants(team_name, year)
+        if not team_variants:
+            return None
+
+        cursor = self.connection.cursor(row_factory=dict_row)
+        try:
+            query = """
+                WITH latest AS (
+                    SELECT MAX(standings_date) AS standings_date
+                    FROM team_standings_daily
+                    WHERE standings_date >= make_date(%s, 1, 1)
+                      AND standings_date < make_date(%s + 1, 1, 1)
+                ),
+                ranked AS (
+                    SELECT
+                        tsd.team_code,
+                        tsd.games_played,
+                        tsd.wins,
+                        tsd.losses,
+                        tsd.draws,
+                        tsd.win_pct,
+                        tsd.games_behind,
+                        tsd.standings_date,
+                        RANK() OVER (
+                            ORDER BY
+                                tsd.win_pct DESC NULLS LAST,
+                                tsd.wins DESC NULLS LAST,
+                                tsd.run_differential DESC NULLS LAST,
+                                tsd.team_code ASC
+                        ) AS season_rank
+                    FROM team_standings_daily tsd
+                    JOIN latest ON latest.standings_date = tsd.standings_date
+                )
+                SELECT *
+                FROM ranked
+                WHERE team_code = ANY(%s)
+                ORDER BY season_rank ASC
+                LIMIT 1
+            """
+            cursor.execute(query, (year, year, team_variants))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "team_name": self.get_team_name(row["team_code"], year) or team_name,
+                "year": year,
+                "rank": self.safe_int(row.get("season_rank")),
+                "wins": self.safe_int(row.get("wins")),
+                "losses": self.safe_int(row.get("losses")),
+                "draws": self.safe_int(row.get("draws")),
+                "win_pct": row.get("win_pct"),
+                "games_played": self.safe_int(row.get("games_played")),
+                "games_behind": row.get("games_behind"),
+                "as_of_date": (
+                    row["standings_date"].isoformat()
+                    if row.get("standings_date") is not None
+                    else None
+                ),
+                "found": True,
+                "error": None,
+                "source": "team_standings_daily",
+            }
+        except Exception as exc:
+            logger.warning(
+                "[DatabaseQuery] team_standings_daily rank lookup failed: %s", exc
+            )
+            return None
+        finally:
+            cursor.close()
+
     def get_team_season_rank(self, team_name: str, year: int) -> Dict[str, Any]:
         """
         특정 팀의 시즌 순위를 계산하여 반환합니다.
@@ -1825,6 +1950,15 @@ class DatabaseQueryTool:
             team_variants,
             self.team_resolver.query_mode,
         )
+
+        standings_result = self._get_current_team_rank_from_standings_daily(
+            team_name, year
+        )
+        if standings_result is not None:
+            self._record_team_query_result(
+                "get_team_season_rank", team_name, year, standings_result
+            )
+            return standings_result
 
         try:
             cursor = self.connection.cursor(row_factory=dict_row)
