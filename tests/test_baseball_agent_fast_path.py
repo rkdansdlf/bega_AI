@@ -334,6 +334,66 @@ def test_player_stats_fast_path_renders_without_llm() -> None:
     assert "다른 출처" not in answer
 
 
+def test_big_game_team_fast_path_avoids_audit_failure_fallback_phrase() -> None:
+    agent = _build_agent_for_fast_path()
+
+    answer = agent._build_fast_path_answer(
+        "LG 큰 경기만 가면 흔들리는 구간이 어디인지 콕 집어줘.",
+        [
+            ToolResult(
+                success=True,
+                data={
+                    "team_name": "LG",
+                    "year": 2026,
+                    "top_batters": [
+                        {
+                            "player_name": "오스틴",
+                            "ops": 0.931,
+                            "home_runs": 12,
+                        }
+                    ],
+                    "top_pitchers": [],
+                },
+                message="ok",
+            ),
+            ToolResult(
+                success=True,
+                data={
+                    "team_name": "LG",
+                    "year": 2026,
+                    "metrics": {
+                        "batting": {
+                            "ops": 0.781,
+                            "avg": 0.281,
+                            "total_hr": 39,
+                        },
+                        "pitching": {
+                            "avg_era": 3.86,
+                            "qs_rate": 0.54,
+                            "era_rank": "3위",
+                        },
+                    },
+                    "rankings": {"batting_ops": "2위"},
+                    "fatigue_index": {
+                        "bullpen_share": "41.2%",
+                        "bullpen_load_rank": "4위",
+                    },
+                    "league_averages": {"bullpen_share": "39.0%"},
+                },
+                message="ok",
+            ),
+        ],
+        chat_mode=True,
+    )
+
+    assert answer is not None
+    assert "클러치/큰 경기" in answer
+    assert "최근 흐름·선발·불펜·타선 지표 중심" in answer
+    assert "단정하기 어렵" not in answer
+    assert "자료만으로는" not in answer
+    assert "현재 연결된 자료" not in answer
+
+
 def test_game_flow_query_does_not_collapse_to_schedule_fast_path() -> None:
     agent = _build_agent_for_fast_path()
     query = "2025년 5월 1일 경기 흐름 요약해줘"

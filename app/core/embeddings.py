@@ -150,6 +150,50 @@ def _ensure_dimension(
         )
 
 
+def _is_text_embedding_3_model(model: str) -> bool:
+    return "text-embedding-3" in (model or "").lower()
+
+
+def _fit_embedding_dimensions(
+    vectors: Sequence[Sequence[float]],
+    expected: Optional[int],
+    *,
+    allow_truncate: bool = False,
+) -> List[List[float]]:
+    """Return vectors at the expected dimension, raising before DB writes on mismatch."""
+    if not vectors:
+        return []
+    if not expected:
+        return [list(map(float, vec)) for vec in vectors]
+
+    fitted: List[List[float]] = []
+    mismatched: set[int] = set()
+    truncated = 0
+    for vec in vectors:
+        vector = list(map(float, vec))
+        actual = len(vector)
+        if actual == expected:
+            fitted.append(vector)
+            continue
+        if allow_truncate and actual > expected:
+            fitted.append(vector[:expected])
+            truncated += 1
+            continue
+        mismatched.add(actual)
+
+    if mismatched:
+        raise EmbeddingError(
+            f"임베딩 차원 불일치: 기대값={expected}, 실제값={sorted(mismatched)[:3]}"
+        )
+    if truncated:
+        logger.info(
+            "Matryoshka 임베딩 %d건을 앞 %d차원으로 축소했습니다.",
+            truncated,
+            expected,
+        )
+    return fitted
+
+
 async def _embed_local(texts: Sequence[str], settings: Settings) -> List[List[float]]:
     """로컬 테스트를 위해 결정론적인 사인파 기반 벡터를 생성합니다."""
     dim = max(1, int(settings.embed_dim))
@@ -373,6 +417,7 @@ async def _embed_openai(
     model = (
         settings.openai_embed_model or settings.embed_model or "text-embedding-3-small"
     )
+    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
     url = "https://api.openai.com/v1/embeddings"
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
@@ -399,6 +444,8 @@ async def _embed_openai(
             "model": model,
             "input": list(chunk),
         }
+        if expected_dim and _is_text_embedding_3_model(model):
+            payload["dimensions"] = expected_dim
         response = await client.post(url, json=payload, headers=headers)
 
         if response.status_code != 200:
@@ -482,9 +529,11 @@ async def _embed_openai(
             f"OpenAI 응답 수가 입력 수와 일치하지 않습니다. 입력={len(texts)}, 출력={len(results)}"
         )
 
-    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
-    _ensure_dimension(results, expected_dim)
-    return results
+    return _fit_embedding_dimensions(
+        results,
+        expected_dim,
+        allow_truncate=_is_text_embedding_3_model(model),
+    )
 
 
 async def _embed_openrouter(
@@ -502,6 +551,7 @@ async def _embed_openrouter(
         or settings.embed_model
         or "openai/text-embedding-3-small"
     )
+    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
     base_url = settings.openrouter_base_url.rstrip("/")
     url = f"{base_url}/embeddings"
     headers = {
@@ -542,6 +592,8 @@ async def _embed_openrouter(
             "model": model,
             "input": list(chunk),
         }
+        if expected_dim and _is_text_embedding_3_model(model):
+            payload["dimensions"] = expected_dim
         response = await client.post(url, json=payload, headers=headers)
 
         content_type = response.headers.get("content-type", "")
@@ -613,9 +665,11 @@ async def _embed_openrouter(
     for i in range(len(batches)):
         results.extend(results_map[i])
 
-    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
-    _ensure_dimension(results, expected_dim)
-    return results
+    return _fit_embedding_dimensions(
+        results,
+        expected_dim,
+        allow_truncate=_is_text_embedding_3_model(model),
+    )
 
 
 async def async_embed_texts(

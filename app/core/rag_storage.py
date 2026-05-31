@@ -710,6 +710,11 @@ def soft_deactivate_missing_parts(
 ) -> None:
     if not source_prefix:
         return
+    if source_table == "game_summary":
+        return
+    active_ids = [value for value in active_source_row_ids if value]
+    if len(active_ids) == 1 and active_ids[0] == source_prefix:
+        return
     cur.execute(
         """
         UPDATE rag_chunks
@@ -723,7 +728,7 @@ def soft_deactivate_missing_parts(
             source_table,
             source_prefix,
             f"{source_prefix}#part%",
-            list(active_source_row_ids),
+            active_ids,
         ),
     )
 

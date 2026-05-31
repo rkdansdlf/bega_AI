@@ -45,6 +45,25 @@ def test_build_select_query_with_alias(sample_since):
     assert params == (2025, sample_since)
 
 
+def test_build_select_query_applies_date_to_exclusive_for_game_summary() -> None:
+    profile = TABLE_PROFILES["game_summary"]
+
+    query, params = build_select_query(
+        table="game_summary",
+        profile=profile,
+        pk_columns=["id"],
+        limit=None,
+        season_year=2026,
+        since=None,
+        date_to_exclusive=datetime(2026, 5, 1).date(),
+    )
+
+    assert "ks.season_year = %s" in query
+    assert "g.game_date < %s" in query
+    assert "ORDER BY g.game_date DESC" in query
+    assert params == (2026, datetime(2026, 5, 1).date())
+
+
 def test_build_select_query_without_alias(sample_since):
     profile = {
         "select_sql": "SELECT * FROM team_name_mapping",
