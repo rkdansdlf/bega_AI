@@ -57,6 +57,8 @@ from ..core.chat_cache import (
     delete_by_intent,
     delete_by_key,
 )
+from ..core.rag import _build_static_kbo_faq_result
+from ..tools.operator_data_query import try_build_operator_fast_path_result
 from ..observability.metrics import AI_RESPONSE_CACHE_BY_INTENT
 
 
@@ -356,6 +358,91 @@ def _normalize_chatbot_answer_text(answer: str) -> str:
 
 def _ensure_quality_answer_text(answer: str) -> str:
     return _normalize_chatbot_answer_text(answer or "")
+
+
+def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
+    settings = get_settings()
+    if settings.operator_data_fast_path_enabled:
+        try:
+            pool = get_connection_pool()
+            with pool.connection() as conn:
+                result = try_build_operator_fast_path_result(conn, question)
+            if result is not None:
+                payload = dict(result)
+                payload["answer"] = _ensure_quality_answer_text(
+                    str(payload.get("answer") or "")
+                )
+                payload["cached"] = False
+                return payload
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ChatStatic] operator data fast-path skipped: %s", exc)
+
+    result = _build_static_kbo_faq_result(question)
+    if result is None:
+        return None
+    payload = dict(result)
+    payload["answer"] = _ensure_quality_answer_text(str(payload.get("answer") or ""))
+    payload["cached"] = False
+    return payload
+
+
+def _make_static_sse_response(result: Dict[str, Any], style: str) -> EventSourceResponse:
+    async def static_generator():
+        answer = await _render_answer(result, style)
+        answer = _ensure_quality_answer_text(answer)
+        yield {
+            "event": "status",
+            "data": json.dumps({"message": "답변을 준비했습니다."}, ensure_ascii=False),
+        }
+        yield {
+            "event": "message",
+            "data": json.dumps({"delta": answer}, ensure_ascii=False),
+        }
+        yield {
+            "event": "meta",
+            "data": json.dumps(
+                {
+                    "tool_calls": result.get("tool_calls", []),
+                    "tool_results": result.get("tool_results", []),
+                    "data_sources": result.get("data_sources", []),
+                    "verified": bool(result.get("verified", True)),
+                    "visualizations": result.get("visualizations", []),
+                    "style": style,
+                    "cached": False,
+                    "intent": result.get("intent"),
+                    "planner_mode": result.get("planner_mode", "fast_path"),
+                    "planner_cache_hit": bool(
+                        result.get("planner_cache_hit", False)
+                    ),
+                    "tool_execution_mode": result.get(
+                        "tool_execution_mode", "none"
+                    ),
+                    "fallback_triggered": bool(
+                        result.get("fallback_triggered", False)
+                    ),
+                    "fallback_answer_used": bool(
+                        result.get("fallback_answer_used", False)
+                    ),
+                    "grounding_mode": result.get("grounding_mode"),
+                    "source_tier": result.get("source_tier"),
+                    "answer_sources": result.get("answer_sources", []),
+                    "as_of_date": result.get("as_of_date"),
+                    "fallback_reason": result.get("fallback_reason"),
+                    "perf": result.get("perf", {}),
+                },
+                ensure_ascii=False,
+            ),
+        }
+        yield {"event": "done", "data": "[DONE]"}
+
+    return EventSourceResponse(
+        static_generator(),
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+        ping=max(1, int(get_settings().chat_sse_ping_seconds)),
+    )
 
 
 def _is_non_cacheable_response(response_text: str) -> bool:
@@ -1190,6 +1277,12 @@ async def chat_completion(
 
     filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
+
+    static_result = _build_static_chat_result(question)
+    if static_result is not None:
+        logger.info("[ChatStatic] completion fast-path question=%s", question[:120])
+        return JSONResponse(_safe_serialize(static_result))
+
     cacheable = (history is None) and (not has_temporal_keyword(question))
     cache_key: Optional[str] = None
 
@@ -1435,6 +1528,11 @@ async def chat_stream_post(
     style_override = payload.get("style")
     if style_override in {"markdown", "json", "compact"}:
         style = style_override
+
+    static_result = _build_static_chat_result(question)
+    if static_result is not None:
+        logger.info("[ChatStatic] stream fast-path question=%s", question[:120])
+        return _make_static_sse_response(static_result, style)
 
     # 캐시 적용 조건: history-free 쿼리이고 실시간 키워드 없음
     # history가 있으면 대화 맥락이 있으므로 캐싱 불가
