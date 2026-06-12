@@ -352,6 +352,9 @@ class Settings(BaseSettings):
     chat_fast_path_fallback_on_empty: bool = Field(
         True, validation_alias="CHAT_FAST_PATH_FALLBACK_ON_EMPTY"
     )
+    operator_data_fast_path_enabled: bool = Field(
+        False, validation_alias="OPERATOR_DATA_FAST_PATH_ENABLED"
+    )
     chat_planner_cache_ttl_seconds: int = Field(
         60, validation_alias="CHAT_PLANNER_CACHE_TTL_SECONDS"
     )
