@@ -484,10 +484,7 @@ def _classify_expected_answerability_status(question: str, text: str) -> str:
             "확정 전",
             "공식 기록이 제공된 뒤",
         ]
-    ) and any(
-        token in query
-        for token in ["올스타", "포스트시즌", "한국시리즈", "mvp", "수상", "왕"]
-    ):
+    ) and any(token in query for token in ["올스타", "포스트시즌", "한국시리즈", "mvp", "수상", "왕"]):
         return "future_event_pending"
     if any(
         marker in answer

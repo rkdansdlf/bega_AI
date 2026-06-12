@@ -564,9 +564,7 @@ def _finding(
     source_row_id = (
         expected.source_row_id
         if expected is not None
-        else actual.normalized_source_row_id
-        if actual is not None
-        else ""
+        else actual.normalized_source_row_id if actual is not None else ""
     )
     item: Dict[str, Any] = {
         "type": finding_type,

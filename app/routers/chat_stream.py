@@ -387,7 +387,9 @@ def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
-def _make_static_sse_response(result: Dict[str, Any], style: str) -> EventSourceResponse:
+def _make_static_sse_response(
+    result: Dict[str, Any], style: str
+) -> EventSourceResponse:
     async def static_generator():
         answer = await _render_answer(result, style)
         answer = _ensure_quality_answer_text(answer)
@@ -412,15 +414,9 @@ def _make_static_sse_response(result: Dict[str, Any], style: str) -> EventSource
                     "cached": False,
                     "intent": result.get("intent"),
                     "planner_mode": result.get("planner_mode", "fast_path"),
-                    "planner_cache_hit": bool(
-                        result.get("planner_cache_hit", False)
-                    ),
-                    "tool_execution_mode": result.get(
-                        "tool_execution_mode", "none"
-                    ),
-                    "fallback_triggered": bool(
-                        result.get("fallback_triggered", False)
-                    ),
+                    "planner_cache_hit": bool(result.get("planner_cache_hit", False)),
+                    "tool_execution_mode": result.get("tool_execution_mode", "none"),
+                    "fallback_triggered": bool(result.get("fallback_triggered", False)),
                     "fallback_answer_used": bool(
                         result.get("fallback_answer_used", False)
                     ),

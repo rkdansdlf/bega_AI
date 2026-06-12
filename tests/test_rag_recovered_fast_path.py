@@ -339,7 +339,9 @@ def test_operator_data_fast_path_underspecified_rows_keep_manual_contract() -> N
     )
 
     lineup = pipeline._build_operator_or_static_kbo_result("LG 라인업 알려줘.")
-    roster = pipeline._build_operator_or_static_kbo_result("LG 부상자 명단은 어디서 봐?")
+    roster = pipeline._build_operator_or_static_kbo_result(
+        "LG 부상자 명단은 어디서 봐?"
+    )
 
     assert lineup is not None
     assert lineup["strategy"] == "manual_baseball_data_required"
@@ -368,7 +370,9 @@ def test_operator_data_fast_path_malformed_lineup_notes_keep_manual_contract() -
         ],
     )
 
-    result = pipeline._build_operator_or_static_kbo_result("2026-06-05 LG 라인업 알려줘.")
+    result = pipeline._build_operator_or_static_kbo_result(
+        "2026-06-05 LG 라인업 알려줘."
+    )
 
     assert result is not None
     assert result["strategy"] == "manual_baseball_data_required"

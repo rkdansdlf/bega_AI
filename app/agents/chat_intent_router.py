@@ -7,7 +7,11 @@ from enum import Enum
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from ..core.entity_extractor import TEAM_MAPPING, extract_entities_from_query, extract_team
+from ..core.entity_extractor import (
+    TEAM_MAPPING,
+    extract_entities_from_query,
+    extract_team,
+)
 from .tool_caller import ToolCall
 
 
@@ -1118,7 +1122,14 @@ class ChatIntentRouter:
             for token in ("경기표", "경기 일정", "경기일정", "일정 보여", "일정 알려")
         ) and not any(
             token in query_lower
-            for token in ("중계", "라디오", "하이라이트", "다시보기", "문자중계", "알림")
+            for token in (
+                "중계",
+                "라디오",
+                "하이라이트",
+                "다시보기",
+                "문자중계",
+                "알림",
+            )
         )
 
     def _is_team_standings_table_query(self, query_lower: str) -> bool:
@@ -1133,9 +1144,7 @@ class ChatIntentRouter:
                 "팀별 승률",
                 "팀별 승차",
             )
-        ) and not any(
-            token in query_lower for token in ("뉴스", "이슈", "소식", "가능성", "후보")
-        )
+        ) and not any(token in query_lower for token in ("뉴스", "이슈", "소식", "가능성", "후보"))
 
     def _build_clarification_answer(
         self,
@@ -1153,7 +1162,9 @@ class ChatIntentRouter:
 
         comparison_tokens = ["두 선수", "선수 비교", "비교하면", "비교해"]
         if not player_name and any(token in query_lower for token in comparison_tokens):
-            if not re.search(r"[가-힣A-Za-z]{2,}\s*(?:과|와|vs|VS)\s*[가-힣A-Za-z]{2,}", query_lower):
+            if not re.search(
+                r"[가-힣A-Za-z]{2,}\s*(?:과|와|vs|VS)\s*[가-힣A-Za-z]{2,}", query_lower
+            ):
                 return "비교할 두 선수 이름을 같이 알려주세요. 예: 김도영과 문보경처럼 두 이름이 필요합니다."
 
         if not team_name and any(
@@ -1174,19 +1185,23 @@ class ChatIntentRouter:
             "핵심 장면",
             "선발 투수",
         ]
-        if not game_id and not extracted_date and not team_name and any(
-            token in query_lower for token in game_detail_tokens
+        if (
+            not game_id
+            and not extracted_date
+            and not team_name
+            and any(token in query_lower for token in game_detail_tokens)
         ):
             return "어느 경기인지 특정할 수 있게 날짜와 팀명 또는 game_id를 같이 알려주세요. 한 날짜에 여러 경기가 있으면 경기별로 나눠서 조회하겠습니다."
 
         return None
 
-    def _resolve_team_metric_spec(
-        self, query_lower: str
-    ) -> Optional[tuple[str, str]]:
+    def _resolve_team_metric_spec(self, query_lower: str) -> Optional[tuple[str, str]]:
         comparison_specs: list[tuple[tuple[str, ...], tuple[str, str]]] = [
             (("불펜 소모", "불펜 과부하"), ("bullpen_share", "DESC")),
-            (("불펜 era", "불펜 평균자책", "불펜 비교", "불펜이 좋은"), ("bullpen_era", "ASC")),
+            (
+                ("불펜 era", "불펜 평균자책", "불펜 비교", "불펜이 좋은"),
+                ("bullpen_era", "ASC"),
+            ),
             (("선발진 비교", "선발진이 좋은"), ("starter_qs_rate", "DESC")),
             (("타선 비교", "타선이 좋은"), ("ops", "DESC")),
             (("수비 비교", "수비가 좋은", "수비 좋은"), ("fielding_pct", "DESC")),
@@ -1223,8 +1238,14 @@ class ChatIntentRouter:
             (("실책",), ("errors", "ASC")),
             (("홈런",), ("home_runs", "DESC")),
             (("도루",), ("stolen_bases", "DESC")),
-            (("경기당 평균 득점", "경기당 득점", "평균 득점"), ("runs_per_game", "DESC")),
-            (("경기당 평균 실점", "경기당 실점", "평균 실점"), ("runs_allowed_per_game", "ASC")),
+            (
+                ("경기당 평균 득점", "경기당 득점", "평균 득점"),
+                ("runs_per_game", "DESC"),
+            ),
+            (
+                ("경기당 평균 실점", "경기당 실점", "평균 실점"),
+                ("runs_allowed_per_game", "ASC"),
+            ),
             (("득점력", "득점"), ("runs", "DESC")),
             (("실점력", "실점"), ("runs_allowed", "ASC")),
             (("출루율", "obp"), ("obp", "DESC")),
@@ -1238,16 +1259,23 @@ class ChatIntentRouter:
                 return spec
         return None
 
-    def _resolve_team_form_spec(
-        self, query_lower: str
-    ) -> Optional[tuple[str, int]]:
-        if any(token in query_lower for token in ["홈 승률", "원정 승률", "홈/원정", "홈 원정"]):
+    def _resolve_team_form_spec(self, query_lower: str) -> Optional[tuple[str, int]]:
+        if any(
+            token in query_lower
+            for token in ["홈 승률", "원정 승률", "홈/원정", "홈 원정"]
+        ):
             return "home_away", 10
         if any(token in query_lower for token in ["연승", "연패"]):
             return "streak", 10
-        if any(token in query_lower for token in ["최근 10경기", "최근10경기", "최근 열 경기"]):
+        if any(
+            token in query_lower
+            for token in ["최근 10경기", "최근10경기", "최근 열 경기"]
+        ):
             return "recent", 10
-        if any(token in query_lower for token in ["최근 5경기", "최근5경기", "최근 다섯 경기"]):
+        if any(
+            token in query_lower
+            for token in ["최근 5경기", "최근5경기", "최근 다섯 경기"]
+        ):
             return "recent", 5
         if "최근" in query_lower and any(
             token in query_lower for token in ["성적", "흐름", "승률", "승패", "페이스"]
@@ -1268,10 +1296,19 @@ class ChatIntentRouter:
             (("다승", "wins", "승수"), ("pitching", "wins")),
             (("세이브", "saves", "save"), ("pitching", "saves")),
             (("홀드", "holds", "hold"), ("pitching", "holds")),
-            (("이닝 소화", "이닝", "innings pitched", "innings_pitched"), ("pitching", "innings_pitched")),
-            (("완투", "complete game", "complete_games"), ("pitching", "complete_games")),
+            (
+                ("이닝 소화", "이닝", "innings pitched", "innings_pitched"),
+                ("pitching", "innings_pitched"),
+            ),
+            (
+                ("완투", "complete game", "complete_games"),
+                ("pitching", "complete_games"),
+            ),
             (("완봉", "shutout", "shutouts"), ("pitching", "shutouts")),
-            (("피안타율", "avg_against", "batting average against"), ("pitching", "avg_against")),
+            (
+                ("피안타율", "avg_against", "batting average against"),
+                ("pitching", "avg_against"),
+            ),
             (("ops",), ("batting", "ops")),
             (("홈런", "home_runs", "home runs"), ("batting", "home_runs")),
             (("타점", "rbi"), ("batting", "rbi")),

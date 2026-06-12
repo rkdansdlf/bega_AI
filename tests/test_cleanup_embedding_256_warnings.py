@@ -205,9 +205,7 @@ def test_validate_runtime_accepts_expected_openrouter_256_v2_hnsw_halfvec() -> N
 
 
 def test_validate_runtime_rejects_unexpected_embedding_model() -> None:
-    errors = cleanup._validate_runtime(
-        _settings(openrouter_embed_model="other/model")
-    )
+    errors = cleanup._validate_runtime(_settings(openrouter_embed_model="other/model"))
 
     assert errors
     assert "resolved embedding model is not" in errors[0]
@@ -292,9 +290,7 @@ def test_count_expectation_mismatches_reports_actual_counts() -> None:
         },
     )
 
-    assert mismatches == [
-        {"count": "metadata_fixable", "expected": 413, "actual": 7}
-    ]
+    assert mismatches == [{"count": "metadata_fixable", "expected": 413, "actual": 7}]
 
 
 def test_apply_count_mismatch_rolls_back_before_updates(monkeypatch, tmp_path) -> None:

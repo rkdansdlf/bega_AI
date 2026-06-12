@@ -16,10 +16,12 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PACKET_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_operator_packet" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_operator_packet"
+    / "post_db_fast_path_docker_kbo500"
 )
 DEFAULT_AUDIT_DIR = (
     PROJECT_ROOT
@@ -28,7 +30,10 @@ DEFAULT_AUDIT_DIR = (
     / "post_db_fast_path_docker_kbo500"
 )
 DEFAULT_DB_PREREQ_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_db_prereqs" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_db_prereqs"
+    / "post_db_fast_path_docker_kbo500"
 )
 DEFAULT_VALIDATION_DIR = (
     PROJECT_ROOT
@@ -37,7 +42,10 @@ DEFAULT_VALIDATION_DIR = (
     / "p0_packet_post_db_fast_path_docker_kbo500"
 )
 DEFAULT_INGEST_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_ingest" / "p0_packet_post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_ingest"
+    / "p0_packet_post_db_fast_path_docker_kbo500"
 )
 DEFAULT_GATE_DIR = (
     PROJECT_ROOT
@@ -46,7 +54,10 @@ DEFAULT_GATE_DIR = (
     / "p0_packet_post_db_fast_path_docker_kbo500"
 )
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_p0_recovery_status" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_p0_recovery_status"
+    / "post_db_fast_path_docker_kbo500"
 )
 BLOCKER_FIELDNAMES = ["severity", "code", "message", "source", "queue_id", "domain"]
 P0_DOMAIN_ORDER = ("season_meta", "schedule_window", "game_day_lineup", "roster_news")
@@ -94,10 +105,14 @@ def _read_csv(path: Path, *, required: bool = True) -> list[dict[str, str]]:
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -282,10 +297,17 @@ def build_status_report(
                     message="DB prerequisite checks have not passed.",
                 )
             )
-        db_prereq_issues = (db_prereq_report or {}).get("issues") if isinstance(db_prereq_report, Mapping) else []
+        db_prereq_issues = (
+            (db_prereq_report or {}).get("issues")
+            if isinstance(db_prereq_report, Mapping)
+            else []
+        )
         if isinstance(db_prereq_issues, Sequence):
             for issue in db_prereq_issues:
-                if not isinstance(issue, Mapping) or str(issue.get("severity") or "") != "error":
+                if (
+                    not isinstance(issue, Mapping)
+                    or str(issue.get("severity") or "") != "error"
+                ):
                     continue
                 blockers.append(
                     _blocker(
@@ -410,10 +432,14 @@ def build_status_report(
             "manual_fallback_count": _as_int(audit.get("manual_fallback_count")),
             "blocked_ready_count": _as_int(audit.get("blocked_ready_count")),
             "db_prereq_status": str(db_prereq.get("status") or "missing"),
-            "db_prereq_error_count": _issue_count(db_prereq, "error") if db_prereq else 0,
+            "db_prereq_error_count": (
+                _issue_count(db_prereq, "error") if db_prereq else 0
+            ),
             "validation_error_count": _issue_count(validation, "error"),
             "validation_warning_count": _issue_count(validation, "warning"),
-            "db_checks_skipped": bool(isinstance(db_checks, Mapping) and db_checks.get("skipped")),
+            "db_checks_skipped": bool(
+                isinstance(db_checks, Mapping) and db_checks.get("skipped")
+            ),
             "apply_eligible_count": _as_int(validation.get("apply_eligible_count")),
             "manual_required_count": manual_required_count,
             "manual_required_domain_counts": manual_required_domain_counts,
@@ -513,14 +539,22 @@ def run_summary(
     report = build_status_report(
         packet_summary=_read_json(packet_dir / "p0_input_summary.json"),
         audit_report=_read_json(audit_dir / "p0_input_audit_summary.json"),
-        db_prereq_report=_read_json(db_prereq_dir / "db_prereq_summary.json", required=False),
-        validation_summary=_read_json(validation_dir / "operator_data_validation_summary.json"),
+        db_prereq_report=_read_json(
+            db_prereq_dir / "db_prereq_summary.json", required=False
+        ),
+        validation_summary=_read_json(
+            validation_dir / "operator_data_validation_summary.json"
+        ),
         ingest_summary=_read_json(ingest_dir / "operator_data_ingest_summary.json"),
         gate_report=_read_json(gate_dir / "summary.json"),
         gate_issues=_read_csv(gate_dir / "issues.csv"),
         audit_issues=_read_csv(audit_dir / "p0_input_audit_issues.csv", required=False),
-        validation_issues=_read_csv(validation_dir / "operator_data_validation_issues.csv", required=False),
-        ingest_issues=_read_csv(ingest_dir / "operator_data_ingest_issues.csv", required=False),
+        validation_issues=_read_csv(
+            validation_dir / "operator_data_validation_issues.csv", required=False
+        ),
+        ingest_issues=_read_csv(
+            ingest_dir / "operator_data_ingest_issues.csv", required=False
+        ),
         gate_manual_required_rows=_read_csv(
             gate_dir / "manual_baseball_data_required_rows.csv",
             required=False,
@@ -534,7 +568,11 @@ def run_summary(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "p0_recovery_status_summary.json", report)
-    _write_csv(output_dir / "p0_recovery_status_blockers.csv", report["blockers"], BLOCKER_FIELDNAMES)
+    _write_csv(
+        output_dir / "p0_recovery_status_blockers.csv",
+        report["blockers"],
+        BLOCKER_FIELDNAMES,
+    )
     (output_dir / "p0_recovery_status_handoff.md").write_text(
         _render_handoff(report),
         encoding="utf-8",
@@ -543,7 +581,9 @@ def run_summary(
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarize P0 recovery readiness artifacts.")
+    parser = argparse.ArgumentParser(
+        description="Summarize P0 recovery readiness artifacts."
+    )
     parser.add_argument("--packet-dir", default=str(DEFAULT_PACKET_DIR))
     parser.add_argument("--audit-dir", default=str(DEFAULT_AUDIT_DIR))
     parser.add_argument("--db-prereq-dir", default=str(DEFAULT_DB_PREREQ_DIR))

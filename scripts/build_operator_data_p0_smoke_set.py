@@ -15,7 +15,6 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_NORMALIZED = (
     PROJECT_ROOT
@@ -25,7 +24,9 @@ DEFAULT_NORMALIZED = (
     / "operator_data_normalized_rows.jsonl"
 )
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "reports" / "operator_data_smoke"
-DEFAULT_RECOVERED_OUTPUT = PROJECT_ROOT / "scripts" / "smoke_chatbot_operator_data_p0_recovered.txt"
+DEFAULT_RECOVERED_OUTPUT = (
+    PROJECT_ROOT / "scripts" / "smoke_chatbot_operator_data_p0_recovered.txt"
+)
 DEFAULT_MANUAL_OUTPUT = (
     PROJECT_ROOT / "scripts" / "smoke_chatbot_operator_data_p0_manual_controls.txt"
 )
@@ -121,8 +122,12 @@ def build_smoke_set(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "warnings": warnings,
         },
         "expectations": expectations,
-        "recovered_questions": [_normalize_text(row.get("question")) for row in recovered_rows],
-        "manual_control_questions": [_normalize_text(row.get("question")) for row in manual_rows],
+        "recovered_questions": [
+            _normalize_text(row.get("question")) for row in recovered_rows
+        ],
+        "manual_control_questions": [
+            _normalize_text(row.get("question")) for row in manual_rows
+        ],
         "all_questions": [
             *[_normalize_text(row.get("question")) for row in recovered_rows],
             *[_normalize_text(row.get("question")) for row in manual_rows],
@@ -140,7 +145,9 @@ def _write_questions(path: Path, questions: Sequence[str]) -> None:
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def build_files(
@@ -153,7 +160,9 @@ def build_files(
     expectations_output: Optional[Path] = None,
 ) -> dict[str, Any]:
     result = build_smoke_set(_load_jsonl(normalized_path))
-    expectations_path = expectations_output or output_dir / "operator_data_p0_smoke_expectations.json"
+    expectations_path = (
+        expectations_output or output_dir / "operator_data_p0_smoke_expectations.json"
+    )
     payload = {
         "summary": {
             **result["summary"],
@@ -190,7 +199,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         recovered_output=Path(args.recovered_output),
         manual_output=Path(args.manual_output),
         all_output=Path(args.all_output),
-        expectations_output=Path(args.expectations_output) if args.expectations_output else None,
+        expectations_output=(
+            Path(args.expectations_output) if args.expectations_output else None
+        ),
     )
     print(json.dumps(payload["summary"], ensure_ascii=False, indent=2))
     return 0

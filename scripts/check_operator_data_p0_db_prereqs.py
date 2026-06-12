@@ -33,9 +33,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts import ingest_operator_data_handoff as ingest
 
-
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_db_prereqs" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_db_prereqs"
+    / "post_db_fast_path_docker_kbo500"
 )
 ISSUE_FIELDNAMES = ["severity", "code", "message", "table_name", "missing_columns"]
 BASE_READER_TABLE_COLUMNS = {
@@ -90,10 +92,14 @@ def _issue(
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -113,11 +119,17 @@ def _table_columns(cur: Any, table_name: str) -> set[str]:
     )
     columns: set[str] = set()
     for row in list(cur.fetchall() or []):
-        columns.add(_normalize_text(row.get("column_name") if isinstance(row, Mapping) else row[0]))
+        columns.add(
+            _normalize_text(
+                row.get("column_name") if isinstance(row, Mapping) else row[0]
+            )
+        )
     return columns
 
 
-def _has_unique_conflict_target(cur: Any, table_name: str, columns: Sequence[str]) -> bool:
+def _has_unique_conflict_target(
+    cur: Any, table_name: str, columns: Sequence[str]
+) -> bool:
     cur.execute(
         """
         SELECT 1
@@ -166,7 +178,9 @@ def build_db_prereq_report(
             }
         )
         if missing_columns:
-            code = "missing_table" if not available_columns else "schema_missing_columns"
+            code = (
+                "missing_table" if not available_columns else "schema_missing_columns"
+            )
             issues.append(
                 _issue(
                     code=code,
@@ -288,7 +302,9 @@ def _write_report(output_dir: Path, report: Mapping[str, Any]) -> None:
             "status",
         ],
     )
-    (output_dir / "db_prereq_handoff.md").write_text(_render_handoff(report), encoding="utf-8")
+    (output_dir / "db_prereq_handoff.md").write_text(
+        _render_handoff(report), encoding="utf-8"
+    )
 
 
 def _connect(db_url: str) -> Any:
@@ -323,8 +339,12 @@ def run_check(*, db_url: str, output_dir: Path) -> dict[str, Any]:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Check P0 operator-data DB prerequisites.")
-    parser.add_argument("--db-url", default="", help="PostgreSQL URL. Defaults to POSTGRES_DB_URL.")
+    parser = argparse.ArgumentParser(
+        description="Check P0 operator-data DB prerequisites."
+    )
+    parser.add_argument(
+        "--db-url", default="", help="PostgreSQL URL. Defaults to POSTGRES_DB_URL."
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument(
         "--no-strict",

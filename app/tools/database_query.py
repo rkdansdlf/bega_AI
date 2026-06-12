@@ -3050,11 +3050,7 @@ class DatabaseQueryTool:
                 if form_row is None:
                     variants = set(self.get_team_variants(team, year))
                     form_row = next(
-                        (
-                            row
-                            for code, row in form_by_team.items()
-                            if code in variants
-                        ),
+                        (row for code, row in form_by_team.items() if code in variants),
                         None,
                     )
 

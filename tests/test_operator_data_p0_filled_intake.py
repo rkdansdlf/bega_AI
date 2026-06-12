@@ -9,7 +9,9 @@ from typing import Any, Mapping, Sequence
 from scripts import run_operator_data_p0_filled_intake as runner
 
 
-def _write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> None:
+def _write_csv(
+    path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -83,7 +85,9 @@ def _schedule_fields(queue_id: str, **overrides: str) -> list[dict[str, str]]:
         "confidence": "0.95",
     }
     values.update(overrides)
-    return [_field_row(queue_id, field_name, value) for field_name, value in values.items()]
+    return [
+        _field_row(queue_id, field_name, value) for field_name, value in values.items()
+    ]
 
 
 def _write_packet(
@@ -100,8 +104,12 @@ def _write_packet(
     source_fields = tmp_path / "source_fields.csv"
     _write_csv(source_queue, runner.audit.QUEUE_FIELDNAMES, source_queue_rows)
     _write_csv(source_fields, runner.audit.FIELDS_FIELDNAMES, source_field_rows)
-    _write_csv(queue, runner.audit.QUEUE_FIELDNAMES, packet_queue_rows or source_queue_rows)
-    _write_csv(fields, runner.audit.FIELDS_FIELDNAMES, packet_field_rows or source_field_rows)
+    _write_csv(
+        queue, runner.audit.QUEUE_FIELDNAMES, packet_queue_rows or source_queue_rows
+    )
+    _write_csv(
+        fields, runner.audit.FIELDS_FIELDNAMES, packet_field_rows or source_field_rows
+    )
     return queue, fields, source_queue, source_fields
 
 
@@ -127,7 +135,9 @@ class FakeDbChecker:
         del player_name
         return 1
 
-    def is_known_team_code(self, team_code: str, season_year: int | None = None) -> bool:
+    def is_known_team_code(
+        self, team_code: str, season_year: int | None = None
+    ) -> bool:
         del team_code, season_year
         return True
 
@@ -201,7 +211,9 @@ def _fake_db_prereq_pass(output_dir: Path) -> dict[str, Any]:
     return report
 
 
-def test_pending_only_packet_creates_full_bundle_and_exits_blocked(tmp_path: Path, monkeypatch) -> None:
+def test_pending_only_packet_creates_full_bundle_and_exits_blocked(
+    tmp_path: Path, monkeypatch
+) -> None:
     queue, fields, source_queue, source_fields = _write_packet(
         tmp_path,
         source_queue_rows=[_queue_row("ODQ-0001")],
@@ -229,16 +241,23 @@ def test_pending_only_packet_creates_full_bundle_and_exits_blocked(tmp_path: Pat
     assert (output_dir / "packet_snapshot" / "p0_queue.csv").exists()
     assert (output_dir / "audit" / "p0_input_audit_summary.json").exists()
     assert (output_dir / "db_prereqs" / "db_prereq_summary.json").exists()
-    assert (output_dir / "validation" / "operator_data_validation_summary.json").exists()
+    assert (
+        output_dir / "validation" / "operator_data_validation_summary.json"
+    ).exists()
     assert (output_dir / "ingest" / "operator_data_ingest_summary.json").exists()
     assert (output_dir / "gate" / "summary.json").exists()
     assert (output_dir / "status" / "p0_recovery_status_summary.json").exists()
-    summary = json.loads((output_dir / "intake_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads(
+        (output_dir / "intake_summary.json").read_text(encoding="utf-8")
+    )
     assert summary["summary"]["status"] == "blocked"
     assert summary["summary"]["nonpassing_stage_count"] == 5
     stages = {row["name"]: row for row in _read_csv(output_dir / "intake_stages.csv")}
     assert stages["audit"]["code"] == "no_ready_p0_rows"
-    assert stages["audit"]["message"] == "No P0 rows are marked ready_for_validation or validated."
+    assert (
+        stages["audit"]["message"]
+        == "No P0 rows are marked ready_for_validation or validated."
+    )
     assert stages["db_prereqs"]["code"] == "db_url_missing"
     assert stages["validation"]["code"] == "db_checks_skipped"
     assert stages["validation"]["message"] == "POSTGRES_DB_URL is not set"
@@ -249,9 +268,15 @@ def test_pending_only_packet_creates_full_bundle_and_exits_blocked(tmp_path: Pat
             encoding="utf-8"
         )
     )
-    gate_summary = json.loads((output_dir / "gate" / "summary.json").read_text(encoding="utf-8"))
-    manual_rows = _read_csv(output_dir / "gate" / "manual_baseball_data_required_rows.csv")
-    assert validation_summary["db_checks"]["skip_reason"] == "POSTGRES_DB_URL is not set"
+    gate_summary = json.loads(
+        (output_dir / "gate" / "summary.json").read_text(encoding="utf-8")
+    )
+    manual_rows = _read_csv(
+        output_dir / "gate" / "manual_baseball_data_required_rows.csv"
+    )
+    assert (
+        validation_summary["db_checks"]["skip_reason"] == "POSTGRES_DB_URL is not set"
+    )
     assert gate_summary["summary"]["manual_required_count"] == 1
     assert manual_rows[0]["queue_id"] == "ODQ-0001"
     assert manual_rows[0]["manual_contract"] == "MANUAL_BASEBALL_DATA_REQUIRED"
@@ -265,7 +290,9 @@ def test_partially_ready_valid_packet_reaches_ready_summary_with_fake_db(
         tmp_path,
         source_queue_rows=[_queue_row("ODQ-0001")],
         source_field_rows=_schedule_fields("ODQ-0001"),
-        packet_queue_rows=[_queue_row("ODQ-0001", operator_status="ready_for_validation")],
+        packet_queue_rows=[
+            _queue_row("ODQ-0001", operator_status="ready_for_validation")
+        ],
         packet_field_rows=_schedule_fields("ODQ-0001"),
     )
     monkeypatch.setattr(
@@ -273,7 +300,9 @@ def test_partially_ready_valid_packet_reaches_ready_summary_with_fake_db(
         "run_check",
         lambda db_url, output_dir: _fake_db_prereq_pass(output_dir),
     )
-    monkeypatch.setattr(runner.validation, "_build_db_checker", lambda **kwargs: FakeDbChecker())
+    monkeypatch.setattr(
+        runner.validation, "_build_db_checker", lambda **kwargs: FakeDbChecker()
+    )
     monkeypatch.setattr(runner.ingest, "_connect", lambda db_url: FakeConnection())
 
     report = runner.run_intake(
@@ -291,12 +320,16 @@ def test_partially_ready_valid_packet_reaches_ready_summary_with_fake_db(
     assert report["blockers"] == []
 
 
-def test_missing_db_url_records_blocker_and_continues_to_status_summary(tmp_path: Path) -> None:
+def test_missing_db_url_records_blocker_and_continues_to_status_summary(
+    tmp_path: Path,
+) -> None:
     queue, fields, source_queue, source_fields = _write_packet(
         tmp_path,
         source_queue_rows=[_queue_row("ODQ-0001")],
         source_field_rows=_schedule_fields("ODQ-0001"),
-        packet_queue_rows=[_queue_row("ODQ-0001", operator_status="ready_for_validation")],
+        packet_queue_rows=[
+            _queue_row("ODQ-0001", operator_status="ready_for_validation")
+        ],
         packet_field_rows=_schedule_fields("ODQ-0001"),
     )
 
@@ -316,9 +349,15 @@ def test_missing_db_url_records_blocker_and_continues_to_status_summary(tmp_path
     assert (tmp_path / "intake" / "status" / "p0_recovery_status_summary.json").exists()
 
 
-def test_audit_failure_writes_downstream_summary_without_modifying_inputs(tmp_path: Path) -> None:
+def test_audit_failure_writes_downstream_summary_without_modifying_inputs(
+    tmp_path: Path,
+) -> None:
     source_queue_rows = [_queue_row("ODQ-0001", question="원본 질문")]
-    packet_queue_rows = [_queue_row("ODQ-0001", question="바뀐 질문", operator_status="ready_for_validation")]
+    packet_queue_rows = [
+        _queue_row(
+            "ODQ-0001", question="바뀐 질문", operator_status="ready_for_validation"
+        )
+    ]
     queue, fields, source_queue, source_fields = _write_packet(
         tmp_path,
         source_queue_rows=source_queue_rows,
@@ -326,7 +365,9 @@ def test_audit_failure_writes_downstream_summary_without_modifying_inputs(tmp_pa
         packet_queue_rows=packet_queue_rows,
         packet_field_rows=_schedule_fields("ODQ-0001", question="바뀐 질문"),
     )
-    before = {_path: _hash(_path) for _path in (queue, fields, source_queue, source_fields)}
+    before = {
+        _path: _hash(_path) for _path in (queue, fields, source_queue, source_fields)
+    }
 
     report = runner.run_intake(
         queue_path=queue,
@@ -337,7 +378,9 @@ def test_audit_failure_writes_downstream_summary_without_modifying_inputs(tmp_pa
         output_dir=tmp_path / "intake",
     )
 
-    after = {_path: _hash(_path) for _path in (queue, fields, source_queue, source_fields)}
+    after = {
+        _path: _hash(_path) for _path in (queue, fields, source_queue, source_fields)
+    }
     assert before == after
     assert report["summary"]["status"] == "blocked"
     assert (tmp_path / "intake" / "status" / "p0_recovery_status_summary.json").exists()
@@ -370,7 +413,9 @@ def test_runner_never_calls_ingest_apply_path(tmp_path: Path, monkeypatch) -> No
     assert seen_apply_values == [False]
 
 
-def test_stage_exception_is_captured_as_blocker_and_handoff(tmp_path: Path, monkeypatch) -> None:
+def test_stage_exception_is_captured_as_blocker_and_handoff(
+    tmp_path: Path, monkeypatch
+) -> None:
     queue, fields, source_queue, source_fields = _write_packet(
         tmp_path,
         source_queue_rows=[_queue_row("ODQ-0001")],

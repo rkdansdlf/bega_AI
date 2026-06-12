@@ -69,14 +69,16 @@ def _db_audit(
         "summary": summary,
         "column_type": {"embedding_type": "extensions.vector(256)"},
         "pgvector": {"extversion": "0.8.2"},
-        "indexes": indexes
-        if indexes is not None
-        else [
-            {
-                "indexname": audit.HALFVEC_INDEX_NAME,
-                "indexdef": "CREATE INDEX USING hnsw (((embedding)::extensions.halfvec(256)))",
-            }
-        ],
+        "indexes": (
+            indexes
+            if indexes is not None
+            else [
+                {
+                    "indexname": audit.HALFVEC_INDEX_NAME,
+                    "indexdef": "CREATE INDEX USING hnsw (((embedding)::extensions.halfvec(256)))",
+                }
+            ]
+        ),
     }
 
 
@@ -90,11 +92,7 @@ def test_audit_clean_post_cleanup_state_passes_without_warning_or_fail() -> None
     )
 
     assert audit._overall_status(findings) == "pass"
-    assert not [
-        item
-        for item in findings
-        if item["severity"] in {"warning", "fail"}
-    ]
+    assert not [item for item in findings if item["severity"] in {"warning", "fail"}]
 
 
 def test_audit_findings_surface_safe_cleanup_classes() -> None:

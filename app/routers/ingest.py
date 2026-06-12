@@ -220,7 +220,9 @@ async def run_ingestion_job(
 
     def _run_ingest_wrapper():
         try:
-            logger.info("[IngestWorker] Starting ingestion for tables: %s", tables_to_run)
+            logger.info(
+                "[IngestWorker] Starting ingestion for tables: %s", tables_to_run
+            )
             ingest(
                 source_db_url=settings.source_db_url,
                 tables=tables_to_run,

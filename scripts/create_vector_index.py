@@ -188,9 +188,7 @@ def _verify_hnsw_usage(
     vector_str = "[" + ",".join("0.0" for _ in range(embed_dim)) + "]"
     distance_expr = "embedding <=> %s::vector"
     if (quantization or "none").lower().strip() == "halfvec":
-        distance_expr = (
-            f"embedding::halfvec({embed_dim}) <=> %s::halfvec({embed_dim})"
-        )
+        distance_expr = f"embedding::halfvec({embed_dim}) <=> %s::halfvec({embed_dim})"
     cur.execute(f"SET hnsw.ef_search = {ef_search}")
     cur.execute(
         "EXPLAIN (FORMAT TEXT) "

@@ -167,8 +167,7 @@ def _json_default(value: Any) -> str:
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default)
-        + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n",
         encoding="utf-8",
     )
 
@@ -500,12 +499,14 @@ def run(
         if sample_limit > 0:
             report["samples"] = {
                 "metadata_fixable_groups": _metadata_fixable_groups(conn),
-                "metadata_conflicts": _metadata_conflict_samples(
-                    conn,
-                    sample_limit=sample_limit,
-                )
-                if before_counts["metadata_conflicts"]
-                else [],
+                "metadata_conflicts": (
+                    _metadata_conflict_samples(
+                        conn,
+                        sample_limit=sample_limit,
+                    )
+                    if before_counts["metadata_conflicts"]
+                    else []
+                ),
                 "active_null_embeddings": _sample_rows(
                     conn,
                     ACTIVE_NULL_WHERE,

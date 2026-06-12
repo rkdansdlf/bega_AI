@@ -10,7 +10,9 @@ import pytest
 from scripts import build_operator_data_p0_input_packet as packet
 
 
-def _write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> None:
+def _write_csv(
+    path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -70,7 +72,9 @@ def _field_row(
     }
 
 
-def test_packet_filters_to_p0_domains_and_preserves_contract_fields(tmp_path: Path) -> None:
+def test_packet_filters_to_p0_domains_and_preserves_contract_fields(
+    tmp_path: Path,
+) -> None:
     queue_path = tmp_path / "queue.csv"
     fields_path = tmp_path / "fields.csv"
     output_dir = tmp_path / "packet"
@@ -96,7 +100,9 @@ def test_packet_filters_to_p0_domains_and_preserves_contract_fields(tmp_path: Pa
         ],
     )
 
-    summary = packet.build_packet(queue_path=queue_path, fields_path=fields_path, output_dir=output_dir)
+    summary = packet.build_packet(
+        queue_path=queue_path, fields_path=fields_path, output_dir=output_dir
+    )
     queue_rows = _read_csv(output_dir / "p0_queue.csv")
     field_rows = _read_csv(output_dir / "p0_fields.csv")
 
@@ -107,7 +113,9 @@ def test_packet_filters_to_p0_domains_and_preserves_contract_fields(tmp_path: Pa
     assert {row["domain"] for row in queue_rows}.issubset(packet.P0_DOMAINS)
     assert {row["queue_id"] for row in field_rows} == {"ODQ-0001", "ODQ-0002"}
     assert {row["domain"] for row in field_rows}.issubset(packet.P0_DOMAINS)
-    assert all(row["contract_code"] == "MANUAL_BASEBALL_DATA_REQUIRED" for row in queue_rows)
+    assert all(
+        row["contract_code"] == "MANUAL_BASEBALL_DATA_REQUIRED" for row in queue_rows
+    )
 
 
 def test_packet_does_not_autofill_operator_values(tmp_path: Path) -> None:
@@ -120,11 +128,17 @@ def test_packet_does_not_autofill_operator_values(tmp_path: Path) -> None:
         packet.FIELDS_FIELDNAMES,
         [
             _field_row("ODQ-0001", "source_name"),
-            _field_row("ODQ-0001", "operator_checked_note", operator_value="already operator-filled"),
+            _field_row(
+                "ODQ-0001",
+                "operator_checked_note",
+                operator_value="already operator-filled",
+            ),
         ],
     )
 
-    packet.build_packet(queue_path=queue_path, fields_path=fields_path, output_dir=output_dir)
+    packet.build_packet(
+        queue_path=queue_path, fields_path=fields_path, output_dir=output_dir
+    )
     field_rows = _read_csv(output_dir / "p0_fields.csv")
 
     values_by_field = {row["field_name"]: row["operator_value"] for row in field_rows}
@@ -136,15 +150,23 @@ def test_packet_generates_checklist_and_summary_files(tmp_path: Path) -> None:
     queue_path = tmp_path / "queue.csv"
     fields_path = tmp_path / "fields.csv"
     output_dir = tmp_path / "packet"
-    _write_csv(queue_path, packet.QUEUE_FIELDNAMES, [_queue_row("ODQ-0001", domain="roster_news")])
+    _write_csv(
+        queue_path,
+        packet.QUEUE_FIELDNAMES,
+        [_queue_row("ODQ-0001", domain="roster_news")],
+    )
     _write_csv(
         fields_path,
         packet.FIELDS_FIELDNAMES,
         [_field_row("ODQ-0001", "effective_date", domain="roster_news")],
     )
 
-    packet.build_packet(queue_path=queue_path, fields_path=fields_path, output_dir=output_dir)
-    summary = json.loads((output_dir / "p0_input_summary.json").read_text(encoding="utf-8"))
+    packet.build_packet(
+        queue_path=queue_path, fields_path=fields_path, output_dir=output_dir
+    )
+    summary = json.loads(
+        (output_dir / "p0_input_summary.json").read_text(encoding="utf-8")
+    )
     checklist = (output_dir / "p0_input_checklist.md").read_text(encoding="utf-8")
 
     assert summary["total_queue_items"] == 1
@@ -165,7 +187,9 @@ def test_real_handoff_packet_extracts_current_p0_bundle(tmp_path: Path) -> None:
 
     output_dir = tmp_path / "packet"
 
-    summary = packet.build_packet(queue_path=queue_path, fields_path=fields_path, output_dir=output_dir)
+    summary = packet.build_packet(
+        queue_path=queue_path, fields_path=fields_path, output_dir=output_dir
+    )
     queue_rows = _read_csv(output_dir / "p0_queue.csv")
     field_rows = _read_csv(output_dir / "p0_fields.csv")
 
