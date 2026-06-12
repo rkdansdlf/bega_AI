@@ -24,8 +24,8 @@ from app.agents.release_decision_eval import (
     load_eval_cases,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CASES = PROJECT_ROOT / "bega_AI" / "evals" / "release_decision_cases.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CASES = PROJECT_ROOT / "evals" / "release_decision_cases.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "reports" / "release_decision_eval"
 
 
