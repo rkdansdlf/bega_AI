@@ -102,7 +102,7 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_API_KEY"
     )
     openrouter_model: str = Field(
-        "openrouter/free", validation_alias="OPENROUTER_MODEL"
+        "openrouter/owl-alpha", validation_alias="OPENROUTER_MODEL"
     )
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
     # Default: no fallback by default; use OPENROUTER_FALLBACK_MODELS when explicitly set.
@@ -238,7 +238,8 @@ class Settings(BaseSettings):
     #   "hnsw"     - HNSW 세션 GUC(hnsw.ef_search)만 설정. 운영 HNSW 인덱스가 있을 때 사용.
     #   "ivfflat"  - IVFFlat 세션 GUC(ivfflat.probes)만 설정. 레거시 인덱스 유지 시 사용.
     #   "auto"     - 기동 시 pg_indexes에서 HNSW 존재 여부를 감지하여 자동 선택(기본값).
-    # 운영 전환 흐름: create_vector_index.py 실행(HNSW 생성) → AI_VECTOR_INDEX=hnsw 배포 → ivfflat 제거.
+    # 운영 전환 흐름: 256-prefix migration → create_vector_index.py 실행(HNSW 생성)
+    # → AI_VECTOR_INDEX=hnsw 배포(halfvec 사용 시 AI_VECTOR_QUANTIZATION=halfvec) → ivfflat 제거.
     ai_vector_index: str = Field("auto", validation_alias="AI_VECTOR_INDEX")
     ai_vector_quantization: str = Field(
         "none", validation_alias="AI_VECTOR_QUANTIZATION"

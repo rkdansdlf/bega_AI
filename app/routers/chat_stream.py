@@ -48,7 +48,11 @@ from ..core.ratelimit import (
     rate_limit_chat_dependency,
     rate_limit_chat_voice_dependency,
 )
-from ..core.chat_cache_key import build_chat_cache_key, has_temporal_keyword
+from ..core.chat_cache_key import (
+    CHAT_CACHE_SCHEMA_VERSION,
+    build_chat_cache_key,
+    has_temporal_keyword,
+)
 from ..core.chat_cache import (
     get_cached_response,
     save_to_cache,
@@ -77,9 +81,6 @@ router = APIRouter(prefix="/ai/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
 
-# 캐시 스키마 버전. 프롬프트 또는 정규화 방식 변경 시 올리면
-# 기존 캐시가 자동으로 미스 처리됩니다.
-CHAT_CACHE_SCHEMA_VERSION = "v10"
 MAX_CHAT_QUESTION_LENGTH = 1200
 MAX_CHAT_HISTORY_ENTRY_LENGTH = 2000
 MAX_CHAT_REQUEST_BYTES = 12 * 1024

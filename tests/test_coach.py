@@ -1084,11 +1084,11 @@ class TestCoachEvidenceHelpers:
         )
 
         fact_sheet = CoachFactSheet(
-            fact_lines=["홈팀 OPS 0.812"],
+            fact_lines=["홈팀 OPS 0.812", "원정팀 OPS 0.905"],
             caveat_lines=["라인업 미확정"],
             allowed_entity_names={"LG 트윈스"},
-            allowed_numeric_tokens={"0.812"},
-            supported_fact_count=1,
+            allowed_numeric_tokens={"0.812", "0.905"},
+            supported_fact_count=2,
             starters_confirmed=False,
             lineup_confirmed=False,
             series_context_confirmed=True,
@@ -1105,9 +1105,11 @@ class TestCoachEvidenceHelpers:
             is False
         )
 
-    def test_scheduled_partial_manual_short_circuits_when_starter_and_lineup_are_both_missing(
+    def test_scheduled_partial_manual_calls_llm_when_facts_sufficient_despite_missing_lineup(
         self,
     ):
+        # 정책 변경: 선발·라인업이 모두 미확정이어도 팀 단위 실데이터가 충분하면
+        # 경기 예측에서도 LLM 을 호출한다(결정론 boilerplate 로 고정되지 않도록).
         from app.core.coach_grounding import CoachFactSheet
         from app.routers.coach import (
             COACH_REQUEST_MODE_MANUAL,
@@ -1120,6 +1122,42 @@ class TestCoachEvidenceHelpers:
             allowed_entity_names={"LG 트윈스", "롯데 자이언츠"},
             allowed_numeric_tokens={"0.740", "0.905"},
             supported_fact_count=2,
+            starters_confirmed=False,
+            lineup_confirmed=False,
+            series_context_confirmed=True,
+            require_series_context=False,
+            reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            warnings=[],
+        )
+
+        assert (
+            _should_short_circuit_to_deterministic_response(
+                request_mode=COACH_REQUEST_MODE_MANUAL,
+                fact_sheet=fact_sheet,
+                game_status_bucket="SCHEDULED",
+                grounding_reasons=[
+                    "missing_starters",
+                    "missing_lineups",
+                    "missing_summary",
+                ],
+            )
+            is False
+        )
+
+    def test_scheduled_partial_manual_short_circuits_when_facts_insufficient(self):
+        # 안전 경계 유지: 선발·라인업 미확정 + 실데이터 fact 가 빈약하면 결정론으로 단락.
+        from app.core.coach_grounding import CoachFactSheet
+        from app.routers.coach import (
+            COACH_REQUEST_MODE_MANUAL,
+            _should_short_circuit_to_deterministic_response,
+        )
+
+        fact_sheet = CoachFactSheet(
+            fact_lines=["홈팀 OPS 0.740"],
+            caveat_lines=["선발 정보 미확정", "라인업 미확정"],
+            allowed_entity_names={"LG 트윈스", "롯데 자이언츠"},
+            allowed_numeric_tokens={"0.740"},
+            supported_fact_count=1,
             starters_confirmed=False,
             lineup_confirmed=False,
             series_context_confirmed=True,
@@ -1178,11 +1216,11 @@ class TestCoachEvidenceHelpers:
         from app.routers import coach as coach_module
 
         fact_sheet = CoachFactSheet(
-            fact_lines=["홈팀 최근 10경기 7승 3패"],
+            fact_lines=["홈팀 최근 10경기 7승 3패", "원정팀 최근 10경기 5승 5패"],
             caveat_lines=[],
             allowed_entity_names={"LG 트윈스"},
-            allowed_numeric_tokens={"7", "3"},
-            supported_fact_count=1,
+            allowed_numeric_tokens={"7", "3", "5"},
+            supported_fact_count=2,
             starters_confirmed=True,
             lineup_confirmed=True,
             series_context_confirmed=True,
@@ -1207,11 +1245,11 @@ class TestCoachEvidenceHelpers:
         from app.routers import coach as coach_module
 
         fact_sheet = CoachFactSheet(
-            fact_lines=["홈팀 최근 10경기 7승 3패"],
+            fact_lines=["홈팀 최근 10경기 7승 3패", "원정팀 최근 10경기 5승 5패"],
             caveat_lines=[],
             allowed_entity_names={"LG 트윈스"},
-            allowed_numeric_tokens={"7", "3"},
-            supported_fact_count=1,
+            allowed_numeric_tokens={"7", "3", "5"},
+            supported_fact_count=2,
             starters_confirmed=True,
             lineup_confirmed=True,
             series_context_confirmed=True,
@@ -6894,6 +6932,78 @@ class TestCoachFastPath:
         assert "- 발표 선발: LG 트윈스 웰스 / KT 위즈 사우어" in markdown
         assert "## 최근 전력" in markdown
         assert "## 불펜 상태" in markdown
+
+
+# ============================================================
+# _attach_scheduled_win_probability (예측 다이얼로그 승률 hero)
+# ============================================================
+
+
+class TestAttachScheduledWinProbability:
+    def _tool_results(self, home=(7, 3, 0), away=(5, 5, 0)):
+        def block(record):
+            wins, losses, draws = record
+            return {
+                "recent": {
+                    "summary": {
+                        "wins": wins,
+                        "losses": losses,
+                        "draws": draws,
+                        "run_diff": wins - losses,
+                    }
+                }
+            }
+
+        return {"home": block(home), "away": block(away)}
+
+    def test_uses_payload_value_when_valid(self):
+        from app.routers.coach import _attach_scheduled_win_probability
+
+        meta = {}
+        _attach_scheduled_win_probability(
+            meta,
+            game_status_bucket="SCHEDULED",
+            tool_results=self._tool_results(),
+            response_payload={"win_probability_home": 0.6123},
+        )
+        assert meta["win_probability_home"] == 0.612
+
+    def test_computes_when_payload_missing_and_data_sufficient(self):
+        from app.routers.coach import _attach_scheduled_win_probability
+
+        meta = {}
+        _attach_scheduled_win_probability(
+            meta,
+            game_status_bucket="SCHEDULED",
+            tool_results=self._tool_results(),
+            response_payload=None,
+        )
+        assert "win_probability_home" in meta
+        assert 0.30 <= meta["win_probability_home"] <= 0.75
+
+    def test_no_key_when_data_insufficient(self):
+        from app.routers.coach import _attach_scheduled_win_probability
+
+        meta = {}
+        _attach_scheduled_win_probability(
+            meta,
+            game_status_bucket="SCHEDULED",
+            tool_results={"home": {}, "away": {}},
+            response_payload={"win_probability_home": 1.5},  # 범위 밖 → 무시
+        )
+        assert "win_probability_home" not in meta
+
+    def test_no_key_when_not_scheduled(self):
+        from app.routers.coach import _attach_scheduled_win_probability
+
+        meta = {}
+        _attach_scheduled_win_probability(
+            meta,
+            game_status_bucket="COMPLETED",
+            tool_results=self._tool_results(),
+            response_payload={"win_probability_home": 0.55},
+        )
+        assert "win_probability_home" not in meta
 
 
 # ============================================================
