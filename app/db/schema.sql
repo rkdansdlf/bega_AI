@@ -143,6 +143,95 @@ create table if not exists rag_ingest_jobs (
 create index if not exists idx_rag_ingest_jobs_started_at on rag_ingest_jobs (started_at);
 create index if not exists idx_rag_ingest_jobs_status on rag_ingest_jobs (status);
 
+create table if not exists operator_data_items (
+  queue_id text primary key,
+  priority text,
+  domain text not null,
+  contract_code text not null,
+  question text not null,
+  operator_status text not null,
+  validation_status text not null,
+  apply_target text,
+  payload jsonb not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_data_items_domain on operator_data_items (domain);
+create index if not exists idx_operator_data_items_payload_hash on operator_data_items (payload_hash);
+create index if not exists idx_operator_data_items_applied_at on operator_data_items (applied_at);
+
+create table if not exists operator_season_events (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  season_year int not null,
+  event_name text not null,
+  event_date date not null,
+  stadium_name text,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_season_events_lookup
+  on operator_season_events (season_year, event_date);
+
+create table if not exists operator_schedule_items (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  game_date date not null,
+  game_id text not null,
+  home_team text not null,
+  away_team text not null,
+  stadium_name text,
+  start_time text not null,
+  game_status text not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_schedule_items_date
+  on operator_schedule_items (game_date, start_time);
+create index if not exists idx_operator_schedule_items_game_id
+  on operator_schedule_items (game_id);
+create index if not exists idx_operator_schedule_items_teams
+  on operator_schedule_items (home_team, away_team);
+
+create table if not exists operator_roster_events (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  season_year int not null,
+  team_code text not null,
+  player_name text not null,
+  roster_event_type text not null,
+  effective_date date not null,
+  status_text text not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_roster_events_lookup
+  on operator_roster_events (season_year, team_code, effective_date);
+create index if not exists idx_operator_roster_events_player
+  on operator_roster_events (player_name);
+
 -- Coach Analysis Cache Table
 create table if not exists coach_analysis_cache (
   cache_key varchar(64) primary key,  -- SHA256 Hash of (team_id, year, focus, question)

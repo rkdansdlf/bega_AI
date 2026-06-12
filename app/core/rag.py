@@ -34,6 +34,7 @@ from .query_transformer import QueryTransformer, multi_query_retrieval
 from .context_formatter import ContextFormatter
 from ..agents.baseball_agent import BaseballAgentRuntime
 from ..agents.shared_runtime import initialize_shared_baseball_agent_runtime
+from ..tools.operator_data_query import try_build_operator_fast_path_result
 from .wpa_calculator import WPACalculator
 from .retry_utils import llm_retry
 from .exceptions import DBRetrievalError
@@ -409,6 +410,7 @@ _VAGUE_GAME_DETAIL_TOKENS = (
     "경기 실책",
     "경기 홈런",
     "경기 역전",
+    "라인업",
     "오늘 선발",
     "다음 경기 선발",
     "주자는 몇 명",
@@ -2040,6 +2042,20 @@ class RAGPipeline:
         else:
             yield self.connection
 
+    def _build_operator_or_static_kbo_result(
+        self, query: str
+    ) -> Optional[Dict[str, Any]]:
+        if bool(getattr(self.settings, "operator_data_fast_path_enabled", False)):
+            try:
+                with self._checkout_conn() as conn:
+                    result = try_build_operator_fast_path_result(conn, query)
+                if result is not None:
+                    logger.info("[RAG] Operator data fast-path: %s", query)
+                    return result
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[RAG] Operator data fast-path skipped: %s", exc)
+        return _build_static_kbo_faq_result(query)
+
     async def _process_and_enrich_docs(
         self, docs: List[Dict[str, Any]], year: int
     ) -> Dict[str, Any]:
@@ -3046,7 +3062,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         query = full_normalize(query)
         logger.info(f"[RAG] Processing query (stream): {query}")
         retrieval_state = _new_retrieval_state()
-        static_kbo_result = _build_static_kbo_faq_result(query)
+        static_kbo_result = self._build_operator_or_static_kbo_result(query)
         if static_kbo_result is not None:
             logger.info("[RAG] Static KBO FAQ fast-path (stream): %s", query)
             yield {
@@ -3278,7 +3294,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         query = full_normalize(query)  # 특수문자 제거, 한영 정규화, 공백 정리
         logger.info(f"[RAG] Processing query: {query}")
         retrieval_state = _new_retrieval_state()
-        static_kbo_result = _build_static_kbo_faq_result(query)
+        static_kbo_result = self._build_operator_or_static_kbo_result(query)
         if static_kbo_result is not None:
             logger.info("[RAG] Static KBO FAQ fast-path: %s", query)
             return static_kbo_result
