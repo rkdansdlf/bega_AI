@@ -17,12 +17,17 @@ METRIC_LABELS = {
     "avg": "타율",
     "battingavg": "타율",
     "ops": "OPS",
+    "obp": "출루율",
+    "slg": "장타율",
     "hr": "홈런",
     "homeruns": "홈런",
     "home_runs": "홈런",
     "hits": "안타",
     "안타": "안타",
+    "runs": "득점",
     "rbi": "타점",
+    "stolen_bases": "도루",
+    "sb_success_rate": "도루 성공률",
     "wins": "다승",
     "win": "다승",
     "whip": "WHIP",
@@ -32,6 +37,11 @@ METRIC_LABELS = {
     "hold": "홀드",
     "strikeouts": "탈삼진",
     "so": "탈삼진",
+    "innings_pitched": "이닝",
+    "complete_games": "완투",
+    "shutouts": "완봉",
+    "avg_against": "피안타율",
+    "gdp": "병살타",
     "war": "WAR",
 }
 
@@ -179,8 +189,11 @@ class ChatRendererRegistry:
         raw_stat_name = resolved_agent._format_deterministic_metric(
             data.get("stat_name")
         )
+        position = str(data.get("position") or "").lower()
         stat_key = re.sub(r"[^a-z0-9가-힣_]+", "", str(raw_stat_name).lower())
         stat_name = self._metric_label(raw_stat_name)
+        if stat_key == "strikeouts" and position == "batting":
+            stat_name = "삼진"
         season_label = f"{year}년" if year != "확인 불가" else "해당 시즌"
         top_entry = leaderboard[0]
         top_player = self._player_label(top_entry, agent=resolved_agent)
@@ -444,7 +457,9 @@ class ChatRendererRegistry:
             return f"{value}안타"
         if stat_key in {"home_runs", "homeruns", "hr", "홈런"}:
             return f"{value}개"
-        if stat_name in {"타점", "탈삼진", "세이브", "홀드", "다승"}:
+        if stat_key in {"home_runs", "homeruns", "hr", "stolen_bases"}:
+            return f"{value}개"
+        if stat_name in {"타점", "탈삼진", "세이브", "홀드", "다승", "득점", "완투", "완봉"}:
             return f"{value}"
         return value
 

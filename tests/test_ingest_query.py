@@ -247,6 +247,26 @@ def test_player_basic_profile_disables_incremental_since_filter(sample_since) ->
     assert params == ()
 
 
+def test_team_profiles_profile_disables_incremental_since_filter(sample_since) -> None:
+    profile = TABLE_PROFILES["team_profiles"]
+
+    assert profile["since_filter_column"] is None
+
+    query, params = build_select_query(
+        table="team_profiles",
+        profile=profile,
+        pk_columns=["team_id", "id"],
+        limit=None,
+        season_year=None,
+        since=sample_since,
+    )
+
+    assert "tp.updated_at" not in query
+    assert "updated_at >=" not in query
+    assert "ORDER BY tp.team_id" in query
+    assert params == ()
+
+
 def test_player_movements_profile_matches_current_schema(sample_since) -> None:
     profile = TABLE_PROFILES["player_movements"]
 
