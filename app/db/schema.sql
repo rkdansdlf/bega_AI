@@ -58,9 +58,11 @@ where (metadata is null or metadata = '{}'::jsonb)
   and meta <> '{}'::jsonb;
 
 -- Vector and text search indexes
--- HNSW 인덱스 (신규 설치 기본). 운영 마이그레이션은 scripts/create_vector_index.py 사용.
--- pgvector >= 0.5.0 필요. m=16: 레이어당 최대 연결 수, ef_construction=64: 빌드 정확도.
-create index if not exists idx_rag_chunks_embedding_hnsw on rag_chunks using hnsw (embedding vector_cosine_ops) with (m = 16, ef_construction = 64);
+-- halfvec HNSW 인덱스 (신규 설치 기본). 운영 마이그레이션은 scripts/create_vector_index.py 사용.
+-- pgvector >= 0.7.0 필요. m=16: 레이어당 최대 연결 수, ef_construction=64: 빌드 정확도.
+create index if not exists idx_rag_chunks_embedding_halfvec_hnsw on rag_chunks using hnsw ((embedding::halfvec(256)) halfvec_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
+-- vector HNSW 인덱스는 halfvec 전환 후 운영 cleanup 대상입니다.
+-- create index if not exists idx_rag_chunks_embedding_hnsw on rag_chunks using hnsw (embedding vector_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
 -- 기존 IVFFlat 인덱스 (레거시, 운영 마이그레이션 후 scripts/create_vector_index.py --drop-ivfflat 으로 제거)
 -- create index if not exists idx_rag_chunks_embedding on rag_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 644);
 create index if not exists idx_rag_chunks_content_tsv on rag_chunks using gin (content_tsv);
