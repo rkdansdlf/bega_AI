@@ -28,8 +28,8 @@ from ..agents.release_decision_eval import (
 from ..config import get_settings
 from ..internal_auth import require_ai_internal_token
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
-EVAL_CASES_PATH = WORKSPACE_ROOT / "bega_AI" / "evals" / "release_decision_cases.json"
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+EVAL_CASES_PATH = WORKSPACE_ROOT / "evals" / "release_decision_cases.json"
 ARTIFACTS_ROOT = WORKSPACE_ROOT / "reports" / "release-decision"
 router = APIRouter(prefix="/ai/release-decision", tags=["release-decision"])
 
