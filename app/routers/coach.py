@@ -1051,7 +1051,11 @@ def _append_team_comparison_fact_lines(
             h = float(home_ops_raw)
             a = float(away_ops_raw)
             diff = h - a
-            edge_label = f"{home_name} +{diff:.3f}" if diff >= 0 else f"{away_name} +{abs(diff):.3f}"
+            edge_label = (
+                f"{home_name} +{diff:.3f}"
+                if diff >= 0
+                else f"{away_name} +{abs(diff):.3f}"
+            )
             fact = _build_fact_line(
                 "OPS 대비",
                 f"{home_name} {h:.3f} vs {away_name} {a:.3f} ({edge_label})",
@@ -1292,7 +1296,11 @@ def _build_coach_fact_sheet(
 
     # 홈 vs 원정 핵심 지표 직접 대비 (LLM 비교 분석 유도)
     _append_team_comparison_fact_lines(
-        fact_lines, numeric_tokens, tool_results, evidence.home_team_name, evidence.away_team_name
+        fact_lines,
+        numeric_tokens,
+        tool_results,
+        evidence.home_team_name,
+        evidence.away_team_name,
     )
     # 팀별 상세 지표 (선수 폼, 주요 타자/투수)
     _append_team_fact_lines(
@@ -1884,9 +1892,15 @@ def _downgrade_data_quality_after_failed_grounding(
     grounded 만 한 단계 강등하고 partial/insufficient 는 그대로 둔다(바닥 partial).
     sanitize 로 정리된(*_sanitized) 사유는 강등 트리거가 아니다.
     """
-    if COACH_DATA_QUALITY_RANK.get(data_quality, 1) < COACH_DATA_QUALITY_RANK["grounded"]:
+    if (
+        COACH_DATA_QUALITY_RANK.get(data_quality, 1)
+        < COACH_DATA_QUALITY_RANK["grounded"]
+    ):
         return data_quality
-    if any(reason in COACH_GROUNDING_HARD_FAILURE_REASONS for reason in (failure_reasons or [])):
+    if any(
+        reason in COACH_GROUNDING_HARD_FAILURE_REASONS
+        for reason in (failure_reasons or [])
+    ):
         return "partial"
     return data_quality
 
@@ -6196,44 +6210,63 @@ def _build_scheduled_team_level_deterministic_analysis(
     # 강점 최소 1건 보장: 양 팀 모두 하락세면 폼 루프가 strengths를 비울 수 있음.
     if not strengths:
         if ops_edge_team:
-            strengths.append(f"{ops_edge_team}는 팀 OPS 우위로 초반 득점 설계에서 앞섭니다.")
+            strengths.append(
+                f"{ops_edge_team}는 팀 OPS 우위로 초반 득점 설계에서 앞섭니다."
+            )
         elif edge_team:
             strengths.append(f"{edge_team}는 확인된 팀 지표에서 우위를 보입니다.")
         else:
-            strengths.append("양 팀 전력이 팽팽해 초반 주도권 다툼이 관전 포인트입니다.")
+            strengths.append(
+                "양 팀 전력이 팽팽해 초반 주도권 다툼이 관전 포인트입니다."
+            )
 
     # 약점 최소 1건 보장: strengths는 폼 기반으로 항상 채워지지만 weaknesses는 비대칭이라 빌 수 있음.
     if not weaknesses:
         if ops_edge_team:
             ops_trailing_name = home_name if ops_edge_team == away_name else away_name
-            weaknesses.append(f"{ops_trailing_name}는 팀 OPS 열세로 초반 득점 설계가 과제입니다.")
+            weaknesses.append(
+                f"{ops_trailing_name}는 팀 OPS 열세로 초반 득점 설계가 과제입니다."
+            )
         elif trailing_team:
-            weaknesses.append(f"{trailing_team}는 확인된 우위 지표가 적어 초반 흐름 관리가 과제입니다.")
+            weaknesses.append(
+                f"{trailing_team}는 확인된 우위 지표가 적어 초반 흐름 관리가 과제입니다."
+            )
         else:
-            weaknesses.append("양 팀 모두 확인된 우위가 제한적이라 초반 변동성 관리가 공통 과제입니다.")
+            weaknesses.append(
+                "양 팀 모두 확인된 우위가 제한적이라 초반 변동성 관리가 공통 과제입니다."
+            )
 
     # 리스크 최소 1건 보장: 이미 계산된 폼/OPS/라인업 신호에서 유도 (외부 호출 없음).
     min_risk_candidates: List[Dict[str, Any]] = []
-    for team_name, signal in ((away_name, away_form_signal), (home_name, home_form_signal)):
+    for team_name, signal in (
+        (away_name, away_form_signal),
+        (home_name, home_form_signal),
+    ):
         if _form_status_trend_label((signal or {}).get("form_status")) == "하락세":
-            min_risk_candidates.append({
-                "area": "form",
-                "level": 1,
-                "description": f"{team_name}는 팀 폼이 하락세라 초반 흐름이 흔들리면 반등 동력이 부족할 수 있습니다.",
-            })
+            min_risk_candidates.append(
+                {
+                    "area": "form",
+                    "level": 1,
+                    "description": f"{team_name}는 팀 폼이 하락세라 초반 흐름이 흔들리면 반등 동력이 부족할 수 있습니다.",
+                }
+            )
     if ops_edge_team:
         ops_trailing_name = home_name if ops_edge_team == away_name else away_name
-        min_risk_candidates.append({
-            "area": "offense",
-            "level": 1,
-            "description": f"{ops_trailing_name}는 팀 OPS 열세로 초반 득점 설계가 막히면 추격 부담이 커집니다.",
-        })
+        min_risk_candidates.append(
+            {
+                "area": "offense",
+                "level": 1,
+                "description": f"{ops_trailing_name}는 팀 OPS 열세로 초반 득점 설계가 막히면 추격 부담이 커집니다.",
+            }
+        )
     if not evidence.home_pitcher or not evidence.away_pitcher:
-        min_risk_candidates.append({
-            "area": "lineup",
-            "level": 1,
-            "description": "선발·라인업 미발표라 초반 매치업 해석에 불확실성이 큽니다.",
-        })
+        min_risk_candidates.append(
+            {
+                "area": "lineup",
+                "level": 1,
+                "description": "선발·라인업 미발표라 초반 매치업 해석에 불확실성이 큽니다.",
+            }
+        )
     risks = _ensure_minimum_risks(
         risks,
         candidates=min_risk_candidates,
@@ -6900,9 +6933,9 @@ def _build_deterministic_analysis(
 
     # 리스크 최소 1건 보장: 이미 계산된 OPS/우열 신호에서 유도 (외부 호출 없음).
     det_edge_team = (
-        home_name if home_score > away_score
-        else away_name if away_score > home_score
-        else None
+        home_name
+        if home_score > away_score
+        else away_name if away_score > home_score else None
     )
     # 강점 최소 1건 보장: 양 팀 모두 하락세면 strengths가 빌 수 있음.
     if not strengths:
@@ -6910,7 +6943,11 @@ def _build_deterministic_analysis(
             ops_leader_name = home_name if home_ops > away_ops else away_name
             strengths.append(
                 f"{ops_leader_name} 팀 OPS 우위로 "
-                + ("득점 연결 효율이 결과를 뒷받침했습니다." if review_mode else "초반 득점 설계에서 앞섭니다.")
+                + (
+                    "득점 연결 효율이 결과를 뒷받침했습니다."
+                    if review_mode
+                    else "초반 득점 설계에서 앞섭니다."
+                )
             )
         elif det_edge_team:
             strengths.append(
@@ -6920,7 +6957,11 @@ def _build_deterministic_analysis(
         else:
             strengths.append(
                 "양 팀 전력이 팽팽해 "
-                + ("승부처 집중력이 결과를 갈랐습니다." if review_mode else "초반 주도권 다툼이 관전 포인트입니다.")
+                + (
+                    "승부처 집중력이 결과를 갈랐습니다."
+                    if review_mode
+                    else "초반 주도권 다툼이 관전 포인트입니다."
+                )
             )
 
     # 약점 최소 1건 보장: weaknesses는 strengths와 달리 비대칭이라 빌 수 있음.
@@ -6929,31 +6970,49 @@ def _build_deterministic_analysis(
             ops_trailing_name = away_name if home_ops > away_ops else home_name
             weaknesses.append(
                 f"{ops_trailing_name} 팀 OPS 열세로 "
-                + ("득점 연결 효율이 결과에 영향을 줬습니다." if review_mode else "초반 득점 설계가 과제입니다.")
+                + (
+                    "득점 연결 효율이 결과에 영향을 줬습니다."
+                    if review_mode
+                    else "초반 득점 설계가 과제입니다."
+                )
             )
         elif det_edge_team:
             trailing = away_name if det_edge_team == home_name else home_name
             weaknesses.append(
                 f"{trailing}{_topic_particle(trailing)} 확인된 우위 지표가 적어 "
-                + ("결과를 뒤집을 동력이 부족했습니다." if review_mode else "초반 흐름 관리가 과제입니다.")
+                + (
+                    "결과를 뒤집을 동력이 부족했습니다."
+                    if review_mode
+                    else "초반 흐름 관리가 과제입니다."
+                )
             )
         else:
             weaknesses.append(
                 "양 팀 모두 확인된 우위가 제한적이라 "
-                + ("승부처 대응이 결과를 갈랐습니다." if review_mode else "초반 변동성 관리가 공통 과제입니다.")
+                + (
+                    "승부처 대응이 결과를 갈랐습니다."
+                    if review_mode
+                    else "초반 변동성 관리가 공통 과제입니다."
+                )
             )
 
     min_risk_candidates: List[Dict[str, Any]] = []
     if home_ops and away_ops and home_ops != away_ops:
         ops_trailing_name = away_name if home_ops > away_ops else home_name
-        min_risk_candidates.append({
-            "area": "offense",
-            "level": 1,
-            "description": (
-                f"{ops_trailing_name} 팀 OPS 열세로 "
-                + ("득점 연결 효율이 결과에 영향을 줬습니다." if review_mode else "초반 득점 설계가 막히면 추격 부담이 커집니다.")
-            ),
-        })
+        min_risk_candidates.append(
+            {
+                "area": "offense",
+                "level": 1,
+                "description": (
+                    f"{ops_trailing_name} 팀 OPS 열세로 "
+                    + (
+                        "득점 연결 효율이 결과에 영향을 줬습니다."
+                        if review_mode
+                        else "초반 득점 설계가 막히면 추격 부담이 커집니다."
+                    )
+                ),
+            }
+        )
     risks = _ensure_minimum_risks(
         risks,
         candidates=min_risk_candidates,

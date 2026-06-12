@@ -37,7 +37,10 @@ DEFAULT_FIELDS_INPUT = (
     / "operator_data_handoff_fields_post_db_fast_path_docker_kbo500.csv"
 )
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_validation" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_validation"
+    / "post_db_fast_path_docker_kbo500"
 )
 
 ALLOWED_STATUSES = {
@@ -200,17 +203,15 @@ class DbChecker(Protocol):
     db_checks_skipped: bool
     db_skip_reason: str
 
-    def get_game(self, game_id: str) -> Optional[Mapping[str, Any]]:
-        ...
+    def get_game(self, game_id: str) -> Optional[Mapping[str, Any]]: ...
 
-    def count_players(self, player_name: str) -> int:
-        ...
+    def count_players(self, player_name: str) -> int: ...
 
-    def is_known_team_code(self, team_code: str, season_year: Optional[int] = None) -> bool:
-        ...
+    def is_known_team_code(
+        self, team_code: str, season_year: Optional[int] = None
+    ) -> bool: ...
 
-    def close(self) -> None:
-        ...
+    def close(self) -> None: ...
 
 
 class NoopDbChecker:
@@ -226,7 +227,9 @@ class NoopDbChecker:
         del player_name
         return 0
 
-    def is_known_team_code(self, team_code: str, season_year: Optional[int] = None) -> bool:
+    def is_known_team_code(
+        self, team_code: str, season_year: Optional[int] = None
+    ) -> bool:
         del team_code, season_year
         return True
 
@@ -271,7 +274,9 @@ class PsycopgDbChecker:
             row = cur.fetchone() or {}
         return int(row.get("count") or 0)
 
-    def is_known_team_code(self, team_code: str, season_year: Optional[int] = None) -> bool:
+    def is_known_team_code(
+        self, team_code: str, season_year: Optional[int] = None
+    ) -> bool:
         canonical = self._resolver.resolve_canonical(team_code, season_year)
         return str(canonical or "").upper() in CANONICAL_CODES
 
@@ -308,7 +313,9 @@ def _read_csv(path: Path) -> tuple[List[str], List[Dict[str, str]]]:
         return list(reader.fieldnames or []), [dict(row) for row in reader]
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fields: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fields: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fields))
@@ -334,7 +341,9 @@ def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
 
 def _split_fields(raw: Any) -> List[str]:
     if isinstance(raw, str):
-        return [_normalize_text(field) for field in raw.split("|") if _normalize_text(field)]
+        return [
+            _normalize_text(field) for field in raw.split("|") if _normalize_text(field)
+        ]
     if isinstance(raw, Sequence):
         return [_normalize_text(field) for field in raw if _normalize_text(field)]
     return []
@@ -434,7 +443,9 @@ def _domain_apply_eligible(domain: str, payload: Mapping[str, str]) -> tuple[boo
         return False, "policy_gate_subjective_prediction"
     if domain == "db_fast_path_candidate":
         return False, "db_fast_path_candidate_not_operator_fact"
-    if domain == "unsupported_external" and _is_false(payload.get("supported_by_operator")):
+    if domain == "unsupported_external" and _is_false(
+        payload.get("supported_by_operator")
+    ):
         return False, "unsupported_external_not_supported"
     if domain not in P0_DOMAINS:
         return False, "operator_data_v1_non_p0_domain"
@@ -457,7 +468,10 @@ def _validate_headers(
     field_fieldnames: Optional[Sequence[str]],
 ) -> List[ValidationIssue]:
     issues: List[ValidationIssue] = []
-    if queue_fieldnames is not None and list(queue_fieldnames) != QUEUE_INPUT_FIELDNAMES:
+    if (
+        queue_fieldnames is not None
+        and list(queue_fieldnames) != QUEUE_INPUT_FIELDNAMES
+    ):
         issues.append(
             _issue(
                 queue_id="",
@@ -470,7 +484,10 @@ def _validate_headers(
                 ),
             )
         )
-    if field_fieldnames is not None and list(field_fieldnames) != FIELDS_INPUT_FIELDNAMES:
+    if (
+        field_fieldnames is not None
+        and list(field_fieldnames) != FIELDS_INPUT_FIELDNAMES
+    ):
         issues.append(
             _issue(
                 queue_id="",
@@ -569,7 +586,9 @@ def _validate_file_shape(
             )
 
     valid_queue_ids = {
-        _normalize_text(row.get("queue_id")) for row in queue_rows if _normalize_text(row.get("queue_id"))
+        _normalize_text(row.get("queue_id"))
+        for row in queue_rows
+        if _normalize_text(row.get("queue_id"))
     }
     seen_field_keys: set[tuple[str, str]] = set()
     for queue_id, field_rows in fields_by_queue.items():
@@ -663,7 +682,9 @@ def _validate_file_shape(
                     )
                 )
 
-        required_fields = _split_fields(queue_row.get("required_fields")) or _contract_required_fields(domain)
+        required_fields = _split_fields(
+            queue_row.get("required_fields")
+        ) or _contract_required_fields(domain)
         expected_field_names = set(required_fields)
         actual_field_names = set(field_names)
         for field_name in sorted(expected_field_names - actual_field_names):
@@ -819,7 +840,11 @@ def _validate_domain_values(
         if _parse_iso_date(payload.get("game_date")) is None:
             invalid("game_date", "invalid_date", "game_date must be an ISO date.")
         if not _valid_time(payload.get("start_time")):
-            invalid("start_time", "invalid_time", "start_time must be HH:MM or ISO datetime.")
+            invalid(
+                "start_time",
+                "invalid_time",
+                "start_time must be HH:MM or ISO datetime.",
+            )
         status = _normalize_text(payload.get("game_status")).lower()
         if status and status not in {item.lower() for item in ALLOWED_GAME_STATUSES}:
             invalid("game_status", "invalid_enum", "game_status is not supported.")
@@ -827,28 +852,56 @@ def _validate_domain_values(
     elif domain == "game_day_lineup":
         batting_order = _parse_int(payload.get("batting_order"))
         if batting_order is None or batting_order <= 0:
-            invalid("batting_order", "invalid_integer", "batting_order must be a positive integer.")
+            invalid(
+                "batting_order",
+                "invalid_integer",
+                "batting_order must be a positive integer.",
+            )
         if _parse_iso_datetime(payload.get("announced_at")) is None:
-            invalid("announced_at", "invalid_datetime", "announced_at must be an ISO date or datetime.")
+            invalid(
+                "announced_at",
+                "invalid_datetime",
+                "announced_at must be an ISO date or datetime.",
+            )
 
     elif domain == "roster_news":
         if _parse_int(payload.get("season_year")) is None:
             invalid("season_year", "invalid_integer", "season_year must be an integer.")
         if _parse_iso_date(payload.get("effective_date")) is None:
-            invalid("effective_date", "invalid_date", "effective_date must be an ISO date.")
+            invalid(
+                "effective_date", "invalid_date", "effective_date must be an ISO date."
+            )
         event_type = _normalize_text(payload.get("roster_event_type")).lower()
-        if event_type and event_type not in {item.lower() for item in ALLOWED_ROSTER_EVENT_TYPES}:
-            invalid("roster_event_type", "invalid_enum", "roster_event_type is not supported.")
+        if event_type and event_type not in {
+            item.lower() for item in ALLOWED_ROSTER_EVENT_TYPES
+        }:
+            invalid(
+                "roster_event_type",
+                "invalid_enum",
+                "roster_event_type is not supported.",
+            )
 
     elif domain == "venue_ticket":
         valid_from = _parse_iso_datetime(payload.get("valid_from"))
         valid_to = _parse_iso_datetime(payload.get("valid_to"))
         if valid_from is None:
-            invalid("valid_from", "invalid_datetime", "valid_from must be an ISO date or datetime.")
+            invalid(
+                "valid_from",
+                "invalid_datetime",
+                "valid_from must be an ISO date or datetime.",
+            )
         if valid_to is None:
-            invalid("valid_to", "invalid_datetime", "valid_to must be an ISO date or datetime.")
+            invalid(
+                "valid_to",
+                "invalid_datetime",
+                "valid_to must be an ISO date or datetime.",
+            )
         if valid_from is not None and valid_to is not None and valid_from > valid_to:
-            invalid("valid_to", "invalid_validity_window", "valid_to must be greater than or equal to valid_from.")
+            invalid(
+                "valid_to",
+                "invalid_validity_window",
+                "valid_to must be greater than or equal to valid_from.",
+            )
         topic = _normalize_text(payload.get("topic_type")).lower()
         if topic and topic not in {item.lower() for item in ALLOWED_TOPIC_TYPES}:
             invalid("topic_type", "invalid_enum", "topic_type is not supported.")
@@ -857,20 +910,28 @@ def _validate_domain_values(
         if _parse_iso_date(payload.get("game_date")) is None:
             invalid("game_date", "invalid_date", "game_date must be an ISO date.")
         media_type = _normalize_text(payload.get("media_type")).lower()
-        if media_type and media_type not in {item.lower() for item in ALLOWED_MEDIA_TYPES}:
+        if media_type and media_type not in {
+            item.lower() for item in ALLOWED_MEDIA_TYPES
+        }:
             invalid("media_type", "invalid_enum", "media_type is not supported.")
 
     elif domain == "fan_event":
         if _parse_iso_date(payload.get("game_date")) is None:
             invalid("game_date", "invalid_date", "game_date must be an ISO date.")
         event_type = _normalize_text(payload.get("event_type")).lower()
-        if event_type and event_type not in {item.lower() for item in ALLOWED_FAN_EVENT_TYPES}:
+        if event_type and event_type not in {
+            item.lower() for item in ALLOWED_FAN_EVENT_TYPES
+        }:
             invalid("event_type", "invalid_enum", "event_type is not supported.")
 
     elif domain == "unsupported_external":
         supported = _parse_bool(payload.get("supported_by_operator"))
         if supported is None:
-            invalid("supported_by_operator", "invalid_boolean", "supported_by_operator must be boolean.")
+            invalid(
+                "supported_by_operator",
+                "invalid_boolean",
+                "supported_by_operator must be boolean.",
+            )
 
     elif domain == "subjective_prediction":
         if _parse_iso_date(payload.get("as_of_date")) is None:
@@ -910,7 +971,10 @@ def _validate_db_values(
             )
 
     if domain == "schedule_window" and game_row is not None:
-        for payload_field, db_field in (("home_team", "home_team"), ("away_team", "away_team")):
+        for payload_field, db_field in (
+            ("home_team", "home_team"),
+            ("away_team", "away_team"),
+        ):
             payload_team = _normalize_text(payload.get(payload_field))
             db_team = _normalize_text(game_row.get(db_field))
             if payload_team and db_team and payload_team != db_team:
@@ -977,7 +1041,9 @@ def _detect_lineup_conflicts(
         if previous is not None:
             previous_payload = previous.get("payload") or {}
             previous_player = _normalize_text(
-                previous_payload.get("player_name") if isinstance(previous_payload, Mapping) else ""
+                previous_payload.get("player_name")
+                if isinstance(previous_payload, Mapping)
+                else ""
             )
             if player_name != previous_player:
                 issues.append(
@@ -1036,7 +1102,9 @@ def build_validation_report(
         domain = _normalize_text(queue_row.get("domain"))
         status = _normalize_text(queue_row.get("operator_status")) or "pending"
         priority = _normalize_text(queue_row.get("priority"))
-        required_fields = _split_fields(queue_row.get("required_fields")) or _contract_required_fields(domain)
+        required_fields = _split_fields(
+            queue_row.get("required_fields")
+        ) or _contract_required_fields(domain)
         payload = _build_payload(fields_by_queue.get(queue_id, []))
 
         row_issues = list(issues_by_queue.get(queue_id, []))
@@ -1121,8 +1189,12 @@ def build_validation_report(
     severity_counts = Counter(issue.severity for issue in issues)
     priority_counts = Counter(str(row.get("priority") or "") for row in normalized_rows)
     domain_counts = Counter(str(row.get("domain") or "") for row in normalized_rows)
-    status_counts = Counter(str(row.get("operator_status") or "") for row in normalized_rows)
-    validation_counts = Counter(str(row.get("validation_status") or "") for row in normalized_rows)
+    status_counts = Counter(
+        str(row.get("operator_status") or "") for row in normalized_rows
+    )
+    validation_counts = Counter(
+        str(row.get("validation_status") or "") for row in normalized_rows
+    )
     summary_status = _validation_status(issues)
     summary = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -1139,7 +1211,9 @@ def build_validation_report(
         "domain_counts": dict(sorted(domain_counts.items())),
         "operator_status_counts": dict(sorted(status_counts.items())),
         "validation_status_counts": dict(sorted(validation_counts.items())),
-        "apply_eligible_count": sum(1 for row in normalized_rows if row.get("apply_eligible")),
+        "apply_eligible_count": sum(
+            1 for row in normalized_rows if row.get("apply_eligible")
+        ),
         "db_checks": {
             "skipped": bool(db_checker.db_checks_skipped),
             "skip_reason": db_checker.db_skip_reason,

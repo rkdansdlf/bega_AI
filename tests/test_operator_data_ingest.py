@@ -253,7 +253,9 @@ def test_skipped_lineup_rows_do_not_create_starter_plan_rows() -> None:
     report = ingest.build_ingest_report([home, away], conn=conn, apply=False)
 
     assert [plan["action"] for plan in report["plans"]] == ["skipped", "skipped"]
-    assert {plan["skip_reason"] for plan in report["plans"]} == {"overwrite_requires_flag"}
+    assert {plan["skip_reason"] for plan in report["plans"]} == {
+        "overwrite_requires_flag"
+    }
     assert {issue["code"] for issue in report["issues"]} == {"overwrite_requires_flag"}
     assert report["starter_plan_rows"] == []
 
@@ -340,7 +342,9 @@ def test_game_day_lineup_requires_upsert_conflict_target() -> None:
         query for query, _params in cursor.executed if "FROM pg_index" in query
     ]
     assert conflict_queries
-    assert "array_agg(att.attname::text ORDER BY keys.ordinality)" in conflict_queries[0]
+    assert (
+        "array_agg(att.attname::text ORDER BY keys.ordinality)" in conflict_queries[0]
+    )
 
 
 def test_dry_run_reports_schema_conflicts_without_writes() -> None:

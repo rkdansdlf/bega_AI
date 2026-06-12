@@ -459,7 +459,16 @@ class ChatRendererRegistry:
             return f"{value}개"
         if stat_key in {"home_runs", "homeruns", "hr", "stolen_bases"}:
             return f"{value}개"
-        if stat_name in {"타점", "탈삼진", "세이브", "홀드", "다승", "득점", "완투", "완봉"}:
+        if stat_name in {
+            "타점",
+            "탈삼진",
+            "세이브",
+            "홀드",
+            "다승",
+            "득점",
+            "완투",
+            "완봉",
+        }:
             return f"{value}"
         return value
 

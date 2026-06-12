@@ -5,8 +5,10 @@ from pathlib import Path
 
 def _schema_sql() -> str:
     return (
-        Path(__file__).parent.parent / "app" / "db" / "schema.sql"
-    ).read_text(encoding="utf-8").lower()
+        (Path(__file__).parent.parent / "app" / "db" / "schema.sql")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
 
 
 def test_schema_sql_has_rag_storage_metadata_columns() -> None:
@@ -42,13 +44,15 @@ def test_schema_sql_uses_256_dimensional_embeddings() -> None:
 
 def test_halfvec_index_migration_sql_does_not_reembed() -> None:
     content = (
-        Path(__file__).parent.parent
-        / "app"
-        / "db"
-        / "create_halfvec_hnsw_index.sql"
-    ).read_text(encoding="utf-8").lower()
+        (Path(__file__).parent.parent / "app" / "db" / "create_halfvec_hnsw_index.sql")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
 
-    assert "create index concurrently if not exists idx_rag_chunks_embedding_halfvec_hnsw" in content
+    assert (
+        "create index concurrently if not exists idx_rag_chunks_embedding_halfvec_hnsw"
+        in content
+    )
     assert "embedding::halfvec(256)" in content
     assert "halfvec_cosine_ops" in content
     assert "does not call any embedding api" in content
@@ -57,11 +61,15 @@ def test_halfvec_index_migration_sql_does_not_reembed() -> None:
 
 def test_prefix_256_migration_slices_without_api_calls() -> None:
     content = (
-        Path(__file__).parent.parent
-        / "app"
-        / "db"
-        / "migrate_rag_embeddings_256_prefix.sql"
-    ).read_text(encoding="utf-8").lower()
+        (
+            Path(__file__).parent.parent
+            / "app"
+            / "db"
+            / "migrate_rag_embeddings_256_prefix.sql"
+        )
+        .read_text(encoding="utf-8")
+        .lower()
+    )
 
     assert "does not call any embedding api" in content
     assert "rag_chunks_embedding_1536_backup_20260525" in content
@@ -99,16 +107,28 @@ def test_schema_sql_has_operator_data_tables() -> None:
 
 def test_concurrent_index_sql_uses_concurrently() -> None:
     content = (
-        Path(__file__).parent.parent
-        / "app"
-        / "db"
-        / "rag_storage_indexes_concurrent.sql"
-    ).read_text(encoding="utf-8").lower()
+        (
+            Path(__file__).parent.parent
+            / "app"
+            / "db"
+            / "rag_storage_indexes_concurrent.sql"
+        )
+        .read_text(encoding="utf-8")
+        .lower()
+    )
 
-    assert "create index concurrently if not exists idx_rag_chunks_content_hash" in content
+    assert (
+        "create index concurrently if not exists idx_rag_chunks_content_hash" in content
+    )
     assert "create index concurrently if not exists idx_rag_chunks_topic_key" in content
-    assert "create index concurrently if not exists idx_rag_chunks_active_topic_key" in content
-    assert "create index concurrently if not exists idx_rag_chunks_embedding_reuse" in content
+    assert (
+        "create index concurrently if not exists idx_rag_chunks_active_topic_key"
+        in content
+    )
+    assert (
+        "create index concurrently if not exists idx_rag_chunks_embedding_reuse"
+        in content
+    )
     assert "create index concurrently if not exists idx_rag_chunks_metadata" in content
     assert "create index if not exists" not in content
     assert "begin" not in content

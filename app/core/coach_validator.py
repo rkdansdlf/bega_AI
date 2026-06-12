@@ -821,7 +821,9 @@ def backfill_empty_strengths(data: Dict[str, Any]) -> List[str]:
         if derived:
             break
     if not derived:
-        derived = "확인된 우위 시그널은 제한적이지만, 초반 주도권 다툼이 관전 포인트입니다."
+        derived = (
+            "확인된 우위 시그널은 제한적이지만, 초반 주도권 다툼이 관전 포인트입니다."
+        )
 
     analysis["strengths"] = [derived]
     return ["backfill_empty_strengths"]

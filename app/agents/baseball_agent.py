@@ -9947,7 +9947,9 @@ class BaseballStatisticsAgent:
                     f"{game_date} {away_team} 대 {home_team}: {stadium}, {status}"
                 )
         if len(games) > 5:
-            lines.append(f"나머지 {len(games) - 5}경기도 같은 기간 일정에 포함돼 있습니다.")
+            lines.append(
+                f"나머지 {len(games) - 5}경기도 같은 기간 일정에 포함돼 있습니다."
+            )
         return "\n\n".join(lines)
 
     def _build_team_standings_chat_answer(self, data: Dict[str, Any]) -> Optional[str]:
@@ -10004,14 +10006,10 @@ class BaseballStatisticsAgent:
                 if games is not None
                 else ""
             )
-            lines.append(
-                f"{index}위 {team_name}: {metric_label} {value}{games_text}"
-            )
+            lines.append(f"{index}위 {team_name}: {metric_label} {value}{games_text}")
         return "\n\n".join(lines[:6])
 
-    def _build_team_comparison_chat_answer(
-        self, data: Dict[str, Any]
-    ) -> Optional[str]:
+    def _build_team_comparison_chat_answer(self, data: Dict[str, Any]) -> Optional[str]:
         teams = data.get("teams") or []
         if len(teams) < 2:
             return None
@@ -10049,9 +10047,7 @@ class BaseballStatisticsAgent:
             )
         return "\n\n".join(lines[:3])
 
-    def _build_team_form_table_chat_answer(
-        self, data: Dict[str, Any]
-    ) -> Optional[str]:
+    def _build_team_form_table_chat_answer(self, data: Dict[str, Any]) -> Optional[str]:
         rows = data.get("form_rows") or []
         if not rows:
             return None
@@ -10065,7 +10061,9 @@ class BaseballStatisticsAgent:
             suffix = f" ({as_of_date} 기준)"
 
         if form_type == "home_away":
-            lines = [f"{year}년 팀별 홈/원정 승률은 DB 기준으로 이렇게 잡힙니다{suffix}."]
+            lines = [
+                f"{year}년 팀별 홈/원정 승률은 DB 기준으로 이렇게 잡힙니다{suffix}."
+            ]
             for row in rows[:5]:
                 team_name = self._format_team_display_name(
                     row.get("team_name") or row.get("team_code")
@@ -10076,7 +10074,9 @@ class BaseballStatisticsAgent:
             return "\n\n".join(lines[:6])
 
         if form_type == "streak":
-            lines = [f"{year}년 현재 연승/연패 흐름은 DB 기준으로 이렇게 잡힙니다{suffix}."]
+            lines = [
+                f"{year}년 현재 연승/연패 흐름은 DB 기준으로 이렇게 잡힙니다{suffix}."
+            ]
             for row in rows[:5]:
                 team_name = self._format_team_display_name(
                     row.get("team_name") or row.get("team_code")
@@ -10106,9 +10106,7 @@ class BaseballStatisticsAgent:
             losses = self._format_deterministic_metric(row.get("losses"))
             draws = self._format_deterministic_metric(row.get("draws"))
             win_pct = self._format_win_pct(row.get("win_pct"))
-            lines.append(
-                f"{team_name}: {wins}승 {losses}패 {draws}무, 승률 {win_pct}"
-            )
+            lines.append(f"{team_name}: {wins}승 {losses}패 {draws}무, 승률 {win_pct}")
         return "\n\n".join(lines[:6])
 
     def _build_player_stats_chat_answer(self, data: Dict[str, Any]) -> Optional[str]:

@@ -543,12 +543,16 @@ def build_chunk_storage_fields(
             content_hash_value=hash_value,
         ),
         "embedding_model": embedding_model or resolve_embedding_model(settings),
-        "embedding_dim": max(1, int(embedding_dim))
-        if embedding_dim is not None
-        else resolve_embedding_dim(settings),
-        "embedding_version": max(1, int(embedding_version))
-        if embedding_version is not None
-        else resolve_embedding_version(settings),
+        "embedding_dim": (
+            max(1, int(embedding_dim))
+            if embedding_dim is not None
+            else resolve_embedding_dim(settings)
+        ),
+        "embedding_version": (
+            max(1, int(embedding_version))
+            if embedding_version is not None
+            else resolve_embedding_version(settings)
+        ),
         "chunking_version": chunking_version or resolve_chunking_version(settings),
         "quality_score": infer_quality_score(
             resolved_source_type,

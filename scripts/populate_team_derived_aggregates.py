@@ -15,7 +15,6 @@ import psycopg
 
 from app.config import get_settings
 
-
 DOUBLE_PRECISION_COLUMNS = {
     "team_season_fielding": ("fielding_pct", "range_factor_per_game"),
     "team_season_baserunning": ("sb_success_rate",),

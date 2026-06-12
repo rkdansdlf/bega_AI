@@ -322,7 +322,11 @@ def _fetch_schedule_rows(
           AND is_verified = true
           AND confidence >= %s
     """
-    params: List[Any] = [start_date.isoformat(), end_date.isoformat(), CONFIDENCE_MINIMUM]
+    params: List[Any] = [
+        start_date.isoformat(),
+        end_date.isoformat(),
+        CONFIDENCE_MINIMUM,
+    ]
     if team_code:
         query += " AND (home_team = %s OR away_team = %s)"
         params.extend([team_code, team_code])
@@ -418,13 +422,17 @@ def _fetch_lineup_rows(
                 "queue_id": str(notes.get("queue_id") or row.get("game_id") or ""),
                 "source_name": notes.get("source_name", ""),
                 "source_checked_at": notes.get("source_checked_at", ""),
-                "confidence": confidence if confidence is not None else CONFIDENCE_MINIMUM,
+                "confidence": (
+                    confidence if confidence is not None else CONFIDENCE_MINIMUM
+                ),
             }
         )
     return normalized
 
 
-def _fetch_rows(conn: Any, query: str, params: Sequence[Any]) -> List[Mapping[str, Any]]:
+def _fetch_rows(
+    conn: Any, query: str, params: Sequence[Any]
+) -> List[Mapping[str, Any]]:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, tuple(params))
         return [dict(row) for row in list(cur.fetchall() or [])]
@@ -486,10 +494,16 @@ def _extract_all_explicit_dates(query: str, today: date) -> List[date]:
     dates: List[date] = []
     for match in re.finditer(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", query):
         with suppress(ValueError):
-            dates.append(date(int(match.group(1)), int(match.group(2)), int(match.group(3))))
-    for match in re.finditer(r"\b(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", query):
+            dates.append(
+                date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            )
+    for match in re.finditer(
+        r"\b(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", query
+    ):
         with suppress(ValueError):
-            dates.append(date(int(match.group(1)), int(match.group(2)), int(match.group(3))))
+            dates.append(
+                date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            )
     if not dates:
         for match in re.finditer(r"\b(\d{1,2})\s*월\s*(\d{1,2})\s*일", query):
             with suppress(ValueError):

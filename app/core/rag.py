@@ -980,9 +980,7 @@ def _is_db_answerable_standings_table_query(query_lower: str) -> bool:
             "팀별 승률",
             "팀별 승차",
         )
-    ) and not any(
-        token in query_lower for token in ("뉴스", "이슈", "소식", "가능성", "후보")
-    )
+    ) and not any(token in query_lower for token in ("뉴스", "이슈", "소식", "가능성", "후보"))
 
 
 def _is_doru_success_rate_explainer_query(query_lower: str) -> bool:
@@ -1071,9 +1069,11 @@ def _is_db_answerable_leaderboard_or_team_form_query(query_lower: str) -> bool:
         "연승 중인 팀",
         "연패 중인 팀",
     )
-    return any(token in query_lower for token in player_leader_tokens) or any(
-        token in query_lower for token in team_metric_tokens
-    ) or any(token in query_lower for token in team_form_tokens)
+    return (
+        any(token in query_lower for token in player_leader_tokens)
+        or any(token in query_lower for token in team_metric_tokens)
+        or any(token in query_lower for token in team_form_tokens)
+    )
 
 
 def _build_future_event_pending_result(
@@ -1403,7 +1403,9 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
             fallback_reason="clarification_required",
         )
 
-    if any(token in query_lower for token in ("두 선수", "선수 비교")) and not re.search(
+    if any(
+        token in query_lower for token in ("두 선수", "선수 비교")
+    ) and not re.search(
         r"[가-힣A-Za-z]{2,}\s*(?:과|와|vs|VS)\s*[가-힣A-Za-z]{2,}",
         query,
     ):

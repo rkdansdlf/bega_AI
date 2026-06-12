@@ -83,8 +83,7 @@ def _json_default(value: Any) -> str:
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default)
-        + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n",
         encoding="utf-8",
     )
 
@@ -285,9 +284,10 @@ def _fetch_samples(
     has_version_mismatch = int(summary.get("version_not_2") or 0) > 0
     has_missing_model = int(summary.get("embedded_missing_model") or 0) > 0
     return {
-        "metadata_dim_mismatch_groups": _fetch_rows_sample(
-            conn,
-            f"""
+        "metadata_dim_mismatch_groups": (
+            _fetch_rows_sample(
+                conn,
+                f"""
             SELECT
                 source_table,
                 season_year,
@@ -303,27 +303,31 @@ def _fetch_samples(
             ORDER BY count DESC, source_table, season_year NULLS LAST
             LIMIT %s
             """,
-            (EXPECTED_EMBED_DIM, sample_limit),
-            statement_timeout_ms=statement_timeout_ms,
-        )
-        if has_stale_dim
-        else _skipped_sample("metadata_dim_not_256 is 0"),
-        "metadata_dim_mismatch_samples": _fetch_rows_sample(
-            conn,
-            f"""
+                (EXPECTED_EMBED_DIM, sample_limit),
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if has_stale_dim
+            else _skipped_sample("metadata_dim_not_256 is 0")
+        ),
+        "metadata_dim_mismatch_samples": (
+            _fetch_rows_sample(
+                conn,
+                f"""
             SELECT {base_columns}
             FROM rag_chunks
             WHERE {stale_where}
             LIMIT %s
             """,
-            (EXPECTED_EMBED_DIM, sample_limit),
-            statement_timeout_ms=statement_timeout_ms,
-        )
-        if has_stale_dim
-        else _skipped_sample("metadata_dim_not_256 is 0"),
-        "metadata_fixable_groups": _fetch_rows_sample(
-            conn,
-            f"""
+                (EXPECTED_EMBED_DIM, sample_limit),
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if has_stale_dim
+            else _skipped_sample("metadata_dim_not_256 is 0")
+        ),
+        "metadata_fixable_groups": (
+            _fetch_rows_sample(
+                conn,
+                f"""
             SELECT
                 source_table,
                 season_year,
@@ -339,78 +343,89 @@ def _fetch_samples(
             ORDER BY count DESC, source_table, season_year NULLS LAST
             LIMIT %s
             """,
-            (*metadata_fix_params(), sample_limit),
-            statement_timeout_ms=statement_timeout_ms,
-        )
-        if has_metadata_fixable
-        else _skipped_sample("metadata_fixable is 0"),
-        "metadata_fixable_samples": _fetch_rows_sample(
-            conn,
-            f"""
+                (*metadata_fix_params(), sample_limit),
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if has_metadata_fixable
+            else _skipped_sample("metadata_fixable is 0")
+        ),
+        "metadata_fixable_samples": (
+            _fetch_rows_sample(
+                conn,
+                f"""
             SELECT {base_columns}
             FROM rag_chunks
             WHERE {METADATA_FIX_WHERE}
             LIMIT %s
             """,
-            (*metadata_fix_params(), sample_limit),
-            statement_timeout_ms=statement_timeout_ms,
-        )
-        if has_metadata_fixable
-        else _skipped_sample("metadata_fixable is 0"),
-        "metadata_conflict_samples": _fetch_rows_sample(
-            conn,
-            f"""
+                (*metadata_fix_params(), sample_limit),
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if has_metadata_fixable
+            else _skipped_sample("metadata_fixable is 0")
+        ),
+        "metadata_conflict_samples": (
+            _fetch_rows_sample(
+                conn,
+                f"""
             SELECT {base_columns}
             FROM rag_chunks
             WHERE {METADATA_CONFLICT_WHERE}
             LIMIT %s
             """,
-            (*metadata_conflict_params(), sample_limit),
-            statement_timeout_ms=statement_timeout_ms,
-        )
-        if has_metadata_conflicts
-        else _skipped_sample("metadata_conflicts is 0"),
-        "null_embedding_samples": _fetch_rows_sample(
-            conn,
-            f"""
+                (*metadata_conflict_params(), sample_limit),
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if has_metadata_conflicts
+            else _skipped_sample("metadata_conflicts is 0")
+        ),
+        "null_embedding_samples": (
+            _fetch_rows_sample(
+                conn,
+                f"""
             SELECT {base_columns}
             FROM rag_chunks
             WHERE is_active AND embedding IS NULL
             LIMIT %s
             """,
-            (sample_limit,),
-            statement_timeout_ms=statement_timeout_ms,
-        )
-        if has_active_null
-        else _skipped_sample("active_null_embeddings is 0"),
-        "version_mismatch_samples": _fetch_rows_sample(
-            conn,
-            f"""
+                (sample_limit,),
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if has_active_null
+            else _skipped_sample("active_null_embeddings is 0")
+        ),
+        "version_mismatch_samples": (
+            _fetch_rows_sample(
+                conn,
+                f"""
             SELECT {base_columns}
             FROM rag_chunks
             WHERE embedding IS NOT NULL
               AND coalesce(embedding_version, -1) <> %s
             LIMIT %s
             """,
-            (EXPECTED_EMBEDDING_VERSION, sample_limit),
-            statement_timeout_ms=statement_timeout_ms,
-        )
-        if has_version_mismatch
-        else _skipped_sample("version_not_2 is 0"),
-        "missing_model_samples": _fetch_rows_sample(
-            conn,
-            f"""
+                (EXPECTED_EMBEDDING_VERSION, sample_limit),
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if has_version_mismatch
+            else _skipped_sample("version_not_2 is 0")
+        ),
+        "missing_model_samples": (
+            _fetch_rows_sample(
+                conn,
+                f"""
             SELECT {base_columns}
             FROM rag_chunks
             WHERE embedding IS NOT NULL
               AND embedding_model IS NULL
             LIMIT %s
             """,
-            (sample_limit,),
-            statement_timeout_ms=statement_timeout_ms,
-        )
-        if has_missing_model
-        else _skipped_sample("embedded_missing_model is 0"),
+                (sample_limit,),
+                statement_timeout_ms=statement_timeout_ms,
+            )
+            if has_missing_model
+            else _skipped_sample("embedded_missing_model is 0")
+        ),
     }
 
 
@@ -494,9 +509,7 @@ def _build_findings(
                 "expected": EXPECTED_VECTOR_INDEX,
             },
         )
-    vector_quantization = (
-        str(runtime["ai_vector_quantization"] or "").lower().strip()
-    )
+    vector_quantization = str(runtime["ai_vector_quantization"] or "").lower().strip()
     if vector_quantization != EXPECTED_VECTOR_QUANTIZATION:
         add(
             "fail",

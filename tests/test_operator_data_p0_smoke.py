@@ -102,7 +102,9 @@ def test_pending_only_bundle_creates_manual_controls_and_recovered_warning() -> 
 
     assert result["summary"]["recovered_count"] == 0
     assert result["summary"]["manual_control_count"] == 1
-    assert result["summary"]["warnings"] == ["no_apply_eligible_p0_rows_for_recovered_smoke"]
+    assert result["summary"]["warnings"] == [
+        "no_apply_eligible_p0_rows_for_recovered_smoke"
+    ]
     assert result["recovered_questions"] == []
     assert result["manual_control_questions"] == ["오늘 KBO 경기 일정 알려줘."]
 
@@ -117,7 +119,9 @@ def test_apply_eligible_rows_create_recovered_expectations_for_p0_only() -> None
 
     assert result["summary"]["recovered_count"] == 1
     assert result["expectations"][0]["expectation"] == "recovered"
-    assert result["expectations"][0]["expected_operator_data_domain"] == "schedule_window"
+    assert (
+        result["expectations"][0]["expected_operator_data_domain"] == "schedule_window"
+    )
 
 
 def test_validation_fail_row_goes_to_manual_controls() -> None:
@@ -136,7 +140,9 @@ def test_validation_fail_row_goes_to_manual_controls() -> None:
     assert result["expectations"][0]["skip_reason"] == "validation_not_passed"
 
 
-def test_build_files_writes_combined_questions_in_expectation_order(tmp_path: Path) -> None:
+def test_build_files_writes_combined_questions_in_expectation_order(
+    tmp_path: Path,
+) -> None:
     normalized_path = tmp_path / "normalized.jsonl"
     rows = [
         _row("ODQ-0001", question="복구된 P0 질문"),
@@ -164,8 +170,12 @@ def test_build_files_writes_combined_questions_in_expectation_order(tmp_path: Pa
         all_output=all_output,
     )
 
-    assert recovered_output.read_text(encoding="utf-8").splitlines() == ["복구된 P0 질문"]
-    assert manual_output.read_text(encoding="utf-8").splitlines() == ["수동 계약 유지 질문"]
+    assert recovered_output.read_text(encoding="utf-8").splitlines() == [
+        "복구된 P0 질문"
+    ]
+    assert manual_output.read_text(encoding="utf-8").splitlines() == [
+        "수동 계약 유지 질문"
+    ]
     assert all_output.read_text(encoding="utf-8").splitlines() == [
         "복구된 P0 질문",
         "수동 계약 유지 질문",
@@ -263,7 +273,9 @@ def test_smoke_verifier_fails_when_expected_question_is_absent() -> None:
         "expectations": [_expectation("recovered")],
     }
 
-    result = verifier.verify_report(smoke_report=_report([]), expectations_payload=payload)
+    result = verifier.verify_report(
+        smoke_report=_report([]), expectations_payload=payload
+    )
 
     assert result["summary"]["status"] == "fail"
     assert result["summary"]["expected_question_count"] == 1

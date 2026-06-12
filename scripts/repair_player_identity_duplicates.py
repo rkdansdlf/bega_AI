@@ -18,7 +18,6 @@ import psycopg
 
 from app.config import get_settings
 
-
 CANONICAL_PLAYER_ID = 56632
 DUPLICATE_PLAYER_ID = 59359
 

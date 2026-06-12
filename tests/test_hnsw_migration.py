@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, call, patch
 
-
 # ---------------------------------------------------------------------------
 # config.py — AI_VECTOR_INDEX 설정
 # ---------------------------------------------------------------------------
@@ -235,9 +234,7 @@ def test_embedding_distance_sql_uses_halfvec_when_enabled(monkeypatch) -> None:
 
 def test_schema_sql_has_hnsw_index_definition() -> None:
     """schema.sql에 halfvec HNSW 인덱스 정의가 포함되어 있어야 한다."""
-    schema_path = (
-        Path(__file__).parent.parent / "app" / "db" / "schema.sql"
-    )
+    schema_path = Path(__file__).parent.parent / "app" / "db" / "schema.sql"
     content = schema_path.read_text(encoding="utf-8").lower()
     assert "hnsw" in content, "schema.sql에 HNSW 인덱스 정의가 없습니다."
     assert "idx_rag_chunks_embedding_halfvec_hnsw" in content
@@ -247,9 +244,7 @@ def test_schema_sql_has_hnsw_index_definition() -> None:
 
 def test_schema_sql_does_not_auto_create_vector_hnsw() -> None:
     """halfvec 전환 후 schema.sql은 vector HNSW를 자동 생성하지 않는다."""
-    schema_path = (
-        Path(__file__).parent.parent / "app" / "db" / "schema.sql"
-    )
+    schema_path = Path(__file__).parent.parent / "app" / "db" / "schema.sql"
     lines = schema_path.read_text(encoding="utf-8").splitlines()
     active_lines = [
         line.strip().lower()
@@ -267,9 +262,7 @@ def test_schema_sql_does_not_auto_create_vector_hnsw() -> None:
 
 def test_schema_sql_ivfflat_is_commented_out() -> None:
     """schema.sql의 IVFFlat 인덱스 생성 구문은 주석 처리되어 있어야 한다."""
-    schema_path = (
-        Path(__file__).parent.parent / "app" / "db" / "schema.sql"
-    )
+    schema_path = Path(__file__).parent.parent / "app" / "db" / "schema.sql"
     lines = schema_path.read_text(encoding="utf-8").splitlines()
     # 주석 아닌 라인에 ivfflat + create index 가 동시에 있으면 안 됨
     for line in lines:
@@ -386,9 +379,7 @@ class _VerifyCursor:
 
     def fetchall(self) -> list[tuple[str]]:
         return [
-            (
-                "Index Scan using idx_rag_chunks_embedding_halfvec_hnsw on rag_chunks",
-            )
+            ("Index Scan using idx_rag_chunks_embedding_halfvec_hnsw on rag_chunks",)
         ]
 
 

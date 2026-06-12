@@ -92,7 +92,9 @@ def timestamp(value: str = "") -> str:
     return value.strip() or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def load_report(path: Optional[Path], label: str, warnings: List[str]) -> Dict[str, Any]:
+def load_report(
+    path: Optional[Path], label: str, warnings: List[str]
+) -> Dict[str, Any]:
     if path is None:
         warnings.append(f"{label}: report path not provided")
         return {}
@@ -157,7 +159,9 @@ def _cleanup_command() -> str:
 
 
 def _source_refresh_command(source_table: str, year: str) -> str:
-    year_args = f" --start-year {year} --end-year {year}" if year and year != "0" else ""
+    year_args = (
+        f" --start-year {year} --end-year {year}" if year and year != "0" else ""
+    )
     return (
         ".venv/bin/python scripts/audit_rag_chunk_source_drift.py "
         "--mode all --sample-limit 20"
@@ -412,7 +416,10 @@ def triage_storage(report: Mapping[str, Any]) -> List[TriageAction]:
                 notes=f"Storage audit found {missing_embedding} chunks with NULL embeddings.",
             )
         )
-    if _int(summary.get("active_expired")) > 0 or _int(summary.get("active_past_valid_to")) > 0:
+    if (
+        _int(summary.get("active_expired")) > 0
+        or _int(summary.get("active_past_valid_to")) > 0
+    ):
         actions.append(
             TriageAction(
                 priority="P3",
@@ -440,7 +447,11 @@ def triage_embedding_256(report: Mapping[str, Any]) -> List[TriageAction]:
         action_type = "embedding_metadata_review"
         command = _cleanup_command()
         priority = "P2" if severity == "warning" else "P1"
-        if code in {"metadata_conflicts", "runtime_embedding_model", "runtime_embed_dim"}:
+        if code in {
+            "metadata_conflicts",
+            "runtime_embedding_model",
+            "runtime_embed_dim",
+        }:
             action_type = "manual_data_required"
             command = ""
         actions.append(
@@ -450,7 +461,9 @@ def triage_embedding_256(report: Mapping[str, Any]) -> List[TriageAction]:
                 source_report="embedding_256",
                 finding_type=code,
                 recommended_command=command,
-                manual_contract=MANUAL_CONTRACT if action_type == "manual_data_required" else "",
+                manual_contract=(
+                    MANUAL_CONTRACT if action_type == "manual_data_required" else ""
+                ),
                 notes=_string(finding.get("message")),
             )
         )
@@ -586,9 +599,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         ),
     }
     actions: List[TriageAction] = []
-    actions.extend(
-        triage_coverage(reports["coverage"], sample_limit=args.sample_limit)
-    )
+    actions.extend(triage_coverage(reports["coverage"], sample_limit=args.sample_limit))
     actions.extend(
         triage_source_drift(
             reports["source_drift"],

@@ -228,9 +228,7 @@ def build_steps(
                     "--output-dir",
                     str(artifacts.coverage_json.parent),
                     "--timestamp",
-                    artifacts.coverage_json.stem.removeprefix(
-                        "db_embedding_coverage_"
-                    ),
+                    artifacts.coverage_json.stem.removeprefix("db_embedding_coverage_"),
                     "--sample-limit",
                     str(args.sample_limit),
                     "--fail-on",
@@ -341,11 +339,19 @@ def render_markdown_summary(
     drift = _load_json(artifacts.source_drift_json)
     triage = _load_json(artifacts.triage_json)
 
-    coverage_rows = coverage.get("rows") if isinstance(coverage.get("rows"), list) else []
+    coverage_rows = (
+        coverage.get("rows") if isinstance(coverage.get("rows"), list) else []
+    )
     coverage_bad = sum(1 for row in coverage_rows if row.get("status") != "OK")
-    storage_summary = storage.get("summary") if isinstance(storage.get("summary"), dict) else {}
-    drift_summary = drift.get("summary") if isinstance(drift.get("summary"), dict) else {}
-    triage_summary = triage.get("summary") if isinstance(triage.get("summary"), dict) else {}
+    storage_summary = (
+        storage.get("summary") if isinstance(storage.get("summary"), dict) else {}
+    )
+    drift_summary = (
+        drift.get("summary") if isinstance(drift.get("summary"), dict) else {}
+    )
+    triage_summary = (
+        triage.get("summary") if isinstance(triage.get("summary"), dict) else {}
+    )
 
     lines = [
         "# DB Embedding Consistency Audit",
