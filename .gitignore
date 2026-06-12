@@ -26,6 +26,7 @@ scripts/migration_progress.json
 migration.log
 server_log.txt
 *.txt
+!scripts/smoke_chatbot_quality_db_fast_path_candidates_23.txt
 
 # Local diagnostics and generated artifacts
 logs/
@@ -38,6 +39,10 @@ test_rag_search.py
 /reports
 /tests/*
 !/tests/
+!/tests/test_audit_embedding_256_migration.py
+!/tests/test_cleanup_embedding_256_warnings.py
+!/tests/test_hnsw_migration.py
+!/tests/test_rag_storage_schema.py
 !/tests/test_analyze_operator_data_required.py
 !/tests/test_build_operator_data_handoff.py
 !/tests/test_operator_data_db_prereqs.py
