@@ -469,11 +469,55 @@ def _answerability_failures(text: str) -> List[str]:
     return failures
 
 
-def _evaluate_answerability(text: str) -> Dict[str, Any]:
+def _classify_expected_answerability_status(question: str, text: str) -> str:
+    query = (question or "").lower()
+    answer = text or ""
+    if "MANUAL_BASEBALL_DATA_REQUIRED" in answer:
+        return "operator_data_required"
+    if "외부 야구 웹 조회는 사용하지 않습니다" in answer:
+        return "operator_data_required"
+    if any(
+        marker in answer
+        for marker in [
+            "아직 진행 전",
+            "아직 시즌 중",
+            "확정 전",
+            "공식 기록이 제공된 뒤",
+        ]
+    ) and any(
+        token in query
+        for token in ["올스타", "포스트시즌", "한국시리즈", "mvp", "수상", "왕"]
+    ):
+        return "future_event_pending"
+    if any(
+        marker in answer
+        for marker in [
+            "팀명을 같이 알려주세요",
+            "두 선수 이름",
+            "두 팀명을 같이 알려주세요",
+            "날짜와 팀명 또는 game_id",
+            "한 번만 더 적어주세요",
+        ]
+    ):
+        return "clarification_required"
+    if any(token in query for token in ["이 팀", "우리 팀", "두 선수", "두 팀"]):
+        return "clarification_required"
+    return "answerable"
+
+
+def _evaluate_answerability(text: str, question: str = "") -> Dict[str, Any]:
     failure_markers = _answerability_failures(text)
+    status = _classify_expected_answerability_status(question, text)
+    expected_non_answer = status in {
+        "operator_data_required",
+        "clarification_required",
+        "future_event_pending",
+    }
     return {
-        "answerability_pass": not failure_markers,
+        "answerability_pass": not failure_markers or expected_non_answer,
         "failure_markers": failure_markers,
+        "status": status if failure_markers or expected_non_answer else "answerable",
+        "expected_non_answer": expected_non_answer,
     }
 
 
@@ -528,12 +572,21 @@ def _empty_answerability() -> Dict[str, Any]:
 
 def _fallback_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     total = len(items)
-    fallback_count = sum(
-        1 for item in items if _is_fallback_answer(str(item.get("answer", "")))
-    )
-    ratio = (fallback_count / total) if total else 0.0
+    expected_non_answer_count = 0
+    fallback_count = 0
+    for item in items:
+        answerability = item.get("answerability")
+        if isinstance(answerability, dict) and answerability.get("expected_non_answer"):
+            expected_non_answer_count += 1
+            continue
+        if _is_fallback_answer(str(item.get("answer", ""))):
+            fallback_count += 1
+    eligible_total = total - expected_non_answer_count
+    ratio = (fallback_count / eligible_total) if eligible_total else 0.0
     return {
         "total": total,
+        "eligible_total": eligible_total,
+        "expected_non_answer_count": expected_non_answer_count,
         "fallback_count": fallback_count,
         "fallback_ratio": round(ratio, 4),
     }
@@ -596,7 +649,7 @@ def _check_completion(
             if not isinstance(answer, str):
                 answer = str(answer)
             quality = _evaluate_quality(answer)
-            answerability = _evaluate_answerability(answer)
+            answerability = _evaluate_answerability(answer, question)
             overall_ok = _overall_pass(quality, answerability)
             return {
                 "endpoint": "/ai/chat/completion",
@@ -751,7 +804,7 @@ def _check_stream(
             if seen_done:
                 text = "".join(message_chunks)
                 quality = _evaluate_quality(text)
-                answerability = _evaluate_answerability(text)
+                answerability = _evaluate_answerability(text, question)
                 event_order = event_positions.get("status", 1e9)
                 event_message = event_positions.get("message", 1e9)
                 event_meta = event_positions.get("meta", 1e9)
@@ -1114,6 +1167,17 @@ def _endpoint_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _answerability_status_distribution(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    distribution: Dict[str, int] = {}
+    for item in items:
+        answerability = item.get("answerability")
+        status = "unknown"
+        if isinstance(answerability, dict):
+            status = str(answerability.get("status") or "answerable")
+        distribution[status] = distribution.get(status, 0) + 1
+    return dict(sorted(distribution.items()))
+
+
 def _extract_planner_mode(item: Dict[str, Any]) -> str:
     mode: Any = None
     sample_response = item.get("sample_response")
@@ -1352,6 +1416,16 @@ def _build_failed_cases(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     if isinstance(item.get("answerability"), dict)
                     else []
                 ),
+                "answerability_status": (
+                    item.get("answerability", {}).get("status")
+                    if isinstance(item.get("answerability"), dict)
+                    else None
+                ),
+                "expected_non_answer": (
+                    item.get("answerability", {}).get("expected_non_answer")
+                    if isinstance(item.get("answerability"), dict)
+                    else False
+                ),
             }
         )
     return failed_cases
@@ -1509,6 +1583,11 @@ def _summarize_results(
         "answerability_failed": sum(
             1 for item in results if item.get("answerability_pass") is False
         ),
+        "answerability_status_distribution": {
+            "overall": _answerability_status_distribution(results),
+            "completion": _answerability_status_distribution(completion),
+            "stream": _answerability_status_distribution(stream),
+        },
         "completion_metrics": _endpoint_metrics(completion),
         "stream_metrics": _endpoint_metrics(stream),
         "planner_mode_metrics": {
