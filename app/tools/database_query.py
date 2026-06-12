@@ -5,6 +5,7 @@
 실제 DB에서 정확한 데이터만을 조회하여 반환합니다.
 """
 
+from collections import defaultdict
 from datetime import date
 from typing import Dict, List, Any, Optional, Tuple
 import logging
@@ -1158,6 +1159,27 @@ class DatabaseQueryTool:
                     "stolen_bases": ("stolen_bases", "DESC", 0),
                     "안타": ("hits", "DESC", 0),
                     "hits": ("hits", "DESC", 0),
+                    "득점": ("runs", "DESC", 0),
+                    "runs": ("runs", "DESC", 0),
+                    "삼진": ("strikeouts", "DESC", 0),
+                    "strikeouts": ("strikeouts", "DESC", 0),
+                    "gdp": ("gdp", "DESC", 0),
+                    "병살": ("gdp", "DESC", 0),
+                    "도루성공률": (
+                        "CASE WHEN (stolen_bases + caught_stealing) > 0 THEN stolen_bases::double precision / (stolen_bases + caught_stealing) ELSE NULL END",
+                        "DESC",
+                        0,
+                    ),
+                    "도루 성공률": (
+                        "CASE WHEN (stolen_bases + caught_stealing) > 0 THEN stolen_bases::double precision / (stolen_bases + caught_stealing) ELSE NULL END",
+                        "DESC",
+                        0,
+                    ),
+                    "sb_success_rate": (
+                        "CASE WHEN (stolen_bases + caught_stealing) > 0 THEN stolen_bases::double precision / (stolen_bases + caught_stealing) ELSE NULL END",
+                        "DESC",
+                        0,
+                    ),
                     "득점권타율": ("scoring_position_avg", "DESC", 0),
                     "득점권 타율": ("scoring_position_avg", "DESC", 0),
                     "scoring_position_avg": ("scoring_position_avg", "DESC", 0),
@@ -1255,6 +1277,11 @@ class DatabaseQueryTool:
                             ops,
                             home_runs,
                             rbi,
+                            runs,
+                            strikeouts,
+                            stolen_bases,
+                            caught_stealing,
+                            gdp,
                             {db_column} as stat_value
                         FROM normalized_batting
                         ORDER BY
@@ -1277,7 +1304,12 @@ class DatabaseQueryTool:
                             lb.slg,
                             lb.ops,
                             lb.home_runs,
-                            lb.rbi
+                            lb.rbi,
+                            lb.runs,
+                            lb.strikeouts,
+                            lb.stolen_bases,
+                            lb.caught_stealing,
+                            lb.gdp
                         FROM latest_batting lb
                         JOIN player_basic pb ON lb.player_id = pb.player_id
                         WHERE 1 = 1
@@ -1317,6 +1349,12 @@ class DatabaseQueryTool:
                     "innings": ("innings_pitched", "DESC", 0),
                     "이닝": ("innings_pitched", "DESC", 0),
                     "ip": ("innings_pitched", "DESC", 0),
+                    "complete_games": ("complete_games", "DESC", 0),
+                    "완투": ("complete_games", "DESC", 0),
+                    "shutouts": ("shutouts", "DESC", 0),
+                    "완봉": ("shutouts", "DESC", 0),
+                    "avg_against": ("avg_against", "ASC", 30),
+                    "피안타율": ("avg_against", "ASC", 30),
                     "quality_starts": ("quality_starts", "DESC", 0),
                     "qs": ("quality_starts", "DESC", 0),
                 }
@@ -1367,7 +1405,11 @@ class DatabaseQueryTool:
                             wins,
                             losses,
                             saves,
+                            holds,
                             strikeouts,
+                            complete_games,
+                            shutouts,
+                            avg_against,
                             quality_starts,
                             {db_column} as stat_value
                         FROM normalized_pitching
@@ -1391,7 +1433,11 @@ class DatabaseQueryTool:
                             lp.wins,
                             lp.losses,
                             lp.saves,
+                            lp.holds,
                             lp.strikeouts,
+                            lp.complete_games,
+                            lp.shutouts,
+                            lp.avg_against,
                             lp.quality_starts
                         FROM latest_pitching lp
                         JOIN player_basic pb ON lp.player_id = pb.player_id
@@ -2154,6 +2200,898 @@ class DatabaseQueryTool:
         self._record_team_query_result(
             "get_team_by_season_rank", str(rank), year, result
         )
+        return result
+
+    def get_team_standings(
+        self, year: int, as_of_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Return a full team standings table from team_standings_daily."""
+        logger.info(
+            "[DatabaseQuery] Loading team standings year=%s as_of_date=%s",
+            year,
+            as_of_date,
+        )
+
+        result: Dict[str, Any] = {
+            "year": year,
+            "as_of_date": as_of_date,
+            "standings": [],
+            "found": False,
+            "error": None,
+            "source": "team_standings_daily",
+        }
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            params: list[Any] = [year, year]
+            as_of_filter = ""
+            if as_of_date:
+                as_of_filter = "AND standings_date <= %s"
+                params.append(as_of_date)
+
+            query = f"""
+                WITH latest AS (
+                    SELECT MAX(standings_date) AS standings_date
+                    FROM team_standings_daily
+                    WHERE standings_date >= make_date(%s, 1, 1)
+                      AND standings_date < make_date(%s + 1, 1, 1)
+                      {as_of_filter}
+                ),
+                ranked AS (
+                    SELECT
+                        tsd.team_code,
+                        tsd.games_played,
+                        tsd.wins,
+                        tsd.losses,
+                        tsd.draws,
+                        tsd.win_pct,
+                        tsd.games_behind,
+                        tsd.standings_date,
+                        RANK() OVER (
+                            ORDER BY
+                                tsd.win_pct DESC NULLS LAST,
+                                tsd.wins DESC NULLS LAST,
+                                tsd.run_differential DESC NULLS LAST,
+                                tsd.team_code ASC
+                        ) AS season_rank
+                    FROM team_standings_daily tsd
+                    JOIN latest ON latest.standings_date = tsd.standings_date
+                )
+                SELECT *
+                FROM ranked
+                ORDER BY season_rank ASC, team_code ASC
+            """
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            if not rows:
+                return result
+
+            result["as_of_date"] = (
+                rows[0]["standings_date"].isoformat()
+                if rows[0].get("standings_date") is not None
+                else as_of_date
+            )
+            result["standings"] = [
+                {
+                    "rank": self.safe_int(row.get("season_rank")),
+                    "team_code": row.get("team_code"),
+                    "team_name": self.get_team_name(row.get("team_code"), year)
+                    or row.get("team_code"),
+                    "games_played": self.safe_int(row.get("games_played")),
+                    "wins": self.safe_int(row.get("wins")),
+                    "losses": self.safe_int(row.get("losses")),
+                    "draws": self.safe_int(row.get("draws")),
+                    "win_pct": row.get("win_pct"),
+                    "games_behind": row.get("games_behind"),
+                }
+                for row in rows
+            ]
+            result["found"] = True
+            return result
+
+        except Exception as exc:
+            logger.error("[DatabaseQuery] Error loading team standings: %s", exc)
+            result["error"] = str(exc)
+            return result
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+    def get_team_metric_leaderboard(
+        self,
+        metric_name: str,
+        year: int,
+        limit: int = 10,
+        sort_order: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return a team-level metric leaderboard from trusted season aggregate tables."""
+        metric_key = str(metric_name or "").strip().lower()
+        aliases = {
+            "득점": "runs",
+            "득점력": "runs",
+            "홈런": "home_runs",
+            "도루": "stolen_bases",
+            "타율": "avg",
+            "출루율": "obp",
+            "장타율": "slg",
+            "경기당득점": "runs_per_game",
+            "평균득점": "runs_per_game",
+            "경기당실점": "runs_allowed_per_game",
+            "평균실점": "runs_allowed_per_game",
+            "실점": "runs_allowed",
+            "실점력": "runs_allowed",
+            "방어율": "era",
+            "평균자책": "era",
+            "평균자책점": "era",
+            "불펜": "bullpen_era",
+            "불펜era": "bullpen_era",
+            "불펜평균자책": "bullpen_era",
+            "불펜비중": "bullpen_share",
+            "불펜소모": "bullpen_share",
+            "선발진": "starter_qs_rate",
+            "선발qs": "starter_qs_rate",
+            "기복": "run_margin_volatility",
+            "기복이큰": "run_margin_volatility",
+            "실책": "errors",
+            "수비": "fielding_pct",
+            "병살": "double_plays",
+            "도루성공률": "sb_success_rate",
+            "공격과수비": "overall_profile",
+        }
+        metric_key = aliases.get(metric_key.replace(" ", ""), metric_key)
+        metric_specs: Dict[str, Dict[str, str]] = {
+            "runs": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "runs",
+                "label": "득점",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+            "runs_per_game": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "ROUND((runs::numeric / NULLIF(games, 0)), 2)",
+                "label": "경기당 평균 득점",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+            "home_runs": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "home_runs",
+                "label": "홈런",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+            "stolen_bases": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "stolen_bases",
+                "label": "도루",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+            "avg": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "avg",
+                "label": "타율",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+            "obp": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "obp",
+                "label": "출루율",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+            "slg": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "slg",
+                "label": "장타율",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+            "ops": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "ops",
+                "label": "OPS",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+            "runs_allowed": {
+                "table": "team_season_pitching",
+                "team_column": "team_id",
+                "value": "runs_allowed",
+                "label": "실점",
+                "sort": "ASC",
+                "league": "league = 'REGULAR'",
+            },
+            "runs_allowed_per_game": {
+                "table": "team_season_pitching",
+                "team_column": "team_id",
+                "value": "ROUND((runs_allowed::numeric / NULLIF(games, 0)), 2)",
+                "label": "경기당 평균 실점",
+                "sort": "ASC",
+                "league": "league = 'REGULAR'",
+            },
+            "era": {
+                "table": "team_season_pitching",
+                "team_column": "team_id",
+                "value": "era",
+                "label": "평균자책점",
+                "sort": "ASC",
+                "league": "league = 'REGULAR'",
+            },
+            "errors": {
+                "table": "team_season_fielding",
+                "team_column": "team_code",
+                "value": "errors",
+                "label": "실책",
+                "sort": "ASC",
+                "league": "TRUE",
+            },
+            "fielding_pct": {
+                "table": "team_season_fielding",
+                "team_column": "team_code",
+                "value": "fielding_pct",
+                "label": "수비율",
+                "sort": "DESC",
+                "league": "TRUE",
+            },
+            "double_plays": {
+                "table": "team_season_fielding",
+                "team_column": "team_code",
+                "value": "double_plays",
+                "label": "병살 처리",
+                "sort": "DESC",
+                "league": "TRUE",
+            },
+            "sb_success_rate": {
+                "table": "team_season_baserunning",
+                "team_column": "team_code",
+                "value": "sb_success_rate",
+                "label": "도루 성공률",
+                "sort": "DESC",
+                "league": "TRUE",
+            },
+            "overall_profile": {
+                "table": "team_season_batting",
+                "team_column": "team_id",
+                "value": "ops",
+                "label": "공격/수비 종합 참고 OPS",
+                "sort": "DESC",
+                "league": "league = 'REGULAR'",
+            },
+        }
+        spec = metric_specs.get(metric_key)
+        result: Dict[str, Any] = {
+            "metric_name": metric_key,
+            "metric_label": metric_key,
+            "year": year,
+            "sort_order": sort_order,
+            "team_metric_leaderboard": [],
+            "found": False,
+            "error": None,
+            "source": None,
+        }
+        if spec is None:
+            role_metric_result = self._get_team_pitching_role_metric_leaderboard(
+                metric_key=metric_key,
+                metric_name=metric_name,
+                year=year,
+                limit=limit,
+                sort_order=sort_order,
+            )
+            if role_metric_result is not None:
+                return role_metric_result
+            game_metric_result = self._get_team_game_metric_leaderboard(
+                metric_key=metric_key,
+                metric_name=metric_name,
+                year=year,
+                limit=limit,
+                sort_order=sort_order,
+            )
+            if game_metric_result is not None:
+                return game_metric_result
+            result["error"] = f"지원하지 않는 팀 지표: {metric_name}"
+            return result
+
+        resolved_sort = (sort_order or spec["sort"]).upper()
+        if resolved_sort not in {"ASC", "DESC"}:
+            resolved_sort = spec["sort"]
+        table_name = spec["table"]
+        team_column = spec["team_column"]
+        value_expr = spec["value"]
+        league_condition = spec["league"]
+        games_expr = (
+            "games"
+            if table_name in {"team_season_batting", "team_season_pitching"}
+            else "NULL::integer"
+        )
+        result["metric_label"] = spec["label"]
+        result["sort_order"] = resolved_sort
+        result["source"] = table_name
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            query = f"""
+                SELECT
+                    {team_column} AS team_code,
+                    {value_expr} AS stat_value,
+                    {games_expr} AS games
+                FROM {table_name}
+                WHERE season = %s
+                  AND {league_condition}
+                  AND {value_expr} IS NOT NULL
+                ORDER BY stat_value {resolved_sort}, team_code ASC
+                LIMIT %s
+            """
+            cursor.execute(query, (year, max(1, int(limit or 10))))
+            rows = cursor.fetchall()
+            for row in rows:
+                team_code = row.get("team_code")
+                result["team_metric_leaderboard"].append(
+                    {
+                        "team_code": team_code,
+                        "team_name": self.get_team_name(team_code, year) or team_code,
+                        "stat_value": row.get("stat_value"),
+                        "details": {"games": row.get("games")},
+                    }
+                )
+            result["found"] = bool(result["team_metric_leaderboard"])
+        except Exception as e:
+            logger.error("[DatabaseQuery] Team metric leaderboard error: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return result
+
+    def _get_team_pitching_role_metric_leaderboard(
+        self,
+        *,
+        metric_key: str,
+        metric_name: str,
+        year: int,
+        limit: int = 10,
+        sort_order: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return team leaderboard metrics derived from starter/reliever splits."""
+        role_specs = {
+            "bullpen_share": {
+                "value": "bullpen_share",
+                "label": "불펜 이닝 비중",
+                "sort": "DESC",
+            },
+            "bullpen_era": {
+                "value": "bullpen_era",
+                "label": "불펜 평균자책점",
+                "sort": "ASC",
+            },
+            "starter_qs_rate": {
+                "value": "starter_qs_rate",
+                "label": "선발 QS 비율",
+                "sort": "DESC",
+            },
+        }
+        spec = role_specs.get(metric_key)
+        if spec is None:
+            return None
+
+        resolved_sort = (sort_order or spec["sort"]).upper()
+        if resolved_sort not in {"ASC", "DESC"}:
+            resolved_sort = spec["sort"]
+
+        result: Dict[str, Any] = {
+            "metric_name": metric_key,
+            "metric_label": spec["label"],
+            "year": year,
+            "sort_order": resolved_sort,
+            "team_metric_leaderboard": [],
+            "found": False,
+            "error": None,
+            "source": "player_season_pitching",
+        }
+        value_column = spec["value"]
+        canonical_team_code_expr = self._canonical_team_expr("team_code")
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            query = f"""
+                WITH role_split AS (
+                    SELECT
+                        {canonical_team_code_expr} AS team_code,
+                        SUM(innings_pitched) AS total_ip,
+                        SUM(
+                            CASE
+                                WHEN NOT (
+                                    COALESCE(games_started, 0) > 0
+                                    OR COALESCE(quality_starts, 0) > 0
+                                    OR (innings_pitched / NULLIF(games, 0)) >= 3
+                                )
+                                THEN innings_pitched
+                                ELSE 0
+                            END
+                        ) AS bullpen_ip,
+                        SUM(
+                            CASE
+                                WHEN NOT (
+                                    COALESCE(games_started, 0) > 0
+                                    OR COALESCE(quality_starts, 0) > 0
+                                    OR (innings_pitched / NULLIF(games, 0)) >= 3
+                                )
+                                THEN earned_runs
+                                ELSE 0
+                            END
+                        ) AS bullpen_er,
+                        SUM(quality_starts) AS total_qs,
+                        SUM(
+                            CASE
+                                WHEN COALESCE(games_started, 0) > 0 THEN games_started
+                                WHEN (
+                                    COALESCE(quality_starts, 0) > 0
+                                    OR (innings_pitched / NULLIF(games, 0)) >= 3
+                                )
+                                THEN games
+                                ELSE 0
+                            END
+                        ) AS starter_games
+                    FROM player_season_pitching
+                    WHERE season = %s
+                    GROUP BY 1
+                ),
+                metrics AS (
+                    SELECT
+                        team_code,
+                        ROUND((bullpen_ip / NULLIF(total_ip, 0) * 100)::numeric, 1) AS bullpen_share,
+                        ROUND((bullpen_er * 9.0 / NULLIF(bullpen_ip, 0))::numeric, 2) AS bullpen_era,
+                        ROUND((total_qs::numeric / NULLIF(starter_games, 0) * 100)::numeric, 1) AS starter_qs_rate,
+                        total_ip,
+                        bullpen_ip,
+                        starter_games
+                    FROM role_split
+                )
+                SELECT
+                    team_code,
+                    {value_column} AS stat_value,
+                    total_ip,
+                    bullpen_ip,
+                    starter_games
+                FROM metrics
+                WHERE {value_column} IS NOT NULL
+                ORDER BY stat_value {resolved_sort}, team_code ASC
+                LIMIT %s
+            """
+            cursor.execute(query, (year, max(1, int(limit or 10))))
+            rows = cursor.fetchall()
+            for row in rows:
+                team_code = row.get("team_code")
+                result["team_metric_leaderboard"].append(
+                    {
+                        "team_code": team_code,
+                        "team_name": self.get_team_name(team_code, year) or team_code,
+                        "stat_value": row.get("stat_value"),
+                        "details": {
+                            "total_ip": row.get("total_ip"),
+                            "bullpen_ip": row.get("bullpen_ip"),
+                            "starter_games": row.get("starter_games"),
+                        },
+                    }
+                )
+            result["found"] = bool(result["team_metric_leaderboard"])
+        except Exception as e:
+            logger.error("[DatabaseQuery] Team role metric leaderboard error: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return result
+
+    def _get_team_game_metric_leaderboard(
+        self,
+        *,
+        metric_key: str,
+        metric_name: str,
+        year: int,
+        limit: int = 10,
+        sort_order: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return team leaderboard metrics derived from completed game rows."""
+        game_specs = {
+            "run_margin_volatility": {
+                "value": "run_margin_volatility",
+                "label": "득실점 기복",
+                "sort": "DESC",
+            },
+        }
+        spec = game_specs.get(metric_key)
+        if spec is None:
+            return None
+
+        resolved_sort = (sort_order or spec["sort"]).upper()
+        if resolved_sort not in {"ASC", "DESC"}:
+            resolved_sort = spec["sort"]
+
+        result: Dict[str, Any] = {
+            "metric_name": metric_key,
+            "metric_label": spec["label"],
+            "year": year,
+            "sort_order": resolved_sort,
+            "team_metric_leaderboard": [],
+            "found": False,
+            "error": None,
+            "source": "game",
+        }
+        home_team_expr = self._canonical_team_expr("g.home_team")
+        away_team_expr = self._canonical_team_expr("g.away_team")
+        value_column = spec["value"]
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            query = f"""
+                WITH team_games AS (
+                    SELECT
+                        {home_team_expr} AS team_code,
+                        (g.home_score - g.away_score) AS run_margin
+                    FROM game g
+                    JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    WHERE ks.season_year = %s
+                      AND ks.league_type_code = 0
+                      AND g.game_status = 'COMPLETED'
+                      AND g.home_score IS NOT NULL
+                      AND g.away_score IS NOT NULL
+                    UNION ALL
+                    SELECT
+                        {away_team_expr} AS team_code,
+                        (g.away_score - g.home_score) AS run_margin
+                    FROM game g
+                    JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    WHERE ks.season_year = %s
+                      AND ks.league_type_code = 0
+                      AND g.game_status = 'COMPLETED'
+                      AND g.home_score IS NOT NULL
+                      AND g.away_score IS NOT NULL
+                ),
+                metrics AS (
+                    SELECT
+                        team_code,
+                        ROUND(STDDEV_POP(run_margin)::numeric, 2) AS run_margin_volatility,
+                        COUNT(*) AS games
+                    FROM team_games
+                    WHERE team_code IS NOT NULL
+                    GROUP BY team_code
+                )
+                SELECT
+                    team_code,
+                    {value_column} AS stat_value,
+                    games
+                FROM metrics
+                WHERE {value_column} IS NOT NULL
+                ORDER BY stat_value {resolved_sort}, team_code ASC
+                LIMIT %s
+            """
+            cursor.execute(query, (year, year, max(1, int(limit or 10))))
+            rows = cursor.fetchall()
+            for row in rows:
+                team_code = row.get("team_code")
+                result["team_metric_leaderboard"].append(
+                    {
+                        "team_code": team_code,
+                        "team_name": self.get_team_name(team_code, year) or team_code,
+                        "stat_value": row.get("stat_value"),
+                        "details": {"games": row.get("games")},
+                    }
+                )
+            result["found"] = bool(result["team_metric_leaderboard"])
+        except Exception as e:
+            logger.error("[DatabaseQuery] Team game metric leaderboard error: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return result
+
+    def get_team_form_table(
+        self,
+        year: int,
+        form_type: str = "recent",
+        team_name: Optional[str] = None,
+        recent_limit: int = 10,
+        as_of_date: Optional[str] = None,
+        limit: int = 10,
+    ) -> Dict[str, Any]:
+        """Return recent form, home/away split, and streak rows from completed games."""
+        normalized_form_type = (
+            form_type if form_type in {"recent", "home_away", "streak"} else "recent"
+        )
+        result: Dict[str, Any] = {
+            "year": year,
+            "form_type": normalized_form_type,
+            "team_name": team_name,
+            "recent_limit": max(1, int(recent_limit or 10)),
+            "as_of_date": as_of_date,
+            "form_rows": [],
+            "found": False,
+            "error": None,
+            "source": "game",
+        }
+
+        home_team_expr = self._canonical_team_expr("g.home_team")
+        away_team_expr = self._canonical_team_expr("g.away_team")
+        winning_team_expr = self._canonical_team_expr("g.winning_team")
+        team_filter = ""
+        params: list[Any] = [year, 0, year, 0]
+        if as_of_date:
+            team_filter += " AND game_date <= %s"
+            params.append(as_of_date)
+        if team_name:
+            variants = self.get_team_variants(team_name, year)
+            team_filter += " AND team = ANY(%s)"
+            params.append(variants)
+
+        try:
+            cursor = self.connection.cursor(row_factory=dict_row)
+            query = f"""
+                WITH team_games AS (
+                    SELECT
+                        {home_team_expr} AS team,
+                        {away_team_expr} AS opponent,
+                        'home' AS side,
+                        {winning_team_expr} AS winning_team,
+                        g.game_id,
+                        g.game_date,
+                        g.home_score AS team_score,
+                        g.away_score AS opponent_score
+                    FROM game g
+                    JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    WHERE ks.season_year = %s
+                      AND ks.league_type_code = %s
+                      AND g.game_status = 'COMPLETED'
+                    UNION ALL
+                    SELECT
+                        {away_team_expr} AS team,
+                        {home_team_expr} AS opponent,
+                        'away' AS side,
+                        {winning_team_expr} AS winning_team,
+                        g.game_id,
+                        g.game_date,
+                        g.away_score AS team_score,
+                        g.home_score AS opponent_score
+                    FROM game g
+                    JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    WHERE ks.season_year = %s
+                      AND ks.league_type_code = %s
+                      AND g.game_status = 'COMPLETED'
+                )
+                SELECT
+                    team,
+                    opponent,
+                    side,
+                    winning_team,
+                    game_id,
+                    game_date,
+                    team_score,
+                    opponent_score,
+                    CASE
+                        WHEN winning_team = team THEN 'win'
+                        WHEN winning_team IS NOT NULL AND winning_team <> team THEN 'loss'
+                        WHEN team_score = opponent_score THEN 'draw'
+                        ELSE 'unknown'
+                    END AS result
+                FROM team_games
+                WHERE team IS NOT NULL
+                {team_filter}
+                ORDER BY team ASC, game_date DESC, game_id DESC
+            """
+            cursor.execute(query, params)
+            games = cursor.fetchall()
+            if not games:
+                return result
+
+            grouped: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
+            for row in games:
+                grouped[str(row["team"])].append(dict(row))
+
+            rows: list[Dict[str, Any]] = []
+            for team_code, team_games in grouped.items():
+                recent_games = team_games[: result["recent_limit"]]
+
+                def _count(subset: list[Dict[str, Any]], value: str) -> int:
+                    return sum(1 for game in subset if game.get("result") == value)
+
+                wins = _count(recent_games, "win")
+                losses = _count(recent_games, "loss")
+                draws = _count(recent_games, "draw")
+                decided = wins + losses
+                home_games = [game for game in team_games if game.get("side") == "home"]
+                away_games = [game for game in team_games if game.get("side") == "away"]
+                home_wins = _count(home_games, "win")
+                home_losses = _count(home_games, "loss")
+                away_wins = _count(away_games, "win")
+                away_losses = _count(away_games, "loss")
+                streak_type = "none"
+                streak_count = 0
+                for game in team_games:
+                    game_result = str(game.get("result") or "unknown")
+                    if game_result == "unknown":
+                        continue
+                    if streak_count == 0:
+                        streak_type = game_result
+                        streak_count = 1
+                    elif game_result == streak_type:
+                        streak_count += 1
+                    else:
+                        break
+
+                rows.append(
+                    {
+                        "team_code": team_code,
+                        "team_name": self.get_team_name(team_code, year) or team_code,
+                        "games": len(recent_games),
+                        "wins": wins,
+                        "losses": losses,
+                        "draws": draws,
+                        "win_pct": (wins / decided) if decided else None,
+                        "home_games": len(home_games),
+                        "home_wins": home_wins,
+                        "home_losses": home_losses,
+                        "home_draws": _count(home_games, "draw"),
+                        "home_win_pct": (
+                            home_wins / (home_wins + home_losses)
+                            if (home_wins + home_losses)
+                            else None
+                        ),
+                        "away_games": len(away_games),
+                        "away_wins": away_wins,
+                        "away_losses": away_losses,
+                        "away_draws": _count(away_games, "draw"),
+                        "away_win_pct": (
+                            away_wins / (away_wins + away_losses)
+                            if (away_wins + away_losses)
+                            else None
+                        ),
+                        "streak_type": streak_type,
+                        "streak_count": streak_count,
+                        "recent_games": [
+                            {
+                                "game_id": game.get("game_id"),
+                                "game_date": (
+                                    game["game_date"].isoformat()
+                                    if hasattr(game.get("game_date"), "isoformat")
+                                    else game.get("game_date")
+                                ),
+                                "opponent": self.get_team_name(
+                                    game.get("opponent"), year
+                                )
+                                or game.get("opponent"),
+                                "result": game.get("result"),
+                                "score": f"{game.get('team_score')}-{game.get('opponent_score')}",
+                            }
+                            for game in recent_games[:3]
+                        ],
+                    }
+                )
+
+            if normalized_form_type == "streak":
+                rows.sort(
+                    key=lambda row: (
+                        0 if row.get("streak_type") == "win" else 1,
+                        -(row.get("streak_count") or 0),
+                        row.get("team_name") or "",
+                    )
+                )
+            else:
+                rows.sort(
+                    key=lambda row: (
+                        -(row.get("win_pct") or 0.0),
+                        -(row.get("wins") or 0),
+                        row.get("team_name") or "",
+                    )
+                )
+            result["form_rows"] = rows[: max(1, int(limit or 10))]
+            result["found"] = bool(result["form_rows"])
+        except Exception as e:
+            logger.error("[DatabaseQuery] Team form table error: %s", e)
+            result["error"] = str(e)
+        finally:
+            if "cursor" in locals():
+                cursor.close()
+
+        return result
+
+    def get_team_comparison(
+        self,
+        team1: str,
+        team2: str,
+        year: int,
+        recent_limit: int = 10,
+    ) -> Dict[str, Any]:
+        """Return a compact two-team comparison from trusted DB aggregates."""
+        result: Dict[str, Any] = {
+            "year": year,
+            "team1": team1,
+            "team2": team2,
+            "teams": [],
+            "found": False,
+            "error": None,
+            "source": "team_standings_daily/team_season/player_season_pitching/game",
+        }
+
+        try:
+            form_result = self.get_team_form_table(
+                year=year,
+                form_type="recent",
+                recent_limit=recent_limit,
+                limit=10,
+            )
+            form_by_team = {
+                str(row.get("team_code")): row
+                for row in (form_result.get("form_rows") or [])
+                if row.get("team_code") is not None
+            }
+
+            for team in (team1, team2):
+                team_code = self.get_team_code(team, year)
+                team_name = self.get_team_name(team_code, year) or team
+                rank = self.get_team_season_rank(team, year)
+                advanced = self.get_team_advanced_metrics(team, year)
+                metrics = advanced.get("metrics") or {}
+                batting = metrics.get("batting") or {}
+                pitching = metrics.get("pitching") or {}
+                fatigue = advanced.get("fatigue_index") or {}
+                form_row = form_by_team.get(team_code)
+                if form_row is None:
+                    variants = set(self.get_team_variants(team, year))
+                    form_row = next(
+                        (
+                            row
+                            for code, row in form_by_team.items()
+                            if code in variants
+                        ),
+                        None,
+                    )
+
+                result["teams"].append(
+                    {
+                        "team_code": team_code,
+                        "team_name": team_name,
+                        "rank": rank.get("rank") or rank.get("team_rank"),
+                        "wins": rank.get("wins"),
+                        "losses": rank.get("losses"),
+                        "draws": rank.get("draws"),
+                        "win_pct": rank.get("win_pct"),
+                        "as_of_date": rank.get("as_of_date"),
+                        "ops": batting.get("ops"),
+                        "avg": batting.get("avg"),
+                        "home_runs": batting.get("total_hr"),
+                        "era": pitching.get("avg_era"),
+                        "era_rank": pitching.get("era_rank"),
+                        "qs_rate": pitching.get("qs_rate"),
+                        "bullpen_share": fatigue.get("bullpen_share"),
+                        "bullpen_load_rank": fatigue.get("bullpen_load_rank"),
+                        "recent": form_row,
+                        "found": bool(
+                            rank.get("found")
+                            or advanced.get("found")
+                            or form_row is not None
+                        ),
+                    }
+                )
+
+            result["found"] = len(result["teams"]) == 2 and all(
+                bool(team.get("found")) for team in result["teams"]
+            )
+        except Exception as e:
+            logger.error("[DatabaseQuery] Team comparison error: %s", e)
+            result["error"] = str(e)
+
         return result
 
     def get_team_basic_info(self, team_name: str) -> Dict[str, Any]:

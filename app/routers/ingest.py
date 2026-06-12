@@ -220,7 +220,7 @@ async def run_ingestion_job(
 
     def _run_ingest_wrapper():
         try:
-            print(f"[IngestWorker] Starting ingestion for tables: {tables_to_run}")
+            logger.info("[IngestWorker] Starting ingestion for tables: %s", tables_to_run)
             ingest(
                 source_db_url=settings.source_db_url,
                 tables=tables_to_run,
@@ -236,9 +236,9 @@ async def run_ingestion_job(
                 parallel_engine=payload.parallel_engine,
                 workers=max(1, payload.workers),
             )
-            print(f"[IngestWorker] Ingestion completed successfully.")
+            logger.info("[IngestWorker] Ingestion completed successfully.")
         except Exception as e:
-            print(f"[IngestWorker] Ingestion failed: {e}")
+            logger.exception("[IngestWorker] Ingestion failed: %s", e)
 
     background_tasks.add_task(_run_ingest_wrapper)
 

@@ -970,7 +970,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["team_id", "id"],
         "season_filter_column": None,
-        "since_filter_column": "tp.updated_at",
+        "since_filter_column": None,
     },
     "team_season_batting": {
         "description": "KBO 팀 시즌 타격 기록",
