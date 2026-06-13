@@ -92,6 +92,70 @@ def test_claim_cache_generation_recreates_missing_row():
     assert attempt_count == 1
 
 
+def test_read_completed_cache_if_fresh_returns_manual_cache_without_claiming():
+    cached_payload = {
+        "response": {
+            "headline": "캐시된 AI 코치 분석",
+            "detailed_markdown": "## 경기 복기\n- 기존 분석을 조회합니다.",
+            "coach_note": "완료된 캐시를 재사용합니다.",
+            "analysis": {
+                "summary": "기존 분석입니다.",
+                "verdict": "캐시 조회 결과입니다.",
+                "strengths": [],
+                "weaknesses": [],
+                "risks": [],
+                "why_it_matters": [],
+                "swing_factors": [],
+                "watch_points": [],
+                "uncertainty": [],
+            },
+            "key_metrics": [],
+        },
+        "_meta": {
+            "data_quality": "insufficient",
+            "game_status_bucket": "COMPLETED",
+            "used_evidence": ["game", "kbo_seasons"],
+            "grounding_reasons": ["missing_summary"],
+        },
+    }
+    conn = _ScriptedConn(
+        [
+            {
+                "contains": "SELECT status, response_json",
+                "fetchone": (
+                    "COMPLETED",
+                    cached_payload,
+                    None,
+                    None,
+                    3,
+                    None,
+                    None,
+                    None,
+                ),
+            },
+        ]
+    )
+
+    gate, cached, error_message, error_code, attempt_count = (
+        coach_router._read_completed_cache_if_fresh(
+            pool=_Pool(conn),
+            cache_key="cache",
+            completed_ttl_seconds=None,
+            request_mode=coach_router.COACH_REQUEST_MODE_MANUAL,
+            expected_data_quality="insufficient",
+            expected_used_evidence=["game", "kbo_seasons"],
+            expected_game_status_bucket="COMPLETED",
+            current_root_causes=["missing_summary"],
+        )
+    )
+
+    assert gate == "HIT"
+    assert cached == cached_payload
+    assert error_message is None
+    assert error_code is None
+    assert attempt_count == 3
+
+
 def test_store_completed_cache_reinserts_missing_row():
     conn = _ScriptedConn(
         [

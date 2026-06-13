@@ -10,7 +10,7 @@ from .coach_cache_key import (
     build_starter_signature,
 )
 
-COACH_CACHE_SCHEMA_VERSION = "v5"
+COACH_CACHE_SCHEMA_VERSION = "coach_analysis_v2"
 COACH_CACHE_PROMPT_VERSION = "v90_scheduled_llm"  # 예측(SCHEDULED manual)도 LLM 호출 + risk 백필 → stale 캐시 무효화
 
 
@@ -50,6 +50,7 @@ def build_coach_cache_identity(
     league_type_code: Optional[int] = None,
     stage_label: Optional[str] = None,
     request_mode: Optional[str] = None,
+    analysis_type: Optional[str] = None,
     game_status_bucket: Optional[str] = None,
     question_signature_override: Optional[str] = None,
     requested_starter_signature: Optional[str] = None,
@@ -80,6 +81,7 @@ def build_coach_cache_identity(
         starter_signature=starter_signature,
         lineup_signature=lineup_signature,
         request_mode=request_mode,
+        analysis_type=analysis_type,
         game_status_bucket=game_status_bucket,
         question_signature_override=question_signature_override,
     )

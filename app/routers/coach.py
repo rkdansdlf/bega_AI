@@ -75,6 +75,7 @@ from ..core.coach_cache_key import normalize_focus
 from ..core.ratelimit import rate_limit_coach_dependency
 from ..observability.metrics import (
     AI_COACH_DYNAMIC_PROMPT_CHARS,
+    AI_COACH_LLM_SKIP_TOTAL,
     AI_COACH_PAYLOAD_COMPRESSION_TOTAL,
     AI_COACH_REQUEST_TOTAL,
 )
@@ -306,9 +307,14 @@ STAGE_TO_ROUND_DISPLAY: Dict[str, str] = {
 }
 COACH_META_GENERATION_MODES = {
     "deterministic_auto",
+    "deterministic_review",
+    "deterministic_preview",
     "llm_manual",
     "evidence_fallback",
 }
+COACH_ANALYSIS_TYPE_REVIEW = "game_review"
+COACH_ANALYSIS_TYPE_PREVIEW = "game_preview"
+COACH_ANALYSIS_TYPES = {COACH_ANALYSIS_TYPE_REVIEW, COACH_ANALYSIS_TYPE_PREVIEW}
 COACH_META_DATA_QUALITIES = {"grounded", "partial", "insufficient"}
 COACH_DATA_QUALITY_RANK = {
     "insufficient": 0,
@@ -519,9 +525,16 @@ def _log_coach_stream_meta(
     *,
     game_id: Optional[str],
 ) -> None:
+    llm_skip_reason = str(payload.get("llm_skip_reason") or "").strip()
+    if llm_skip_reason:
+        AI_COACH_LLM_SKIP_TOTAL.labels(
+            reason=llm_skip_reason,
+            request_mode=str(payload.get("request_mode") or "unknown"),
+            analysis_type=str(payload.get("analysis_type") or "unknown"),
+        ).inc()
     logger.info(
         "[Coach Meta] request_mode=%s game_id=%s cache_state=%s validation_status=%s "
-        "generation_mode=%s cached=%s in_progress=%s data_quality=%s supported_fact_count=%s "
+        "generation_mode=%s llm_skip_reason=%s cached=%s in_progress=%s data_quality=%s supported_fact_count=%s "
         "grounding_reasons=%s grounding_warnings=%s used_evidence=%s resolved_focus=%s "
         "missing_focus_sections=%s",
         payload.get("request_mode"),
@@ -529,6 +542,7 @@ def _log_coach_stream_meta(
         payload.get("cache_state"),
         payload.get("validation_status"),
         payload.get("generation_mode"),
+        payload.get("llm_skip_reason"),
         payload.get("cached"),
         payload.get("in_progress"),
         payload.get("data_quality"),
@@ -1700,6 +1714,41 @@ def _is_completed_review(evidence: GameEvidence) -> bool:
     return _is_completed_review_bucket(evidence.game_status_bucket)
 
 
+def _normalize_analysis_type(value: Optional[str]) -> Optional[str]:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in COACH_ANALYSIS_TYPES else None
+
+
+def _resolve_analysis_type(
+    payload: "AnalyzeRequest",
+    evidence: GameEvidence,
+) -> str:
+    status_based = (
+        COACH_ANALYSIS_TYPE_REVIEW
+        if _is_completed_review(evidence)
+        else COACH_ANALYSIS_TYPE_PREVIEW
+    )
+    requested = _normalize_analysis_type(getattr(payload, "analysis_type", None))
+    if requested and requested == status_based:
+        return requested
+    return status_based
+
+
+def _generation_mode_for_analysis_type(
+    *,
+    analysis_type: str,
+    request_mode: str,
+    fallback: str = "evidence_fallback",
+) -> str:
+    if _normalize_analysis_type(analysis_type) == COACH_ANALYSIS_TYPE_REVIEW:
+        return "deterministic_review"
+    if _normalize_analysis_type(analysis_type) == COACH_ANALYSIS_TYPE_PREVIEW:
+        return "deterministic_preview"
+    if request_mode == COACH_REQUEST_MODE_AUTO:
+        return "deterministic_auto"
+    return fallback
+
+
 def _should_include_auto_brief_clutch(evidence: GameEvidence) -> bool:
     """auto_brief cache generation should include WPA moments for completed games."""
     return _is_completed_review(evidence)
@@ -1740,7 +1789,13 @@ def _default_used_evidence(evidence: GameEvidence) -> List[str]:
     return sources
 
 
-def assess_game_evidence(evidence: GameEvidence) -> GameEvidenceAssessment:
+def assess_game_evidence(
+    evidence: GameEvidence,
+    analysis_type: str = COACH_ANALYSIS_TYPE_REVIEW,
+) -> GameEvidenceAssessment:
+    normalized_analysis_type = (
+        _normalize_analysis_type(analysis_type) or COACH_ANALYSIS_TYPE_REVIEW
+    )
     used_evidence = _default_used_evidence(evidence)
     home_pitcher_present = bool(evidence.home_pitcher)
     away_pitcher_present = bool(evidence.away_pitcher)
@@ -1775,7 +1830,10 @@ def assess_game_evidence(evidence: GameEvidence) -> GameEvidenceAssessment:
             root_causes.append("missing_starters")
     if not lineup_announced:
         root_causes.append("missing_lineups")
-    if not summary_present:
+    if (
+        normalized_analysis_type == COACH_ANALYSIS_TYPE_REVIEW
+        and not summary_present
+    ):
         root_causes.append("missing_summary")
     if not metadata_present:
         root_causes.append("missing_metadata")
@@ -1856,8 +1914,9 @@ def _has_balanced_tool_coverage(
 def _determine_data_quality(
     evidence: GameEvidence,
     tool_results: Optional[Dict[str, Any]] = None,
+    analysis_type: str = COACH_ANALYSIS_TYPE_REVIEW,
 ) -> str:
-    assessment = assess_game_evidence(evidence)
+    assessment = assess_game_evidence(evidence, analysis_type=analysis_type)
     if tool_results is None:
         return assessment.expected_data_quality
 
@@ -2048,7 +2107,11 @@ def _build_manual_data_request(
     payload: "AnalyzeRequest",
     evidence: GameEvidence,
     assessment: GameEvidenceAssessment,
+    analysis_type: str = COACH_ANALYSIS_TYPE_REVIEW,
 ) -> Optional[Dict[str, Any]]:
+    normalized_analysis_type = (
+        _normalize_analysis_type(analysis_type) or COACH_ANALYSIS_TYPE_REVIEW
+    )
     missing_items: List[Dict[str, str]] = []
     seen_keys: Set[str] = set()
 
@@ -2128,7 +2191,10 @@ def _build_manual_data_request(
             "season_id, season_year, league_type_code",
         )
 
-    if missing_final_state:
+    if (
+        normalized_analysis_type == COACH_ANALYSIS_TYPE_REVIEW
+        and missing_final_state
+    ):
         add_item(
             "game_status",
             "경기 상태",
@@ -2161,6 +2227,8 @@ def _build_manual_data_request(
                 "team_code, batting_order, player_name",
             )
     elif (
+        normalized_analysis_type == COACH_ANALYSIS_TYPE_REVIEW
+        and
         _normalize_game_status_bucket(evidence_game_status) == "SCHEDULED"
         and not _is_starter_announcement_pending(evidence)
         and not (assessment.home_pitcher_present and assessment.away_pitcher_present)
@@ -2212,6 +2280,7 @@ def _build_meta_payload_defaults(
     starter_signature: Optional[str] = None,
     lineup_signature: Optional[str] = None,
     cache_key_mismatch: bool = False,
+    analysis_type: Optional[str] = None,
     game_status_bucket: Optional[str] = None,
     grounding_warnings: Optional[List[str]] = None,
     grounding_reasons: Optional[List[str]] = None,
@@ -2245,6 +2314,14 @@ def _build_meta_payload_defaults(
         "starter_signature": str(starter_signature or "").strip() or None,
         "lineup_signature": str(lineup_signature or "").strip() or None,
         "cache_key_mismatch": bool(cache_key_mismatch),
+        "analysis_type": (
+            _normalize_analysis_type(analysis_type)
+            or (
+                COACH_ANALYSIS_TYPE_REVIEW
+                if _normalize_game_status_bucket(game_status_bucket) == "COMPLETED"
+                else COACH_ANALYSIS_TYPE_PREVIEW
+            )
+        ),
         "game_status_bucket": _normalize_game_status_bucket(game_status_bucket),
         "used_evidence": list(used_evidence),
         "grounding_warnings": list(grounding_warnings or []),
@@ -2263,9 +2340,45 @@ def _build_meta_payload_defaults(
     }
 
 
+def _resolve_llm_skip_reason(
+    *,
+    request_mode: str,
+    generation_mode: Optional[str],
+    cache_state: Optional[str],
+    cached: bool,
+    in_progress: bool,
+    manual_data_required: bool,
+) -> Optional[str]:
+    if manual_data_required:
+        return "manual_data_required"
+    if cached:
+        return "cache_hit"
+
+    normalized_cache_state = str(cache_state or "").strip().upper()
+    if in_progress or normalized_cache_state == "PENDING_WAIT":
+        return "pending_wait"
+    if normalized_cache_state == "FAILED_RETRY_WAIT":
+        return "failed_retry_wait"
+    if normalized_cache_state == "FAILED_LOCKED":
+        return "failed_locked"
+    if generation_mode == "llm_manual":
+        return None
+    if request_mode == COACH_REQUEST_MODE_AUTO:
+        return "auto_brief_deterministic"
+    if generation_mode in {
+        "evidence_fallback",
+        "deterministic_preview",
+        "deterministic_review",
+        "deterministic_auto",
+    }:
+        return "deterministic_short_circuit"
+    return None
+
+
 def _default_generation_mode_for_request_mode(
     *,
     request_mode: str,
+    analysis_type: Optional[str] = None,
     generation_mode: Optional[str] = None,
     cache_state: Optional[str] = None,
     validation_status: Optional[str] = None,
@@ -2286,7 +2399,10 @@ def _default_generation_mode_for_request_mode(
                 "PENDING_WAIT",
             }
         ):
-            return "deterministic_auto"
+            return _generation_mode_for_analysis_type(
+                analysis_type=analysis_type or COACH_ANALYSIS_TYPE_PREVIEW,
+                request_mode=request_mode,
+            )
         return "evidence_fallback"
 
     return "evidence_fallback"
@@ -2298,8 +2414,13 @@ def _ensure_stream_meta_contract(payload: Dict[str, Any]) -> Dict[str, Any]:
     if request_mode != COACH_REQUEST_MODE_AUTO:
         return normalized
 
+    normalized["analysis_type"] = (
+        _normalize_analysis_type(normalized.get("analysis_type"))
+        or COACH_ANALYSIS_TYPE_PREVIEW
+    )
     normalized["generation_mode"] = _default_generation_mode_for_request_mode(
         request_mode=request_mode,
+        analysis_type=normalized.get("analysis_type"),
         generation_mode=normalized.get("generation_mode"),
         cache_state=normalized.get("cache_state"),
         validation_status=normalized.get("validation_status"),
@@ -2802,11 +2923,24 @@ def _resolve_coach_empty_chunk_retry_limit(
     return -1
 
 
+def _attach_response_analysis_type(
+    response_data: Dict[str, Any],
+    analysis_type: Optional[str],
+) -> Dict[str, Any]:
+    normalized_analysis_type = _normalize_analysis_type(analysis_type)
+    if not normalized_analysis_type:
+        return response_data
+    response_data["analysisType"] = normalized_analysis_type
+    response_data["analysis_type"] = normalized_analysis_type
+    return response_data
+
+
 def _wrap_cached_payload(
     response_data: Dict[str, Any], meta: Dict[str, Any]
 ) -> Dict[str, Any]:
+    analysis_type = _normalize_analysis_type(meta.get("analysis_type"))
     return {
-        "response": response_data,
+        "response": _attach_response_analysis_type(response_data, analysis_type),
         "_meta": {
             "generation_mode": meta.get("generation_mode"),
             "data_quality": meta.get("data_quality"),
@@ -2817,6 +2951,7 @@ def _wrap_cached_payload(
             "starter_signature": meta.get("starter_signature"),
             "lineup_signature": meta.get("lineup_signature"),
             "cache_key_mismatch": bool(meta.get("cache_key_mismatch")),
+            "analysis_type": analysis_type,
             "game_status_bucket": meta.get("game_status_bucket"),
             "used_evidence": list(meta.get("used_evidence") or []),
             "grounding_warnings": list(meta.get("grounding_warnings") or []),
@@ -2838,6 +2973,7 @@ def _extract_cached_payload(
     cached_data: Dict[str, Any],
     *,
     request_mode: str = COACH_REQUEST_MODE_MANUAL,
+    analysis_type: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     if isinstance(cached_data, dict) and isinstance(cached_data.get("response"), dict):
         response = cached_data["response"]
@@ -2845,10 +2981,18 @@ def _extract_cached_payload(
     else:
         response = cached_data
         meta = {}
-    normalized = _normalize_cached_response(response)
+    normalized_analysis_type = (
+        _normalize_analysis_type(analysis_type)
+        or _normalize_analysis_type(meta.get("analysis_type"))
+    )
+    normalized = _attach_response_analysis_type(
+        _normalize_cached_response(response),
+        normalized_analysis_type,
+    )
     meta_defaults = _build_meta_payload_defaults(
         generation_mode=_default_generation_mode_for_request_mode(
             request_mode=request_mode,
+            analysis_type=normalized_analysis_type,
             generation_mode=meta.get("generation_mode"),
             validation_status="success",
         ),
@@ -2861,6 +3005,7 @@ def _extract_cached_payload(
         starter_signature=meta.get("starter_signature"),
         lineup_signature=meta.get("lineup_signature"),
         cache_key_mismatch=bool(meta.get("cache_key_mismatch")),
+        analysis_type=normalized_analysis_type,
         game_status_bucket=str(meta.get("game_status_bucket") or "UNKNOWN"),
         grounding_warnings=list(meta.get("grounding_warnings") or []),
         grounding_reasons=list(meta.get("grounding_reasons") or []),
@@ -3382,6 +3527,7 @@ async def _generate_auto_brief_cache_background(
     resolved_focus: List[str],
     game_evidence: Any,
     evidence_assessment: Any,
+    analysis_type: str,
     coach_model_name: str,
     cache_attempt_count: int,
 ) -> None:
@@ -3451,7 +3597,11 @@ async def _generate_auto_brief_cache_background(
 
         dependency_degraded = _collect_dependency_degraded(tool_results)
         dependency_degraded_reasons = _collect_dependency_degraded_reasons(tool_results)
-        data_quality = _determine_data_quality(game_evidence, tool_results)
+        data_quality = _determine_data_quality(
+            game_evidence,
+            tool_results,
+            analysis_type=analysis_type,
+        )
         fact_sheet = _build_coach_fact_sheet(
             game_evidence, tool_results, allowed_names, evidence_assessment
         )
@@ -3494,9 +3644,16 @@ async def _generate_auto_brief_cache_background(
             response_payload,
             evidence=game_evidence,
         )
+        response_payload = _attach_response_analysis_type(
+            response_payload,
+            analysis_type,
+        )
 
         meta_defaults = _build_meta_payload_defaults(
-            generation_mode="deterministic_auto",
+            generation_mode=_generation_mode_for_analysis_type(
+                analysis_type=analysis_type,
+                request_mode=COACH_REQUEST_MODE_AUTO,
+            ),
             data_quality=data_quality,
             used_evidence=used_evidence,
             cache_key=cache_key,
@@ -3506,6 +3663,7 @@ async def _generate_auto_brief_cache_background(
             starter_signature=None,
             lineup_signature=None,
             cache_key_mismatch=False,
+            analysis_type=analysis_type,
             game_status_bucket=game_evidence.game_status_bucket,
             grounding_warnings=grounding_warnings,
             grounding_reasons=grounding_reasons,
@@ -3539,7 +3697,10 @@ async def _generate_auto_brief_cache_background(
             away_team_canonical,
         )
     except Exception as exc:
-        failed_data_quality = _determine_data_quality(game_evidence)
+        failed_data_quality = _determine_data_quality(
+            game_evidence,
+            analysis_type=analysis_type,
+        )
         logger.error(
             "[AutoBriefBG] Generation failed game_id=%s cache_key=%s "
             "cache_state=%s error_code=%s data_quality=%s: %s",
@@ -3721,6 +3882,80 @@ def _claim_cache_generation_once(
                 str(error_code or ""),
                 _normalize_attempt_count(attempt_count),
             )
+
+
+def _read_completed_cache_if_fresh(
+    *,
+    pool: ConnectionPool,
+    cache_key: str,
+    completed_ttl_seconds: Optional[int],
+    request_mode: str = COACH_REQUEST_MODE_MANUAL,
+    expected_data_quality: Optional[str] = None,
+    expected_used_evidence: Optional[Sequence[str]] = None,
+    expected_game_status_bucket: Optional[str] = None,
+    current_root_causes: Optional[Sequence[str]] = None,
+) -> tuple[str, Any, Optional[str], Optional[str], int]:
+    with pool.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT status, response_json, error_message, error_code, attempt_count,
+                   updated_at, lease_expires_at, last_heartbeat_at
+            FROM coach_analysis_cache
+            WHERE cache_key = %s
+            """,
+            (cache_key,),
+        ).fetchone()
+
+    if not row:
+        return "MISS_GENERATE", None, None, None, 0
+
+    (
+        status,
+        cached_json,
+        error_message,
+        error_code,
+        attempt_count,
+        updated_at,
+        lease_expires_at,
+        last_heartbeat_at,
+    ) = row
+
+    cache_state = _determine_cache_gate(
+        status=status,
+        has_cached_json=bool(cached_json),
+        updated_at=updated_at,
+        error_code=error_code,
+        attempt_count=attempt_count,
+        last_heartbeat_at=last_heartbeat_at,
+        lease_expires_at=lease_expires_at,
+        completed_ttl_seconds=completed_ttl_seconds,
+    )
+    if cache_state == "HIT" and _should_regenerate_completed_cache(
+        cached_data=cached_json,
+        request_mode=request_mode,
+        expected_data_quality=expected_data_quality,
+        expected_used_evidence=expected_used_evidence,
+        expected_game_status_bucket=expected_game_status_bucket,
+        current_root_causes=current_root_causes,
+    ):
+        cache_state = "MISS_GENERATE"
+
+    if cache_state == "HIT":
+        return (
+            cache_state,
+            cached_json,
+            error_message,
+            error_code,
+            _normalize_attempt_count(attempt_count),
+        )
+
+    return (
+        cache_state,
+        None,
+        error_message,
+        str(error_code or "") or None,
+        _normalize_attempt_count(attempt_count),
+    )
 
 
 def _refresh_cache_pool_after_operational_error(
@@ -10726,6 +10961,9 @@ class AnalyzeRequest(BaseModel):
     request_mode: Literal[COACH_REQUEST_MODE_AUTO, COACH_REQUEST_MODE_MANUAL] = (
         COACH_REQUEST_MODE_MANUAL
     )
+    analysis_type: Optional[
+        Literal[COACH_ANALYSIS_TYPE_REVIEW, COACH_ANALYSIS_TYPE_PREVIEW]
+    ] = None
     question_override: Optional[str] = None
     starter_signature: Optional[str] = None
     lineup_signature: Optional[str] = None
@@ -10736,6 +10974,14 @@ class AnalyzeRequest(BaseModel):
     def backfill_home_team_id(cls, values: Any) -> Any:
         """team_id만 보내는 기존 호출을 home_team_id로 매핑"""
         if isinstance(values, dict):
+            if "analysisType" in values and "analysis_type" not in values:
+                values["analysis_type"] = values["analysisType"]
+            analysis_type = values.get("analysis_type")
+            if isinstance(analysis_type, str):
+                values["analysis_type"] = (
+                    _normalize_analysis_type(analysis_type) or analysis_type
+                )
+
             focus = values.get("focus")
             if (
                 focus is not None
@@ -10856,6 +11102,7 @@ async def analyze_team(
             game_evidence,
         )
         request_mode = payload.request_mode
+        analysis_type = _resolve_analysis_type(payload, game_evidence)
         is_auto_brief = request_mode == COACH_REQUEST_MODE_AUTO
         input_focus = list(payload.focus or [])
         resolved_focus = (
@@ -10915,6 +11162,7 @@ async def analyze_team(
                 league_type_code=game_evidence.league_type_code,
                 stage_label=game_evidence.stage_label,
                 request_mode=request_mode,
+                analysis_type=analysis_type,
                 game_status_bucket=game_evidence.game_status_bucket,
                 question_signature_override=question_signature_override,
                 requested_starter_signature=payload.starter_signature,
@@ -10935,16 +11183,18 @@ async def analyze_team(
             "starter_signature": starter_signature,
             "lineup_signature": lineup_signature,
             "cache_key_mismatch": cache_key_mismatch,
+            "analysis_type": analysis_type,
         }
         focus_signature = str(cache_key_payload["focus_signature"])
         question_signature = str(cache_key_payload["question_signature"])
 
         logger.info(
-            "[Coach Router] request_mode=%s Analyzing %s vs %s (year=%d game_id=%s stage=%s status=%s): %s... "
+            "[Coach Router] request_mode=%s analysis_type=%s Analyzing %s vs %s (year=%d game_id=%s stage=%s status=%s): %s... "
             "(CacheKey: %s) expected_cache_key=%s prompt_version=%s starter_signature=%s lineup_signature=%s "
             "input_season=%s resolved_year=%d resolve_source=%s input_focus=%s resolved_focus=%s "
             "focus_signature=%s question_signature=%s cache_key_version=%s",
             request_mode,
+            analysis_type,
             home_name,
             away_name or "Single",
             year,
@@ -10977,12 +11227,16 @@ async def analyze_team(
                 starter_signature,
                 lineup_signature,
             )
-        evidence_assessment = assess_game_evidence(game_evidence)
+        evidence_assessment = assess_game_evidence(
+            game_evidence,
+            analysis_type=analysis_type,
+        )
         manual_data_request = _build_manual_data_request(
             pool,
             payload,
             game_evidence,
             evidence_assessment,
+            analysis_type=analysis_type,
         )
         unavailable_game_status_message = _get_unavailable_game_status_message(
             getattr(game_evidence, "game_status", None)
@@ -10990,12 +11244,13 @@ async def analyze_team(
         prepare_elapsed_sec = perf_counter() - route_prepare_started
         log_prepare = logger.warning if prepare_elapsed_sec >= 25.0 else logger.info
         log_prepare(
-            "[Coach] Stream prepared game_id=%s cache_key=%s request_mode=%s "
+            "[Coach] Stream prepared game_id=%s cache_key=%s request_mode=%s analysis_type=%s "
             "game_status_bucket=%s prepare_elapsed_sec=%.2f manual_data_required=%s "
             "unavailable_status=%s",
             game_evidence.game_id,
             cache_key,
             request_mode,
+            analysis_type,
             game_evidence.game_status_bucket,
             prepare_elapsed_sec,
             manual_data_request is not None,
@@ -11029,6 +11284,7 @@ async def analyze_team(
                 ) -> Dict[str, Any]:
                     payload_data = {
                         "request_mode": request_mode,
+                        "analysis_type": analysis_type,
                         "resolved_focus": resolved_focus,
                         "focus_signature": focus_signature,
                         "question_signature": question_signature,
@@ -11037,6 +11293,42 @@ async def analyze_team(
                     }
                     if extra_payload:
                         payload_data.update(extra_payload)
+                    if "llm_skip_reason" not in payload_data:
+                        llm_skip_reason = _resolve_llm_skip_reason(
+                            request_mode=str(
+                                payload_data.get("request_mode") or request_mode
+                            ),
+                            generation_mode=(
+                                str(payload_data.get("generation_mode"))
+                                if payload_data.get("generation_mode") is not None
+                                else None
+                            ),
+                            cache_state=(
+                                str(payload_data.get("cache_state"))
+                                if payload_data.get("cache_state") is not None
+                                else None
+                            ),
+                            cached=payload_data.get("cached") is True,
+                            in_progress=payload_data.get("in_progress") is True,
+                            manual_data_required=(
+                                payload_data.get("manual_data_request") is not None
+                                or payload_data.get("validation_status")
+                                == "manual_data_required"
+                            ),
+                        )
+                        if llm_skip_reason:
+                            payload_data["llm_skip_reason"] = llm_skip_reason
+                    payload_analysis_type = (
+                        _normalize_analysis_type(payload_data.get("analysis_type"))
+                        or analysis_type
+                    )
+                    payload_data["analysis_type"] = payload_analysis_type
+                    structured_response = payload_data.get("structured_response")
+                    if isinstance(structured_response, dict):
+                        enriched_response = dict(structured_response)
+                        enriched_response.setdefault("analysisType", payload_analysis_type)
+                        enriched_response.setdefault("analysis_type", payload_analysis_type)
+                        payload_data["structured_response"] = enriched_response
                     payload_data = _ensure_stream_meta_contract(payload_data)
                     _log_coach_stream_meta(
                         payload_data,
@@ -11085,56 +11377,74 @@ async def analyze_team(
                     }
                     return
 
-                if manual_data_request is not None:
-                    yield {
-                        "event": "meta",
-                        "data": json.dumps(
-                            _build_stream_meta(
-                                {
-                                    "validation_status": "manual_data_required",
-                                    "generation_mode": "evidence_fallback",
-                                    "data_quality": "insufficient",
-                                    "used_evidence": evidence_assessment.used_evidence,
-                                    "grounding_warnings": [
-                                        MANUAL_BASEBALL_DATA_REQUIRED_MESSAGE
-                                    ],
-                                    "grounding_reasons": evidence_assessment.root_causes,
-                                    "supported_fact_count": 0,
-                                    "cache_state": "MISS_GENERATE",
-                                    "cached": False,
-                                    "in_progress": False,
-                                    "manual_data_request": manual_data_request,
-                                }
-                            ),
-                            ensure_ascii=False,
-                        ),
-                    }
-                    yield {"event": "done", "data": "[DONE]"}
-                    return
-
-                (
-                    cache_state,
-                    cached_data,
-                    cache_error_message,
-                    cache_error_code,
-                    cache_attempt_count,
-                ) = _claim_cache_generation(
-                    pool=pool,
-                    cache_key=cache_key,
-                    team_id=home_team_canonical,
-                    year=year,
-                    prompt_version=COACH_CACHE_PROMPT_VERSION,
-                    model_name=coach_model_name,
-                    lease_owner=cache_lease_owner,
-                    completed_ttl_seconds=_cache_ttl_seconds_for_status_bucket(
-                        game_evidence.game_status_bucket
-                    ),
-                    request_mode=request_mode,
-                    expected_data_quality=evidence_assessment.expected_data_quality,
-                    expected_used_evidence=evidence_assessment.used_evidence,
-                    expected_game_status_bucket=game_evidence.game_status_bucket,
-                    current_root_causes=evidence_assessment.root_causes,
+                completed_ttl_seconds = _cache_ttl_seconds_for_status_bucket(
+                    game_evidence.game_status_bucket
                 )
+                if manual_data_request is not None:
+                    (
+                        cache_state,
+                        cached_data,
+                        cache_error_message,
+                        cache_error_code,
+                        cache_attempt_count,
+                    ) = _read_completed_cache_if_fresh(
+                        pool=pool,
+                        cache_key=cache_key,
+                        completed_ttl_seconds=completed_ttl_seconds,
+                        request_mode=request_mode,
+                        expected_data_quality=evidence_assessment.expected_data_quality,
+                        expected_used_evidence=evidence_assessment.used_evidence,
+                        expected_game_status_bucket=game_evidence.game_status_bucket,
+                        current_root_causes=evidence_assessment.root_causes,
+                    )
+                    if not cached_data:
+                        yield {
+                            "event": "meta",
+                            "data": json.dumps(
+                                _build_stream_meta(
+                                    {
+                                        "validation_status": "manual_data_required",
+                                        "generation_mode": "evidence_fallback",
+                                        "data_quality": "insufficient",
+                                        "used_evidence": evidence_assessment.used_evidence,
+                                        "grounding_warnings": [
+                                            MANUAL_BASEBALL_DATA_REQUIRED_MESSAGE
+                                        ],
+                                        "grounding_reasons": evidence_assessment.root_causes,
+                                        "supported_fact_count": 0,
+                                        "cache_state": cache_state,
+                                        "cached": False,
+                                        "in_progress": False,
+                                        "manual_data_request": manual_data_request,
+                                    }
+                                ),
+                                ensure_ascii=False,
+                            ),
+                        }
+                        yield {"event": "done", "data": "[DONE]"}
+                        return
+                else:
+                    (
+                        cache_state,
+                        cached_data,
+                        cache_error_message,
+                        cache_error_code,
+                        cache_attempt_count,
+                    ) = _claim_cache_generation(
+                        pool=pool,
+                        cache_key=cache_key,
+                        team_id=home_team_canonical,
+                        year=year,
+                        prompt_version=COACH_CACHE_PROMPT_VERSION,
+                        model_name=coach_model_name,
+                        lease_owner=cache_lease_owner,
+                        completed_ttl_seconds=completed_ttl_seconds,
+                        request_mode=request_mode,
+                        expected_data_quality=evidence_assessment.expected_data_quality,
+                        expected_used_evidence=evidence_assessment.used_evidence,
+                        expected_game_status_bucket=game_evidence.game_status_bucket,
+                        current_root_causes=evidence_assessment.root_causes,
+                    )
 
                 logger.info(
                     "[Coach] Cache gate=%s game_id=%s resolved_cache_key=%s expected_cache_key=%s prompt_version=%s "
@@ -11159,6 +11469,7 @@ async def analyze_team(
                     cached_data, cached_meta = _extract_cached_payload(
                         cached_data,
                         request_mode=request_mode,
+                        analysis_type=analysis_type,
                     )
                     cached_meta = _merge_cache_contract_meta(
                         cached_meta,
@@ -11207,7 +11518,10 @@ async def analyze_team(
 
                 # [AutoBriefBG] auto_brief MISS_GENERATE → 백그라운드 생성 후 즉시 PENDING 반환
                 if _should_generate_from_gate(cache_state) and is_auto_brief:
-                    auto_brief_data_quality = _determine_data_quality(game_evidence)
+                    auto_brief_data_quality = _determine_data_quality(
+                        game_evidence,
+                        analysis_type=analysis_type,
+                    )
                     logger.info(
                         "[AutoBriefBG] Cache miss generation start game_id=%s "
                         "cache_key=%s cache_state=%s error_code=%s data_quality=%s",
@@ -11230,6 +11544,7 @@ async def analyze_team(
                             resolved_focus=resolved_focus,
                             game_evidence=game_evidence,
                             evidence_assessment=evidence_assessment,
+                            analysis_type=analysis_type,
                             coach_model_name=coach_model_name,
                             cache_attempt_count=cache_attempt_count,
                         )
@@ -11307,6 +11622,7 @@ async def analyze_team(
                                 _extract_cached_payload(
                                     wait_result["response_json"],
                                     request_mode=request_mode,
+                                    analysis_type=analysis_type,
                                 )
                             )
                             cached_wait_meta = _merge_cache_contract_meta(
@@ -11390,6 +11706,7 @@ async def analyze_team(
                                 cached_data, cached_meta = _extract_cached_payload(
                                     cached_data,
                                     request_mode=request_mode,
+                                    analysis_type=analysis_type,
                                 )
                                 cached_meta = _merge_cache_contract_meta(
                                     cached_meta,
@@ -11475,7 +11792,10 @@ async def analyze_team(
                         )
                         waiting_meta_defaults = _build_meta_payload_defaults(
                             generation_mode="evidence_fallback",
-                            data_quality=_determine_data_quality(game_evidence),
+                            data_quality=_determine_data_quality(
+                                game_evidence,
+                                analysis_type=analysis_type,
+                            ),
                             used_evidence=game_evidence.used_evidence,
                             **cache_contract_meta,
                             game_status_bucket=game_evidence.game_status_bucket,
@@ -11570,7 +11890,10 @@ async def analyze_team(
                         }
                         failed_meta_defaults = _build_meta_payload_defaults(
                             generation_mode="evidence_fallback",
-                            data_quality=_determine_data_quality(game_evidence),
+                            data_quality=_determine_data_quality(
+                                game_evidence,
+                                analysis_type=analysis_type,
+                            ),
                             used_evidence=game_evidence.used_evidence,
                             **cache_contract_meta,
                             game_status_bucket=game_evidence.game_status_bucket,
@@ -11700,7 +12023,11 @@ async def analyze_team(
                 dependency_degraded_reasons = _collect_dependency_degraded_reasons(
                     tool_results
                 )
-                data_quality = _determine_data_quality(game_evidence, tool_results)
+                data_quality = _determine_data_quality(
+                    game_evidence,
+                    tool_results,
+                    analysis_type=analysis_type,
+                )
                 fact_sheet = _build_coach_fact_sheet(
                     game_evidence,
                     tool_results,
@@ -11832,7 +12159,12 @@ async def analyze_team(
                         fast_path_hit,
                     )
                     generation_mode = (
-                        "deterministic_auto" if is_auto_brief else "evidence_fallback"
+                        _generation_mode_for_analysis_type(
+                            analysis_type=analysis_type,
+                            request_mode=request_mode,
+                        )
+                        if is_auto_brief
+                        else "evidence_fallback"
                     )
                     response_payload = _build_deterministic_coach_response(
                         game_evidence,
@@ -11859,6 +12191,10 @@ async def analyze_team(
                     _ensure_completed_review_markdown_sections(
                         response_payload,
                         evidence=game_evidence,
+                    )
+                    response_payload = _attach_response_analysis_type(
+                        response_payload,
+                        analysis_type,
                     )
                     response_json = json.dumps(response_payload, ensure_ascii=False)
                     meta_defaults = _build_meta_payload_defaults(
@@ -12636,6 +12972,10 @@ async def analyze_team(
                         response_payload,
                         evidence=game_evidence,
                     )
+                response_payload = _attach_response_analysis_type(
+                    response_payload,
+                    analysis_type,
+                )
                 response_json = json.dumps(response_payload, ensure_ascii=False)
                 missing_focus_sections = _find_missing_focus_sections(
                     response_payload, response_focus_targets
@@ -12867,7 +13207,10 @@ async def analyze_team(
                     pass
                 failure_meta_defaults = _build_meta_payload_defaults(
                     generation_mode="evidence_fallback",
-                    data_quality=_determine_data_quality(game_evidence),
+                    data_quality=_determine_data_quality(
+                        game_evidence,
+                        analysis_type=analysis_type,
+                    ),
                     used_evidence=game_evidence.used_evidence,
                     **cache_contract_meta,
                     game_status_bucket=game_evidence.game_status_bucket,

@@ -109,6 +109,12 @@ AI_COACH_PAYLOAD_COMPRESSION_TOTAL = Counter(
     ["enabled"],  # on|off
 )
 
+AI_COACH_LLM_SKIP_TOTAL = Counter(
+    "ai_coach_llm_skip_total",
+    "Coach stream meta events where the LLM was skipped.",
+    ["reason", "request_mode", "analysis_type"],
+)
+
 AI_RETRIEVAL_FALLBACK_LEVEL_TOTAL = Counter(
     "ai_retrieval_fallback_level_total",
     "Number of times each fallback level was reached in similarity_search_with_fallback.",
@@ -190,6 +196,7 @@ def metrics_asgi_app() -> Any:
 
 __all__ = [
     "AI_COACH_DYNAMIC_PROMPT_CHARS",
+    "AI_COACH_LLM_SKIP_TOTAL",
     "AI_COACH_PAYLOAD_COMPRESSION_TOTAL",
     "AI_COACH_REQUEST_TOTAL",
     "AI_DB_POOL_SIZE",

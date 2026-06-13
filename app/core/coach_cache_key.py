@@ -116,6 +116,7 @@ def build_coach_cache_key(
     starter_signature: Optional[str] = None,
     lineup_signature: Optional[str] = None,
     request_mode: Optional[str] = None,
+    analysis_type: Optional[str] = None,
     game_status_bucket: Optional[str] = None,
     question_signature_override: Optional[str] = None,
 ) -> tuple[str, Dict[str, Any]]:
@@ -139,6 +140,7 @@ def build_coach_cache_key(
         "starter_signature": str(starter_signature or "starter_pending"),
         "lineup_signature": str(lineup_signature or "lineup_pending"),
         "request_mode": str(request_mode or "manual_detail").lower().strip(),
+        "analysis_type": str(analysis_type or "game_preview").lower().strip(),
         "game_status_bucket": str(game_status_bucket or "").upper().strip()
         or "UNKNOWN",
         "question_signature": (
