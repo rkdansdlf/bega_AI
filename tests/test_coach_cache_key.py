@@ -17,6 +17,7 @@ from app.core.coach_cache_key import (
     normalize_focus,
     normalize_question_override,
 )
+from app.core.coach_cache_contract import COACH_CACHE_SCHEMA_VERSION
 
 
 # ── TestNormalizeFocus ────────────────────────────────────────────────────────
@@ -191,6 +192,9 @@ def _default_key(**overrides):
 
 
 class TestBuildCoachCacheKey:
+    def test_cache_contract_uses_readable_analysis_schema_version(self):
+        assert COACH_CACHE_SCHEMA_VERSION == "coach_analysis_v2"
+
     def test_returns_tuple_of_two(self):
         result = _default_key()
         assert isinstance(result, tuple)
@@ -215,6 +219,20 @@ class TestBuildCoachCacheKey:
         k1, _ = _default_key(home_team_code="KIA")
         k2, _ = _default_key(home_team_code="LG")
         assert k1 != k2
+
+    def test_different_analysis_type_different_key(self):
+        preview_key, preview_payload = _default_key(
+            request_mode="auto_brief",
+            analysis_type="game_preview",
+        )
+        review_key, review_payload = _default_key(
+            request_mode="auto_brief",
+            analysis_type="game_review",
+        )
+
+        assert preview_payload["analysis_type"] == "game_preview"
+        assert review_payload["analysis_type"] == "game_review"
+        assert preview_key != review_key
 
     def test_payload_contains_schema(self):
         _, payload = _default_key()
