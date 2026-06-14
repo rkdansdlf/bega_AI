@@ -137,6 +137,9 @@ NON_MISSING_RESPONSE_REASON_LABELS = {
 }
 LOCAL_TOKEN_ENV_FILES = (".env.prod", ".env")
 MANUAL_BASEBALL_DATA_REQUIRED_CODE = "MANUAL_BASEBALL_DATA_REQUIRED"
+BASEBALL_DATA_SYNC_REQUIRED_CODE = "BASEBALL_DATA_SYNC_REQUIRED"
+BASEBALL_DATA_SYNC_EXTERNAL_SOURCE = "trusted_baseball_data_project"
+BASEBALL_DATA_SYNC_HANDOFF = "external_trusted_baseball_data_sync"
 MANUAL_REQUIRED_FIELDS_BY_MISSING_KEY: Dict[str, Sequence[str]] = {
     "game_id": ("game.game_id",),
     "game_date": ("game.game_date",),
@@ -1168,8 +1171,12 @@ def summarize_results(
         for row in item.get("response_notes") or []
     )
     manual_required_rows = _manual_baseball_data_required_rows(results)
+    data_sync_required_rows = _baseball_data_sync_required_rows(results)
     manual_required_count = len(
         {row.get("game_id") for row in manual_required_rows if row.get("game_id")}
+    )
+    data_sync_required_count = len(
+        {row.get("game_id") for row in data_sync_required_rows if row.get("game_id")}
     )
     starter_announcement_pending_count = len(
         _starter_announcement_pending_rows(results)
@@ -1229,6 +1236,8 @@ def summarize_results(
         ),
         "manual_baseball_data_required_count": manual_required_count,
         "manual_baseball_data_required_row_count": len(manual_required_rows),
+        "baseball_data_sync_required_count": data_sync_required_count,
+        "baseball_data_sync_required_row_count": len(data_sync_required_rows),
         "starter_announcement_pending_count": starter_announcement_pending_count,
     }
 
@@ -1342,27 +1351,28 @@ def _write_response_notes_csv(path: Path, results: Sequence[Dict[str, Any]]) -> 
                 )
 
 
+def _manual_data_requests_for_item(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    requests: List[Dict[str, Any]] = []
+    for capture_key in ("response", "cache_probe_response"):
+        capture = item.get(capture_key) or {}
+        meta = capture.get("meta") or {}
+        if isinstance(meta, dict):
+            request = meta.get("manual_data_request")
+            if isinstance(request, dict):
+                requests.append(request)
+        error_payload = capture.get("error_payload")
+        if isinstance(error_payload, dict):
+            request = error_payload.get("manual_data_request")
+            if isinstance(request, dict):
+                requests.append(request)
+            if error_payload.get("code") == MANUAL_BASEBALL_DATA_REQUIRED_CODE:
+                requests.append(error_payload)
+    return requests
+
+
 def _manual_baseball_data_required_rows(
     results: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, str]]:
-    def manual_requests(item: Dict[str, Any]) -> List[Dict[str, Any]]:
-        requests: List[Dict[str, Any]] = []
-        for capture_key in ("response", "cache_probe_response"):
-            capture = item.get(capture_key) or {}
-            meta = capture.get("meta") or {}
-            if isinstance(meta, dict):
-                request = meta.get("manual_data_request")
-                if isinstance(request, dict):
-                    requests.append(request)
-            error_payload = capture.get("error_payload")
-            if isinstance(error_payload, dict):
-                request = error_payload.get("manual_data_request")
-                if isinstance(request, dict):
-                    requests.append(request)
-                if error_payload.get("code") == MANUAL_BASEBALL_DATA_REQUIRED_CODE:
-                    requests.append(error_payload)
-        return requests
-
     def required_fields_for_missing_item(item: Dict[str, Any]) -> List[str]:
         key = str(item.get("key") or "").strip()
         mapped = MANUAL_REQUIRED_FIELDS_BY_MISSING_KEY.get(key)
@@ -1380,7 +1390,7 @@ def _manual_baseball_data_required_rows(
     for item in results:
         target = item["target"]
         target_game_id = str(target.get("game_id") or "")
-        for request in manual_requests(item):
+        for request in _manual_data_requests_for_item(item):
             if request.get("code") != MANUAL_BASEBALL_DATA_REQUIRED_CODE:
                 continue
             missing_items = [
@@ -1479,6 +1489,148 @@ def _manual_baseball_data_required_rows(
     return rows
 
 
+def _baseball_data_sync_required_rows(
+    results: Sequence[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    def required_fields_for_missing_item(item: Dict[str, Any]) -> List[str]:
+        key = str(item.get("key") or "").strip()
+        mapped = MANUAL_REQUIRED_FIELDS_BY_MISSING_KEY.get(key)
+        if mapped:
+            return [str(field) for field in mapped]
+        expected = str(item.get("expected_format") or "").strip()
+        if expected:
+            return [part.strip() for part in expected.split(",") if part.strip()]
+        return [key] if key else []
+
+    def sync_metadata(
+        request: Dict[str, Any],
+        *,
+        target_game_id: str,
+        target_game_date: str,
+        missing_code: str,
+    ) -> Dict[str, str]:
+        sync_request = request.get("dataSyncRequest")
+        if not isinstance(sync_request, dict):
+            sync_request = {}
+        request_identity = target_game_id or target_game_date or "unknown"
+        return {
+            "data_sync_code": str(
+                sync_request.get("code")
+                or request.get("dataSyncCode")
+                or BASEBALL_DATA_SYNC_REQUIRED_CODE
+            ),
+            "data_sync_request_id": str(
+                sync_request.get("requestId")
+                or f"coach:{request_identity}:{missing_code or 'missing_data'}"
+            ),
+            "data_sync_consumer": str(sync_request.get("consumer") or "ai_coach"),
+            "external_source": str(
+                sync_request.get("targetSource")
+                or request.get("externalSource")
+                or BASEBALL_DATA_SYNC_EXTERNAL_SOURCE
+            ),
+            "handoff_target": str(
+                sync_request.get("handoff") or BASEBALL_DATA_SYNC_HANDOFF
+            ),
+            "sync_status": "required",
+        }
+
+    rows: List[Dict[str, str]] = []
+    seen_rows: set[tuple[str, str, str]] = set()
+
+    for item in results:
+        target = item["target"]
+        target_game_id = str(target.get("game_id") or "")
+        target_game_date = str(target.get("game_date") or "")
+        for request in _manual_data_requests_for_item(item):
+            if request.get("code") != MANUAL_BASEBALL_DATA_REQUIRED_CODE:
+                continue
+            missing_items = [
+                missing_item
+                for missing_item in request.get("missingItems") or []
+                if isinstance(missing_item, dict)
+            ]
+            missing_keys = [
+                str(missing_item.get("key") or "").strip()
+                for missing_item in missing_items
+                if str(missing_item.get("key") or "").strip()
+            ]
+            if not missing_keys:
+                missing_keys = ["manual_data_required"]
+
+            required_fields: List[str] = []
+            for missing_item in missing_items:
+                for field in required_fields_for_missing_item(missing_item):
+                    if field and field not in required_fields:
+                        required_fields.append(field)
+            if not required_fields:
+                required_fields = ["operator.provided_baseball_data"]
+
+            missing_code = "|".join(missing_keys)
+            required_fields_text = "|".join(required_fields)
+            row_key = (target_game_id, missing_code, required_fields_text)
+            if row_key in seen_rows:
+                continue
+            seen_rows.add(row_key)
+            rows.append(
+                {
+                    "game_id": target_game_id,
+                    "game_date": target_game_date,
+                    "status_bucket": str(target.get("game_status_bucket") or ""),
+                    "away_team_id": str(target.get("away_team_id") or ""),
+                    "home_team_id": str(target.get("home_team_id") or ""),
+                    **sync_metadata(
+                        request,
+                        target_game_id=target_game_id,
+                        target_game_date=target_game_date,
+                        missing_code=missing_code,
+                    ),
+                    "legacy_contract_code": MANUAL_BASEBALL_DATA_REQUIRED_CODE,
+                    "missing_code": missing_code,
+                    "required_fields": required_fields_text,
+                    "operator_message": str(request.get("operatorMessage") or ""),
+                }
+            )
+
+    for manual_row in _manual_baseball_data_required_rows(results):
+        row_key = (
+            manual_row.get("game_id", ""),
+            manual_row.get("missing_code", ""),
+            manual_row.get("required_fields", ""),
+        )
+        if row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
+        request_identity = (
+            manual_row.get("game_id")
+            or manual_row.get("game_date")
+            or "unknown"
+        )
+        missing_code = manual_row.get("missing_code", "")
+        rows.append(
+            {
+                "game_id": manual_row.get("game_id", ""),
+                "game_date": manual_row.get("game_date", ""),
+                "status_bucket": manual_row.get("status_bucket", ""),
+                "away_team_id": manual_row.get("away_team_id", ""),
+                "home_team_id": manual_row.get("home_team_id", ""),
+                "data_sync_code": BASEBALL_DATA_SYNC_REQUIRED_CODE,
+                "data_sync_request_id": (
+                    f"coach:{request_identity}:{missing_code or 'missing_data'}"
+                ),
+                "data_sync_consumer": "ai_coach",
+                "external_source": BASEBALL_DATA_SYNC_EXTERNAL_SOURCE,
+                "handoff_target": BASEBALL_DATA_SYNC_HANDOFF,
+                "sync_status": "required",
+                "legacy_contract_code": manual_row.get("contract_code", ""),
+                "missing_code": missing_code,
+                "required_fields": manual_row.get("required_fields", ""),
+                "operator_message": manual_row.get("operator_message", ""),
+            }
+        )
+    return rows
+
+
 def _starter_announcement_pending_rows(
     results: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, str]]:
@@ -1530,6 +1682,34 @@ def _write_manual_baseball_data_required_csv(
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in _manual_baseball_data_required_rows(results):
+            writer.writerow(row)
+
+
+def _write_baseball_data_sync_required_csv(
+    path: Path,
+    results: Sequence[Dict[str, Any]],
+) -> None:
+    fields = [
+        "game_id",
+        "game_date",
+        "status_bucket",
+        "away_team_id",
+        "home_team_id",
+        "data_sync_code",
+        "data_sync_request_id",
+        "data_sync_consumer",
+        "external_source",
+        "handoff_target",
+        "sync_status",
+        "legacy_contract_code",
+        "missing_code",
+        "required_fields",
+        "operator_message",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in _baseball_data_sync_required_rows(results):
             writer.writerow(row)
 
 
@@ -1619,6 +1799,9 @@ def write_reports(
     manual_required_csv_path = (
         output_dir / f"coach_manual_baseball_data_required_{timestamp}.csv"
     )
+    data_sync_required_csv_path = (
+        output_dir / f"coach_baseball_data_sync_required_{timestamp}.csv"
+    )
     starter_pending_csv_path = (
         output_dir / f"coach_starter_announcement_pending_{timestamp}.csv"
     )
@@ -1632,6 +1815,9 @@ def write_reports(
     )
     latest_manual_required_csv_path = (
         output_dir / "coach_manual_baseball_data_required_latest.csv"
+    )
+    latest_data_sync_required_csv_path = (
+        output_dir / "coach_baseball_data_sync_required_latest.csv"
     )
     latest_starter_pending_csv_path = (
         output_dir / "coach_starter_announcement_pending_latest.csv"
@@ -1647,6 +1833,7 @@ def write_reports(
     _write_missing_data_csv(missing_csv_path, results)
     _write_response_notes_csv(response_notes_csv_path, results)
     _write_manual_baseball_data_required_csv(manual_required_csv_path, results)
+    _write_baseball_data_sync_required_csv(data_sync_required_csv_path, results)
     _write_starter_announcement_pending_csv(starter_pending_csv_path, results)
     _write_quality_failures_csv(quality_csv_path, results)
 
@@ -1656,6 +1843,7 @@ def write_reports(
     shutil.copyfile(missing_csv_path, latest_missing_csv_path)
     shutil.copyfile(response_notes_csv_path, latest_response_notes_csv_path)
     shutil.copyfile(manual_required_csv_path, latest_manual_required_csv_path)
+    shutil.copyfile(data_sync_required_csv_path, latest_data_sync_required_csv_path)
     shutil.copyfile(starter_pending_csv_path, latest_starter_pending_csv_path)
     shutil.copyfile(quality_csv_path, latest_quality_csv_path)
 
@@ -1666,6 +1854,7 @@ def write_reports(
         "missing_data_csv": str(missing_csv_path),
         "response_notes_csv": str(response_notes_csv_path),
         "manual_baseball_data_required_csv": str(manual_required_csv_path),
+        "baseball_data_sync_required_csv": str(data_sync_required_csv_path),
         "starter_announcement_pending_csv": str(starter_pending_csv_path),
         "quality_failures_csv": str(quality_csv_path),
         "latest_results_jsonl": str(latest_jsonl_path),
@@ -1675,6 +1864,9 @@ def write_reports(
         "latest_response_notes_csv": str(latest_response_notes_csv_path),
         "latest_manual_baseball_data_required_csv": str(
             latest_manual_required_csv_path
+        ),
+        "latest_baseball_data_sync_required_csv": str(
+            latest_data_sync_required_csv_path
         ),
         "latest_starter_announcement_pending_csv": str(latest_starter_pending_csv_path),
         "latest_quality_failures_csv": str(latest_quality_csv_path),

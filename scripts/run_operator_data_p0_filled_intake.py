@@ -552,12 +552,16 @@ def _intake_handoff(report: Mapping[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "## MANUAL_BASEBALL_DATA_REQUIRED",
+                "## BASEBALL_DATA_SYNC_REQUIRED",
                 "",
-                "These P0 rows still require operator-provided data and must remain on the manual contract path.",
+                "These P0 rows should be handed to the external trusted baseball data sync project.",
+                "This repo must not crawl, synthesize, or directly enter missing baseball data.",
+                "The legacy `MANUAL_BASEBALL_DATA_REQUIRED` marker remains for compatibility.",
                 "",
                 f"- By domain: `{format_counts(domain_counts)}`",
                 f"- By reason: `{format_counts(reason_counts)}`",
+                "- Sync CSV: `gate/baseball_data_sync_required_rows.csv`",
+                "- External source: `trusted_baseball_data_project`",
                 "- Detail CSV: `gate/manual_baseball_data_required_rows.csv`",
             ]
         )

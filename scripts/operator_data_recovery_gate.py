@@ -39,6 +39,9 @@ P0_DOMAIN_ORDER = ("season_meta", "schedule_window", "game_day_lineup", "roster_
 P0_DOMAINS = set(P0_DOMAIN_ORDER)
 APPLY_ACTIONS = {"insert", "update", "noop"}
 MANUAL_CONTRACT = "MANUAL_BASEBALL_DATA_REQUIRED"
+BASEBALL_DATA_SYNC_REQUIRED_CODE = "BASEBALL_DATA_SYNC_REQUIRED"
+BASEBALL_DATA_SYNC_EXTERNAL_SOURCE = "trusted_baseball_data_project"
+BASEBALL_DATA_SYNC_HANDOFF = "external_trusted_baseball_data_sync"
 MANUAL_REQUIRED_FIELDNAMES = [
     "queue_id",
     "domain",
@@ -48,6 +51,22 @@ MANUAL_REQUIRED_FIELDNAMES = [
     "required_fields",
     "missing_required_fields",
     "manual_contract",
+]
+DATA_SYNC_REQUIRED_FIELDNAMES = [
+    "queue_id",
+    "domain",
+    "operator_status",
+    "skip_reason",
+    "question",
+    "required_fields",
+    "missing_required_fields",
+    "data_sync_code",
+    "data_sync_request_id",
+    "data_sync_consumer",
+    "external_source",
+    "handoff_target",
+    "sync_status",
+    "legacy_contract_code",
 ]
 
 
@@ -209,6 +228,36 @@ def build_manual_required_rows(
     return rows
 
 
+def build_baseball_data_sync_required_rows(
+    manual_required_rows: Sequence[Mapping[str, str]],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for row in manual_required_rows:
+        queue_id = _normalize_text(row.get("queue_id"))
+        rows.append(
+            {
+                "queue_id": queue_id,
+                "domain": _normalize_text(row.get("domain")),
+                "operator_status": _normalize_text(row.get("operator_status")),
+                "skip_reason": _normalize_text(row.get("skip_reason")),
+                "question": _normalize_text(row.get("question")),
+                "required_fields": _normalize_text(row.get("required_fields")),
+                "missing_required_fields": _normalize_text(
+                    row.get("missing_required_fields")
+                ),
+                "data_sync_code": BASEBALL_DATA_SYNC_REQUIRED_CODE,
+                "data_sync_request_id": f"operator-data:{queue_id or 'unknown'}",
+                "data_sync_consumer": "ai_operator_data",
+                "external_source": BASEBALL_DATA_SYNC_EXTERNAL_SOURCE,
+                "handoff_target": BASEBALL_DATA_SYNC_HANDOFF,
+                "sync_status": "required",
+                "legacy_contract_code": _normalize_text(row.get("manual_contract"))
+                or MANUAL_CONTRACT,
+            }
+        )
+    return rows
+
+
 def _manual_domain_counts(rows: Sequence[Mapping[str, str]]) -> dict[str, int]:
     counts = Counter(_normalize_text(row.get("domain")) for row in rows)
     return {domain: counts.get(domain, 0) for domain in P0_DOMAIN_ORDER}
@@ -260,6 +309,9 @@ def build_gate_report(
     ingest_issue_counts = ingest_summary.get("issue_counts") or {}
     db_checks = validation_summary.get("db_checks") or {}
     manual_required_rows = build_manual_required_rows(validation_normalized_rows)
+    data_sync_required_rows = build_baseball_data_sync_required_rows(
+        manual_required_rows
+    )
     manual_domain_counts = _manual_domain_counts(manual_required_rows)
     manual_skip_reason_counts = _manual_skip_reason_counts(manual_required_rows)
 
@@ -404,11 +456,13 @@ def build_gate_report(
             "issue_counts": {"error": error_count},
             "ingest_action_counts": dict(sorted(action_counts.items())),
             "manual_required_count": len(manual_required_rows),
+            "baseball_data_sync_required_count": len(data_sync_required_rows),
             "manual_required_domain_counts": manual_domain_counts,
             "manual_required_skip_reason_counts": manual_skip_reason_counts,
         },
         "issues": [issue.to_record() for issue in issues],
         "manual_required_rows": manual_required_rows,
+        "baseball_data_sync_required_rows": data_sync_required_rows,
     }
 
 
@@ -424,6 +478,7 @@ def _render_handoff(report: Mapping[str, Any]) -> str:
         f"- Status: `{summary.get('status', 'unknown')}`",
         f"- Apply eligible rows: `{summary.get('apply_eligible_count', 0)}`",
         f"- Manual required rows: `{summary.get('manual_required_count', 0)}`",
+        f"- Baseball data sync required rows: `{summary.get('baseball_data_sync_required_count', 0)}`",
         f"- Validation errors: `{summary.get('validation_error_count', 0)}`",
         f"- Ingest errors: `{summary.get('ingest_error_count', 0)}`",
         "",
@@ -431,10 +486,14 @@ def _render_handoff(report: Mapping[str, Any]) -> str:
     if manual_required_rows:
         lines.extend(
             [
-                "## MANUAL_BASEBALL_DATA_REQUIRED",
+                "## BASEBALL_DATA_SYNC_REQUIRED",
                 "",
-                "These P0 rows still require operator-provided data. Do not synthesize or crawl baseball data for them.",
+                "These P0 rows should be handed to the external trusted baseball data sync project.",
+                "This repo must not crawl, synthesize, or directly enter missing baseball data.",
+                f"The legacy `{MANUAL_CONTRACT}` marker remains for compatibility.",
                 "",
+                f"- Sync CSV: `baseball_data_sync_required_rows.csv`",
+                f"- External source: `{BASEBALL_DATA_SYNC_EXTERNAL_SOURCE}`",
                 f"- CSV: `manual_baseball_data_required_rows.csv`",
                 f"- By domain: `{_format_counts(manual_domain_counts)}`",
                 f"- By reason: `{_format_counts(manual_skip_reason_counts)}`",
@@ -509,6 +568,11 @@ def run_gate(
         output_dir / "manual_baseball_data_required_rows.csv",
         report.get("manual_required_rows", []),
         MANUAL_REQUIRED_FIELDNAMES,
+    )
+    _write_csv(
+        output_dir / "baseball_data_sync_required_rows.csv",
+        report.get("baseball_data_sync_required_rows", []),
+        DATA_SYNC_REQUIRED_FIELDNAMES,
     )
     (output_dir / "handoff.md").write_text(_render_handoff(report), encoding="utf-8")
     return report

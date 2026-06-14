@@ -214,11 +214,12 @@ V1 ingest 후 답변 경로는 다음 순서로 둔다.
 3. `MANUAL_BASEBALL_DATA_REQUIRED`
 
 `operator_data_required` 문항이 자동으로 answerable이 되는 것은 아니다. 해당 도메인에 검증 완료 row가 있고, 기준일/팀/경기/선수 조건이 질문과 매칭될 때만 답한다.
+`MANUAL_BASEBALL_DATA_REQUIRED`는 기존 호환 marker이며, 새 산출물에서는 `BASEBALL_DATA_SYNC_REQUIRED`와 `trusted_baseball_data_project` handoff 정보를 함께 노출한다.
 
 답변에는 다음을 포함한다.
 
 - 기준일 또는 유효기간
-- 운영자 제공 데이터 기준이라는 표현
+- 검증된 trusted baseball data sync 기준이라는 표현
 - 값이 만료되었거나 검증되지 않았으면 답하지 않고 manual contract 유지
 
 ## Rollout Plan
@@ -254,7 +255,7 @@ V1 ingest 후 답변 경로는 다음 순서로 둔다.
 - `validate_operator_data_handoff.py`는 CSV shape, source metadata, domain values, DB cross-check, P0-only apply eligibility를 구현했다.
 - `ingest_operator_data_handoff.py`는 normalized JSONL만 입력으로 받고, 기본 dry-run, `--apply` 명시 적용, idempotent payload hash, P0-only domain selection, lineup schema/conflict-target checks를 구현했다.
 - `operator_data_query.py`는 `season_meta`, `schedule_window`, `game_day_lineup`, `roster_news` read-only fast-path를 제공한다. missing row, schema error, low confidence, underspecified lineup/roster query는 `None`을 반환해 manual contract를 유지한다.
-- `operator_data_recovery_gate.py`는 validation/ingest dry-run 산출물을 읽어 apply 가능 여부를 read-only로 판정한다.
+- `operator_data_recovery_gate.py`는 validation/ingest dry-run 산출물을 읽어 apply 가능 여부를 read-only로 판정하고, 미충족 row는 `baseball_data_sync_required_rows.csv`로 외부 trusted sync 요구사항을 발행한다.
 - `build_operator_data_p0_input_packet.py`는 원본 handoff CSV에서 P0 도메인 4개만 별도 operator input packet으로 복사한다. `operator_value`는 자동으로 채우지 않는다.
 - `audit_operator_data_p0_input_packet.py`는 운영자가 채운 P0 packet을 strict validation 전에 read-only로 점검한다. 일부 P0 row만 ready여도 허용하며, pending/rejected/blocked row는 manual contract 대상으로 남긴다.
 - `check_operator_data_p0_db_prereqs.py`는 DB URL이 주어졌을 때 P0 target/read table columns와 `game_lineups(game_id, team_code, batting_order)` conflict target을 read-only로 확인한다.
@@ -266,7 +267,7 @@ V1 ingest 후 답변 경로는 다음 순서로 둔다.
 ## Post-KBO500 Recovery Runbook
 
 1. P0 input packet을 생성한다. 출력은 `season_meta`, `schedule_window`, `game_day_lineup`, `roster_news`만 포함해야 한다.
-2. 운영자가 packet의 P0 row만 채우고 `operator_status=ready_for_validation` 또는 `validated`로 변경한다. 미입력, 불일치, 미검증 row는 복구 대상이 아니며 `MANUAL_BASEBALL_DATA_REQUIRED` 경로를 유지한다.
+2. P0 row 데이터는 외부 trusted baseball data sync 프로젝트가 수집/검증해 내부 DB 또는 handoff 산출물로 반영한다. 미수집, 불일치, 미검증 row는 복구 대상이 아니며 `MANUAL_BASEBALL_DATA_REQUIRED` 호환 경로와 `BASEBALL_DATA_SYNC_REQUIRED` handoff를 유지한다.
 3. P0 packet QA preflight를 실행한다. `status=pass` 또는 `warning`이면 strict validation으로 갈 수 있고, `fail`이면 packet을 먼저 고친다. 운영 gate에서 최소 1개 ready row를 강제하려면 `--require-ready`를 사용한다.
 4. Filled intake runner를 실행해 packet snapshot, P0 packet QA, DB prerequisite, strict validation, ingest dry-run, recovery gate, status summary 산출물을 한 번에 생성한다. DB URL 누락, target schema 누락, lineup conflict target 누락이 있으면 status는 `blocked`여야 한다.
 5. DB 체크를 켠 strict validation을 실행한다. `db_checks.skipped=false`, `issue_counts.error=0`, `apply_eligible_count > 0`이어야 다음 단계로 간다.
@@ -276,7 +277,7 @@ V1 ingest 후 답변 경로는 다음 순서로 둔다.
 9. `--apply`는 dry-run이 통과한 같은 normalized JSONL에만 실행한다. 다른 payload hash overwrite는 `--allow-overwrite` 승인 전 금지한다.
 10. P0 smoke set을 생성한다. `apply_eligible=true` row는 recovered expectation, 나머지 P0 row는 manual-control expectation으로 분리한다.
 11. smoke 환경에서만 `OPERATOR_DATA_FAST_PATH_ENABLED=true`를 켜고 completion/stream audit을 실행한다.
-12. smoke verifier로 recovered P0 질문은 operator-data 답변을 반환하고, 미입력/미검증/범위 불일치 질문은 `MANUAL_BASEBALL_DATA_REQUIRED`를 유지하는지 확인한다.
+12. smoke verifier로 recovered P0 질문은 operator-data 답변을 반환하고, 미수집/미검증/범위 불일치 질문은 `MANUAL_BASEBALL_DATA_REQUIRED` 호환 marker와 `BASEBALL_DATA_SYNC_REQUIRED` handoff를 유지하는지 확인한다.
 
 ## Verification Commands
 

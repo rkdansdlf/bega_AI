@@ -238,10 +238,17 @@ def test_gate_reports_manual_required_rows_from_pending_p0_normalized_rows() -> 
     assert report["summary"]["manual_required_skip_reason_counts"] == {
         "operator_status_pending": 1
     }
+    assert report["summary"]["baseball_data_sync_required_count"] == 1
     assert manual_rows[0]["queue_id"] == "ODQ-0001"
     assert manual_rows[0]["manual_contract"] == "MANUAL_BASEBALL_DATA_REQUIRED"
+    data_sync_rows = report["baseball_data_sync_required_rows"]
+    assert data_sync_rows[0]["data_sync_code"] == "BASEBALL_DATA_SYNC_REQUIRED"
+    assert data_sync_rows[0]["data_sync_request_id"] == "operator-data:ODQ-0001"
+    assert data_sync_rows[0]["external_source"] == "trusted_baseball_data_project"
+    assert data_sync_rows[0]["legacy_contract_code"] == "MANUAL_BASEBALL_DATA_REQUIRED"
     assert "game_date" in manual_rows[0]["missing_required_fields"]
     handoff = gate._render_handoff(report)
+    assert "BASEBALL_DATA_SYNC_REQUIRED" in handoff
     assert "MANUAL_BASEBALL_DATA_REQUIRED" in handoff
     assert "ODQ-0001" in handoff
 
@@ -354,7 +361,10 @@ def test_run_gate_writes_manual_required_csv_and_handoff(tmp_path: Path) -> None
     )
 
     manual_rows = _read_csv(output_dir / "manual_baseball_data_required_rows.csv")
+    data_sync_rows = _read_csv(output_dir / "baseball_data_sync_required_rows.csv")
     handoff = (output_dir / "handoff.md").read_text(encoding="utf-8")
     assert report["summary"]["manual_required_count"] == 1
     assert manual_rows[0]["queue_id"] == "ODQ-0001"
+    assert data_sync_rows[0]["data_sync_code"] == "BASEBALL_DATA_SYNC_REQUIRED"
     assert "manual_baseball_data_required_rows.csv" in handoff
+    assert "baseball_data_sync_required_rows.csv" in handoff

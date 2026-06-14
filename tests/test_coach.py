@@ -6771,6 +6771,7 @@ class TestCoachFastPath:
     def test_build_manual_data_request_requires_final_score_for_review(self):
         from app.routers.coach import (
             AnalyzeRequest,
+            BASEBALL_DATA_SYNC_REQUIRED_CODE,
             COACH_ANALYSIS_TYPE_REVIEW,
             MANUAL_BASEBALL_DATA_REQUIRED_CODE,
             _build_manual_data_request,
@@ -6810,6 +6811,43 @@ class TestCoachFastPath:
 
         assert manual_request is not None
         assert manual_request["code"] == MANUAL_BASEBALL_DATA_REQUIRED_CODE
+        assert manual_request["dataSyncRequired"] is True
+        assert manual_request["dataSyncCode"] == BASEBALL_DATA_SYNC_REQUIRED_CODE
+        assert manual_request["externalSource"] == "trusted_baseball_data_project"
+        assert manual_request["dataSyncRequest"] == {
+            "code": BASEBALL_DATA_SYNC_REQUIRED_CODE,
+            "requestId": "coach:20260405LGKT0:game_review",
+            "consumer": "ai_coach",
+            "scope": "coach.analyze",
+            "analysisType": COACH_ANALYSIS_TYPE_REVIEW,
+            "targetSource": "trusted_baseball_data_project",
+            "handoff": "external_trusted_baseball_data_sync",
+            "blocking": True,
+            "entity": {
+                "gameId": "20260405LGKT0",
+                "gameDate": "2026-04-05",
+                "seasonYear": 2026,
+                "homeTeamId": "LG",
+                "awayTeamId": "KT",
+                "stage": "REGULAR",
+            },
+            "missingItems": [
+                {
+                    "key": "game_status",
+                    "label": "경기 상태",
+                    "reason": "과거 경기의 상태가 종료 기준으로 확정되지 않았습니다.",
+                    "expectedFormat": "SCHEDULED, COMPLETED, CANCELLED 등",
+                    "requiredFields": ["game.game_status"],
+                },
+                {
+                    "key": "final_score",
+                    "label": "최종 점수",
+                    "reason": "과거 경기의 최종 점수가 비어 있습니다.",
+                    "expectedFormat": "home_score, away_score",
+                    "requiredFields": ["game.home_score", "game.away_score"],
+                },
+            ],
+        }
         assert {item["key"] for item in manual_request["missingItems"]} == {
             "game_status",
             "final_score",
