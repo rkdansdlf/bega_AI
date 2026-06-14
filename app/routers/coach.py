@@ -182,8 +182,28 @@ COACH_UNSUPPORTED_CLAIM_ERROR_CODE = "grounding_validation_failed"
 COACH_NON_RETRYABLE_ERROR_CODE = "non_retryable_internal_error"
 MANUAL_BASEBALL_DATA_REQUIRED_CODE = "MANUAL_BASEBALL_DATA_REQUIRED"
 MANUAL_BASEBALL_DATA_REQUIRED_MESSAGE = (
-    "야구 데이터 준비가 필요합니다. 운영자가 데이터를 제공하면 다시 확인할 수 있습니다."
+    "야구 데이터 준비가 필요합니다. trusted baseball data sync 반영 후 다시 확인할 수 있습니다."
 )
+BASEBALL_DATA_SYNC_REQUIRED_CODE = "BASEBALL_DATA_SYNC_REQUIRED"
+BASEBALL_DATA_SYNC_EXTERNAL_SOURCE = "trusted_baseball_data_project"
+BASEBALL_DATA_SYNC_HANDOFF = "external_trusted_baseball_data_sync"
+BASEBALL_DATA_SYNC_REQUIRED_FIELDS_BY_MISSING_KEY: Dict[str, Sequence[str]] = {
+    "game_id": ("game.game_id",),
+    "game_date": ("game.game_date",),
+    "season_league_context": (
+        "game.season_id",
+        "game.season_year",
+        "game.league_type_code",
+    ),
+    "game_status": ("game.game_status",),
+    "final_score": ("game.home_score", "game.away_score"),
+    "starters": ("game.home_pitcher", "game.away_pitcher"),
+    "lineup": (
+        "game_lineups.team_code",
+        "game_lineups.batting_order",
+        "game_lineups.player_name",
+    ),
+}
 COACH_STARTER_ANNOUNCEMENT_PENDING_CODE = "starter_announcement_pending"
 KBO_TIMEZONE = ZoneInfo("Asia/Seoul")
 KBO_STARTER_ANNOUNCEMENT_HOUR = 18
@@ -1978,6 +1998,65 @@ def _manual_data_missing_item(
     }
 
 
+def _baseball_data_sync_required_fields(item: Dict[str, str]) -> List[str]:
+    key = str(item.get("key") or "").strip()
+    mapped = BASEBALL_DATA_SYNC_REQUIRED_FIELDS_BY_MISSING_KEY.get(key)
+    if mapped:
+        return [str(field) for field in mapped]
+    expected_format = str(item.get("expected_format") or "").strip()
+    if expected_format:
+        return [part.strip() for part in expected_format.split(",") if part.strip()]
+    return [key] if key else []
+
+
+def _build_baseball_data_sync_request(
+    *,
+    request_game_id: Optional[str],
+    request_game_date: Optional[date_cls],
+    season_year: Optional[int],
+    home_team_id: Optional[str],
+    away_team_id: Optional[str],
+    stage_label: str,
+    analysis_type: str,
+    missing_items: Sequence[Dict[str, str]],
+) -> Dict[str, Any]:
+    request_identity = (
+        request_game_id
+        or (request_game_date.isoformat() if request_game_date is not None else "")
+        or "unknown"
+    )
+    return {
+        "code": BASEBALL_DATA_SYNC_REQUIRED_CODE,
+        "requestId": f"coach:{request_identity}:{analysis_type}",
+        "consumer": "ai_coach",
+        "scope": "coach.analyze",
+        "analysisType": analysis_type,
+        "targetSource": BASEBALL_DATA_SYNC_EXTERNAL_SOURCE,
+        "handoff": BASEBALL_DATA_SYNC_HANDOFF,
+        "blocking": True,
+        "entity": {
+            "gameId": request_game_id,
+            "gameDate": request_game_date.isoformat()
+            if request_game_date is not None
+            else None,
+            "seasonYear": season_year,
+            "homeTeamId": home_team_id,
+            "awayTeamId": away_team_id,
+            "stage": stage_label,
+        },
+        "missingItems": [
+            {
+                "key": str(item.get("key") or ""),
+                "label": str(item.get("label") or ""),
+                "reason": str(item.get("reason") or ""),
+                "expectedFormat": str(item.get("expected_format") or ""),
+                "requiredFields": _baseball_data_sync_required_fields(item),
+            }
+            for item in missing_items
+        ],
+    }
+
+
 def _parse_iso_date(value: Optional[str]) -> Optional[date_cls]:
     normalized = str(value or "").strip()
     if not normalized:
@@ -2258,6 +2337,16 @@ def _build_manual_data_request(
         request_game_id,
         [item["key"] for item in missing_items],
     )
+    data_sync_request = _build_baseball_data_sync_request(
+        request_game_id=request_game_id,
+        request_game_date=request_game_date,
+        season_year=parsed_evidence_season_year,
+        home_team_id=evidence_home_team_code,
+        away_team_id=evidence_away_team_code,
+        stage_label=evidence_stage_label,
+        analysis_type=normalized_analysis_type,
+        missing_items=missing_items,
+    )
     return {
         "scope": "coach.analyze",
         "missingItems": missing_items,
@@ -2265,6 +2354,10 @@ def _build_manual_data_request(
         + ", ".join(identifier_parts),
         "blocking": True,
         "code": MANUAL_BASEBALL_DATA_REQUIRED_CODE,
+        "dataSyncRequired": True,
+        "dataSyncCode": BASEBALL_DATA_SYNC_REQUIRED_CODE,
+        "externalSource": BASEBALL_DATA_SYNC_EXTERNAL_SOURCE,
+        "dataSyncRequest": data_sync_request,
     }
 
 

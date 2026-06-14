@@ -98,12 +98,12 @@ queue_id,domain,contract_code,question,field_name,field_description,required,ope
 - `build_operator_data_p0_smoke_set.py`와 `verify_operator_data_p0_smoke.py`는 P0 focused smoke 입력(recovered/manual-control/combined)과 strict 결과 검증을 제공한다.
 - `summarize_operator_data_p0_recovery_status.py`는 packet/audit/validation/ingest/gate 결과를 post-KBO500 recovery handoff로 요약한다.
 - `run_operator_data_p0_filled_intake.py`는 filled P0 packet을 read-only intake pipeline으로 재생하고 stage별 evidence bundle을 만든다.
-- fast-path는 기본 비활성화(`OPERATOR_DATA_FAST_PATH_ENABLED=false`)이며, row가 없거나 질문 범위가 부족하면 `MANUAL_BASEBALL_DATA_REQUIRED` 경로를 유지한다.
+- fast-path는 기본 비활성화(`OPERATOR_DATA_FAST_PATH_ENABLED=false`)이며, row가 없거나 질문 범위가 부족하면 `MANUAL_BASEBALL_DATA_REQUIRED` 호환 marker와 `BASEBALL_DATA_SYNC_REQUIRED` 외부 sync handoff를 유지한다.
 
 ## Post-KBO500 Runbook
 1. P0 input packet을 생성해 `season_meta`, `schedule_window`, `game_day_lineup`, `roster_news` 86개만 운영자 입력 대상으로 분리한다.
 2. 운영자가 P0 row를 채우고 `operator_status=ready_for_validation` 또는 `validated`로 변경한다.
-3. 미입력, 불일치, 미검증 row는 복구 대상이 아니며 `MANUAL_BASEBALL_DATA_REQUIRED` 경로를 유지한다.
+3. 미수집, 불일치, 미검증 row는 복구 대상이 아니며 외부 trusted baseball data sync 프로젝트가 채울 요구사항으로 `BASEBALL_DATA_SYNC_REQUIRED`를 발행한다.
 4. P0 packet QA preflight를 실행해 구조 drift, non-P0 혼입, ready row 입력 누락을 먼저 막는다.
 5. Filled intake runner로 packet snapshot, DB prerequisite, strict validation, ingest dry-run, recovery gate, status summary를 한 번에 재생한다.
 6. DB 체크를 켠 strict validation을 실행하고 `db_checks.skipped=false`, `issue_counts.error=0`을 확인한다.

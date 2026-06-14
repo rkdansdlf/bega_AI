@@ -219,7 +219,7 @@ def test_analyze_team_configures_sse_ping(monkeypatch):
     )
     monkeypatch.setattr(
         "app.routers.coach.assess_game_evidence",
-        lambda game_evidence: types.SimpleNamespace(root_causes=[]),
+        lambda game_evidence, **kwargs: types.SimpleNamespace(root_causes=[]),
     )
 
     response = asyncio.run(analyze_team(payload, agent=agent, _=None))

@@ -487,12 +487,16 @@ def _render_handoff(report: Mapping[str, Any]) -> str:
     if _as_int(summary.get("manual_required_count")) > 0:
         lines.extend(
             [
-                "## MANUAL_BASEBALL_DATA_REQUIRED",
+                "## BASEBALL_DATA_SYNC_REQUIRED",
                 "",
-                "These P0 rows still require operator-provided data and must remain on the manual contract path.",
+                "These P0 rows should be handed to the external trusted baseball data sync project.",
+                "This repo must not crawl, synthesize, or directly enter missing baseball data.",
+                "The legacy `MANUAL_BASEBALL_DATA_REQUIRED` marker remains for compatibility.",
                 "",
                 f"- By domain: `{_format_counts(summary.get('manual_required_domain_counts') or {})}`",
                 f"- By reason: `{_format_counts(summary.get('manual_required_skip_reason_counts') or {})}`",
+                f"- Sync CSV: `../gate/baseball_data_sync_required_rows.csv`",
+                f"- External source: `trusted_baseball_data_project`",
                 f"- Detail CSV: `../gate/manual_baseball_data_required_rows.csv`",
                 "",
             ]
