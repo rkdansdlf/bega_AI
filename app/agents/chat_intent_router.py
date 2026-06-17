@@ -7,7 +7,11 @@ from enum import Enum
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from ..core.entity_extractor import extract_entities_from_query, extract_team
+from ..core.entity_extractor import (
+    TEAM_MAPPING,
+    extract_entities_from_query,
+    extract_team,
+)
 from .tool_caller import ToolCall
 
 
@@ -155,6 +159,52 @@ class ChatIntentRouter:
         game_id_match = re.search(r"\b\d{8}[A-Z]{4}\d\b", query)
         extracted_date = self._extract_date(query, query_lower)
         explicit_metric = self._resolve_leaderboard_spec(query_lower)
+        clarification_answer = self._build_clarification_answer(
+            query_lower=query_lower,
+            team_name=team_name,
+            player_name=player_name,
+            game_id=game_id_match.group(0) if game_id_match else None,
+            extracted_date=extracted_date,
+        )
+        if clarification_answer:
+            return IntentDecision(
+                intent=ChatIntent.UNKNOWN,
+                planner_mode="fast_path",
+                tool_calls=[],
+                subject_type="clarification",
+                season_year=season_year,
+                metric_policy="clarification_required",
+                confidence=0.92,
+                analysis="질문 주체가 부족해 DB 조회 전에 필요한 식별자를 요청합니다.",
+                direct_answer=clarification_answer,
+                grounding_mode="clarification_required",
+                source_tier="none",
+                fallback_reason="clarification_required",
+            )
+
+        team_comparison_pair = self._extract_team_comparison_pair(query)
+        if team_comparison_pair:
+            team1, team2 = team_comparison_pair
+            return IntentDecision(
+                intent=ChatIntent.TEAM_ANALYSIS,
+                planner_mode="fast_path",
+                tool_calls=[
+                    ToolCall(
+                        "get_team_comparison",
+                        {
+                            "team1": team1,
+                            "team2": team2,
+                            "year": season_year,
+                            "recent_limit": 10,
+                        },
+                    )
+                ],
+                subject_type="team_comparison",
+                season_year=season_year,
+                metric_policy="team_comparison",
+                confidence=0.96,
+                analysis="두 팀명이 명시된 비교 질문으로 판단되어 team comparison fast-path를 사용합니다.",
+            )
 
         # stat_leader 체크 — get_leaderboard fast path (최우선 라우팅).
         # 홈런왕/다승왕/평균자책점 1위/홈런 가장 많이 등 통계 리더 키워드는
@@ -284,6 +334,65 @@ class ChatIntentRouter:
                 analysis="두 선수 비교 질의로 판단되어 compare_players fast-path를 사용합니다.",
             )
 
+        date_range = self._extract_date_range(query_lower)
+        if date_range and self._is_schedule_range_query(query_lower):
+            start_date, end_date = date_range
+            parameters: dict[str, Any] = {
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+            if team_name:
+                parameters["team"] = team_name
+            return IntentDecision(
+                intent=ChatIntent.SCHEDULE_LOOKUP,
+                planner_mode="fast_path",
+                tool_calls=[ToolCall("get_schedule", parameters)],
+                subject_type="schedule_range",
+                season_year=season_year,
+                metric_policy="schedule_range",
+                confidence=0.95,
+                analysis="날짜 범위 경기표 질문으로 판단되어 경기 일정 범위 fast-path를 사용합니다.",
+            )
+
+        if self._is_team_standings_table_query(query_lower):
+            parameters = {"year": season_year}
+            if extracted_date:
+                parameters["as_of_date"] = extracted_date
+            return IntentDecision(
+                intent=ChatIntent.SEASON_RESULT_LOOKUP,
+                planner_mode="fast_path",
+                tool_calls=[ToolCall("get_team_standings", parameters)],
+                subject_type="team_standings",
+                season_year=season_year,
+                metric_policy="team_standings_table",
+                confidence=0.95,
+                analysis="팀별 순위/승패/승률/승차 질문으로 판단되어 standings fast-path를 사용합니다.",
+            )
+
+        team_metric_spec = self._resolve_team_metric_spec(query_lower)
+        if team_metric_spec:
+            metric_name, sort_order = team_metric_spec
+            return IntentDecision(
+                intent=ChatIntent.TEAM_ANALYSIS,
+                planner_mode="fast_path",
+                tool_calls=[
+                    ToolCall(
+                        "get_team_metric_leaderboard",
+                        {
+                            "metric_name": metric_name,
+                            "year": season_year,
+                            "limit": 10,
+                            "sort_order": sort_order,
+                        },
+                    )
+                ],
+                subject_type="team_metric_leaderboard",
+                season_year=season_year,
+                metric_policy=f"team_metric_{metric_name}",
+                confidence=0.95,
+                analysis="팀 단위 지표 비교 질문으로 판단되어 team metric leaderboard fast-path를 사용합니다.",
+            )
+
         schedule_bundle_tool_calls = self._build_schedule_bundle_tool_calls(
             query_lower=query_lower,
             extracted_date=extracted_date,
@@ -318,6 +427,30 @@ class ChatIntentRouter:
                 metric_policy="team_recent_bullpen_bundle",
                 confidence=0.97,
                 analysis=f"{team_name} 팀의 최근 흐름/불펜 복합 질의로 판단되어 deterministic bundle fast-path를 사용합니다.",
+            )
+
+        team_form_spec = self._resolve_team_form_spec(query_lower)
+        if team_form_spec:
+            form_type, recent_limit = team_form_spec
+            parameters: dict[str, Any] = {
+                "year": season_year,
+                "form_type": form_type,
+                "recent_limit": recent_limit,
+                "limit": 10,
+            }
+            if team_name:
+                parameters["team_name"] = team_name
+            if extracted_date:
+                parameters["as_of_date"] = extracted_date
+            return IntentDecision(
+                intent=ChatIntent.TEAM_ANALYSIS,
+                planner_mode="fast_path",
+                tool_calls=[ToolCall("get_team_form_table", parameters)],
+                subject_type="team_form_table",
+                season_year=season_year,
+                metric_policy=f"team_form_{form_type}",
+                confidence=0.95,
+                analysis="팀 흐름/홈원정/연승연패 질문으로 판단되어 team form fast-path를 사용합니다.",
             )
 
         player_bundle_tool_calls = self._build_player_validation_bundle_tool_calls(
@@ -930,20 +1063,252 @@ class ChatIntentRouter:
         ):
             return None
 
+        if "최하위" in query_lower:
+            return 10, "regular"
+
         match = re.search(r"(?<!\d)(10|[1-9])\s*(등|위)", query_lower)
         if not match:
             return None
 
         return int(match.group(1)), "regular"
 
+    def _extract_date_range(self, query_lower: str) -> Optional[tuple[str, str]]:
+        iso_match = re.search(
+            r"\b(20\d{2}-\d{1,2}-\d{1,2})\b\s*(?:부터|에서|~)\s*"
+            r"\b(20\d{2}-\d{1,2}-\d{1,2})\b",
+            query_lower,
+        )
+        if iso_match:
+            return self._normalize_date_range(iso_match.group(1), iso_match.group(2))
+
+        korean_match = re.search(
+            r"\b(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*"
+            r"(?:부터|에서|~)\s*"
+            r"(?:(20\d{2})\s*년\s*)?"
+            r"(?:(\d{1,2})\s*월\s*)?"
+            r"(\d{1,2})\s*일",
+            query_lower,
+        )
+        if not korean_match:
+            return None
+
+        start_year, start_month, start_day, end_year, end_month, end_day = (
+            korean_match.groups()
+        )
+        end_year = end_year or start_year
+        end_month = end_month or start_month
+        return self._normalize_date_range(
+            f"{start_year}-{start_month}-{start_day}",
+            f"{end_year}-{end_month}-{end_day}",
+        )
+
+    def _normalize_date_range(
+        self, start_raw: str, end_raw: str
+    ) -> Optional[tuple[str, str]]:
+        try:
+            start_date = datetime.strptime(start_raw, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_raw, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+        if (end_date - start_date).days > 31:
+            return None
+        return start_date.isoformat(), end_date.isoformat()
+
+    def _is_schedule_range_query(self, query_lower: str) -> bool:
+        return any(
+            token in query_lower
+            for token in ("경기표", "경기 일정", "경기일정", "일정 보여", "일정 알려")
+        ) and not any(
+            token in query_lower
+            for token in (
+                "중계",
+                "라디오",
+                "하이라이트",
+                "다시보기",
+                "문자중계",
+                "알림",
+            )
+        )
+
+    def _is_team_standings_table_query(self, query_lower: str) -> bool:
+        return any(
+            token in query_lower
+            for token in (
+                "현재 kbo 순위",
+                "kbo 순위",
+                "순위표",
+                "전체 순위",
+                "팀별 승패",
+                "팀별 승률",
+                "팀별 승차",
+            )
+        ) and not any(token in query_lower for token in ("뉴스", "이슈", "소식", "가능성", "후보"))
+
+    def _build_clarification_answer(
+        self,
+        *,
+        query_lower: str,
+        team_name: Optional[str],
+        player_name: Optional[str],
+        game_id: Optional[str],
+        extracted_date: Optional[str],
+    ) -> Optional[str]:
+        if not team_name and any(
+            token in query_lower for token in ["이 팀", "우리 팀", "해당 팀"]
+        ):
+            return "어떤 팀 기준인지 팀명을 같이 알려주세요. 예: LG, KIA, KT처럼 팀명을 붙이면 바로 DB 기준으로 조회하겠습니다."
+
+        comparison_tokens = ["두 선수", "선수 비교", "비교하면", "비교해"]
+        if not player_name and any(token in query_lower for token in comparison_tokens):
+            if not re.search(
+                r"[가-힣A-Za-z]{2,}\s*(?:과|와|vs|VS)\s*[가-힣A-Za-z]{2,}", query_lower
+            ):
+                return "비교할 두 선수 이름을 같이 알려주세요. 예: 김도영과 문보경처럼 두 이름이 필요합니다."
+
+        if not team_name and any(
+            token in query_lower for token in ["두 팀", "팀 비교", "팀끼리 비교"]
+        ):
+            return "비교할 두 팀명을 같이 알려주세요. 예: LG와 KT처럼 팀 두 개가 필요합니다."
+
+        game_detail_tokens = [
+            "경기 mvp",
+            "결승타",
+            "승리 투수",
+            "패전 투수",
+            "세이브",
+            "홀드",
+            "경기 스코어",
+            "경기 점수",
+            "경기 하이라이트",
+            "핵심 장면",
+            "선발 투수",
+        ]
+        if (
+            not game_id
+            and not extracted_date
+            and not team_name
+            and any(token in query_lower for token in game_detail_tokens)
+        ):
+            return "어느 경기인지 특정할 수 있게 날짜와 팀명 또는 game_id를 같이 알려주세요. 한 날짜에 여러 경기가 있으면 경기별로 나눠서 조회하겠습니다."
+
+        return None
+
+    def _resolve_team_metric_spec(self, query_lower: str) -> Optional[tuple[str, str]]:
+        comparison_specs: list[tuple[tuple[str, ...], tuple[str, str]]] = [
+            (("불펜 소모", "불펜 과부하"), ("bullpen_share", "DESC")),
+            (
+                ("불펜 era", "불펜 평균자책", "불펜 비교", "불펜이 좋은"),
+                ("bullpen_era", "ASC"),
+            ),
+            (("선발진 비교", "선발진이 좋은"), ("starter_qs_rate", "DESC")),
+            (("타선 비교", "타선이 좋은"), ("ops", "DESC")),
+            (("수비 비교", "수비가 좋은", "수비 좋은"), ("fielding_pct", "DESC")),
+            (("주루 비교",), ("stolen_bases", "DESC")),
+            (("기복이 큰", "기복 큰"), ("run_margin_volatility", "DESC")),
+        ]
+        for tokens, spec in comparison_specs:
+            if any(token in query_lower for token in tokens):
+                return spec
+
+        team_context = any(
+            token in query_lower
+            for token in [
+                "팀별",
+                "구단별",
+                "팀 ",
+                "팀은",
+                "팀이",
+                "구단",
+                "공격과 수비",
+                "수비가 좋은 팀",
+                "수비 좋은 팀",
+            ]
+        )
+        if not team_context:
+            return None
+        if any(token in query_lower for token in ["순위표", "승패", "승차"]):
+            return None
+
+        specs: list[tuple[tuple[str, ...], tuple[str, str]]] = [
+            (("공격과 수비", "공수", "전력 균형"), ("overall_profile", "DESC")),
+            (("수비가 좋은", "수비 좋은"), ("fielding_pct", "DESC")),
+            (("병살타", "병살"), ("double_plays", "DESC")),
+            (("실책",), ("errors", "ASC")),
+            (("홈런",), ("home_runs", "DESC")),
+            (("도루",), ("stolen_bases", "DESC")),
+            (
+                ("경기당 평균 득점", "경기당 득점", "평균 득점"),
+                ("runs_per_game", "DESC"),
+            ),
+            (
+                ("경기당 평균 실점", "경기당 실점", "평균 실점"),
+                ("runs_allowed_per_game", "ASC"),
+            ),
+            (("득점력", "득점"), ("runs", "DESC")),
+            (("실점력", "실점"), ("runs_allowed", "ASC")),
+            (("출루율", "obp"), ("obp", "DESC")),
+            (("장타율", "slg"), ("slg", "DESC")),
+            (("ops",), ("ops", "DESC")),
+            (("타율", "avg"), ("avg", "DESC")),
+            (("평균자책", "평균 자책", "평균자책점", "방어율", "era"), ("era", "ASC")),
+        ]
+        for tokens, spec in specs:
+            if any(token in query_lower for token in tokens):
+                return spec
+        return None
+
+    def _resolve_team_form_spec(self, query_lower: str) -> Optional[tuple[str, int]]:
+        if any(
+            token in query_lower
+            for token in ["홈 승률", "원정 승률", "홈/원정", "홈 원정"]
+        ):
+            return "home_away", 10
+        if any(token in query_lower for token in ["연승", "연패"]):
+            return "streak", 10
+        if any(
+            token in query_lower
+            for token in ["최근 10경기", "최근10경기", "최근 열 경기"]
+        ):
+            return "recent", 10
+        if any(
+            token in query_lower
+            for token in ["최근 5경기", "최근5경기", "최근 다섯 경기"]
+        ):
+            return "recent", 5
+        if "최근" in query_lower and any(
+            token in query_lower for token in ["성적", "흐름", "승률", "승패", "페이스"]
+        ):
+            return "recent", 10
+        return None
+
     def _resolve_leaderboard_spec(self, query_lower: str) -> Optional[tuple[str, str]]:
         stat_specs = [
+            (("도루 성공률", "도루성공률"), ("batting", "sb_success_rate")),
+            (("장타율", "slg"), ("batting", "slg")),
+            (("출루율", "obp"), ("batting", "obp")),
+            (("득점", "runs"), ("batting", "runs")),
+            (("삼진이 많은 타자", "타자 삼진"), ("batting", "strikeouts")),
             (("평균자책", "방어율", "era"), ("pitching", "era")),
             (("whip",), ("pitching", "whip")),
             (("탈삼진", "삼진", "strikeout", "strikeouts"), ("pitching", "strikeouts")),
             (("다승", "wins", "승수"), ("pitching", "wins")),
             (("세이브", "saves", "save"), ("pitching", "saves")),
             (("홀드", "holds", "hold"), ("pitching", "holds")),
+            (
+                ("이닝 소화", "이닝", "innings pitched", "innings_pitched"),
+                ("pitching", "innings_pitched"),
+            ),
+            (
+                ("완투", "complete game", "complete_games"),
+                ("pitching", "complete_games"),
+            ),
+            (("완봉", "shutout", "shutouts"), ("pitching", "shutouts")),
+            (
+                ("피안타율", "avg_against", "batting average against"),
+                ("pitching", "avg_against"),
+            ),
             (("ops",), ("batting", "ops")),
             (("홈런", "home_runs", "home runs"), ("batting", "home_runs")),
             (("타점", "rbi"), ("batting", "rbi")),
@@ -1265,6 +1630,27 @@ class ChatIntentRouter:
             ):
                 continue
             return candidate1, candidate2
+        return None
+
+    def _extract_team_comparison_pair(self, query: str) -> Optional[tuple[str, str]]:
+        query_lower = query.lower()
+        if not any(token in query_lower for token in ("비교", "vs", "전력")):
+            return None
+
+        matches: list[tuple[int, int, str]] = []
+        for alias, team_code in TEAM_MAPPING.items():
+            alias_lower = alias.lower()
+            start = query_lower.find(alias_lower)
+            if start < 0:
+                continue
+            matches.append((start, -len(alias_lower), team_code))
+
+        ordered_codes: list[str] = []
+        for _start, _neg_len, team_code in sorted(matches):
+            if team_code not in ordered_codes:
+                ordered_codes.append(team_code)
+            if len(ordered_codes) >= 2:
+                return ordered_codes[0], ordered_codes[1]
         return None
 
     def _is_team_metric_query(

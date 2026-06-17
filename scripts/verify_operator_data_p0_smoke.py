@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "reports" / "operator_data_smoke"
 P0_DOMAINS = {"season_meta", "schedule_window", "game_day_lineup", "roster_news"}
@@ -26,10 +25,14 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -64,7 +67,9 @@ def _answerability(item: Mapping[str, Any]) -> dict[str, Any]:
     return _nested_dict(item.get("answerability"))
 
 
-def _result_index(results: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str], Mapping[str, Any]]:
+def _result_index(
+    results: Sequence[Mapping[str, Any]],
+) -> dict[tuple[str, str], Mapping[str, Any]]:
     index: dict[tuple[str, str], Mapping[str, Any]] = {}
     for item in results:
         question = _normalize_text(item.get("question"))
@@ -125,15 +130,29 @@ def _verify_recovered(
         )
 
     if item.get("ok") is not True:
-        add("smoke_item_failed", "Smoke item did not pass quality/answerability checks.")
+        add(
+            "smoke_item_failed", "Smoke item did not pass quality/answerability checks."
+        )
     if strategy != "operator_data_fast_path":
-        add("wrong_strategy", f"Expected operator_data_fast_path, got {strategy or 'missing'}.")
+        add(
+            "wrong_strategy",
+            f"Expected operator_data_fast_path, got {strategy or 'missing'}.",
+        )
     if source_tier != "operator_data":
-        add("wrong_source_tier", f"Expected source_tier=operator_data, got {source_tier or 'missing'}.")
+        add(
+            "wrong_source_tier",
+            f"Expected source_tier=operator_data, got {source_tier or 'missing'}.",
+        )
     if domain not in P0_DOMAINS or domain != expected_domain:
-        add("wrong_operator_data_domain", f"Expected domain={expected_domain}, got {domain or 'missing'}.")
+        add(
+            "wrong_operator_data_domain",
+            f"Expected domain={expected_domain}, got {domain or 'missing'}.",
+        )
     if "MANUAL_BASEBALL_DATA_REQUIRED" in answer:
-        add("manual_contract_returned", "Recovered expectation returned manual-data contract.")
+        add(
+            "manual_contract_returned",
+            "Recovered expectation returned manual-data contract.",
+        )
     return failures
 
 
@@ -174,7 +193,10 @@ def _verify_manual_control(
         )
 
     if strategy == "operator_data_fast_path":
-        add("unexpected_operator_fast_path", "Manual-control expectation used operator fast-path.")
+        add(
+            "unexpected_operator_fast_path",
+            "Manual-control expectation used operator fast-path.",
+        )
     if not (manual_contract or expected_non_answer or allowed_status):
         add(
             "manual_contract_not_preserved",
@@ -202,10 +224,11 @@ def verify_report(
     expectations = [
         item
         for item in raw_expectations
-        if isinstance(item, Mapping)
-        and _normalize_text(item.get("question"))
+        if isinstance(item, Mapping) and _normalize_text(item.get("question"))
     ]
-    expected_questions = {_normalize_text(item.get("question")) for item in expectations}
+    expected_questions = {
+        _normalize_text(item.get("question")) for item in expectations
+    }
     failures: list[dict[str, Any]] = []
 
     for question in sorted(result_questions - expected_questions):
@@ -241,11 +264,15 @@ def verify_report(
             verified_items += 1
             if kind == "recovered":
                 failures.extend(
-                    _verify_recovered(item=item, expectation=expectation, endpoint=endpoint)
+                    _verify_recovered(
+                        item=item, expectation=expectation, endpoint=endpoint
+                    )
                 )
             elif kind == "manual_control":
                 failures.extend(
-                    _verify_manual_control(item=item, expectation=expectation, endpoint=endpoint)
+                    _verify_manual_control(
+                        item=item, expectation=expectation, endpoint=endpoint
+                    )
                 )
             else:
                 failures.append(
@@ -274,7 +301,9 @@ def verify_report(
     }
 
 
-def run_verification(*, report_path: Path, expectations_path: Path, output_dir: Path) -> dict[str, Any]:
+def run_verification(
+    *, report_path: Path, expectations_path: Path, output_dir: Path
+) -> dict[str, Any]:
     report = verify_report(
         smoke_report=_read_json(report_path),
         expectations_payload=_read_json(expectations_path),
@@ -284,13 +313,23 @@ def run_verification(*, report_path: Path, expectations_path: Path, output_dir: 
     _write_csv(
         output_dir / "operator_data_p0_smoke_verification_failures.csv",
         report["failures"],
-        ["question", "endpoint", "expectation", "code", "message", "queue_id", "domain"],
+        [
+            "question",
+            "endpoint",
+            "expectation",
+            "code",
+            "message",
+            "queue_id",
+            "domain",
+        ],
     )
     return report
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify P0 operator-data smoke reports.")
+    parser = argparse.ArgumentParser(
+        description="Verify P0 operator-data smoke reports."
+    )
     parser.add_argument("--report", required=True)
     parser.add_argument("--expectations", required=True)
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))

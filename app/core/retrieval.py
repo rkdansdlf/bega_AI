@@ -66,7 +66,7 @@ def _detect_active_index(conn: psycopg.Connection) -> str:
     """pg_indexes에서 rag_chunks embedding 인덱스 타입을 감지합니다.
 
     결과를 모듈 레벨 변수에 캐싱하여 반복 조회를 방지합니다.
-    HNSW 인덱스(idx_rag_chunks_embedding_hnsw)가 있으면 "hnsw"를,
+    HNSW 인덱스(idx_rag_chunks_embedding_halfvec_hnsw 또는 vector HNSW)가 있으면 "hnsw"를,
     없으면 "ivfflat"을 반환합니다.
     """
     global _detected_vector_index

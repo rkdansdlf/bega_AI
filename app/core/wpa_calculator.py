@@ -1,6 +1,9 @@
 import os
 import json
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class WPACalculator:
@@ -26,7 +29,7 @@ class WPACalculator:
                 with open(self.matrix_path, "r", encoding="utf-8") as f:
                     return json.load(f)
         except Exception as e:
-            print(f"⚠️ Failed to load WE Matrix: {e}")
+            logger.warning("Failed to load WE Matrix: %s", e)
         return None
 
     def _initialize_base_matrix(self):

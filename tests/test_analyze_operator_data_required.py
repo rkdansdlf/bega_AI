@@ -88,12 +88,17 @@ def test_db_fast_path_candidate_without_basis_keeps_operator_data_verdict() -> N
         classification = analyzer.classify_question(question)
 
         assert classification.domain == "db_fast_path_candidate"
-        assert analyzer.final_verdict_for_question(
-            question, classification
-        )["final_verdict"] == "operator_data_required"
+        assert (
+            analyzer.final_verdict_for_question(question, classification)[
+                "final_verdict"
+            ]
+            == "operator_data_required"
+        )
 
 
-def test_build_taxonomy_dedupes_operator_questions_and_preserves_status_counts() -> None:
+def test_build_taxonomy_dedupes_operator_questions_and_preserves_status_counts() -> (
+    None
+):
     report = {
         "results": [
             {
@@ -141,7 +146,9 @@ def test_build_taxonomy_dedupes_operator_questions_and_preserves_status_counts()
     ]
 
 
-def test_build_taxonomy_counts_recovered_fast_paths_separately_from_manual_cases() -> None:
+def test_build_taxonomy_counts_recovered_fast_paths_separately_from_manual_cases() -> (
+    None
+):
     report = {
         "results": [
             {

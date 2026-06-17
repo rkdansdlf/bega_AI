@@ -710,8 +710,11 @@ class GameQueryTool:
                     g.game_date,
                     g.home_team,
                     g.away_team,
+                    g.home_score,
+                    g.away_score,
                     g.game_status,
-                    g.stadium
+                    g.stadium,
+                    g.winning_team
                 FROM game g
                 WHERE {" AND ".join(where_conditions)}
                 ORDER BY g.game_date, g.game_id;

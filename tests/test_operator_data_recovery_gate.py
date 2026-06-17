@@ -112,7 +112,9 @@ def _normalized_row(**overrides: Any) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
@@ -207,8 +209,12 @@ def test_gate_fails_on_non_p0_apply_target() -> None:
 def test_gate_fails_when_no_rows_are_apply_eligible() -> None:
     report = _report(
         validation_summary=_validation_summary(apply_eligible_count=0),
-        validation_apply_plan=[_apply_plan(apply_eligible="false", skip_reason="operator_status_pending")],
-        ingest_plan=[_ingest_plan(action="skipped", skip_reason="operator_status_pending")],
+        validation_apply_plan=[
+            _apply_plan(apply_eligible="false", skip_reason="operator_status_pending")
+        ],
+        ingest_plan=[
+            _ingest_plan(action="skipped", skip_reason="operator_status_pending")
+        ],
     )
 
     assert "no_apply_eligible_rows" in _codes(report)
@@ -220,7 +226,9 @@ def test_gate_reports_manual_required_rows_from_pending_p0_normalized_rows() -> 
         validation_apply_plan=[
             _apply_plan(apply_eligible="false", skip_reason="operator_status_pending")
         ],
-        ingest_plan=[_ingest_plan(action="skipped", skip_reason="operator_status_pending")],
+        ingest_plan=[
+            _ingest_plan(action="skipped", skip_reason="operator_status_pending")
+        ],
         validation_normalized_rows=[_normalized_row()],
     )
 
@@ -238,13 +246,17 @@ def test_gate_reports_manual_required_rows_from_pending_p0_normalized_rows() -> 
     assert "ODQ-0001" in handoff
 
 
-def test_gate_does_not_count_ready_rows_blocked_only_by_db_checks_as_manual_required() -> None:
+def test_gate_does_not_count_ready_rows_blocked_only_by_db_checks_as_manual_required() -> (
+    None
+):
     report = _report(
         validation_summary=_validation_summary(
             apply_eligible_count=0,
             db_checks={"skipped": True, "skip_reason": "POSTGRES_DB_URL is not set"},
         ),
-        validation_apply_plan=[_apply_plan(apply_eligible="false", skip_reason="db_checks_skipped")],
+        validation_apply_plan=[
+            _apply_plan(apply_eligible="false", skip_reason="db_checks_skipped")
+        ],
         ingest_plan=[_ingest_plan(action="skipped", skip_reason="db_checks_skipped")],
         validation_normalized_rows=[
             _normalized_row(
@@ -284,17 +296,21 @@ def test_run_gate_writes_manual_required_csv_and_handoff(tmp_path: Path) -> None
     _write_csv(
         validation_dir / "operator_data_apply_plan.csv",
         [_apply_plan(apply_eligible="false", skip_reason="operator_status_pending")],
-        gate.APPLY_PLAN_FIELDNAMES if hasattr(gate, "APPLY_PLAN_FIELDNAMES") else [
-            "queue_id",
-            "priority",
-            "domain",
-            "operator_status",
-            "validation_status",
-            "apply_eligible",
-            "apply_target",
-            "issue_count",
-            "skip_reason",
-        ],
+        (
+            gate.APPLY_PLAN_FIELDNAMES
+            if hasattr(gate, "APPLY_PLAN_FIELDNAMES")
+            else [
+                "queue_id",
+                "priority",
+                "domain",
+                "operator_status",
+                "validation_status",
+                "apply_eligible",
+                "apply_target",
+                "issue_count",
+                "skip_reason",
+            ]
+        ),
     )
     _write_csv(
         validation_dir / "operator_data_validation_issues.csv",
@@ -305,7 +321,10 @@ def test_run_gate_writes_manual_required_csv_and_handoff(tmp_path: Path) -> None
         json.dumps(normalized_row, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    _write_json(ingest_dir / "operator_data_ingest_summary.json", _ingest_summary(action_counts={"skipped": 1}))
+    _write_json(
+        ingest_dir / "operator_data_ingest_summary.json",
+        _ingest_summary(action_counts={"skipped": 1}),
+    )
     _write_csv(
         ingest_dir / "operator_data_ingest_plan.csv",
         [_ingest_plan(action="skipped", skip_reason="operator_status_pending")],

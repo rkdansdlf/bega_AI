@@ -400,8 +400,7 @@ async def _embed_gemini(
         raise EmbeddingError(
             f"Gemini 응답 수가 입력 수와 일치하지 않습니다. 입력={len(texts)}, 출력={len(results)}"
         )
-    _ensure_dimension(results, embed_dim)
-    return results
+    return _fit_embedding_dimensions(results, embed_dim)
 
 
 async def _embed_openai(
@@ -687,8 +686,7 @@ async def async_embed_texts(
     if provider == "hf":
         vectors = await _embed_hf(texts, settings, max_concurrency=max_concurrency)
         expected_dim = int(settings.embed_dim) if settings.embed_dim else None
-        _ensure_dimension(vectors, expected_dim)
-        return vectors
+        return _fit_embedding_dimensions(vectors, expected_dim)
     if provider == "gemini":
         return await _embed_gemini(texts, settings, max_concurrency=max_concurrency)
     if provider == "openai":
