@@ -56,7 +56,9 @@ def test_db_prereqs_pass_when_schema_and_conflict_target_exist(tmp_path: Path) -
     report = prereqs.build_db_prereq_report(cur=cursor, output_dir=tmp_path)
 
     assert report["summary"]["status"] == "pass"
-    assert report["summary"]["checked_table_count"] == len(prereqs.REQUIRED_TABLE_COLUMNS)
+    assert report["summary"]["checked_table_count"] == len(
+        prereqs.REQUIRED_TABLE_COLUMNS
+    )
     assert report["summary"]["missing_column_count"] == 0
     assert report["summary"]["lineup_conflict_target_exists"] is True
     assert report["issues"] == []
@@ -64,7 +66,9 @@ def test_db_prereqs_pass_when_schema_and_conflict_target_exist(tmp_path: Path) -
         query for query, _params in cursor.executed if "FROM pg_index" in query
     ]
     assert conflict_queries
-    assert "array_agg(att.attname::text ORDER BY keys.ordinality)" in conflict_queries[0]
+    assert (
+        "array_agg(att.attname::text ORDER BY keys.ordinality)" in conflict_queries[0]
+    )
 
 
 def test_db_prereqs_fail_on_missing_columns() -> None:
@@ -100,7 +104,9 @@ def test_run_check_without_db_url_writes_failure_outputs(tmp_path: Path) -> None
     assert (tmp_path / "db_prereq_issues.csv").exists()
     assert (tmp_path / "db_prereq_tables.csv").exists()
     assert (tmp_path / "db_prereq_handoff.md").exists()
-    payload = json.loads((tmp_path / "db_prereq_summary.json").read_text(encoding="utf-8"))
+    payload = json.loads(
+        (tmp_path / "db_prereq_summary.json").read_text(encoding="utf-8")
+    )
     issues = _read_csv(tmp_path / "db_prereq_issues.csv")
     assert payload["summary"]["status"] == "fail"
     assert issues[0]["code"] == "db_url_missing"
@@ -129,7 +135,10 @@ def test_backend_postgresql_migration_contains_operator_data_prereqs() -> None:
 
     sql = migration.read_text(encoding="utf-8").lower()
 
-    expected_created_tables = set(prereqs.REQUIRED_TABLE_COLUMNS) - {"game", "player_basic"}
+    expected_created_tables = set(prereqs.REQUIRED_TABLE_COLUMNS) - {
+        "game",
+        "player_basic",
+    }
     for table_name in expected_created_tables:
         assert f"create table if not exists {table_name}" in sql
     assert "ux_game_lineups_game_team_batting_order" in sql

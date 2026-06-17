@@ -167,6 +167,8 @@ CANONICAL_KBO_SOURCE_TABLES = {
     "game_pitching_stats",
     "game_summary",
 }
+DEFAULT_RAG_EMBEDDING_DIM = 256
+DEFAULT_RAG_EMBEDDING_VERSION = 2
 
 
 def normalize_content_for_hash(text: str) -> str:
@@ -337,7 +339,27 @@ def resolve_embedding_model(settings: Any) -> str:
 
 
 def resolve_embedding_version(settings: Any) -> int:
-    return max(1, int(getattr(settings, "rag_embedding_version", 1) or 1))
+    return max(
+        1,
+        int(
+            getattr(
+                settings,
+                "rag_embedding_version",
+                DEFAULT_RAG_EMBEDDING_VERSION,
+            )
+            or DEFAULT_RAG_EMBEDDING_VERSION
+        ),
+    )
+
+
+def resolve_embedding_dim(settings: Any) -> int:
+    return max(
+        1,
+        int(
+            getattr(settings, "embed_dim", DEFAULT_RAG_EMBEDDING_DIM)
+            or DEFAULT_RAG_EMBEDDING_DIM
+        ),
+    )
 
 
 def resolve_chunking_version(settings: Any) -> int:
@@ -521,9 +543,16 @@ def build_chunk_storage_fields(
             content_hash_value=hash_value,
         ),
         "embedding_model": embedding_model or resolve_embedding_model(settings),
-        "embedding_dim": embedding_dim
-        or int(getattr(settings, "embed_dim", 1536) or 1536),
-        "embedding_version": embedding_version or resolve_embedding_version(settings),
+        "embedding_dim": (
+            max(1, int(embedding_dim))
+            if embedding_dim is not None
+            else resolve_embedding_dim(settings)
+        ),
+        "embedding_version": (
+            max(1, int(embedding_version))
+            if embedding_version is not None
+            else resolve_embedding_version(settings)
+        ),
         "chunking_version": chunking_version or resolve_chunking_version(settings),
         "quality_score": infer_quality_score(
             resolved_source_type,

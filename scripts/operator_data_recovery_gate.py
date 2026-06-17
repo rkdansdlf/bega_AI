@@ -16,16 +16,24 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VALIDATION_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_validation" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_validation"
+    / "post_db_fast_path_docker_kbo500"
 )
 DEFAULT_INGEST_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_ingest" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_ingest"
+    / "post_db_fast_path_docker_kbo500"
 )
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_recovery_gate" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_recovery_gate"
+    / "post_db_fast_path_docker_kbo500"
 )
 P0_DOMAIN_ORDER = ("season_meta", "schedule_window", "game_day_lineup", "roster_news")
 P0_DOMAINS = set(P0_DOMAIN_ORDER)
@@ -97,10 +105,14 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -126,7 +138,11 @@ def _as_bool(value: Any) -> bool:
 
 def _field_list(value: Any) -> list[str]:
     if isinstance(value, str):
-        return [_normalize_text(field) for field in value.split("|") if _normalize_text(field)]
+        return [
+            _normalize_text(field)
+            for field in value.split("|")
+            if _normalize_text(field)
+        ]
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_normalize_text(field) for field in value if _normalize_text(field)]
     return []
@@ -137,9 +153,13 @@ def _payload(row: Mapping[str, Any]) -> Mapping[str, Any]:
     return payload if isinstance(payload, Mapping) else {}
 
 
-def _missing_required_fields(row: Mapping[str, Any], required_fields: Sequence[str]) -> list[str]:
+def _missing_required_fields(
+    row: Mapping[str, Any], required_fields: Sequence[str]
+) -> list[str]:
     payload = _payload(row)
-    return [field for field in required_fields if not _normalize_text(payload.get(field))]
+    return [
+        field for field in required_fields if not _normalize_text(payload.get(field))
+    ]
 
 
 def _manual_required_reason(row: Mapping[str, Any]) -> str:
@@ -253,7 +273,9 @@ def build_gate_report(
         )
 
     validation_errors = _as_int(
-        validation_issue_counts.get("error") if isinstance(validation_issue_counts, Mapping) else 0
+        validation_issue_counts.get("error")
+        if isinstance(validation_issue_counts, Mapping)
+        else 0
     )
     if validation_errors > 0:
         issues.append(
@@ -277,7 +299,9 @@ def build_gate_report(
         )
 
     ingest_errors = _as_int(
-        ingest_issue_counts.get("error") if isinstance(ingest_issue_counts, Mapping) else 0
+        ingest_issue_counts.get("error")
+        if isinstance(ingest_issue_counts, Mapping)
+        else 0
     )
     if ingest_errors > 0:
         issues.append(
@@ -323,7 +347,10 @@ def build_gate_report(
                     message="Only P0 domains may be apply-eligible in V1.",
                 )
             )
-        if _as_bool(row.get("apply_eligible")) and row.get("skip_reason") == "operator_data_v1_non_p0_domain":
+        if (
+            _as_bool(row.get("apply_eligible"))
+            and row.get("skip_reason") == "operator_data_v1_non_p0_domain"
+        ):
             issues.append(
                 _issue(
                     code="non_p0_policy_leaked_to_apply",
@@ -416,7 +443,9 @@ def _render_handoff(report: Mapping[str, Any]) -> str:
                 "",
             ]
         )
-        rows_by_domain: dict[str, list[str]] = {domain: [] for domain in P0_DOMAIN_ORDER}
+        rows_by_domain: dict[str, list[str]] = {
+            domain: [] for domain in P0_DOMAIN_ORDER
+        }
         for row in manual_required_rows:
             rows_by_domain.setdefault(_normalize_text(row.get("domain")), []).append(
                 _normalize_text(row.get("queue_id"))
@@ -447,12 +476,22 @@ def _render_handoff(report: Mapping[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def run_gate(*, validation_dir: Path, ingest_dir: Path, output_dir: Path) -> dict[str, Any]:
+def run_gate(
+    *, validation_dir: Path, ingest_dir: Path, output_dir: Path
+) -> dict[str, Any]:
     report = build_gate_report(
-        validation_summary=_read_json(validation_dir / "operator_data_validation_summary.json"),
-        validation_apply_plan=_read_csv(validation_dir / "operator_data_apply_plan.csv"),
-        validation_issues=_read_csv(validation_dir / "operator_data_validation_issues.csv"),
-        validation_normalized_rows=_read_jsonl(validation_dir / "operator_data_normalized_rows.jsonl"),
+        validation_summary=_read_json(
+            validation_dir / "operator_data_validation_summary.json"
+        ),
+        validation_apply_plan=_read_csv(
+            validation_dir / "operator_data_apply_plan.csv"
+        ),
+        validation_issues=_read_csv(
+            validation_dir / "operator_data_validation_issues.csv"
+        ),
+        validation_normalized_rows=_read_jsonl(
+            validation_dir / "operator_data_normalized_rows.jsonl"
+        ),
         ingest_summary=_read_json(ingest_dir / "operator_data_ingest_summary.json"),
         ingest_plan=_read_csv(ingest_dir / "operator_data_ingest_plan.csv"),
         ingest_issues=_read_csv(ingest_dir / "operator_data_ingest_issues.csv"),
@@ -476,7 +515,9 @@ def run_gate(*, validation_dir: Path, ingest_dir: Path, output_dir: Path) -> dic
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Gate operator-data recovery readiness.")
+    parser = argparse.ArgumentParser(
+        description="Gate operator-data recovery readiness."
+    )
     parser.add_argument("--validation-dir", default=str(DEFAULT_VALIDATION_DIR))
     parser.add_argument("--ingest-dir", default=str(DEFAULT_INGEST_DIR))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))

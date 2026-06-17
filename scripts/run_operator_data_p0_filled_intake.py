@@ -19,7 +19,6 @@ import shutil
 import sys
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -31,13 +30,15 @@ from scripts import operator_data_recovery_gate as recovery_gate
 from scripts import summarize_operator_data_p0_recovery_status as status_summary
 from scripts import validate_operator_data_handoff as validation
 
-
 DEFAULT_QUEUE_INPUT = audit.DEFAULT_QUEUE_INPUT
 DEFAULT_FIELDS_INPUT = audit.DEFAULT_FIELDS_INPUT
 DEFAULT_SOURCE_QUEUE_INPUT = audit.DEFAULT_SOURCE_QUEUE_INPUT
 DEFAULT_SOURCE_FIELDS_INPUT = audit.DEFAULT_SOURCE_FIELDS_INPUT
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_p0_filled_intake" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_p0_filled_intake"
+    / "post_db_fast_path_docker_kbo500"
 )
 STAGE_FIELDNAMES = ["name", "status", "code", "message", "output_dir"]
 
@@ -64,10 +65,14 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -157,13 +162,17 @@ def _snapshot_packet(
     shutil.copyfile(fields_path, snapshot_fields)
 
     domain_counts = Counter(_normalize_text(row.get("domain")) for row in queue_rows)
-    status_counts = Counter(_normalize_text(row.get("operator_status")) for row in queue_rows)
+    status_counts = Counter(
+        _normalize_text(row.get("operator_status")) for row in queue_rows
+    )
     non_p0_domains = sorted(set(domain_counts) - audit.P0_DOMAINS - {""})
     summary = {
         "generated_at_utc": _now_utc(),
         "total_queue_items": len(queue_rows),
         "total_field_rows": len(field_rows),
-        "domain_counts": {domain: domain_counts.get(domain, 0) for domain in audit.P0_DOMAIN_ORDER},
+        "domain_counts": {
+            domain: domain_counts.get(domain, 0) for domain in audit.P0_DOMAIN_ORDER
+        },
         "status_counts": dict(sorted(status_counts.items())),
         "non_p0_domains": non_p0_domains,
         "source_queue_path": str(source_queue_path),
@@ -197,7 +206,9 @@ def _snapshot_packet(
     return summary
 
 
-def _write_audit_stage_error(output_dir: Path, *, code: str, message: str) -> dict[str, Any]:
+def _write_audit_stage_error(
+    output_dir: Path, *, code: str, message: str
+) -> dict[str, Any]:
     report = {
         "summary": {
             "generated_at_utc": _now_utc(),
@@ -225,8 +236,14 @@ def _write_audit_stage_error(output_dir: Path, *, code: str, message: str) -> di
         "readiness_plan": [],
     }
     _write_json(output_dir / "p0_input_audit_summary.json", report)
-    _write_csv(output_dir / "p0_input_audit_issues.csv", report["issues"], audit.ISSUE_FIELDNAMES)
-    _write_csv(output_dir / "p0_input_readiness_plan.csv", [], audit.READINESS_FIELDNAMES)
+    _write_csv(
+        output_dir / "p0_input_audit_issues.csv",
+        report["issues"],
+        audit.ISSUE_FIELDNAMES,
+    )
+    _write_csv(
+        output_dir / "p0_input_readiness_plan.csv", [], audit.READINESS_FIELDNAMES
+    )
     (output_dir / "p0_input_audit_handoff.md").write_text(
         "# P0 Operator Input Packet Audit\n\n- Status: `fail`\n\n"
         f"## Issues\n\n- `{code}`: {message}\n",
@@ -235,7 +252,9 @@ def _write_audit_stage_error(output_dir: Path, *, code: str, message: str) -> di
     return report
 
 
-def _write_db_prereq_stage_error(output_dir: Path, *, code: str, message: str) -> dict[str, Any]:
+def _write_db_prereq_stage_error(
+    output_dir: Path, *, code: str, message: str
+) -> dict[str, Any]:
     report = {
         "summary": {
             "generated_at_utc": _now_utc(),
@@ -257,7 +276,11 @@ def _write_db_prereq_stage_error(output_dir: Path, *, code: str, message: str) -
         ],
     }
     _write_json(output_dir / "db_prereq_summary.json", report)
-    _write_csv(output_dir / "db_prereq_issues.csv", report["issues"], db_prereqs.ISSUE_FIELDNAMES)
+    _write_csv(
+        output_dir / "db_prereq_issues.csv",
+        report["issues"],
+        db_prereqs.ISSUE_FIELDNAMES,
+    )
     _write_csv(
         output_dir / "db_prereq_tables.csv",
         [],
@@ -278,7 +301,9 @@ def _write_db_prereq_stage_error(output_dir: Path, *, code: str, message: str) -
     return report
 
 
-def _write_validation_stage_error(output_dir: Path, *, code: str, message: str) -> dict[str, Any]:
+def _write_validation_stage_error(
+    output_dir: Path, *, code: str, message: str
+) -> dict[str, Any]:
     summary = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "status": "fail",
@@ -304,13 +329,30 @@ def _write_validation_stage_error(output_dir: Path, *, code: str, message: str) 
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "operator_data_validation_summary.json", summary)
-    _write_csv(output_dir / "operator_data_validation_issues.csv", [issue], validation.ISSUE_FIELDNAMES)
-    (output_dir / "operator_data_normalized_rows.jsonl").write_text("", encoding="utf-8")
-    _write_csv(output_dir / "operator_data_apply_plan.csv", [], validation.APPLY_PLAN_FIELDNAMES)
-    return {"summary": summary, "issues": [issue], "normalized_rows": [], "apply_plan_rows": []}
+    _write_csv(
+        output_dir / "operator_data_validation_issues.csv",
+        [issue],
+        validation.ISSUE_FIELDNAMES,
+    )
+    (output_dir / "operator_data_normalized_rows.jsonl").write_text(
+        "", encoding="utf-8"
+    )
+    _write_csv(
+        output_dir / "operator_data_apply_plan.csv",
+        [],
+        validation.APPLY_PLAN_FIELDNAMES,
+    )
+    return {
+        "summary": summary,
+        "issues": [issue],
+        "normalized_rows": [],
+        "apply_plan_rows": [],
+    }
 
 
-def _write_ingest_stage_error(output_dir: Path, *, code: str, message: str) -> dict[str, Any]:
+def _write_ingest_stage_error(
+    output_dir: Path, *, code: str, message: str
+) -> dict[str, Any]:
     summary = {
         "generated_at_utc": _now_utc(),
         "dry_run": True,
@@ -323,16 +365,28 @@ def _write_ingest_stage_error(output_dir: Path, *, code: str, message: str) -> d
         "domain_counts": {},
         "starter_plan_count": 0,
     }
-    issue = {"queue_id": "", "domain": "", "severity": "error", "code": code, "message": message}
+    issue = {
+        "queue_id": "",
+        "domain": "",
+        "severity": "error",
+        "code": code,
+        "message": message,
+    }
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "operator_data_ingest_summary.json", summary)
     _write_csv(output_dir / "operator_data_ingest_plan.csv", [], ingest.PLAN_FIELDNAMES)
-    _write_csv(output_dir / "operator_data_ingest_issues.csv", [issue], ingest.ISSUE_FIELDNAMES)
-    _write_csv(output_dir / "operator_data_starter_plan.csv", [], ingest.STARTER_FIELDNAMES)
+    _write_csv(
+        output_dir / "operator_data_ingest_issues.csv", [issue], ingest.ISSUE_FIELDNAMES
+    )
+    _write_csv(
+        output_dir / "operator_data_starter_plan.csv", [], ingest.STARTER_FIELDNAMES
+    )
     return {"summary": summary, "plans": [], "issues": [issue], "starter_plan_rows": []}
 
 
-def _write_gate_stage_error(output_dir: Path, *, code: str, message: str) -> dict[str, Any]:
+def _write_gate_stage_error(
+    output_dir: Path, *, code: str, message: str
+) -> dict[str, Any]:
     report = {
         "summary": {
             "generated_at_utc": _now_utc(),
@@ -358,7 +412,11 @@ def _write_gate_stage_error(output_dir: Path, *, code: str, message: str) -> dic
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "summary.json", report)
-    _write_csv(output_dir / "issues.csv", report["issues"], ["severity", "code", "message", "source", "queue_id", "domain"])
+    _write_csv(
+        output_dir / "issues.csv",
+        report["issues"],
+        ["severity", "code", "message", "source", "queue_id", "domain"],
+    )
     (output_dir / "handoff.md").write_text(
         "# Operator Data Recovery Gate\n\n- Status: `fail`\n\n"
         f"## Blocking Issues\n\n- `{code}`: {message}\n",
@@ -420,15 +478,33 @@ def _run_ingest_stage(
             conn.close()
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "operator_data_ingest_summary.json", report["summary"])
-    _write_csv(output_dir / "operator_data_ingest_plan.csv", report["plans"], ingest.PLAN_FIELDNAMES)
-    _write_csv(output_dir / "operator_data_ingest_issues.csv", report["issues"], ingest.ISSUE_FIELDNAMES)
-    _write_csv(output_dir / "operator_data_starter_plan.csv", report["starter_plan_rows"], ingest.STARTER_FIELDNAMES)
+    _write_csv(
+        output_dir / "operator_data_ingest_plan.csv",
+        report["plans"],
+        ingest.PLAN_FIELDNAMES,
+    )
+    _write_csv(
+        output_dir / "operator_data_ingest_issues.csv",
+        report["issues"],
+        ingest.ISSUE_FIELDNAMES,
+    )
+    _write_csv(
+        output_dir / "operator_data_starter_plan.csv",
+        report["starter_plan_rows"],
+        ingest.STARTER_FIELDNAMES,
+    )
     return report
 
 
 def _summary_status(payload: Mapping[str, Any]) -> str:
-    summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else payload
-    return _normalize_text(summary.get("status") if isinstance(summary, Mapping) else "")
+    summary = (
+        payload.get("summary")
+        if isinstance(payload.get("summary"), Mapping)
+        else payload
+    )
+    return _normalize_text(
+        summary.get("status") if isinstance(summary, Mapping) else ""
+    )
 
 
 def _intake_handoff(report: Mapping[str, Any]) -> str:
@@ -467,11 +543,12 @@ def _intake_handoff(report: Mapping[str, Any]) -> str:
     if int(final.get("manual_required_count") or 0) > 0:
         domain_counts = final.get("manual_required_domain_counts") or {}
         reason_counts = final.get("manual_required_skip_reason_counts") or {}
-        format_counts = lambda counts: ", ".join(
-            f"{key}={value}"
-            for key, value in counts.items()
-            if int(value or 0) > 0
-        ) or "none"
+        format_counts = (
+            lambda counts: ", ".join(
+                f"{key}={value}" for key, value in counts.items() if int(value or 0) > 0
+            )
+            or "none"
+        )
         lines.extend(
             [
                 "",
@@ -498,8 +575,12 @@ def _intake_handoff(report: Mapping[str, Any]) -> str:
 def _write_intake_report(output_dir: Path, report: Mapping[str, Any]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "intake_summary.json", report)
-    _write_csv(output_dir / "intake_stages.csv", report.get("stages", []), STAGE_FIELDNAMES)
-    (output_dir / "intake_handoff.md").write_text(_intake_handoff(report), encoding="utf-8")
+    _write_csv(
+        output_dir / "intake_stages.csv", report.get("stages", []), STAGE_FIELDNAMES
+    )
+    (output_dir / "intake_handoff.md").write_text(
+        _intake_handoff(report), encoding="utf-8"
+    )
 
 
 def _write_fatal_intake_report(
@@ -626,7 +707,9 @@ def run_intake(
         )
     except Exception as exc:
         message = f"DB prerequisite stage failed ({_safe_exception(exc)})."
-        _write_db_prereq_stage_error(db_prereq_dir, code="db_prereq_stage_error", message=message)
+        _write_db_prereq_stage_error(
+            db_prereq_dir, code="db_prereq_stage_error", message=message
+        )
         stages.append(
             _stage_result(
                 name="db_prereqs",
@@ -654,7 +737,9 @@ def run_intake(
         )
     except Exception as exc:
         message = f"Validation stage failed ({_safe_exception(exc)})."
-        _write_validation_stage_error(validation_dir, code="validation_stage_error", message=message)
+        _write_validation_stage_error(
+            validation_dir, code="validation_stage_error", message=message
+        )
         stages.append(
             _stage_result(
                 name="validation",
@@ -674,14 +759,20 @@ def run_intake(
         stages.append(
             _stage_result_from_report(
                 name="ingest_dry_run",
-                status="fail" if (ingest_report["summary"]["issue_counts"]["error"] > 0) else "pass",
+                status=(
+                    "fail"
+                    if (ingest_report["summary"]["issue_counts"]["error"] > 0)
+                    else "pass"
+                ),
                 output_dir=ingest_dir,
                 report=ingest_report,
             )
         )
     except Exception as exc:
         message = f"Ingest dry-run stage failed ({_safe_exception(exc)})."
-        _write_ingest_stage_error(ingest_dir, code="ingest_stage_error", message=message)
+        _write_ingest_stage_error(
+            ingest_dir, code="ingest_stage_error", message=message
+        )
         stages.append(
             _stage_result(
                 name="ingest_dry_run",
@@ -782,7 +873,9 @@ def run_intake(
     final_summary = status_report.get("summary") or {}
     final_status = _normalize_text(final_summary.get("status"))
     exit_code = 0 if final_status == "ready_for_controlled_apply" else 1
-    failed_stage_count = sum(1 for stage in stages if stage.get("status") in {"fail", "fatal"})
+    failed_stage_count = sum(
+        1 for stage in stages if stage.get("status") in {"fail", "fatal"}
+    )
     nonpassing_stage_count = sum(1 for stage in stages if stage.get("status") != "pass")
     intake_report = {
         "summary": {
@@ -806,12 +899,16 @@ def run_intake(
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run read-only P0 filled intake pipeline.")
+    parser = argparse.ArgumentParser(
+        description="Run read-only P0 filled intake pipeline."
+    )
     parser.add_argument("--queue", default=str(DEFAULT_QUEUE_INPUT))
     parser.add_argument("--fields", default=str(DEFAULT_FIELDS_INPUT))
     parser.add_argument("--source-queue", default=str(DEFAULT_SOURCE_QUEUE_INPUT))
     parser.add_argument("--source-fields", default=str(DEFAULT_SOURCE_FIELDS_INPUT))
-    parser.add_argument("--db-url", default="", help="PostgreSQL URL. Defaults to POSTGRES_DB_URL.")
+    parser.add_argument(
+        "--db-url", default="", help="PostgreSQL URL. Defaults to POSTGRES_DB_URL."
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument(
         "--allow-empty-ready",
@@ -836,7 +933,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             allow_empty_ready=bool(args.allow_empty_ready),
         )
     except (FileNotFoundError, OSError, ValueError) as exc:
-        message = f"Could not read required input or write output ({_safe_exception(exc)})."
+        message = (
+            f"Could not read required input or write output ({_safe_exception(exc)})."
+        )
         report = _write_fatal_intake_report(
             output_dir=output_dir,
             code="intake_io_error",

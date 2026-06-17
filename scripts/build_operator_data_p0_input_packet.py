@@ -15,16 +15,22 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_QUEUE_INPUT = (
-    PROJECT_ROOT / "reports" / "operator_data_handoff_queue_post_db_fast_path_docker_kbo500.csv"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_handoff_queue_post_db_fast_path_docker_kbo500.csv"
 )
 DEFAULT_FIELDS_INPUT = (
-    PROJECT_ROOT / "reports" / "operator_data_handoff_fields_post_db_fast_path_docker_kbo500.csv"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_handoff_fields_post_db_fast_path_docker_kbo500.csv"
 )
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_operator_packet" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_operator_packet"
+    / "post_db_fast_path_docker_kbo500"
 )
 P0_DOMAIN_ORDER = ("season_meta", "schedule_window", "game_day_lineup", "roster_news")
 P0_DOMAINS = set(P0_DOMAIN_ORDER)
@@ -67,7 +73,9 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         return list(reader.fieldnames or []), [dict(row) for row in reader]
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fields: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fields: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fields))
@@ -78,7 +86,9 @@ def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fields: Sequence[s
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _validate_headers(
@@ -87,9 +97,13 @@ def _validate_headers(
     field_fields: Sequence[str],
 ) -> None:
     if list(queue_fields) != QUEUE_FIELDNAMES:
-        raise ValueError(f"queue CSV header must match {QUEUE_FIELDNAMES}; got {list(queue_fields)}")
+        raise ValueError(
+            f"queue CSV header must match {QUEUE_FIELDNAMES}; got {list(queue_fields)}"
+        )
     if list(field_fields) != FIELDS_FIELDNAMES:
-        raise ValueError(f"fields CSV header must match {FIELDS_FIELDNAMES}; got {list(field_fields)}")
+        raise ValueError(
+            f"fields CSV header must match {FIELDS_FIELDNAMES}; got {list(field_fields)}"
+        )
 
 
 def _select_p0_rows(
@@ -121,12 +135,16 @@ def _build_summary(
     generated_files: Mapping[str, str],
 ) -> dict[str, Any]:
     domain_counts = Counter(_normalize_text(row.get("domain")) for row in queue_rows)
-    status_counts = Counter(_normalize_text(row.get("operator_status")) for row in queue_rows)
+    status_counts = Counter(
+        _normalize_text(row.get("operator_status")) for row in queue_rows
+    )
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "total_queue_items": len(queue_rows),
         "total_field_rows": len(field_rows),
-        "domain_counts": {domain: domain_counts.get(domain, 0) for domain in P0_DOMAIN_ORDER},
+        "domain_counts": {
+            domain: domain_counts.get(domain, 0) for domain in P0_DOMAIN_ORDER
+        },
         "status_counts": dict(sorted(status_counts.items())),
         "source_queue_path": str(queue_path),
         "source_fields_path": str(fields_path),
@@ -235,7 +253,9 @@ def build_packet(
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a P0 operator-data input packet.")
+    parser = argparse.ArgumentParser(
+        description="Build a P0 operator-data input packet."
+    )
     parser.add_argument("--queue", default=str(DEFAULT_QUEUE_INPUT))
     parser.add_argument("--fields", default=str(DEFAULT_FIELDS_INPUT))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))

@@ -14,7 +14,7 @@ import logging
 import re
 import random
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import psycopg
@@ -293,6 +293,10 @@ _STATIC_EXPLAINER_ANSWERS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
         "병살은 한 번의 플레이에서 아웃 두 개가 동시에 나오는 상황입니다. 주자가 있는 공격 기회가 한순간에 사라지기 때문에 흐름을 크게 끊는 결과가 됩니다.",
     ),
     (
+        ("도루 성공률", "도루성공률"),
+        "도루 성공률은 도루를 시도한 횟수 중 성공한 비율입니다. 보통 도루 / (도루 + 도루 실패)로 계산하며, 값이 높을수록 주루 시도가 아웃 손실 없이 득점권 진입으로 이어졌다는 뜻입니다.",
+    ),
+    (
         ("도루",),
         "도루는 타자의 타격 없이 주자가 다음 베이스를 훔치듯 진루하는 플레이입니다. 성공하면 득점권 기회를 만들 수 있지만 실패하면 아웃 하나를 잃는 고위험 선택입니다.",
     ),
@@ -492,6 +496,96 @@ _SCHEDULE_MANUAL_DATA_TOKENS = (
     "경기 알림",
     "알림 설정",
 )
+_FUTURE_EVENT_DEFINITIONS: Tuple[Dict[str, Any], ...] = (
+    {
+        "event_key": "opening_day",
+        "label": "개막 이벤트",
+        "tokens": ("개막일", "개막전", "정규시즌 개막"),
+        "pending_until": (4, 1),
+        "post_event_scope": "개막전 결과, 선발, 관중 수처럼 경기 후 확정되는 정보",
+    },
+    {
+        "event_key": "all_star",
+        "label": "올스타전",
+        "tokens": (
+            "올스타전",
+            "올스타 브레이크",
+            "올스타 mvp",
+            "올스타전 mvp",
+            "올스타",
+        ),
+        "pending_until": (8, 1),
+        "post_event_scope": "올스타전 결과, MVP, 하이라이트처럼 행사 후 확정되는 정보",
+    },
+    {
+        "event_key": "season_end",
+        "label": "정규시즌 종료",
+        "tokens": ("시즌 종료", "정규시즌 종료", "최종 순위"),
+        "pending_until": (11, 1),
+        "post_event_scope": "최종 순위와 시즌 결산처럼 시즌 종료 후 확정되는 정보",
+    },
+    {
+        "event_key": "postseason",
+        "label": "포스트시즌",
+        "tokens": (
+            "포스트시즌",
+            "가을야구",
+            "와일드카드",
+            "준플레이오프",
+            "플레이오프",
+            "한국시리즈",
+        ),
+        "pending_until": (11, 30),
+        "post_event_scope": "포스트시즌 대진, 시리즈 결과, 한국시리즈 우승팀처럼 진행 후 확정되는 정보",
+    },
+    {
+        "event_key": "season_awards",
+        "label": "시즌 수상",
+        "tokens": ("mvp", "엠브이피", "골든글러브", "신인왕", "수상자", "수상"),
+        "pending_until": (12, 31),
+        "post_event_scope": "MVP, 골든글러브, 신인왕처럼 시즌 종료 후 확정되는 수상 정보",
+    },
+)
+_FUTURE_EVENT_EXPLAINER_TOKENS = (
+    "어떻게",
+    "몇 경기",
+    "몇경기",
+    "규정",
+    "룰",
+    "뜻",
+    "의미",
+    "정의",
+    "설명",
+    "방식",
+    "구조",
+    "결정돼",
+    "경험",
+)
+_FUTURE_EVENT_STATUS_TOKENS = (
+    "언제",
+    "일정",
+    "날짜",
+    "개최",
+    "열려",
+    "어디서",
+    "장소",
+    "결과",
+    "mvp",
+    "엠브이피",
+    "수상",
+    "수상자",
+    "신인왕",
+    "골든글러브",
+    "우승팀",
+    "진출 후보",
+    "후보",
+    "가능성",
+    "유리한 팀",
+    "종료",
+    "브레이크",
+    "끝나",
+    "누구",
+)
 _FAN_EXPERIENCE_MANUAL_DATA_TOKENS = (
     "야구장 티켓",
     "티켓 예매",
@@ -589,6 +683,10 @@ _ROSTER_EVALUATION_MANUAL_DATA_TOKENS = (
     "반등할 팀",
     "추락 가능성",
     "단기전에서 강한 팀",
+    "숫자 밖",
+    "리더십",
+    "팀 상징성",
+    "상징성까지",
     "두 선수 성적 비교",
     "두 팀 전력 비교",
     "lg와 kt를 비교",
@@ -777,9 +875,278 @@ def _manual_baseball_data_required_answer(query: str) -> str:
     )
 
 
+def _extract_query_year(query: str) -> Optional[int]:
+    match = re.search(r"\b(20\d{2})\b", query)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _is_event_pending_for_date(
+    *,
+    event_year: int,
+    pending_until: Tuple[int, int],
+    today: date,
+) -> bool:
+    if event_year > today.year:
+        return True
+    if event_year < today.year:
+        return False
+    pending_month, pending_day = pending_until
+    return today < date(event_year, pending_month, pending_day)
+
+
+def _has_explicit_single_game_date(query: str) -> bool:
+    query_lower = query.lower()
+    if "부터" in query_lower or "까지" in query_lower:
+        return False
+    if re.search(r"\b20\d{2}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일\b", query_lower):
+        return True
+    return bool(re.search(r"\b20\d{2}-\d{1,2}-\d{1,2}\b", query_lower))
+
+
+def _has_explicit_game_date_range(query: str) -> bool:
+    query_lower = query.lower()
+    if not ("부터" in query_lower or "까지" in query_lower or "~" in query_lower):
+        return False
+    if re.search(
+        r"\b20\d{2}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일.*\d{1,2}\s*월\s*\d{1,2}\s*일",
+        query_lower,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b20\d{2}-\d{1,2}-\d{1,2}\b.*\b20\d{2}-\d{1,2}-\d{1,2}\b",
+            query_lower,
+        )
+    )
+
+
+def _is_db_answerable_schedule_query(query_lower: str) -> bool:
+    has_supported_date = _has_explicit_single_game_date(
+        query_lower
+    ) or _has_explicit_game_date_range(query_lower)
+    if not has_supported_date:
+        return False
+    if any(
+        token in query_lower
+        for token in (
+            "중계",
+            "라디오",
+            "하이라이트",
+            "다시보기",
+            "스코어보드",
+            "문자중계",
+            "알림",
+        )
+    ):
+        return False
+    return any(
+        token in query_lower
+        for token in (
+            "경기 일정",
+            "경기일정",
+            "경기표",
+            "일정 알려",
+            "일정 보여",
+        )
+    )
+
+
+def _is_db_answerable_rank_lookup_query(query_lower: str) -> bool:
+    return any(
+        token in query_lower
+        for token in (
+            "1위 팀",
+            "1위팀",
+            "최하위 팀",
+            "최하위팀",
+        )
+    )
+
+
+def _is_db_answerable_standings_table_query(query_lower: str) -> bool:
+    return any(
+        token in query_lower
+        for token in (
+            "현재 kbo 순위",
+            "kbo 순위",
+            "순위표",
+            "전체 순위",
+            "팀별 승패",
+            "팀별 승률",
+            "팀별 승차",
+        )
+    ) and not any(token in query_lower for token in ("뉴스", "이슈", "소식", "가능성", "후보"))
+
+
+def _is_doru_success_rate_explainer_query(query_lower: str) -> bool:
+    return "도루 성공률" in query_lower and any(
+        token in query_lower for token in ("어떻게", "계산", "뜻", "뭐야", "보는", "봐")
+    )
+
+
+def _is_db_answerable_leaderboard_or_team_form_query(query_lower: str) -> bool:
+    query_compact = re.sub(r"[\s?.!,~]+", "", query_lower)
+    if _is_doru_success_rate_explainer_query(query_lower):
+        return False
+    if any(
+        token in query_lower
+        for token in (
+            "실책이 적은 선수",
+            "홈런이 많은 시즌",
+            "도루가 많은 시즌",
+            "포수 도루저지율",
+            "구종별 성적",
+            "타구 속도",
+            "존별 타격",
+            "라인업 상성",
+            "후보",
+            "가능성",
+            "뉴스",
+            "이슈",
+            "소식",
+        )
+    ):
+        return False
+    if any(token in query_compact for token in _TEAM_PAIR_COMPARISON_COMPACT_TOKENS):
+        return True
+
+    player_leader_tokens = (
+        "장타율 1위",
+        "ops 1위",
+        "도루 1위",
+        "득점 1위",
+        "삼진이 많은 타자",
+        "완투",
+        "완봉",
+        "이닝 소화",
+        "피안타율",
+        "도루 성공률",
+    )
+    team_metric_tokens = (
+        "도루가 많은 팀",
+        "실책이 적은 팀",
+        "팀별 홈런",
+        "팀별 도루",
+        "팀별 실책",
+        "팀별 타율",
+        "팀별 출루율",
+        "팀별 장타율",
+        "팀별 ops",
+        "팀별 era",
+        "팀별 경기당 평균 득점",
+        "팀별 경기당 평균 실점",
+        "팀별 득점력",
+        "팀별 실점력",
+        "공격과 수비",
+        "수비가 좋은 팀",
+        "수비 좋은 팀",
+        "내야 수비가 좋은 팀",
+        "외야 수비가 좋은 팀",
+        "병살타가 많은 팀",
+        "불펜 era",
+        "불펜 평균자책",
+        "불펜 비교",
+        "불펜 소모",
+        "불펜이 좋은 팀",
+        "선발진 비교",
+        "선발진이 좋은 팀",
+        "기복이 큰 팀",
+        "타선 비교",
+        "수비 비교",
+        "주루 비교",
+    )
+    team_form_tokens = (
+        "최근 10경기",
+        "최근 5경기",
+        "최근 흐름 비교",
+        "홈 승률",
+        "원정 승률",
+        "연승 중인 팀",
+        "연패 중인 팀",
+    )
+    return (
+        any(token in query_lower for token in player_leader_tokens)
+        or any(token in query_lower for token in team_metric_tokens)
+        or any(token in query_lower for token in team_form_tokens)
+    )
+
+
+def _build_future_event_pending_result(
+    query: str,
+    *,
+    today: Optional[date] = None,
+) -> Optional[Dict[str, Any]]:
+    query_lower = query.lower()
+    if "올스타급" in query_lower:
+        return None
+
+    today = today or datetime.now().date()
+    query_year = _extract_query_year(query)
+    event_year = query_year or today.year
+
+    for definition in _FUTURE_EVENT_DEFINITIONS:
+        if not any(token in query_lower for token in definition["tokens"]):
+            continue
+        has_status_token = any(
+            token in query_lower for token in _FUTURE_EVENT_STATUS_TOKENS
+        )
+        has_explainer_token = any(
+            token in query_lower for token in _FUTURE_EVENT_EXPLAINER_TOKENS
+        )
+        if has_explainer_token and not has_status_token:
+            return None
+        if not has_status_token:
+            return None
+        if (
+            definition["event_key"] == "season_awards"
+            and "경기" in query_lower
+            and query_year is None
+            and "시즌" not in query_lower
+        ):
+            return None
+        if not _is_event_pending_for_date(
+            event_year=event_year,
+            pending_until=definition["pending_until"],
+            today=today,
+        ):
+            return None
+
+        answer = (
+            f"{event_year}년 {definition['label']}은 기준일({today.isoformat()}) 현재 "
+            f"아직 진행 전인 이벤트로 분류합니다. "
+            f"따라서 {definition['post_event_scope']}는 아직 확정 전입니다. "
+            "개최일이나 장소처럼 사전 일정값을 답해야 하는 경우에는 내부 시즌 일정 데이터가 들어온 뒤 그 값을 기준으로 답변해야 합니다."
+        )
+        return _build_static_kbo_result(
+            answer,
+            intent="future_event_status",
+            strategy="future_event_pending",
+            grounding_mode="future_event_status",
+            source_tier="system_clock_and_internal_policy",
+            fallback_reason=None,
+        )
+
+    return None
+
+
 def _is_live_manual_data_query(query: str) -> bool:
     query_lower = query.lower()
     query_compact = re.sub(r"[\s?.!,~]+", "", query_lower)
+    if _is_db_answerable_schedule_query(query_lower):
+        return False
+    if _is_db_answerable_rank_lookup_query(query_lower):
+        return False
+    if _is_db_answerable_standings_table_query(query_lower):
+        return False
+    if _is_db_answerable_leaderboard_or_team_form_query(query_lower):
+        return False
+    if _is_doru_success_rate_explainer_query(query_lower):
+        return False
     if any(token in query_lower for token in _REGULATION_MANUAL_DATA_TOKENS):
         return True
     if any(token in query_lower for token in _LEADERBOARD_MANUAL_DATA_TOKENS):
@@ -1022,6 +1389,35 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
     if chatbot_meta_result is not None:
         return chatbot_meta_result
 
+    future_event_result = _build_future_event_pending_result(query)
+    if future_event_result is not None:
+        return future_event_result
+
+    if any(token in query_lower for token in ("이 팀", "우리 팀", "해당 팀")):
+        return _build_static_kbo_result(
+            "어떤 팀 기준인지 팀명을 같이 알려주세요. 예: LG, KIA, KT처럼 팀명을 붙이면 바로 DB 기준으로 조회하겠습니다.",
+            intent="clarification_required",
+            strategy="clarification_required",
+            grounding_mode="clarification_required",
+            source_tier="none",
+            fallback_reason="clarification_required",
+        )
+
+    if any(
+        token in query_lower for token in ("두 선수", "선수 비교")
+    ) and not re.search(
+        r"[가-힣A-Za-z]{2,}\s*(?:과|와|vs|VS)\s*[가-힣A-Za-z]{2,}",
+        query,
+    ):
+        return _build_static_kbo_result(
+            "비교할 두 선수 이름을 같이 알려주세요. 예: 김도영과 문보경처럼 두 이름이 필요합니다.",
+            intent="clarification_required",
+            strategy="clarification_required",
+            grounding_mode="clarification_required",
+            source_tier="none",
+            fallback_reason="clarification_required",
+        )
+
     if _is_live_manual_data_query(query):
         return _build_static_kbo_result(
             _manual_baseball_data_required_answer(query),
@@ -1031,6 +1427,9 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
             source_tier="none",
             fallback_reason="manual_baseball_data_required",
         )
+
+    if _is_db_answerable_leaderboard_or_team_form_query(query_lower):
+        return None
 
     if "홈런" in query_lower and any(
         token in query_lower
@@ -1053,6 +1452,7 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
             return _build_static_kbo_result(
                 answer,
                 intent="baseball_explainer",
+                strategy="static_baseball_explainer",
                 grounding_mode="static_baseball_explainer",
             )
 

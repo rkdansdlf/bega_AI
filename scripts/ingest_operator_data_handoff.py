@@ -42,7 +42,10 @@ DEFAULT_NORMALIZED_INPUT = (
     / "operator_data_normalized_rows.jsonl"
 )
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_ingest" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_ingest"
+    / "post_db_fast_path_docker_kbo500"
 )
 CONFIDENCE_MINIMUM = 0.70
 STARTER_POSITIONS = {"P", "SP", "투수", "선발", "선발투수"}
@@ -187,7 +190,9 @@ def build_ingest_report(
     allow_overwrite: bool = False,
     domains: Sequence[str] = P0_DOMAINS,
 ) -> Dict[str, Any]:
-    selected_domains = [str(domain).strip() for domain in domains if str(domain).strip()]
+    selected_domains = [
+        str(domain).strip() for domain in domains if str(domain).strip()
+    ]
     selected_domain_set = set(selected_domains)
     plans: List[Dict[str, Any]] = []
     issues: List[IngestIssue] = []
@@ -292,7 +297,10 @@ def build_ingest_report(
                             )
                         )
                     else:
-                        resolved_lineup_row = {**dict(row), "_resolved_player_id": player_id}
+                        resolved_lineup_row = {
+                            **dict(row),
+                            "_resolved_player_id": player_id,
+                        }
                         if game_lineup_columns is None:
                             game_lineup_columns = _columns_for_table(
                                 cur,
@@ -361,7 +369,8 @@ def _row_is_apply_candidate(row: Mapping[str, Any]) -> bool:
     return (
         bool(row.get("apply_eligible"))
         and _normalize_text(row.get("validation_status")) == "pass"
-        and _normalize_text(row.get("operator_status")) in {"ready_for_validation", "validated"}
+        and _normalize_text(row.get("operator_status"))
+        in {"ready_for_validation", "validated"}
         and source.get("is_verified") is True
         and _as_float(source.get("confidence")) is not None
         and float(source.get("confidence")) >= CONFIDENCE_MINIMUM
@@ -433,7 +442,9 @@ def _fetch_existing_payload_hash(cur: Any, queue_id: str) -> str:
     row = cur.fetchone()
     if not row:
         return ""
-    return _normalize_text(row.get("payload_hash") if isinstance(row, Mapping) else row[0])
+    return _normalize_text(
+        row.get("payload_hash") if isinstance(row, Mapping) else row[0]
+    )
 
 
 def _lookup_player_id(cur: Any, row: Mapping[str, Any]) -> str:
@@ -468,7 +479,11 @@ def _table_columns(cur: Any, table_name: str) -> set[str]:
     )
     columns = set()
     for row in list(cur.fetchall() or []):
-        columns.add(_normalize_text(row.get("column_name") if isinstance(row, Mapping) else row[0]))
+        columns.add(
+            _normalize_text(
+                row.get("column_name") if isinstance(row, Mapping) else row[0]
+            )
+        )
     return columns
 
 
@@ -921,7 +936,9 @@ def _as_int(value: Any) -> Optional[int]:
         return None
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -948,7 +965,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         description="Ingest verified operator-data handoff normalized rows."
     )
     parser.add_argument("--normalized", default=str(DEFAULT_NORMALIZED_INPUT))
-    parser.add_argument("--apply", action="store_true", help="Persist rows. Default is dry-run.")
+    parser.add_argument(
+        "--apply", action="store_true", help="Persist rows. Default is dry-run."
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -979,7 +998,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     rows = load_normalized_rows(Path(args.normalized))
-    domains = [item.strip() for item in str(args.domains or "").split(",") if item.strip()]
+    domains = [
+        item.strip() for item in str(args.domains or "").split(",") if item.strip()
+    ]
     eligible_exists = any(
         _normalize_text(row.get("domain")) in set(domains)
         and _row_is_apply_candidate(row)
@@ -1019,8 +1040,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     output_dir = Path(args.output_dir)
     _write_json(output_dir / "operator_data_ingest_summary.json", report["summary"])
-    _write_csv(output_dir / "operator_data_ingest_plan.csv", report["plans"], PLAN_FIELDNAMES)
-    _write_csv(output_dir / "operator_data_ingest_issues.csv", report["issues"], ISSUE_FIELDNAMES)
+    _write_csv(
+        output_dir / "operator_data_ingest_plan.csv", report["plans"], PLAN_FIELDNAMES
+    )
+    _write_csv(
+        output_dir / "operator_data_ingest_issues.csv",
+        report["issues"],
+        ISSUE_FIELDNAMES,
+    )
     _write_csv(
         output_dir / "operator_data_starter_plan.csv",
         report["starter_plan_rows"],

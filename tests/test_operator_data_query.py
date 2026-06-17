@@ -122,7 +122,9 @@ def test_roster_fast_path_uses_verified_operator_rows_only() -> None:
         }
     )
 
-    result = try_build_operator_fast_path_result(conn, "2026년 LG 부상자 명단은 어디서 봐?")
+    result = try_build_operator_fast_path_result(
+        conn, "2026년 LG 부상자 명단은 어디서 봐?"
+    )
 
     assert result is not None
     assert result["operator_data_domain"] == "roster_news"
@@ -150,7 +152,9 @@ def test_roster_fast_path_requires_team_and_year_scope() -> None:
     )
 
     no_year = try_build_operator_fast_path_result(conn, "LG 부상자 명단은 어디서 봐?")
-    no_team = try_build_operator_fast_path_result(conn, "2026년 부상자 명단은 어디서 봐?")
+    no_team = try_build_operator_fast_path_result(
+        conn, "2026년 부상자 명단은 어디서 봐?"
+    )
 
     assert no_year is None
     assert no_team is None

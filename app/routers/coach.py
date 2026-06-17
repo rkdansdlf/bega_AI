@@ -54,6 +54,7 @@ from ..core.coach_grounding import (
     validate_response_against_fact_sheet,
     extend_numeric_tokens,
     response_is_semantically_empty,
+    _collect_response_text_segments,
 )
 from ..core.prompts import (
     COACH_PROMPT_V2,
@@ -314,6 +315,44 @@ COACH_DATA_QUALITY_RANK = {
     "partial": 1,
     "grounded": 2,
 }
+# 근거 가중치: recent-form summary 는 고신호(2), advanced 지표/구조 신호는 1.
+# grounded 승격은 단순 tool-fetch 개수(>=2)가 아니라 가중 합산 점수로 판정해
+# "실데이터 기반" 배지의 과신을 줄인다.
+COACH_EVIDENCE_WEIGHTS = {
+    "home_summary": 2,
+    "away_summary": 2,
+    "home_advanced": 1,
+    "away_advanced": 1,
+    "starters_pair": 1,
+    "lineup": 1,
+    "summary_items": 1,
+}
+COACH_PARTIAL_MIN_SCORE = 2
+COACH_GROUNDED_MIN_SCORE = 4
+# LLM 호출(manual)을 정당화하는 최소 실데이터 fact 수. 미만이면 deterministic 으로 단락.
+COACH_MIN_LLM_FACT_COUNT = 2
+# supported_fact_count 에서 제외하는 보일러플레이트 라벨(항상 존재 → 신뢰 신호 부풀림 방지).
+COACH_CONTEXTUAL_FACT_LABELS = {
+    "매치업",
+    "경기 날짜",
+    "경기 상태",
+    "리그 구분",
+    "구장",
+    "시작 시각",
+    "날씨",
+}
+# sanitize 로도 못 고친 환각성 grounding 실패 → deterministic fallback 시
+# "grounded(실데이터 기반)" 배지는 과신이므로 data_quality 를 한 단계 강등한다.
+# (*_sanitized 변형은 근거 내로 정리된 것이므로 강등 대상에서 제외)
+COACH_GROUNDING_HARD_FAILURE_REASONS = {
+    "unsupported_entity_name",
+    "unsupported_numeric_claim",
+    "unconfirmed_starter_claim",
+    "unconfirmed_lineup_claim",
+    "unconfirmed_series_claim",
+    "empty_response",
+    "llm_parse_failed",
+}
 COACH_GROUNDING_REASON_MESSAGES: Dict[str, str] = {
     "missing_game_context": "경기 기본 맥락이 충분하지 않아 보수적으로 해석합니다.",
     "missing_starters": "선발 정보가 완전하지 않아 선발 관련 표현을 제한합니다.",
@@ -507,6 +546,19 @@ def _build_fact_line(label: str, value: Optional[str]) -> Optional[str]:
     if not clean_value:
         return None
     return f"{label}: {clean_value}"
+
+
+def _count_substantive_facts(fact_lines: List[str]) -> int:
+    """보일러플레이트(구장/날씨/날짜 등)를 제외한 실 야구 근거 fact 수.
+
+    supported_fact_count(=프론트 'N개 실데이터 근거' 신호)가 항상 존재하는 맥락 라벨로
+    부풀지 않도록 substantive 라인만 센다.
+    """
+    return sum(
+        1
+        for line in fact_lines
+        if line.split(":", 1)[0].strip() not in COACH_CONTEXTUAL_FACT_LABELS
+    )
 
 
 def _safe_int_value(value: Any, default: int = 0) -> int:
@@ -999,7 +1051,11 @@ def _append_team_comparison_fact_lines(
             h = float(home_ops_raw)
             a = float(away_ops_raw)
             diff = h - a
-            edge_label = f"{home_name} +{diff:.3f}" if diff >= 0 else f"{away_name} +{abs(diff):.3f}"
+            edge_label = (
+                f"{home_name} +{diff:.3f}"
+                if diff >= 0
+                else f"{away_name} +{abs(diff):.3f}"
+            )
             fact = _build_fact_line(
                 "OPS 대비",
                 f"{home_name} {h:.3f} vs {away_name} {a:.3f} ({edge_label})",
@@ -1240,7 +1296,11 @@ def _build_coach_fact_sheet(
 
     # 홈 vs 원정 핵심 지표 직접 대비 (LLM 비교 분석 유도)
     _append_team_comparison_fact_lines(
-        fact_lines, numeric_tokens, tool_results, evidence.home_team_name, evidence.away_team_name
+        fact_lines,
+        numeric_tokens,
+        tool_results,
+        evidence.home_team_name,
+        evidence.away_team_name,
     )
     # 팀별 상세 지표 (선수 폼, 주요 타자/투수)
     _append_team_fact_lines(
@@ -1296,7 +1356,7 @@ def _build_coach_fact_sheet(
         caveat_lines=caveat_lines,
         allowed_entity_names={name for name in allowed_names if name},
         allowed_numeric_tokens=numeric_tokens,
-        supported_fact_count=len(fact_lines),
+        supported_fact_count=_count_substantive_facts(fact_lines),
         starters_confirmed=assessment.home_pitcher_present
         and assessment.away_pitcher_present,
         lineup_confirmed=assessment.lineup_announced,
@@ -1690,7 +1750,10 @@ def assess_game_evidence(evidence: GameEvidence) -> GameEvidenceAssessment:
         evidence.stadium_name or evidence.start_time or evidence.weather
     )
     series_required = evidence.stage_label not in {"REGULAR", "PRE", "UNKNOWN"}
-    series_context_available = bool(evidence.series_state)
+    # 부분 시리즈(DB 이력 부족으로 축약)는 '확보'로 보지 않는다 → 포스트시즌 과신 방지.
+    series_context_available = bool(evidence.series_state) and not (
+        evidence.series_state is not None and evidence.series_state.series_state_partial
+    )
     has_game_row_context = _has_game_row_context(evidence)
     missing_game_context = not bool(
         has_game_row_context
@@ -1742,6 +1805,54 @@ def assess_game_evidence(evidence: GameEvidence) -> GameEvidenceAssessment:
     )
 
 
+def _grounding_evidence_score(
+    assessment: GameEvidenceAssessment,
+    tool_results: Dict[str, Any],
+    evidence: GameEvidence,
+) -> int:
+    """근거 풍부도를 가중 합산한 점수.
+
+    tool 로 실제 조회된 통계(summary=recent form, advanced)와 구조 신호(양 선발 확정,
+    라인업 확정, 경기 요약)를 가중합한다. away 팀이 없으면 away 가중은 제외한다.
+    """
+    has_away = bool(evidence.away_team_code)
+    score = 0
+    if tool_results.get("home", {}).get("summary", {}).get("found"):
+        score += COACH_EVIDENCE_WEIGHTS["home_summary"]
+    if tool_results.get("home", {}).get("advanced", {}).get("found"):
+        score += COACH_EVIDENCE_WEIGHTS["home_advanced"]
+    if has_away:
+        if tool_results.get("away", {}).get("summary", {}).get("found"):
+            score += COACH_EVIDENCE_WEIGHTS["away_summary"]
+        if tool_results.get("away", {}).get("advanced", {}).get("found"):
+            score += COACH_EVIDENCE_WEIGHTS["away_advanced"]
+    if assessment.home_pitcher_present and assessment.away_pitcher_present:
+        score += COACH_EVIDENCE_WEIGHTS["starters_pair"]
+    if assessment.lineup_announced:
+        score += COACH_EVIDENCE_WEIGHTS["lineup"]
+    if assessment.summary_present:
+        score += COACH_EVIDENCE_WEIGHTS["summary_items"]
+    return score
+
+
+def _has_balanced_tool_coverage(
+    tool_results: Dict[str, Any],
+    evidence: GameEvidence,
+) -> bool:
+    """grounded 승격용 균형 조건: away 가 있으면 양 팀 모두 최소 1개 tool-found."""
+    home_found = bool(
+        tool_results.get("home", {}).get("summary", {}).get("found")
+        or tool_results.get("home", {}).get("advanced", {}).get("found")
+    )
+    if not evidence.away_team_code:
+        return home_found
+    away_found = bool(
+        tool_results.get("away", {}).get("summary", {}).get("found")
+        or tool_results.get("away", {}).get("advanced", {}).get("found")
+    )
+    return home_found and away_found
+
+
 def _determine_data_quality(
     evidence: GameEvidence,
     tool_results: Optional[Dict[str, Any]] = None,
@@ -1750,19 +1861,10 @@ def _determine_data_quality(
     if tool_results is None:
         return assessment.expected_data_quality
 
-    baseline_count = 0
-    if tool_results.get("home", {}).get("summary", {}).get("found"):
-        baseline_count += 1
-    if tool_results.get("home", {}).get("advanced", {}).get("found"):
-        baseline_count += 1
-    if evidence.away_team_code:
-        if tool_results.get("away", {}).get("summary", {}).get("found"):
-            baseline_count += 1
-        if tool_results.get("away", {}).get("advanced", {}).get("found"):
-            baseline_count += 1
+    score = _grounding_evidence_score(assessment, tool_results, evidence)
 
     if assessment.expected_data_quality == "insufficient":
-        if baseline_count >= 2 and evidence.game_id:
+        if score >= COACH_PARTIAL_MIN_SCORE and evidence.game_id:
             return "partial"
         return "insufficient"
     if assessment.expected_data_quality == "partial":
@@ -1771,9 +1873,36 @@ def _determine_data_quality(
         "clutch_moments", {}
     ).get("found"):
         return "partial"
-    if evidence.game_id and baseline_count >= 2:
+    # grounded 승격: 가중 점수 + 균형 조건(양 팀 커버리지) 모두 충족해야 함.
+    if (
+        evidence.game_id
+        and score >= COACH_GROUNDED_MIN_SCORE
+        and _has_balanced_tool_coverage(tool_results, evidence)
+    ):
         return "grounded"
     return "partial"
+
+
+def _downgrade_data_quality_after_failed_grounding(
+    data_quality: str,
+    failure_reasons: Optional[List[str]] = None,
+) -> str:
+    """환각성 grounding 실패로 deterministic fallback 된 경우 grounded→partial 강등.
+
+    grounded 만 한 단계 강등하고 partial/insufficient 는 그대로 둔다(바닥 partial).
+    sanitize 로 정리된(*_sanitized) 사유는 강등 트리거가 아니다.
+    """
+    if (
+        COACH_DATA_QUALITY_RANK.get(data_quality, 1)
+        < COACH_DATA_QUALITY_RANK["grounded"]
+    ):
+        return data_quality
+    if any(
+        reason in COACH_GROUNDING_HARD_FAILURE_REASONS
+        for reason in (failure_reasons or [])
+    ):
+        return "partial"
+    return data_quality
 
 
 def _manual_data_missing_item(
@@ -2423,21 +2552,34 @@ def _should_short_circuit_to_deterministic_response(
     game_status_bucket: str = "UNKNOWN",
     grounding_reasons: Optional[List[str]] = None,
     resolved_focus: Optional[List[str]] = None,
+    tool_results: Optional[Dict[str, Any]] = None,
+    evidence: Optional[GameEvidence] = None,
 ) -> bool:
     if request_mode == COACH_REQUEST_MODE_AUTO:
         return True
     if _is_manual_recent_form_fast_path_eligible(request_mode, resolved_focus):
         return True
-    if _is_scheduled_partial_manual_request(
-        request_mode,
-        game_status_bucket=game_status_bucket,
-        grounding_reasons=grounding_reasons,
-    ) and (not fact_sheet.starters_confirmed and not fact_sheet.lineup_confirmed):
-        return True
+    # 경기 예측(SCHEDULED manual_detail)에서도 LLM을 호출한다.
+    # 과거에는 선발·라인업이 모두 미확정이면 무조건 deterministic 으로 단락했으나,
+    # 미래 경기는 거의 항상 라인업 미발표라 예측이 결정론 boilerplate 로 고정됐다.
+    # 라인업/선발 미확정 자체로는 단락하지 않고, 아래의 데이터 충분성 게이트
+    # (균형 커버리지 + 최소 fact 수)가 LLM 호출 여부를 결정하도록 위임한다.
+    # 미발표 라인업 환각은 _sanitize_scheduled_unconfirmed_lineup_entities,
+    # validate_response_against_fact_sheet, _scheduled_output_guard_reasons 가 방어한다.
     if _is_completed_manual_review_request(
         request_mode,
         game_status_bucket=game_status_bucket,
     ):
+        return True
+    # 팀 균형: away 가 있는데 한 팀만 tool 커버 → 비대칭 근거로 LLM 환각 위험 → deterministic.
+    if (
+        tool_results is not None
+        and evidence is not None
+        and not _has_balanced_tool_coverage(tool_results, evidence)
+    ):
+        return True
+    # 최소 근거: 실데이터 fact 가 너무 적으면 LLM 호출이 무의미 → deterministic.
+    if fact_sheet.supported_fact_count < COACH_MIN_LLM_FACT_COUNT:
         return True
     return fact_sheet.supported_fact_count <= 0
 
@@ -5095,6 +5237,35 @@ def _calculate_pre_game_win_probability(
     return max(0.30, min(0.75, round(p, 3)))
 
 
+def _attach_scheduled_win_probability(
+    meta_defaults: Dict[str, Any],
+    *,
+    game_status_bucket: str,
+    tool_results: Dict[str, Any],
+    response_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """SCHEDULED 경기의 meta 에 홈팀 사전 승률을 채운다.
+
+    프론트 다이얼로그 승률 hero 는 meta 의 ``win_probability_home`` 을 읽으므로,
+    auto_brief 뿐 아니라 manual_detail(예측 다이얼로그)·LLM 경로에도 동일하게 설정한다.
+    LLM 응답 payload 에 유효한 값(0~1)이 있으면 우선 사용하고, 없으면 최근 폼 기반
+    Log5 계산값을 사용한다. 계산 불가(데이터 부족)면 키를 설정하지 않아
+    프론트의 ``initialWinProbabilityHome`` fallback 이 동작하게 둔다.
+    """
+    if str(game_status_bucket or "").upper() != "SCHEDULED":
+        return
+    if isinstance(response_payload, dict):
+        raw = response_payload.get("win_probability_home")
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            value = float(raw)
+            if 0.0 <= value <= 1.0:
+                meta_defaults["win_probability_home"] = round(value, 3)
+                return
+    pre_game_prob = _calculate_pre_game_win_probability(tool_results)
+    if pre_game_prob is not None:
+        meta_defaults["win_probability_home"] = pre_game_prob
+
+
 def _scheduled_recent_edge_delta(
     home_data: Dict[str, Any],
     away_data: Dict[str, Any],
@@ -5807,6 +5978,47 @@ def _build_scheduled_team_level_deterministic_metrics(
     return _finalize_deterministic_metrics(metrics)
 
 
+def _ensure_minimum_risks(
+    risks: List[Dict[str, Any]],
+    *,
+    candidates: Optional[List[Dict[str, Any]]] = None,
+    fallback: Optional[Dict[str, Any]] = None,
+    minimum: int = 1,
+) -> List[Dict[str, Any]]:
+    """리스크가 ``minimum`` 미만이면 ``candidates`` → ``fallback`` 순으로 보강합니다.
+
+    이미 채워진 리스크는 보존하고, 부족할 때만 *이미 계산된 내부 신호*에서 유도한
+    후보로 채웁니다. 외부 데이터 호출이 없으므로 Baseball Data Policy를 위반하지
+    않습니다. level은 항상 0/1/2로 강제합니다.
+    """
+    result: List[Dict[str, Any]] = []
+    seen = set()
+    for item in risks or []:
+        if not isinstance(item, dict):
+            continue
+        desc = str(item.get("description") or "").strip()
+        if not desc or desc in seen:
+            continue
+        result.append(item)
+        seen.add(desc)
+    for cand in candidates or []:
+        if len(result) >= minimum:
+            break
+        if not isinstance(cand, dict):
+            continue
+        desc = str(cand.get("description") or "").strip()
+        if not desc or desc in seen:
+            continue
+        result.append(cand)
+        seen.add(desc)
+    if not result and fallback and str(fallback.get("description") or "").strip():
+        result.append(fallback)
+    for item in result:
+        if item.get("level") not in (0, 1, 2):
+            item["level"] = 1
+    return result
+
+
 def _build_scheduled_team_level_deterministic_analysis(
     evidence: GameEvidence,
     tool_results: Dict[str, Any],
@@ -5994,6 +6206,77 @@ def _build_scheduled_team_level_deterministic_analysis(
         why_it_matters.append(
             "확인된 수치가 제한적이라 절대 우위보다 경기 중 운용 변수 확인이 더 중요합니다."
         )
+
+    # 강점 최소 1건 보장: 양 팀 모두 하락세면 폼 루프가 strengths를 비울 수 있음.
+    if not strengths:
+        if ops_edge_team:
+            strengths.append(
+                f"{ops_edge_team}는 팀 OPS 우위로 초반 득점 설계에서 앞섭니다."
+            )
+        elif edge_team:
+            strengths.append(f"{edge_team}는 확인된 팀 지표에서 우위를 보입니다.")
+        else:
+            strengths.append(
+                "양 팀 전력이 팽팽해 초반 주도권 다툼이 관전 포인트입니다."
+            )
+
+    # 약점 최소 1건 보장: strengths는 폼 기반으로 항상 채워지지만 weaknesses는 비대칭이라 빌 수 있음.
+    if not weaknesses:
+        if ops_edge_team:
+            ops_trailing_name = home_name if ops_edge_team == away_name else away_name
+            weaknesses.append(
+                f"{ops_trailing_name}는 팀 OPS 열세로 초반 득점 설계가 과제입니다."
+            )
+        elif trailing_team:
+            weaknesses.append(
+                f"{trailing_team}는 확인된 우위 지표가 적어 초반 흐름 관리가 과제입니다."
+            )
+        else:
+            weaknesses.append(
+                "양 팀 모두 확인된 우위가 제한적이라 초반 변동성 관리가 공통 과제입니다."
+            )
+
+    # 리스크 최소 1건 보장: 이미 계산된 폼/OPS/라인업 신호에서 유도 (외부 호출 없음).
+    min_risk_candidates: List[Dict[str, Any]] = []
+    for team_name, signal in (
+        (away_name, away_form_signal),
+        (home_name, home_form_signal),
+    ):
+        if _form_status_trend_label((signal or {}).get("form_status")) == "하락세":
+            min_risk_candidates.append(
+                {
+                    "area": "form",
+                    "level": 1,
+                    "description": f"{team_name}는 팀 폼이 하락세라 초반 흐름이 흔들리면 반등 동력이 부족할 수 있습니다.",
+                }
+            )
+    if ops_edge_team:
+        ops_trailing_name = home_name if ops_edge_team == away_name else away_name
+        min_risk_candidates.append(
+            {
+                "area": "offense",
+                "level": 1,
+                "description": f"{ops_trailing_name}는 팀 OPS 열세로 초반 득점 설계가 막히면 추격 부담이 커집니다.",
+            }
+        )
+    if not evidence.home_pitcher or not evidence.away_pitcher:
+        min_risk_candidates.append(
+            {
+                "area": "lineup",
+                "level": 1,
+                "description": "선발·라인업 미발표라 초반 매치업 해석에 불확실성이 큽니다.",
+            }
+        )
+    risks = _ensure_minimum_risks(
+        risks,
+        candidates=min_risk_candidates,
+        fallback={
+            "area": "overall",
+            "level": 1 if edge_team else 2,
+            "description": "확인된 지표상 결정적 리스크는 낮지만, 초반 선취점과 첫 불펜 선택이 경기 흐름을 좌우할 변수입니다.",
+        },
+        minimum=1,
+    )
 
     return {
         "summary": summary,
@@ -6648,6 +6931,103 @@ def _build_deterministic_analysis(
             else:
                 verdict = f"{verdict} 초반 이닝 운영에 따라 체감 우위가 쉽게 바뀔 수 있습니다."
 
+    # 리스크 최소 1건 보장: 이미 계산된 OPS/우열 신호에서 유도 (외부 호출 없음).
+    det_edge_team = (
+        home_name
+        if home_score > away_score
+        else away_name if away_score > home_score else None
+    )
+    # 강점 최소 1건 보장: 양 팀 모두 하락세면 strengths가 빌 수 있음.
+    if not strengths:
+        if home_ops and away_ops and home_ops != away_ops:
+            ops_leader_name = home_name if home_ops > away_ops else away_name
+            strengths.append(
+                f"{ops_leader_name} 팀 OPS 우위로 "
+                + (
+                    "득점 연결 효율이 결과를 뒷받침했습니다."
+                    if review_mode
+                    else "초반 득점 설계에서 앞섭니다."
+                )
+            )
+        elif det_edge_team:
+            strengths.append(
+                f"{det_edge_team}{_topic_particle(det_edge_team)} 확인된 지표에서 우위를 "
+                + ("보이며 결과로 이어졌습니다." if review_mode else "보입니다.")
+            )
+        else:
+            strengths.append(
+                "양 팀 전력이 팽팽해 "
+                + (
+                    "승부처 집중력이 결과를 갈랐습니다."
+                    if review_mode
+                    else "초반 주도권 다툼이 관전 포인트입니다."
+                )
+            )
+
+    # 약점 최소 1건 보장: weaknesses는 strengths와 달리 비대칭이라 빌 수 있음.
+    if not weaknesses:
+        if home_ops and away_ops and home_ops != away_ops:
+            ops_trailing_name = away_name if home_ops > away_ops else home_name
+            weaknesses.append(
+                f"{ops_trailing_name} 팀 OPS 열세로 "
+                + (
+                    "득점 연결 효율이 결과에 영향을 줬습니다."
+                    if review_mode
+                    else "초반 득점 설계가 과제입니다."
+                )
+            )
+        elif det_edge_team:
+            trailing = away_name if det_edge_team == home_name else home_name
+            weaknesses.append(
+                f"{trailing}{_topic_particle(trailing)} 확인된 우위 지표가 적어 "
+                + (
+                    "결과를 뒤집을 동력이 부족했습니다."
+                    if review_mode
+                    else "초반 흐름 관리가 과제입니다."
+                )
+            )
+        else:
+            weaknesses.append(
+                "양 팀 모두 확인된 우위가 제한적이라 "
+                + (
+                    "승부처 대응이 결과를 갈랐습니다."
+                    if review_mode
+                    else "초반 변동성 관리가 공통 과제입니다."
+                )
+            )
+
+    min_risk_candidates: List[Dict[str, Any]] = []
+    if home_ops and away_ops and home_ops != away_ops:
+        ops_trailing_name = away_name if home_ops > away_ops else home_name
+        min_risk_candidates.append(
+            {
+                "area": "offense",
+                "level": 1,
+                "description": (
+                    f"{ops_trailing_name} 팀 OPS 열세로 "
+                    + (
+                        "득점 연결 효율이 결과에 영향을 줬습니다."
+                        if review_mode
+                        else "초반 득점 설계가 막히면 추격 부담이 커집니다."
+                    )
+                ),
+            }
+        )
+    risks = _ensure_minimum_risks(
+        risks,
+        candidates=min_risk_candidates,
+        fallback={
+            "area": "overall",
+            "level": 1 if det_edge_team else 2,
+            "description": (
+                "확인된 실데이터 기준 두드러진 리스크는 적지만, 승부처 대응과 득점 연결 효율이 결과를 갈랐습니다."
+                if review_mode
+                else "확인된 지표상 결정적 리스크는 낮지만, 초반 선취점과 첫 불펜 선택이 경기 흐름을 좌우할 변수입니다."
+            ),
+        },
+        minimum=1,
+    )
+
     return {
         "summary": summary,
         "verdict": _truncate_text_naturally(verdict, max_length=240),
@@ -7225,6 +7605,15 @@ def _normalize_scheduled_partial_analysis_sections(
         analysis["watch_points"] = list(template["watch_points"][:3])
     if template.get("uncertainty"):
         analysis["uncertainty"] = list(template["uncertainty"][:2])
+
+    # 빈 경우에만 결정론 template 로 백필(기존 값 보존). risks 가 비면 프론트의
+    # 리스크 관리 섹션이 빈 상태 박스로만 노출되므로 최소 1건을 보장한다.
+    for key, limit in (("risks", 2), ("strengths", 4), ("weaknesses", 3)):
+        existing = analysis.get(key)
+        if not isinstance(existing, list) or len(existing) == 0:
+            template_items = template.get(key)
+            if isinstance(template_items, list) and template_items:
+                analysis[key] = list(template_items[:limit])
 
     rebuilt_note = _rebuild_scheduled_coach_note(analysis)
     if rebuilt_note:
@@ -8137,23 +8526,23 @@ COMPLETED_RESULT_DIRECTION_MARKERS = (
     "흐름을 굳혔",
     "결과를 만들",
 )
-SCHEDULED_REVIEW_OUTPUT_MARKERS = (
-    "## 결과 진단",
-    "## 결과를 가른 이유",
-    "## 실제 전환점",
-    "## 다시 볼 장면",
-    "결과를 가른",
-    "우위 확정",
-    "승리 리뷰",
-    "패배 리뷰",
+# 예정 경기 응답에서 '이미 끝난 경기'처럼 결과를 단정하는 표현(정규화 후 형식 변형 무관 매칭).
+# 결과-프레이밍에 한정 → 일반 과거시제·최근 폼 서술은 매칭하지 않음(오탐 억제).
+SCHEDULED_REVIEW_PATTERNS = (
+    ("결과진단", re.compile(r"결과\s*진단")),
+    ("결과를가른", re.compile(r"결과\s*를?\s*가른")),
+    ("실제전환점", re.compile(r"실제\s*전환점")),
+    ("다시볼장면", re.compile(r"다시\s*볼\s*장면")),
+    ("우위확정", re.compile(r"우위\s*확정")),
+    ("승패리뷰", re.compile(r"(승리|패배)\s*리뷰")),
 )
-SCHEDULED_CONFIRMED_STARTER_CONFLICT_MARKERS = (
-    "선발 정보가 확정되지",
-    "선발 정보가 완전히 확정되지",
-    "선발 맞대결 평가는 제한",
-    "선발 미확정",
-    "선발 미발표",
-    "선발 대결 분석 불가능",
+# 양 선발이 확정됐는데도 '미확정/불가' 류 모순 표현(선발 정보 충돌).
+SCHEDULED_STARTER_CONFLICT_PATTERNS = (
+    ("확정되지", re.compile(r"선발\s*정보가?\s*(완전히\s*)?확정되지")),
+    ("미확정", re.compile(r"선발\s*[가-힣]?\s*미확정")),
+    ("미발표", re.compile(r"선발\s*[가-힣]?\s*미발표")),
+    ("분석불가", re.compile(r"선발\s*(대결\s*)?분석\s*불가")),
+    ("평가제한", re.compile(r"선발\s*맞?대결.{0,6}평가.{0,6}제한")),
 )
 
 
@@ -9121,6 +9510,19 @@ def _cleanup_response_language_quality(
     return cleaned
 
 
+def _normalize_guard_text(response_payload: Dict[str, Any]) -> str:
+    """가드 매칭용 정규화: 응답 텍스트 세그먼트를 모아 마크다운 마커/구두점 제거 + 공백 축약.
+
+    json.dumps(줄바꿈 escape·JSON 키 포함) 대신 실제 텍스트만 대상으로 해, 헤더 레벨/공백/
+    구두점 변형과 무관하게 결과-프레이밍 표현을 잡는다.
+    """
+    text = " ".join(_collect_response_text_segments(response_payload or {}))
+    text = re.sub(r"[#*>`~_\-]+", " ", text)
+    text = re.sub(r"[.,!?;:()\[\]\"'“”‘’·]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _scheduled_output_guard_reasons(
     response_payload: Dict[str, Any],
     evidence: GameEvidence,
@@ -9128,16 +9530,16 @@ def _scheduled_output_guard_reasons(
     if str(evidence.game_status_bucket or "").upper() != "SCHEDULED":
         return []
 
-    blob = json.dumps(response_payload or {}, ensure_ascii=False)
+    normalized = _normalize_guard_text(response_payload)
     reasons: List[str] = []
-    for marker in SCHEDULED_REVIEW_OUTPUT_MARKERS:
-        if marker in blob:
-            reasons.append(f"review_marker:{marker}")
+    for name, pattern in SCHEDULED_REVIEW_PATTERNS:
+        if pattern.search(normalized):
+            reasons.append(f"review_marker:{name}")
 
     if evidence.home_pitcher and evidence.away_pitcher:
-        for marker in SCHEDULED_CONFIRMED_STARTER_CONFLICT_MARKERS:
-            if marker in blob:
-                reasons.append(f"starter_conflict:{marker}")
+        for name, pattern in SCHEDULED_STARTER_CONFLICT_PATTERNS:
+            if pattern.search(normalized):
+                reasons.append(f"starter_conflict:{name}")
 
     return list(dict.fromkeys(reasons))
 
@@ -11413,6 +11815,8 @@ async def analyze_team(
                     game_status_bucket=game_evidence.game_status_bucket,
                     grounding_reasons=grounding_reasons,
                     resolved_focus=resolved_focus,
+                    tool_results=tool_results,
+                    evidence=game_evidence,
                 ):
                     fast_path_hit = _is_manual_recent_form_fast_path_eligible(
                         request_mode, resolved_focus
@@ -11472,16 +11876,13 @@ async def analyze_team(
                         recovered_from_missing_row=cache_state == "ROW_RECREATED",
                         lease_lost=lease_lost_event.is_set(),
                     )
-                    # Add pre-game win probability for SCHEDULED auto-brief responses
-                    if (
-                        is_auto_brief
-                        and game_evidence.game_status_bucket == "SCHEDULED"
-                    ):
-                        pre_game_prob = _calculate_pre_game_win_probability(
-                            tool_results
-                        )
-                        if pre_game_prob is not None:
-                            meta_defaults["win_probability_home"] = pre_game_prob
+                    # 사전 승률: auto_brief 뿐 아니라 manual_detail(예측 다이얼로그) 결정론 응답도 포함
+                    _attach_scheduled_win_probability(
+                        meta_defaults,
+                        game_status_bucket=game_evidence.game_status_bucket,
+                        tool_results=tool_results,
+                        response_payload=response_payload,
+                    )
                     finalize_result = _store_completed_cache(
                         pool=pool,
                         cache_key=cache_key,
@@ -12174,6 +12575,10 @@ async def analyze_team(
                         tool_results=tool_results,
                         resolved_focus=resolved_focus,
                     )
+                    # grounding 실패로 fallback 됐으면 grounded 배지는 과신 → 한 단계 강등.
+                    data_quality = _downgrade_data_quality_after_failed_grounding(
+                        data_quality, last_failure_reasons
+                    )
 
                 _ensure_detailed_markdown(
                     response_payload,
@@ -12257,6 +12662,13 @@ async def analyze_team(
                     cache_row_missing=cache_state == "ROW_RECREATED",
                     recovered_from_missing_row=cache_state == "ROW_RECREATED",
                     lease_lost=lease_lost_event.is_set(),
+                )
+                # 사전 승률: SCHEDULED 예측은 LLM/결정론 fallback 모두 meta 에 승률을 채운다.
+                _attach_scheduled_win_probability(
+                    meta_defaults,
+                    game_status_bucket=game_evidence.game_status_bucket,
+                    tool_results=tool_results,
+                    response_payload=response_payload,
                 )
                 finalize_result = _store_completed_cache(
                     pool=pool,
@@ -12537,7 +12949,7 @@ async def analyze_team(
 
 
 # ============================================================
-# Legacy endpoint (기존 방식 유지, 필요 시 사용)
+# Legacy endpoint (기존 방식 호환용, 기본 동작 유지)
 # ============================================================
 
 
@@ -12551,10 +12963,20 @@ async def analyze_team_legacy(
     """
     기존 방식의 Coach 분석 (전체 에이전트 파이프라인 사용).
     Fast Path에 문제가 있을 경우 대안으로 사용.
+    deprecate: COACH_ANALYZE_LEGACY_ENABLED=0 으로 비활성화 가능.
     """
     from sse_starlette.sse import EventSourceResponse
 
     try:
+        if not _read_flag_env("COACH_ANALYZE_LEGACY_ENABLED", "1"):
+            logger.warning(
+                "[Coach Router] analyze-legacy is disabled. Use /ai/coach/analyze instead."
+            )
+            raise HTTPException(
+                status_code=410,
+                detail="analyze-legacy is deprecated. Use /ai/coach/analyze.",
+            )
+
         primary_team_id = payload.home_team_id or payload.team_id
         if not primary_team_id:
             raise HTTPException(
@@ -12577,10 +12999,19 @@ async def analyze_team_legacy(
         else:
             query = _build_coach_query(team_name, resolved_focus)
 
+        logger.warning(
+            "[Coach Router Legacy] Deprecated endpoint used. home_team_id=%s request_mode=%s",
+            primary_team_id,
+            payload.request_mode,
+        )
         logger.info(f"[Coach Router Legacy] Analyzing for {team_name}")
         sse_ping_seconds = max(1, int(get_settings().chat_sse_ping_seconds))
 
-        context_data = {"persona": "coach", "team_id": primary_team_id}
+        context_data = {
+            "persona": "coach",
+            "team_id": primary_team_id,
+            "legacy_endpoint": True,
+        }
 
         async def event_generator():
             try:
@@ -12653,6 +13084,8 @@ async def analyze_team_legacy(
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Legacy-Endpoint": "analyze-legacy",
+                "X-Deprecation": "true",
             },
             ping=sse_ping_seconds,
         )

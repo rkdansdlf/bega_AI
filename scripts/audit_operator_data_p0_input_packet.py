@@ -16,7 +16,6 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_QUEUE_INPUT = (
     PROJECT_ROOT
@@ -33,13 +32,20 @@ DEFAULT_FIELDS_INPUT = (
     / "p0_fields.csv"
 )
 DEFAULT_SOURCE_QUEUE_INPUT = (
-    PROJECT_ROOT / "reports" / "operator_data_handoff_queue_post_db_fast_path_docker_kbo500.csv"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_handoff_queue_post_db_fast_path_docker_kbo500.csv"
 )
 DEFAULT_SOURCE_FIELDS_INPUT = (
-    PROJECT_ROOT / "reports" / "operator_data_handoff_fields_post_db_fast_path_docker_kbo500.csv"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_handoff_fields_post_db_fast_path_docker_kbo500.csv"
 )
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "reports" / "operator_data_operator_packet_audit" / "post_db_fast_path_docker_kbo500"
+    PROJECT_ROOT
+    / "reports"
+    / "operator_data_operator_packet_audit"
+    / "post_db_fast_path_docker_kbo500"
 )
 
 P0_DOMAIN_ORDER = ("season_meta", "schedule_window", "game_day_lineup", "roster_news")
@@ -97,7 +103,15 @@ IMMUTABLE_FIELD_FIELDS = [
     "field_description",
     "required",
 ]
-ISSUE_FIELDNAMES = ["severity", "code", "message", "queue_id", "domain", "field_name", "source"]
+ISSUE_FIELDNAMES = [
+    "severity",
+    "code",
+    "message",
+    "queue_id",
+    "domain",
+    "field_name",
+    "source",
+]
 READINESS_FIELDNAMES = [
     "queue_id",
     "domain",
@@ -144,7 +158,9 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         return list(reader.fieldnames or []), [dict(row) for row in reader]
 
 
-def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequence[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -155,7 +171,9 @@ def _write_csv(path: Path, rows: Iterable[Mapping[str, Any]], fieldnames: Sequen
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _issue(
@@ -268,7 +286,12 @@ def _validate_headers(
         ("queue_header", queue_fields, QUEUE_FIELDNAMES, "packet_queue"),
         ("fields_header", field_fields, FIELDS_FIELDNAMES, "packet_fields"),
         ("source_queue_header", source_queue_fields, QUEUE_FIELDNAMES, "source_queue"),
-        ("source_fields_header", source_field_fields, FIELDS_FIELDNAMES, "source_fields"),
+        (
+            "source_fields_header",
+            source_field_fields,
+            FIELDS_FIELDNAMES,
+            "source_fields",
+        ),
     ]
     for field_name, actual, expected, source in checks:
         if list(actual) != expected:
@@ -397,7 +420,9 @@ def _validate_immutable_values(
         if not source_row:
             continue
         for field in IMMUTABLE_QUEUE_FIELDS:
-            if _normalize_text(packet_row.get(field)) != _normalize_text(source_row.get(field)):
+            if _normalize_text(packet_row.get(field)) != _normalize_text(
+                source_row.get(field)
+            ):
                 issues.append(
                     _issue(
                         code="immutable_queue_drift",
@@ -413,7 +438,9 @@ def _validate_immutable_values(
         if not source_row:
             continue
         for field in IMMUTABLE_FIELD_FIELDS:
-            if _normalize_text(packet_row.get(field)) != _normalize_text(source_row.get(field)):
+            if _normalize_text(packet_row.get(field)) != _normalize_text(
+                source_row.get(field)
+            ):
                 issues.append(
                     _issue(
                         code="immutable_field_drift",
@@ -460,7 +487,9 @@ def _validate_ready_payload(
 
     for row in field_rows:
         field_name = _normalize_text(row.get("field_name"))
-        if _is_required(row.get("required")) and not _normalize_text(row.get("operator_value")):
+        if _is_required(row.get("required")) and not _normalize_text(
+            row.get("operator_value")
+        ):
             issues.append(
                 _issue(
                     code="missing_required_operator_value",
@@ -484,7 +513,10 @@ def _validate_ready_payload(
                     source="packet_fields",
                 )
             )
-    if payload.get("source_checked_at") and _parse_iso_datetime(payload.get("source_checked_at")) is None:
+    if (
+        payload.get("source_checked_at")
+        and _parse_iso_datetime(payload.get("source_checked_at")) is None
+    ):
         issues.append(
             _issue(
                 code="invalid_source_checked_at",
@@ -507,7 +539,9 @@ def _validate_ready_payload(
             )
         )
     confidence = _parse_float(payload.get("confidence"))
-    if payload.get("confidence") and (confidence is None or confidence < CONFIDENCE_MINIMUM):
+    if payload.get("confidence") and (
+        confidence is None or confidence < CONFIDENCE_MINIMUM
+    ):
         issues.append(
             _issue(
                 code="confidence_below_minimum",
@@ -519,7 +553,9 @@ def _validate_ready_payload(
             )
         )
 
-    issues.extend(_validate_domain_formats(queue_id=queue_id, domain=domain, payload=payload))
+    issues.extend(
+        _validate_domain_formats(queue_id=queue_id, domain=domain, payload=payload)
+    )
     return issues
 
 
@@ -545,23 +581,52 @@ def _validate_domain_formats(
 
     if domain in {"season_meta", "roster_news"} and payload.get("season_year"):
         if _parse_int(payload.get("season_year")) is None:
-            add("invalid_integer_field", "season_year", "season_year must be an integer.")
+            add(
+                "invalid_integer_field",
+                "season_year",
+                "season_year must be an integer.",
+            )
     if domain == "season_meta" and payload.get("event_date"):
         if _parse_iso_date(payload.get("event_date")) is None:
             add("invalid_date_field", "event_date", "event_date must be an ISO date.")
     if domain == "schedule_window":
-        if payload.get("game_date") and _parse_iso_date(payload.get("game_date")) is None:
+        if (
+            payload.get("game_date")
+            and _parse_iso_date(payload.get("game_date")) is None
+        ):
             add("invalid_date_field", "game_date", "game_date must be an ISO date.")
         if payload.get("start_time") and not _valid_time(payload.get("start_time")):
-            add("invalid_time_field", "start_time", "start_time must be HH:MM or ISO datetime.")
+            add(
+                "invalid_time_field",
+                "start_time",
+                "start_time must be HH:MM or ISO datetime.",
+            )
     if domain == "game_day_lineup":
-        if payload.get("batting_order") and _parse_int(payload.get("batting_order")) is None:
-            add("invalid_integer_field", "batting_order", "batting_order must be an integer.")
-        if payload.get("announced_at") and _parse_iso_datetime(payload.get("announced_at")) is None:
-            add("invalid_datetime_field", "announced_at", "announced_at must be an ISO datetime.")
+        if (
+            payload.get("batting_order")
+            and _parse_int(payload.get("batting_order")) is None
+        ):
+            add(
+                "invalid_integer_field",
+                "batting_order",
+                "batting_order must be an integer.",
+            )
+        if (
+            payload.get("announced_at")
+            and _parse_iso_datetime(payload.get("announced_at")) is None
+        ):
+            add(
+                "invalid_datetime_field",
+                "announced_at",
+                "announced_at must be an ISO datetime.",
+            )
     if domain == "roster_news" and payload.get("effective_date"):
         if _parse_iso_date(payload.get("effective_date")) is None:
-            add("invalid_date_field", "effective_date", "effective_date must be an ISO date.")
+            add(
+                "invalid_date_field",
+                "effective_date",
+                "effective_date must be an ISO date.",
+            )
     return issues
 
 
@@ -672,7 +737,11 @@ def build_audit_report(
     for queue_row in queue_rows:
         queue_id = _normalize_text(queue_row.get("queue_id"))
         status = _normalize_text(queue_row.get("operator_status"))
-        queue_issue_count = sum(1 for issue in issues_by_queue.get(queue_id, []) if issue.severity == "error")
+        queue_issue_count = sum(
+            1
+            for issue in issues_by_queue.get(queue_id, [])
+            if issue.severity == "error"
+        )
         if status in RECOVERY_STATUSES and queue_issue_count == 0:
             readiness_status = "recovery_candidate"
             reason = "ready_for_strict_validation"
@@ -726,12 +795,18 @@ def build_audit_report(
         status = "pass"
 
     domain_counts = Counter(_normalize_text(row.get("domain")) for row in queue_rows)
-    status_counts = Counter(_normalize_text(row.get("operator_status")) for row in queue_rows)
+    status_counts = Counter(
+        _normalize_text(row.get("operator_status")) for row in queue_rows
+    )
     recovery_candidate_count = sum(
         1 for row in readiness_rows if row["readiness_status"] == "recovery_candidate"
     )
-    manual_fallback_count = sum(1 for row in readiness_rows if row["manual_fallback"] == "true")
-    blocked_ready_count = sum(1 for row in readiness_rows if row["readiness_status"] == "blocked")
+    manual_fallback_count = sum(
+        1 for row in readiness_rows if row["manual_fallback"] == "true"
+    )
+    blocked_ready_count = sum(
+        1 for row in readiness_rows if row["readiness_status"] == "blocked"
+    )
 
     return {
         "summary": {
@@ -748,7 +823,9 @@ def build_audit_report(
             "recovery_candidate_count": recovery_candidate_count,
             "manual_fallback_count": manual_fallback_count,
             "blocked_ready_count": blocked_ready_count,
-            "domain_counts": {domain: domain_counts.get(domain, 0) for domain in P0_DOMAIN_ORDER},
+            "domain_counts": {
+                domain: domain_counts.get(domain, 0) for domain in P0_DOMAIN_ORDER
+            },
             "status_counts": dict(sorted(status_counts.items())),
             "issue_counts": {
                 "error": issue_counter.get("error", 0),
@@ -838,21 +915,37 @@ def run_audit(
         require_ready=require_ready,
     )
     if header_issues:
-        report["issues"] = [*report["issues"], *[issue.to_record() for issue in header_issues]]
-        error_count = sum(1 for issue in report["issues"] if issue.get("severity") == "error")
-        warning_count = sum(1 for issue in report["issues"] if issue.get("severity") == "warning")
-        report["summary"]["issue_counts"] = {"error": error_count, "warning": warning_count}
-        report["summary"]["status"] = "fail" if error_count else "warning" if warning_count else "pass"
+        report["issues"] = [
+            *report["issues"],
+            *[issue.to_record() for issue in header_issues],
+        ]
+        error_count = sum(
+            1 for issue in report["issues"] if issue.get("severity") == "error"
+        )
+        warning_count = sum(
+            1 for issue in report["issues"] if issue.get("severity") == "warning"
+        )
+        report["summary"]["issue_counts"] = {
+            "error": error_count,
+            "warning": warning_count,
+        }
+        report["summary"]["status"] = (
+            "fail" if error_count else "warning" if warning_count else "pass"
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "p0_input_audit_summary.json", report)
-    _write_csv(output_dir / "p0_input_audit_issues.csv", report["issues"], ISSUE_FIELDNAMES)
+    _write_csv(
+        output_dir / "p0_input_audit_issues.csv", report["issues"], ISSUE_FIELDNAMES
+    )
     _write_csv(
         output_dir / "p0_input_readiness_plan.csv",
         report["readiness_plan"],
         READINESS_FIELDNAMES,
     )
-    (output_dir / "p0_input_audit_handoff.md").write_text(_render_handoff(report), encoding="utf-8")
+    (output_dir / "p0_input_audit_handoff.md").write_text(
+        _render_handoff(report), encoding="utf-8"
+    )
     return report
 
 

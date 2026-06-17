@@ -709,6 +709,126 @@ def normalize_risk_levels(data: Dict[str, Any]) -> List[str]:
     return reasons
 
 
+def backfill_empty_risks(data: Dict[str, Any]) -> List[str]:
+    """analysis.risks가 비어 있으면 weaknesses/uncertainty에서 1~2건을 유도합니다.
+
+    LLM이 프롬프트 지시에도 risks를 비워 보낸 경우의 안전망입니다. 새 데이터를
+    만들지 않고 이미 응답에 있는 약점·불확실성 텍스트만 재사용하므로 Baseball Data
+    Policy를 위반하지 않습니다.
+    """
+    analysis = data.get("analysis")
+    if not isinstance(analysis, dict):
+        return []
+
+    risks = analysis.get("risks")
+    has_valid_risk = isinstance(risks, list) and any(
+        isinstance(r, dict) and str(r.get("description") or "").strip() for r in risks
+    )
+    if has_valid_risk:
+        return []
+
+    def _first_text(key: str) -> Optional[str]:
+        items = analysis.get(key)
+        if isinstance(items, list):
+            for item in items:
+                text = str(item or "").strip()
+                if text:
+                    return text
+        return None
+
+    derived: List[Dict[str, Any]] = []
+    weakness = _first_text("weaknesses")
+    if weakness:
+        derived.append({"area": "overall", "level": 1, "description": weakness})
+    uncertainty = _first_text("uncertainty")
+    if uncertainty and len(derived) < 2:
+        derived.append({"area": "lineup", "level": 1, "description": uncertainty})
+    if not derived:
+        derived.append(
+            {
+                "area": "overall",
+                "level": 2,
+                "description": "확인된 지표상 결정적 리스크는 낮지만, 초반 운영과 첫 불펜 선택이 경기 흐름을 좌우할 변수입니다.",
+            }
+        )
+
+    analysis["risks"] = derived[:3]
+    return ["backfill_empty_risks"]
+
+
+def backfill_empty_weaknesses(data: Dict[str, Any]) -> List[str]:
+    """analysis.weaknesses가 비어 있으면 risks/uncertainty에서 1건을 유도합니다.
+
+    strengths와 달리 weaknesses는 결정론·LLM 양쪽에서 비대칭적으로 비기 쉬워, 프론트의
+    '약점 관리 포인트' 카드가 사라지는 것을 막는 안전망입니다. 새 데이터를 만들지 않고
+    응답 내 텍스트만 재사용하므로 Baseball Data Policy를 위반하지 않습니다.
+    """
+    analysis = data.get("analysis")
+    if not isinstance(analysis, dict):
+        return []
+
+    weaknesses = analysis.get("weaknesses")
+    if isinstance(weaknesses, list) and any(str(w or "").strip() for w in weaknesses):
+        return []
+
+    derived: Optional[str] = None
+    risks = analysis.get("risks")
+    if isinstance(risks, list):
+        for r in risks:
+            if isinstance(r, dict):
+                desc = str(r.get("description") or "").strip()
+                if desc:
+                    derived = desc
+                    break
+    if not derived:
+        uncertainty = analysis.get("uncertainty")
+        if isinstance(uncertainty, list):
+            for u in uncertainty:
+                text = str(u or "").strip()
+                if text:
+                    derived = text
+                    break
+    if not derived:
+        derived = "확인된 약점 시그널은 제한적이지만, 초반 변동성 관리가 과제입니다."
+
+    analysis["weaknesses"] = [derived]
+    return ["backfill_empty_weaknesses"]
+
+
+def backfill_empty_strengths(data: Dict[str, Any]) -> List[str]:
+    """analysis.strengths가 비어 있으면 why_it_matters/swing_factors에서 1건을 유도합니다.
+
+    weaknesses와 대칭. 프론트의 '강점 유지 포인트' 카드가 사라지는 것을 막는 안전망이며,
+    응답 내 텍스트만 재사용하므로 Baseball Data Policy를 위반하지 않습니다.
+    """
+    analysis = data.get("analysis")
+    if not isinstance(analysis, dict):
+        return []
+
+    strengths = analysis.get("strengths")
+    if isinstance(strengths, list) and any(str(s or "").strip() for s in strengths):
+        return []
+
+    derived: Optional[str] = None
+    for key in ("why_it_matters", "swing_factors"):
+        items = analysis.get(key)
+        if isinstance(items, list):
+            for item in items:
+                text = str(item or "").strip()
+                if text:
+                    derived = text
+                    break
+        if derived:
+            break
+    if not derived:
+        derived = (
+            "확인된 우위 시그널은 제한적이지만, 초반 주도권 다툼이 관전 포인트입니다."
+        )
+
+    analysis["strengths"] = [derived]
+    return ["backfill_empty_strengths"]
+
+
 def normalize_coach_payload(data: dict) -> Tuple[dict, List[str]]:
     """LLM 응답 payload를 검증 전에 정규화합니다."""
     if not isinstance(data, dict):
@@ -730,6 +850,9 @@ def normalize_coach_payload(data: dict) -> Tuple[dict, List[str]]:
     reasons.extend(normalize_key_metric_values(normalized))
     reasons.extend(normalize_critical_flags(normalized))
     reasons.extend(normalize_risk_levels(normalized))
+    reasons.extend(backfill_empty_risks(normalized))
+    reasons.extend(backfill_empty_weaknesses(normalized))
+    reasons.extend(backfill_empty_strengths(normalized))
     return normalized, reasons
 
 

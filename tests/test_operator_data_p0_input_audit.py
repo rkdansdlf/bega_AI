@@ -11,7 +11,9 @@ from scripts import audit_operator_data_p0_input_packet as audit
 from scripts import build_operator_data_p0_input_packet as packet
 
 
-def _write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> None:
+def _write_csv(
+    path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, Any]]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
@@ -86,7 +88,10 @@ def _schedule_fields(queue_id: str, **overrides: str) -> list[dict[str, str]]:
         "confidence": "0.90",
     }
     values.update(overrides)
-    return [_field_row(queue_id, field_name, operator_value=value) for field_name, value in values.items()]
+    return [
+        _field_row(queue_id, field_name, operator_value=value)
+        for field_name, value in values.items()
+    ]
 
 
 def _write_packet_pair(
@@ -138,8 +143,13 @@ def _codes(report: Mapping[str, Any]) -> set[str]:
     return {str(issue["code"]) for issue in report["issues"]}
 
 
-def test_current_all_pending_packet_warns_with_manual_fallback_86(tmp_path: Path) -> None:
-    if not packet.DEFAULT_QUEUE_INPUT.exists() or not packet.DEFAULT_FIELDS_INPUT.exists():
+def test_current_all_pending_packet_warns_with_manual_fallback_86(
+    tmp_path: Path,
+) -> None:
+    if (
+        not packet.DEFAULT_QUEUE_INPUT.exists()
+        or not packet.DEFAULT_FIELDS_INPUT.exists()
+    ):
         pytest.skip("local operator-data handoff reports are not present")
 
     packet_dir = tmp_path / "packet"
@@ -164,12 +174,16 @@ def test_current_all_pending_packet_warns_with_manual_fallback_86(tmp_path: Path
     assert _codes(report) == {"no_ready_p0_rows"}
 
 
-def test_partial_ready_complete_packet_passes_with_pending_manual_fallback(tmp_path: Path) -> None:
+def test_partial_ready_complete_packet_passes_with_pending_manual_fallback(
+    tmp_path: Path,
+) -> None:
     report = _run(
         tmp_path,
         source_queue_rows=[
             _queue_row("ODQ-0001", operator_status="pending"),
-            _queue_row("ODQ-0002", operator_status="pending", question="내일 KBO 일정 알려줘."),
+            _queue_row(
+                "ODQ-0002", operator_status="pending", question="내일 KBO 일정 알려줘."
+            ),
         ],
         source_field_rows=[
             *_schedule_fields("ODQ-0001"),
@@ -177,7 +191,9 @@ def test_partial_ready_complete_packet_passes_with_pending_manual_fallback(tmp_p
         ],
         packet_queue_rows=[
             _queue_row("ODQ-0001", operator_status="ready_for_validation"),
-            _queue_row("ODQ-0002", operator_status="pending", question="내일 KBO 일정 알려줘."),
+            _queue_row(
+                "ODQ-0002", operator_status="pending", question="내일 KBO 일정 알려줘."
+            ),
         ],
         packet_field_rows=[
             *_schedule_fields("ODQ-0001"),
@@ -200,7 +216,9 @@ def test_ready_row_missing_required_operator_value_fails(tmp_path: Path) -> None
         tmp_path,
         source_queue_rows=[_queue_row("ODQ-0001")],
         source_field_rows=_schedule_fields("ODQ-0001"),
-        packet_queue_rows=[_queue_row("ODQ-0001", operator_status="ready_for_validation")],
+        packet_queue_rows=[
+            _queue_row("ODQ-0001", operator_status="ready_for_validation")
+        ],
         packet_field_rows=_schedule_fields("ODQ-0001", game_id=""),
     )
 
@@ -209,7 +227,9 @@ def test_ready_row_missing_required_operator_value_fails(tmp_path: Path) -> None
     assert report["summary"]["blocked_ready_count"] == 1
 
 
-def test_ready_row_requires_verified_source_and_minimum_confidence(tmp_path: Path) -> None:
+def test_ready_row_requires_verified_source_and_minimum_confidence(
+    tmp_path: Path,
+) -> None:
     report = _run(
         tmp_path,
         source_queue_rows=[_queue_row("ODQ-0001")],
@@ -239,7 +259,9 @@ def test_non_p0_domain_and_immutable_drift_fail(tmp_path: Path) -> None:
     ]
     packet_fields = [
         *_schedule_fields("ODQ-0001"),
-        _field_row("ODQ-0002", "venue_name", domain="venue_ticket", operator_value="Jamsil"),
+        _field_row(
+            "ODQ-0002", "venue_name", domain="venue_ticket", operator_value="Jamsil"
+        ),
     ]
 
     report = _run(
@@ -251,9 +273,11 @@ def test_non_p0_domain_and_immutable_drift_fail(tmp_path: Path) -> None:
     )
 
     assert report["summary"]["status"] == "fail"
-    assert {"non_p0_queue_domain", "non_p0_field_domain", "immutable_queue_drift"}.issubset(
-        _codes(report)
-    )
+    assert {
+        "non_p0_queue_domain",
+        "non_p0_field_domain",
+        "immutable_queue_drift",
+    }.issubset(_codes(report))
 
 
 def test_require_ready_turns_all_pending_warning_into_failure(tmp_path: Path) -> None:
@@ -312,7 +336,9 @@ def test_cli_writes_outputs_and_returns_policy_exit_codes(tmp_path: Path) -> Non
     assert (output_dir / "p0_input_audit_issues.csv").exists()
     assert (output_dir / "p0_input_readiness_plan.csv").exists()
     assert (output_dir / "p0_input_audit_handoff.md").exists()
-    payload = json.loads((output_dir / "p0_input_audit_summary.json").read_text(encoding="utf-8"))
+    payload = json.loads(
+        (output_dir / "p0_input_audit_summary.json").read_text(encoding="utf-8")
+    )
     issues = _read_csv(output_dir / "p0_input_audit_issues.csv")
     readiness = _read_csv(output_dir / "p0_input_readiness_plan.csv")
     assert payload["summary"]["status"] == "warning"

@@ -109,6 +109,9 @@ class TestHasTemporalKeyword:
 # ── TestBuildChatCacheKey ─────────────────────────────────────────────────────
 
 class TestBuildChatCacheKey:
+    def test_schema_version_bumped_for_256_embedding_rollout(self):
+        assert CHAT_CACHE_SCHEMA_VERSION == "v12"
+
     def test_returns_tuple_of_two(self):
         result = build_chat_cache_key(question="KIA 홈런")
         assert isinstance(result, tuple)

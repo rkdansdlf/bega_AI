@@ -19,7 +19,18 @@ class FakeDbChecker:
     ) -> None:
         self.games = games or {}
         self.player_counts = player_counts or {}
-        self.known_teams = known_teams or {"LG", "KT", "KIA", "SSG", "DB", "NC", "LT", "SS", "HH", "KH"}
+        self.known_teams = known_teams or {
+            "LG",
+            "KT",
+            "KIA",
+            "SSG",
+            "DB",
+            "NC",
+            "LT",
+            "SS",
+            "HH",
+            "KH",
+        }
         self.db_checks_skipped = False
         self.db_skip_reason = ""
 
@@ -29,7 +40,9 @@ class FakeDbChecker:
     def count_players(self, player_name: str) -> int:
         return self.player_counts.get(player_name, 1)
 
-    def is_known_team_code(self, team_code: str, season_year: int | None = None) -> bool:
+    def is_known_team_code(
+        self, team_code: str, season_year: int | None = None
+    ) -> bool:
         del season_year
         return team_code in self.known_teams
 
@@ -155,11 +168,17 @@ def test_file_shape_rejects_duplicate_orphan_and_bad_status() -> None:
     report = _report(queue, fields)
     codes = {issue["code"] for issue in report["issues"]}
 
-    assert {"invalid_operator_status", "duplicate_queue_id", "orphan_field_row"}.issubset(codes)
+    assert {
+        "invalid_operator_status",
+        "duplicate_queue_id",
+        "orphan_field_row",
+    }.issubset(codes)
     assert report["summary"]["status"] == "fail"
 
 
-def test_file_shape_rejects_duplicate_missing_unexpected_and_mismatched_fields() -> None:
+def test_file_shape_rejects_duplicate_missing_unexpected_and_mismatched_fields() -> (
+    None
+):
     queue = [
         _queue(
             "ODQ-0031",
@@ -354,7 +373,13 @@ def test_db_checker_validates_game_player_and_team_success() -> None:
         },
     )
     db_checker = FakeDbChecker(
-        games={"20260430LGKT0": {"game_id": "20260430LGKT0", "home_team": "LG", "away_team": "KT"}},
+        games={
+            "20260430LGKT0": {
+                "game_id": "20260430LGKT0",
+                "home_team": "LG",
+                "away_team": "KT",
+            }
+        },
         player_counts={"홍길동": 1},
         known_teams={"LG"},
     )
@@ -385,12 +410,18 @@ def test_db_checker_reports_missing_game_ambiguous_player_and_unknown_team() -> 
             "confidence": "0.95",
         },
     )
-    db_checker = FakeDbChecker(games={}, player_counts={"동명이인": 2}, known_teams={"LG"})
+    db_checker = FakeDbChecker(
+        games={}, player_counts={"동명이인": 2}, known_teams={"LG"}
+    )
 
     report = _report(queue, fields, db_checker=db_checker)
     codes = {issue["code"] for issue in report["issues"]}
 
-    assert {"game_not_found", "player_resolution_not_unique", "unknown_team_code"}.issubset(codes)
+    assert {
+        "game_not_found",
+        "player_resolution_not_unique",
+        "unknown_team_code",
+    }.issubset(codes)
     assert report["summary"]["status"] == "fail"
 
 
@@ -491,6 +522,6 @@ def test_real_194_bundle_pending_baseline_is_read_only_and_not_apply_eligible(
     assert report["summary"]["apply_eligible_count"] == 0
     assert len(report["normalized_rows"]) == 194
     assert len(report["apply_plan_rows"]) == 194
-    assert {
-        row["skip_reason"] for row in report["normalized_rows"]
-    } == {"operator_status_pending"}
+    assert {row["skip_reason"] for row in report["normalized_rows"]} == {
+        "operator_status_pending"
+    }

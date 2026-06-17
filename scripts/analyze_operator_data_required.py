@@ -956,9 +956,7 @@ def build_taxonomy(
     for record in records:
         domain_counts[record["domain"]] += 1
         status = str(record["recommended_status"])
-        recommended_status_counts[status] = (
-            recommended_status_counts.get(status, 0) + 1
-        )
+        recommended_status_counts[status] = recommended_status_counts.get(status, 0) + 1
         verdict = str(record.get("final_verdict") or "")
         final_verdict_counts[verdict] = final_verdict_counts.get(verdict, 0) + 1
 
@@ -973,7 +971,9 @@ def build_taxonomy(
             "unique_questions_by_status": _count_unique_by_status(results),
             "target_unique_questions": len(records),
             "domain_counts": domain_counts,
-            "recommended_status_counts": dict(sorted(recommended_status_counts.items())),
+            "recommended_status_counts": dict(
+                sorted(recommended_status_counts.items())
+            ),
             "final_verdict_counts": dict(sorted(final_verdict_counts.items())),
         },
         "records": records,

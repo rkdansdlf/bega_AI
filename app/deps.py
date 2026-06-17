@@ -370,7 +370,7 @@ async def lifespan(app):
             # psycopg3 in pool context might need explicit commit if autocommit is not set?
             # connection pool is created with autocommit=True in get_connection_pool
     except Exception as e:
-        print(f"[Warning] Failed to ensure coach_analysis_cache table: {e}")
+        logger.warning("Failed to ensure coach_analysis_cache table: %s", e)
 
     # [Chat Caching] chat_response_cache 테이블 자동 생성
     try:

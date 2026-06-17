@@ -10,7 +10,9 @@ from scripts import summarize_operator_data_p0_recovery_status as status
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -19,7 +21,9 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=status.BLOCKER_FIELDNAMES)
         writer.writeheader()
         for row in rows:
-            writer.writerow({field: row.get(field, "") for field in status.BLOCKER_FIELDNAMES})
+            writer.writerow(
+                {field: row.get(field, "") for field in status.BLOCKER_FIELDNAMES}
+            )
 
 
 def _base_inputs(**overrides: Any) -> dict[str, Any]:
@@ -283,7 +287,9 @@ def test_status_blocks_failed_db_prereqs() -> None:
     )
 
     assert report["summary"]["status"] == "blocked"
-    assert {"db_prereqs_failed", "missing_lineup_conflict_target"}.issubset(_codes(report))
+    assert {"db_prereqs_failed", "missing_lineup_conflict_target"}.issubset(
+        _codes(report)
+    )
     assert report["summary"]["db_prereq_status"] == "fail"
 
 
@@ -299,8 +305,13 @@ def test_run_summary_writes_json_csv_and_handoff(tmp_path: Path) -> None:
     _write_json(packet_dir / "p0_input_summary.json", data["packet_summary"])
     _write_json(audit_dir / "p0_input_audit_summary.json", data["audit_report"])
     _write_json(db_prereq_dir / "db_prereq_summary.json", data["db_prereq_report"])
-    _write_json(validation_dir / "operator_data_validation_summary.json", data["validation_summary"])
-    _write_json(ingest_dir / "operator_data_ingest_summary.json", data["ingest_summary"])
+    _write_json(
+        validation_dir / "operator_data_validation_summary.json",
+        data["validation_summary"],
+    )
+    _write_json(
+        ingest_dir / "operator_data_ingest_summary.json", data["ingest_summary"]
+    )
     _write_json(gate_dir / "summary.json", data["gate_report"])
     _write_csv(gate_dir / "issues.csv", data["gate_issues"])
 
@@ -346,8 +357,13 @@ def test_main_returns_nonzero_when_blocked(tmp_path: Path) -> None:
     _write_json(packet_dir / "p0_input_summary.json", data["packet_summary"])
     _write_json(audit_dir / "p0_input_audit_summary.json", data["audit_report"])
     _write_json(db_prereq_dir / "db_prereq_summary.json", data["db_prereq_report"])
-    _write_json(validation_dir / "operator_data_validation_summary.json", data["validation_summary"])
-    _write_json(ingest_dir / "operator_data_ingest_summary.json", data["ingest_summary"])
+    _write_json(
+        validation_dir / "operator_data_validation_summary.json",
+        data["validation_summary"],
+    )
+    _write_json(
+        ingest_dir / "operator_data_ingest_summary.json", data["ingest_summary"]
+    )
     _write_json(gate_dir / "summary.json", data["gate_report"])
     _write_csv(gate_dir / "issues.csv", data["gate_issues"])
 
