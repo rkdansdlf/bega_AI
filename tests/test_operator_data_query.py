@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from datetime import date
 from typing import Any, Mapping
 
@@ -15,13 +17,13 @@ class FakeCursor:
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
         self._rows: list[Mapping[str, Any]] = []
 
-    def __enter__(self) -> "FakeCursor":
+    async def __aenter__(self) -> "FakeCursor":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
 
-    def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
+    async def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         self.executed.append((query, params))
         lowered = query.lower()
         table = ""
@@ -36,7 +38,7 @@ class FakeCursor:
                 break
         self._rows = list(self.rows_by_table.get(table, []))
 
-    def fetchall(self) -> list[Mapping[str, Any]]:
+    async def fetchall(self) -> list[Mapping[str, Any]]:
         return list(self._rows)
 
 
@@ -50,13 +52,13 @@ class FakeConnection:
 
 
 class BrokenCursor:
-    def __enter__(self) -> "BrokenCursor":
+    async def __aenter__(self) -> "BrokenCursor":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
 
-    def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
+    async def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         del query, params
         raise RuntimeError("schema missing")
 
@@ -87,10 +89,12 @@ def test_schedule_fast_path_returns_partial_operator_answer() -> None:
         }
     )
 
-    result = try_build_operator_fast_path_result(
-        conn,
-        "오늘 KBO 경기 일정 알려줘.",
-        today=date(2026, 6, 5),
+    result = asyncio.run(
+        try_build_operator_fast_path_result(
+            conn,
+            "오늘 KBO 경기 일정 알려줘.",
+            today=date(2026, 6, 5),
+        )
     )
 
     assert result is not None
@@ -122,8 +126,8 @@ def test_roster_fast_path_uses_verified_operator_rows_only() -> None:
         }
     )
 
-    result = try_build_operator_fast_path_result(
-        conn, "2026년 LG 부상자 명단은 어디서 봐?"
+    result = asyncio.run(
+        try_build_operator_fast_path_result(conn, "2026년 LG 부상자 명단은 어디서 봐?")
     )
 
     assert result is not None
@@ -151,9 +155,11 @@ def test_roster_fast_path_requires_team_and_year_scope() -> None:
         }
     )
 
-    no_year = try_build_operator_fast_path_result(conn, "LG 부상자 명단은 어디서 봐?")
-    no_team = try_build_operator_fast_path_result(
-        conn, "2026년 부상자 명단은 어디서 봐?"
+    no_year = asyncio.run(
+        try_build_operator_fast_path_result(conn, "LG 부상자 명단은 어디서 봐?")
+    )
+    no_team = asyncio.run(
+        try_build_operator_fast_path_result(conn, "2026년 부상자 명단은 어디서 봐?")
     )
 
     assert no_year is None
@@ -184,7 +190,7 @@ def test_lineup_fast_path_requires_date_scope() -> None:
         }
     )
 
-    result = try_build_operator_fast_path_result(conn, "LG 라인업 알려줘.")
+    result = asyncio.run(try_build_operator_fast_path_result(conn, "LG 라인업 알려줘."))
 
     assert result is None
 
@@ -192,10 +198,12 @@ def test_lineup_fast_path_requires_date_scope() -> None:
 def test_no_operator_rows_returns_none_for_manual_fallback() -> None:
     conn = FakeConnection({})
 
-    result = try_build_operator_fast_path_result(
-        conn,
-        "오늘 KBO 경기 일정 알려줘.",
-        today=date(2026, 6, 5),
+    result = asyncio.run(
+        try_build_operator_fast_path_result(
+            conn,
+            "오늘 KBO 경기 일정 알려줘.",
+            today=date(2026, 6, 5),
+        )
     )
 
     assert result is None
@@ -235,20 +243,24 @@ def test_invalid_operator_rows_return_none_for_manual_fallback() -> None:
         }
     )
 
-    result = try_build_operator_fast_path_result(
-        conn,
-        "오늘 KBO 경기 일정 알려줘.",
-        today=date(2026, 6, 5),
+    result = asyncio.run(
+        try_build_operator_fast_path_result(
+            conn,
+            "오늘 KBO 경기 일정 알려줘.",
+            today=date(2026, 6, 5),
+        )
     )
 
     assert result is None
 
 
 def test_schema_errors_return_none_for_manual_fallback() -> None:
-    result = try_build_operator_fast_path_result(
-        BrokenConnection(),
-        "오늘 KBO 경기 일정 알려줘.",
-        today=date(2026, 6, 5),
+    result = asyncio.run(
+        try_build_operator_fast_path_result(
+            BrokenConnection(),
+            "오늘 KBO 경기 일정 알려줘.",
+            today=date(2026, 6, 5),
+        )
     )
 
     assert result is None

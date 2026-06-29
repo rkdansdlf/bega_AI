@@ -11,7 +11,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import logging
 import time
 import threading
-from psycopg import Connection as PgConnection
+from psycopg import AsyncConnection as PgConnection
 from psycopg.rows import dict_row
 from app.core import kbo_metrics
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
@@ -414,8 +414,11 @@ class DatabaseQueryTool:
         if cached_rows:
             self.team_resolver.sync_from_team_rows(cached_rows)
             self.mapping_dependency_reason = "shared_cache"
+            self._mapping_load_pending = False
         else:
-            self._load_team_mappings()
+            # Async 컨텍스트가 아닌 __init__에서는 DB 매핑을 로드할 수 없으므로
+            # 첫 비동기 쿼리 진입 시 _ensure_team_mappings_loaded()로 지연 로드한다.
+            self._mapping_load_pending = True
 
         # KBO 포지션 약어 매핑
         self.position_mapping = {
@@ -432,10 +435,16 @@ class DatabaseQueryTool:
             "포": "포수",
         }
 
-    def _fetch_team_mapping_rows(
+    async def _ensure_team_mappings_loaded(self) -> None:
+        """지연된 팀 매핑 DB 로드를 첫 쿼리 시 1회 수행한다."""
+        if getattr(self, "_mapping_load_pending", False):
+            self._mapping_load_pending = False
+            await self._load_team_mappings()
+
+    async def _fetch_team_mapping_rows(
         self, connection: PgConnection
     ) -> List[Dict[str, Any]]:
-        return fetch_team_mapping_rows(connection)
+        return await fetch_team_mapping_rows(connection)
 
     def _apply_team_mapping_rows(self, rows: List[Dict[str, Any]], source: str) -> None:
         if not rows:
@@ -453,9 +462,9 @@ class DatabaseQueryTool:
             source,
         )
 
-    def _load_team_mappings(self):
+    async def _load_team_mappings(self):
         """OCI DB의 teams 테이블과 franchise_id를 활용하여 팀 매핑 정보를 동적으로 로드합니다."""
-        result = load_team_mappings_with_retry(
+        result = await load_team_mappings_with_retry(
             connection=self.connection,
             fetch_rows=self._fetch_team_mapping_rows,
             apply_rows=self._apply_team_mapping_rows,
@@ -472,15 +481,16 @@ class DatabaseQueryTool:
         self.mapping_dependency_degraded = result.degraded
         self.mapping_dependency_reason = result.reason
 
-    def _get_table_columns(self, table_name: str) -> set[str]:
+    async def _get_table_columns(self, table_name: str) -> set[str]:
         cached = self._table_columns_cache.get(table_name)
         if cached is not None:
             return cached
 
         columns: set[str] = set()
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
-            cursor.execute(
+            await cursor.execute(
                 """
                 SELECT column_name
                 FROM information_schema.columns
@@ -489,9 +499,9 @@ class DatabaseQueryTool:
                 """,
                 (table_name,),
             )
-            rows = cursor.fetchall()
+            rows = await cursor.fetchall()
             columns = {str(row["column_name"]) for row in rows}
-            cursor.close()
+            await cursor.close()
         except Exception as e:
             logger.warning(
                 "[DatabaseQuery] Failed to inspect columns for table '%s': %s",
@@ -618,7 +628,7 @@ class DatabaseQueryTool:
             END
         """
 
-    def get_player_career_stats(
+    async def get_player_career_stats(
         self,
         player_name: str,
         position: str = "both",  # "batting", "pitching", "both"
@@ -645,6 +655,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 우선 선수가 존재하는지 확인
@@ -653,8 +664,8 @@ class DatabaseQueryTool:
                 WHERE (LOWER(name) = LOWER(%s) OR LOWER(name) LIKE LOWER(%s))
                 LIMIT 5
             """
-            cursor.execute(check_query, (player_name, f"%{player_name}%"))
-            existing_players = [row["name"] for row in cursor.fetchall()]
+            await cursor.execute(check_query, (player_name, f"%{player_name}%"))
+            existing_players = [row["name"] for row in await cursor.fetchall()]
 
             if not existing_players:
                 result["error"] = (
@@ -721,8 +732,10 @@ class DatabaseQueryTool:
                     ORDER BY total_home_runs DESC
                     LIMIT 1
                 """
-                cursor.execute(batting_query, (0, player_name, f"%{player_name}%"))
-                batting_row = cursor.fetchone()
+                await cursor.execute(
+                    batting_query, (0, player_name, f"%{player_name}%")
+                )
+                batting_row = await cursor.fetchone()
 
                 if batting_row:
                     batting_stats = dict(batting_row)
@@ -777,8 +790,10 @@ class DatabaseQueryTool:
                     ORDER BY total_wins DESC
                     LIMIT 1
                 """
-                cursor.execute(pitching_query, (0, player_name, f"%{player_name}%"))
-                pitching_row = cursor.fetchone()
+                await cursor.execute(
+                    pitching_query, (0, player_name, f"%{player_name}%")
+                )
+                pitching_row = await cursor.fetchone()
 
                 if pitching_row:
                     result["pitching_stats"] = dict(pitching_row)
@@ -792,11 +807,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_player_season_stats(
+    async def get_player_season_stats(
         self,
         player_name: str,
         year: int,
@@ -827,6 +842,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 타격 통계 조회
@@ -847,8 +863,8 @@ class DatabaseQueryTool:
                     ORDER BY psb.plate_appearances DESC
                     LIMIT 1
                 """
-                cursor.execute(batting_query, (f"%{player_name}%", year))
-                batting_row = cursor.fetchone()
+                await cursor.execute(batting_query, (f"%{player_name}%", year))
+                batting_row = await cursor.fetchone()
 
                 if batting_row:
                     result["batting_stats"] = dict(batting_row)
@@ -875,8 +891,8 @@ class DatabaseQueryTool:
                     ORDER BY psp.innings_pitched DESC
                     LIMIT 1
                 """
-                cursor.execute(pitching_query, (f"%{player_name}%", year))
-                pitching_row = cursor.fetchone()
+                await cursor.execute(pitching_query, (f"%{player_name}%", year))
+                pitching_row = await cursor.fetchone()
 
                 if pitching_row:
                     result["pitching_stats"] = dict(pitching_row)
@@ -890,11 +906,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_player_season_stats_batch(
+    async def get_player_season_stats_batch(
         self,
         player_names: List[str],
         year: int,
@@ -1047,11 +1063,12 @@ class DatabaseQueryTool:
         """
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             if position in ["batting", "both"]:
-                cursor.execute(batting_query, (*values_params, year))
-                for row in cursor.fetchall():
+                await cursor.execute(batting_query, (*values_params, year))
+                for row in await cursor.fetchall():
                     row_dict = dict(row)
                     requested_name = str(row_dict.pop("requested_name"))
                     row_dict.pop("player_order", None)
@@ -1070,8 +1087,8 @@ class DatabaseQueryTool:
                     result["found"] = True
 
             if position in ["pitching", "both"]:
-                cursor.execute(pitching_query, (*values_params, year))
-                for row in cursor.fetchall():
+                await cursor.execute(pitching_query, (*values_params, year))
+                for row in await cursor.fetchall():
                     row_dict = dict(row)
                     requested_name = str(row_dict.pop("requested_name"))
                     row_dict.pop("player_order", None)
@@ -1096,11 +1113,11 @@ class DatabaseQueryTool:
                 result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return results
 
-    def get_team_leaderboard(
+    async def get_team_leaderboard(
         self,
         stat_name: str,
         year: int,
@@ -1137,6 +1154,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 통계 지표에 따른 쿼리 구성
@@ -1217,8 +1235,8 @@ class DatabaseQueryTool:
                         ORDER BY win_rate DESC
                         LIMIT %s
                     """
-                    cursor.execute(query, (year, limit))
-                    rows = cursor.fetchall()
+                    await cursor.execute(query, (year, limit))
+                    rows = await cursor.fetchall()
 
                     for row in rows:
                         result["leaderboard"].append(
@@ -1463,8 +1481,8 @@ class DatabaseQueryTool:
                 return result
 
             # 쿼리 실행
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+            await cursor.execute(query, params)
+            rows = await cursor.fetchall()
 
             if rows:
                 total_qualified_players = rows[0].get("total_qualified_players")
@@ -1492,11 +1510,13 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def validate_player_exists(self, player_name: str, year: int) -> Dict[str, Any]:
+    async def validate_player_exists(
+        self, player_name: str, year: int
+    ) -> Dict[str, Any]:
         """
         선수가 해당 연도에 실제로 존재하는지 DB에서 확인합니다.
 
@@ -1520,6 +1540,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 타격 테이블과 투구 테이블 모두에서 검색
@@ -1543,10 +1564,10 @@ class DatabaseQueryTool:
                 ORDER BY player_name
             """
 
-            cursor.execute(
+            await cursor.execute(
                 search_query, (f"%{player_name}%", year, f"%{player_name}%", year)
             )
-            rows = cursor.fetchall()
+            rows = await cursor.fetchall()
 
             if rows:
                 result["exists"] = True
@@ -1562,11 +1583,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_award_winners(
+    async def get_award_winners(
         self, year: int, award_type: Optional[str] = None
     ) -> Dict[str, Any]:
         """
@@ -1593,7 +1614,7 @@ class DatabaseQueryTool:
             "error": None,
         }
 
-        award_columns = self._get_table_columns("awards")
+        award_columns = await self._get_table_columns("awards")
         season_column = "award_year"
         if "award_year" not in award_columns and "year" in award_columns:
             season_column = "year"
@@ -1602,6 +1623,7 @@ class DatabaseQueryTool:
         team_name_column = "team_name" if "team_name" in award_columns else None
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             position_select = (
                 f"a.{position_column} AS position"
@@ -1625,8 +1647,8 @@ class DatabaseQueryTool:
                 ORDER BY a.award_type, a.player_name
             """
 
-            cursor.execute(query, (year,))
-            rows = cursor.fetchall()
+            await cursor.execute(query, (year,))
+            rows = await cursor.fetchall()
 
             deduped_keys = set()
             for row in rows:
@@ -1674,7 +1696,7 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
@@ -1716,7 +1738,7 @@ class DatabaseQueryTool:
 
         return result
 
-    def get_player_defensive_stats(
+    async def get_player_defensive_stats(
         self, player_name: str, year: int = None
     ) -> Dict[str, Any]:
         """
@@ -1746,6 +1768,7 @@ class DatabaseQueryTool:
         예상되는 수비 통계 쿼리:
         
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             
             if year:
@@ -1772,7 +1795,7 @@ class DatabaseQueryTool:
                     ORDER BY psd.games_played DESC
                     LIMIT 1
                 '''
-                cursor.execute(query, (f'%{player_name}%', year))
+                await cursor.execute(query, (f'%{player_name}%', year))
             else:
                 # 통산 수비 통계
                 query = '''
@@ -1795,9 +1818,9 @@ class DatabaseQueryTool:
                     GROUP BY pb.player_id, pb.name
                     LIMIT 1
                 '''
-                cursor.execute(query, (f'%{player_name}%',))
+                await cursor.execute(query, (f'%{player_name}%',))
             
-            row = cursor.fetchone()
+            row = await cursor.fetchone()
             if row:
                 result["defensive_stats"] = dict(row)
                 result["found"] = True
@@ -1807,7 +1830,7 @@ class DatabaseQueryTool:
         logger.info(f"[DatabaseQuery] Defensive stats not available for {player_name}")
         return result
 
-    def get_pitcher_velocity_data(
+    async def get_pitcher_velocity_data(
         self, player_name: str, year: int = None
     ) -> Dict[str, Any]:
         """
@@ -1837,6 +1860,7 @@ class DatabaseQueryTool:
         예상되는 구속 데이터 쿼리:
         
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             
             query = '''
@@ -1862,13 +1886,13 @@ class DatabaseQueryTool:
             '''
             
             if year:
-                cursor.execute(query, (f'%{player_name}%', year))
+                await cursor.execute(query, (f'%{player_name}%', year))
             else:
                 # 가장 최근 데이터
                 query += ' ORDER BY ppv.season DESC LIMIT 1'
-                cursor.execute(query.replace('AND ppv.season = %s', ''), (f'%{player_name}%',))
+                await cursor.execute(query.replace('AND ppv.season = %s', ''), (f'%{player_name}%',))
             
-            row = cursor.fetchone()
+            row = await cursor.fetchone()
             if row:
                 result["velocity_data"] = dict(row)
                 result["found"] = True
@@ -1880,7 +1904,7 @@ class DatabaseQueryTool:
         )
         return result
 
-    def _get_current_team_rank_from_standings_daily(
+    async def _get_current_team_rank_from_standings_daily(
         self, team_name: str, year: int
     ) -> Optional[Dict[str, Any]]:
         """Return latest in-season rank from team_standings_daily when available."""
@@ -1891,6 +1915,7 @@ class DatabaseQueryTool:
         if not team_variants:
             return None
 
+        await self._ensure_team_mappings_loaded()
         cursor = self.connection.cursor(row_factory=dict_row)
         try:
             query = """
@@ -1926,8 +1951,8 @@ class DatabaseQueryTool:
                 ORDER BY season_rank ASC
                 LIMIT 1
             """
-            cursor.execute(query, (year, year, team_variants))
-            row = cursor.fetchone()
+            await cursor.execute(query, (year, year, team_variants))
+            row = await cursor.fetchone()
             if not row:
                 return None
             return {
@@ -1955,9 +1980,9 @@ class DatabaseQueryTool:
             )
             return None
         finally:
-            cursor.close()
+            await cursor.close()
 
-    def get_team_season_rank(self, team_name: str, year: int) -> Dict[str, Any]:
+    async def get_team_season_rank(self, team_name: str, year: int) -> Dict[str, Any]:
         """
         특정 팀의 시즌 순위를 계산하여 반환합니다.
         MISSING VIEW v_team_rank_all 대체 구현
@@ -1997,7 +2022,7 @@ class DatabaseQueryTool:
             self.team_resolver.query_mode,
         )
 
-        standings_result = self._get_current_team_rank_from_standings_daily(
+        standings_result = await self._get_current_team_rank_from_standings_daily(
             team_name, year
         )
         if standings_result is not None:
@@ -2007,6 +2032,7 @@ class DatabaseQueryTool:
             return standings_result
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             canonical_home_expr = self._canonical_team_expr("g.home_team")
             canonical_away_expr = self._canonical_team_expr("g.away_team")
@@ -2059,8 +2085,8 @@ class DatabaseQueryTool:
                 FROM team_stats
             """
 
-            cursor.execute(rank_query, (year, 0, year, 0))
-            rankings = cursor.fetchall()
+            await cursor.execute(rank_query, (year, 0, year, 0))
+            rankings = await cursor.fetchall()
 
             target_team_code = self.get_game_team_code(team_name, year)
 
@@ -2094,12 +2120,12 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         self._record_team_query_result("get_team_season_rank", team_name, year, result)
         return result
 
-    def get_team_by_season_rank(self, year: int, rank: int) -> Dict[str, Any]:
+    async def get_team_by_season_rank(self, year: int, rank: int) -> Dict[str, Any]:
         """
         특정 연도의 정규시즌 순위로 팀을 역조회합니다.
         """
@@ -2120,6 +2146,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             canonical_home_expr = self._canonical_team_expr("g.home_team")
             canonical_away_expr = self._canonical_team_expr("g.away_team")
@@ -2180,8 +2207,8 @@ class DatabaseQueryTool:
                 LIMIT 1
             """
 
-            cursor.execute(rank_query, (year, 0, year, 0, rank))
-            row = cursor.fetchone()
+            await cursor.execute(rank_query, (year, 0, year, 0, rank))
+            row = await cursor.fetchone()
             if row:
                 result["team_code"] = row["team"]
                 result["team_name"] = self.get_team_name(row["team"]) or row["team"]
@@ -2195,14 +2222,14 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         self._record_team_query_result(
             "get_team_by_season_rank", str(rank), year, result
         )
         return result
 
-    def get_team_standings(
+    async def get_team_standings(
         self, year: int, as_of_date: Optional[str] = None
     ) -> Dict[str, Any]:
         """Return a full team standings table from team_standings_daily."""
@@ -2222,6 +2249,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             params: list[Any] = [year, year]
             as_of_filter = ""
@@ -2261,8 +2289,8 @@ class DatabaseQueryTool:
                 FROM ranked
                 ORDER BY season_rank ASC, team_code ASC
             """
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+            await cursor.execute(query, params)
+            rows = await cursor.fetchall()
             if not rows:
                 return result
 
@@ -2295,9 +2323,9 @@ class DatabaseQueryTool:
             return result
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
-    def get_team_metric_leaderboard(
+    async def get_team_metric_leaderboard(
         self,
         metric_name: str,
         year: int,
@@ -2481,7 +2509,7 @@ class DatabaseQueryTool:
             "source": None,
         }
         if spec is None:
-            role_metric_result = self._get_team_pitching_role_metric_leaderboard(
+            role_metric_result = await self._get_team_pitching_role_metric_leaderboard(
                 metric_key=metric_key,
                 metric_name=metric_name,
                 year=year,
@@ -2490,7 +2518,7 @@ class DatabaseQueryTool:
             )
             if role_metric_result is not None:
                 return role_metric_result
-            game_metric_result = self._get_team_game_metric_leaderboard(
+            game_metric_result = await self._get_team_game_metric_leaderboard(
                 metric_key=metric_key,
                 metric_name=metric_name,
                 year=year,
@@ -2519,6 +2547,7 @@ class DatabaseQueryTool:
         result["source"] = table_name
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             query = f"""
                 SELECT
@@ -2532,8 +2561,8 @@ class DatabaseQueryTool:
                 ORDER BY stat_value {resolved_sort}, team_code ASC
                 LIMIT %s
             """
-            cursor.execute(query, (year, max(1, int(limit or 10))))
-            rows = cursor.fetchall()
+            await cursor.execute(query, (year, max(1, int(limit or 10))))
+            rows = await cursor.fetchall()
             for row in rows:
                 team_code = row.get("team_code")
                 result["team_metric_leaderboard"].append(
@@ -2550,11 +2579,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def _get_team_pitching_role_metric_leaderboard(
+    async def _get_team_pitching_role_metric_leaderboard(
         self,
         *,
         metric_key: str,
@@ -2602,6 +2631,7 @@ class DatabaseQueryTool:
         value_column = spec["value"]
         canonical_team_code_expr = self._canonical_team_expr("team_code")
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             query = f"""
                 WITH role_split AS (
@@ -2668,8 +2698,8 @@ class DatabaseQueryTool:
                 ORDER BY stat_value {resolved_sort}, team_code ASC
                 LIMIT %s
             """
-            cursor.execute(query, (year, max(1, int(limit or 10))))
-            rows = cursor.fetchall()
+            await cursor.execute(query, (year, max(1, int(limit or 10))))
+            rows = await cursor.fetchall()
             for row in rows:
                 team_code = row.get("team_code")
                 result["team_metric_leaderboard"].append(
@@ -2690,11 +2720,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def _get_team_game_metric_leaderboard(
+    async def _get_team_game_metric_leaderboard(
         self,
         *,
         metric_key: str,
@@ -2733,6 +2763,7 @@ class DatabaseQueryTool:
         away_team_expr = self._canonical_team_expr("g.away_team")
         value_column = spec["value"]
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             query = f"""
                 WITH team_games AS (
@@ -2776,8 +2807,8 @@ class DatabaseQueryTool:
                 ORDER BY stat_value {resolved_sort}, team_code ASC
                 LIMIT %s
             """
-            cursor.execute(query, (year, year, max(1, int(limit or 10))))
-            rows = cursor.fetchall()
+            await cursor.execute(query, (year, year, max(1, int(limit or 10))))
+            rows = await cursor.fetchall()
             for row in rows:
                 team_code = row.get("team_code")
                 result["team_metric_leaderboard"].append(
@@ -2794,11 +2825,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_team_form_table(
+    async def get_team_form_table(
         self,
         year: int,
         form_type: str = "recent",
@@ -2837,6 +2868,7 @@ class DatabaseQueryTool:
             params.append(variants)
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             query = f"""
                 WITH team_games AS (
@@ -2890,8 +2922,8 @@ class DatabaseQueryTool:
                 {team_filter}
                 ORDER BY team ASC, game_date DESC, game_id DESC
             """
-            cursor.execute(query, params)
-            games = cursor.fetchall()
+            await cursor.execute(query, params)
+            games = await cursor.fetchall()
             if not games:
                 return result
 
@@ -3002,11 +3034,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_team_comparison(
+    async def get_team_comparison(
         self,
         team1: str,
         team2: str,
@@ -3025,7 +3057,7 @@ class DatabaseQueryTool:
         }
 
         try:
-            form_result = self.get_team_form_table(
+            form_result = await self.get_team_form_table(
                 year=year,
                 form_type="recent",
                 recent_limit=recent_limit,
@@ -3040,8 +3072,8 @@ class DatabaseQueryTool:
             for team in (team1, team2):
                 team_code = self.get_team_code(team, year)
                 team_name = self.get_team_name(team_code, year) or team
-                rank = self.get_team_season_rank(team, year)
-                advanced = self.get_team_advanced_metrics(team, year)
+                rank = await self.get_team_season_rank(team, year)
+                advanced = await self.get_team_advanced_metrics(team, year)
                 metrics = advanced.get("metrics") or {}
                 batting = metrics.get("batting") or {}
                 pitching = metrics.get("pitching") or {}
@@ -3207,7 +3239,7 @@ class DatabaseQueryTool:
 
         return result
 
-    def get_team_summary(self, team_name: str, year: int) -> Dict[str, Any]:
+    async def get_team_summary(self, team_name: str, year: int) -> Dict[str, Any]:
         """
         특정 팀의 주요 선수들과 팀 통계를 실제 DB에서 조회합니다.
 
@@ -3264,6 +3296,7 @@ class DatabaseQueryTool:
         )
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 팀 상위 타자들 조회 (OPS 기준, 역할 분류 포함)
@@ -3286,8 +3319,8 @@ class DatabaseQueryTool:
                 ORDER BY psb.ops DESC
                 LIMIT 8
             """
-            cursor.execute(batters_query, (team_variants, year))
-            batters = cursor.fetchall()
+            await cursor.execute(batters_query, (team_variants, year))
+            batters = await cursor.fetchall()
 
             if batters:
                 for row in batters:
@@ -3318,8 +3351,8 @@ class DatabaseQueryTool:
                 ORDER BY psp.era ASC
                 LIMIT 8
             """
-            cursor.execute(pitchers_query, (team_variants, year))
-            pitchers = cursor.fetchall()
+            await cursor.execute(pitchers_query, (team_variants, year))
+            pitchers = await cursor.fetchall()
 
             if pitchers:
                 for row in pitchers:
@@ -3337,7 +3370,7 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         # 성공적인 결과만 캐시 (Coach 최적화)
         if result.get("found") and not result.get("error"):
@@ -3346,7 +3379,7 @@ class DatabaseQueryTool:
         self._record_team_query_result("get_team_summary", team_name, year, result)
         return result
 
-    def get_pitcher_starting_win_rate(
+    async def get_pitcher_starting_win_rate(
         self, player_name: str, year: int
     ) -> Dict[str, Any]:
         """
@@ -3371,6 +3404,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 1. 먼저 player_id 조회
@@ -3380,8 +3414,8 @@ class DatabaseQueryTool:
                 WHERE name LIKE %s
                 LIMIT 1
             """
-            cursor.execute(player_query, (f"%{player_name}%",))
-            player = cursor.fetchone()
+            await cursor.execute(player_query, (f"%{player_name}%",))
+            player = await cursor.fetchone()
 
             if not player:
                 result["error"] = f"선수 '{player_name}'을(를) 찾을 수 없습니다."
@@ -3415,7 +3449,7 @@ class DatabaseQueryTool:
                 AND g.game_status IN ('S', 'E')
                 ORDER BY g.game_date
             """
-            cursor.execute(
+            await cursor.execute(
                 games_query,
                 (
                     player_id,
@@ -3427,7 +3461,7 @@ class DatabaseQueryTool:
                     player_id,
                 ),
             )
-            games = cursor.fetchall()
+            games = await cursor.fetchall()
 
             if not games:
                 result["error"] = (
@@ -3478,11 +3512,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_advanced_stats(
+    async def get_advanced_stats(
         self, player_name: str, year: int, position: str = "both"
     ) -> Dict[str, Any]:
         """
@@ -3499,6 +3533,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             avg_query = """
@@ -3516,8 +3551,8 @@ class DatabaseQueryTool:
                     FROM player_season_pitching WHERE season = %s AND innings_pitched >= 10
                 ) combined
             """
-            cursor.execute(avg_query, (year, year))
-            lg_avg = cursor.fetchone()
+            await cursor.execute(avg_query, (year, year))
+            lg_avg = await cursor.fetchone()
 
             if position in ["batting", "both"]:
                 bat_query = """
@@ -3529,8 +3564,8 @@ class DatabaseQueryTool:
                     AND psb.season = %s
                     LIMIT 1
                 """
-                cursor.execute(bat_query, (player_name, f"%{player_name}%", year))
-                bat_row = cursor.fetchone()
+                await cursor.execute(bat_query, (player_name, f"%{player_name}%", year))
+                bat_row = await cursor.fetchone()
 
                 if (
                     bat_row
@@ -3557,8 +3592,10 @@ class DatabaseQueryTool:
                     AND psp.season = %s
                     LIMIT 1
                 """
-                cursor.execute(pitch_query, (player_name, f"%{player_name}%", year))
-                pitch_row = cursor.fetchone()
+                await cursor.execute(
+                    pitch_query, (player_name, f"%{player_name}%", year)
+                )
+                pitch_row = await cursor.fetchone()
 
                 if (
                     pitch_row
@@ -3588,10 +3625,12 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
         return result
 
-    def get_team_advanced_metrics(self, team_name: str, year: int) -> Dict[str, Any]:
+    async def get_team_advanced_metrics(
+        self, team_name: str, year: int
+    ) -> Dict[str, Any]:
         """
         팀의 전반적인 성적 지표(ERA, OPS, AVG 등)와 리그 내 순위,
         그리고 '불펜 과부하 지표(Bullpen Share)'를 조회하여 객관적 진단을 돕습니다.
@@ -3647,6 +3686,7 @@ class DatabaseQueryTool:
         )
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             canonical_team_code_expr = self._canonical_team_expr("team_code")
 
@@ -3672,8 +3712,8 @@ class DatabaseQueryTool:
                 )
                 SELECT * FROM ranked_batting WHERE team_code = ANY(%s);
             """
-            cursor.execute(batting_query, (year, team_variants))
-            bat_row = cursor.fetchone()
+            await cursor.execute(batting_query, (year, team_variants))
+            bat_row = await cursor.fetchone()
             if bat_row:
                 result["metrics"]["batting"] = {
                     "avg": self.safe_float(bat_row["avg"]),
@@ -3719,8 +3759,8 @@ class DatabaseQueryTool:
                 )
                 SELECT * FROM ranked_pitching WHERE team_code = ANY(%s);
             """
-            cursor.execute(pitching_query, (year, team_variants))
-            pitch_row = cursor.fetchone()
+            await cursor.execute(pitching_query, (year, team_variants))
+            pitch_row = await cursor.fetchone()
             if pitch_row:
                 result["metrics"]["pitching"] = {
                     "era_rank": (
@@ -3751,8 +3791,8 @@ class DatabaseQueryTool:
                     GROUP BY 1
                 ) as league_stats;
             """
-            cursor.execute(league_avg_query, (year,))
-            l_avg = cursor.fetchone()
+            await cursor.execute(league_avg_query, (year,))
+            l_avg = await cursor.fetchone()
             if l_avg:
                 result["league_averages"]["bullpen_share"] = (
                     f"{l_avg['avg_bullpen_share']}%"
@@ -3784,7 +3824,7 @@ class DatabaseQueryTool:
             return result
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
     def get_game_info(self, game_id: str) -> Dict[str, Any]:
         """
@@ -3865,7 +3905,7 @@ class DatabaseQueryTool:
             logger.error(f"[DatabaseQueryTool] Error fetching game info: {e}")
             return result
 
-    def get_team_recent_form(
+    async def get_team_recent_form(
         self,
         team_name: str,
         year: int,
@@ -3943,6 +3983,7 @@ class DatabaseQueryTool:
         )
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 최근 경기 조회 (완료된 경기만)
@@ -3989,8 +4030,8 @@ class DatabaseQueryTool:
                 LIMIT %s
             """
             query_params.append(limit)
-            cursor.execute(query, tuple(query_params))
-            games = cursor.fetchall()
+            await cursor.execute(query, tuple(query_params))
+            games = await cursor.fetchall()
 
             if games:
                 wins = 0
@@ -4054,7 +4095,7 @@ class DatabaseQueryTool:
         self._record_team_query_result("get_team_recent_form", team_name, year, result)
         return result
 
-    def _fetch_player_wpa_window(
+    async def _fetch_player_wpa_window(
         self,
         cursor,
         *,
@@ -4091,8 +4132,8 @@ class DatabaseQueryTool:
             JOIN kbo_seasons ks ON g.season_id = ks.season_id
             WHERE {where_sql}
         """
-        cursor.execute(total_query, tuple(params))
-        total_row = cursor.fetchone() or {}
+        await cursor.execute(total_query, tuple(params))
+        total_row = await cursor.fetchone() or {}
 
         recent_query = f"""
             WITH player_game_wpa AS (
@@ -4118,8 +4159,8 @@ class DatabaseQueryTool:
                 LIMIT %s
             ) recent
         """
-        cursor.execute(recent_query, tuple(params + [recent_games]))
-        recent_row = cursor.fetchone() or {}
+        await cursor.execute(recent_query, tuple(params + [recent_games]))
+        recent_row = await cursor.fetchone() or {}
 
         total_events = self.safe_int(total_row.get("events"))
         recent_events = self.safe_int(recent_row.get("events"))
@@ -4145,7 +4186,7 @@ class DatabaseQueryTool:
             ),
         }
 
-    def _fetch_recent_batter_window(
+    async def _fetch_recent_batter_window(
         self,
         cursor,
         *,
@@ -4204,8 +4245,8 @@ class DatabaseQueryTool:
                 LIMIT %s
             ) recent
         """
-        cursor.execute(query, tuple(params + [recent_games]))
-        row = cursor.fetchone() or {}
+        await cursor.execute(query, tuple(params + [recent_games]))
+        row = await cursor.fetchone() or {}
 
         hits = self.safe_int(row.get("hits"))
         at_bats = self.safe_int(row.get("at_bats"))
@@ -4238,7 +4279,7 @@ class DatabaseQueryTool:
             ),
         }
 
-    def _fetch_recent_pitcher_window(
+    async def _fetch_recent_pitcher_window(
         self,
         cursor,
         *,
@@ -4289,8 +4330,8 @@ class DatabaseQueryTool:
                 LIMIT %s
             ) recent
         """
-        cursor.execute(query, tuple(params + [recent_games]))
-        row = cursor.fetchone() or {}
+        await cursor.execute(query, tuple(params + [recent_games]))
+        row = await cursor.fetchone() or {}
         innings_pitched = self.safe_float(row.get("innings_pitched"))
         earned_runs = self.safe_int(row.get("earned_runs"))
         hits_allowed = self.safe_int(row.get("hits_allowed"))
@@ -4371,7 +4412,7 @@ class DatabaseQueryTool:
             f"WPA 허용/BF {_format_signed_metric(recent_wpa_allowed_per_bf, 4)} 흐름이 연결됩니다."
         )
 
-    def get_team_player_form_signals(
+    async def get_team_player_form_signals(
         self,
         team_name: str,
         year: int,
@@ -4418,8 +4459,9 @@ class DatabaseQueryTool:
         result["team_name"] = self.get_team_name(team_code)
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
-            cursor.execute(
+            await cursor.execute(
                 """
                 SELECT
                     (SELECT ROUND(AVG(ops)::numeric, 3)
@@ -4434,12 +4476,12 @@ class DatabaseQueryTool:
                 """,
                 (year, year, year),
             )
-            league_row = cursor.fetchone() or {}
+            league_row = await cursor.fetchone() or {}
             league_ops = self.safe_float(league_row.get("league_ops"), 0.0)
             league_era = self.safe_float(league_row.get("league_era"), 0.0)
             league_fip = self.safe_float(league_row.get("league_fip"), 0.0)
 
-            cursor.execute(
+            await cursor.execute(
                 """
                 SELECT
                     psb.player_id,
@@ -4471,7 +4513,7 @@ class DatabaseQueryTool:
                 """,
                 (team_variants, year),
             )
-            batter_rows = cursor.fetchall() or []
+            batter_rows = await cursor.fetchall() or []
             for row in batter_rows:
                 season_ops = self.safe_float(row.get("ops"))
                 season_iso = self.safe_float(row.get("iso"))
@@ -4498,7 +4540,7 @@ class DatabaseQueryTool:
                     if woba_value is not None and plate_appearances > 0
                     else None
                 )
-                recent_window = self._fetch_recent_batter_window(
+                recent_window = await self._fetch_recent_batter_window(
                     cursor,
                     player_id=self.safe_int(row.get("player_id")),
                     year=year,
@@ -4506,7 +4548,7 @@ class DatabaseQueryTool:
                     as_of_game_date=as_of_game_date,
                     exclude_game_id=exclude_game_id,
                 )
-                wpa_window = self._fetch_player_wpa_window(
+                wpa_window = await self._fetch_player_wpa_window(
                     cursor,
                     player_id=self.safe_int(row.get("player_id")),
                     year=year,
@@ -4562,7 +4604,7 @@ class DatabaseQueryTool:
                     }
                 )
 
-            cursor.execute(
+            await cursor.execute(
                 """
                 SELECT
                     psp.player_id,
@@ -4593,7 +4635,7 @@ class DatabaseQueryTool:
                 """,
                 (team_variants, year),
             )
-            pitcher_rows = cursor.fetchall() or []
+            pitcher_rows = await cursor.fetchall() or []
             for row in pitcher_rows:
                 player_id = self.safe_int(row.get("player_id"))
                 season_era = self.safe_float(row.get("era"))
@@ -4607,7 +4649,7 @@ class DatabaseQueryTool:
                     if is_starter
                     else FORM_RELIEVER_RECENT_GAMES
                 )
-                recent_window = self._fetch_recent_pitcher_window(
+                recent_window = await self._fetch_recent_pitcher_window(
                     cursor,
                     player_id=player_id,
                     year=year,
@@ -4616,7 +4658,7 @@ class DatabaseQueryTool:
                     as_of_game_date=as_of_game_date,
                     exclude_game_id=exclude_game_id,
                 )
-                wpa_window = self._fetch_player_wpa_window(
+                wpa_window = await self._fetch_player_wpa_window(
                     cursor,
                     player_id=player_id,
                     year=year,
@@ -4698,14 +4740,14 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         self._record_team_query_result(
             "get_team_player_form_signals", team_name, year, result
         )
         return result
 
-    def get_clutch_moments(self, game_id: str, limit: int = 3) -> Dict[str, Any]:
+    async def get_clutch_moments(self, game_id: str, limit: int = 3) -> Dict[str, Any]:
         logger.info("[DatabaseQuery] Querying clutch moments for %s", game_id)
 
         cache_key = f"clutch_moments:{game_id}:{limit}"
@@ -4720,8 +4762,9 @@ class DatabaseQueryTool:
             "error": None,
         }
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
-            cursor.execute(
+            await cursor.execute(
                 """
                 SELECT
                     ge.event_seq,
@@ -4748,7 +4791,7 @@ class DatabaseQueryTool:
                 """,
                 (game_id, limit),
             )
-            rows = cursor.fetchall() or []
+            rows = await cursor.fetchall() or []
             for row in rows:
                 inning_half = _normalize_inning_half(row.get("inning_half"))
                 batting_team_code = (
@@ -4795,11 +4838,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_player_wpa_stats(
+    async def get_player_wpa_stats(
         self,
         player_name: str,
         year: int,
@@ -4823,8 +4866,9 @@ class DatabaseQueryTool:
             "error": None,
         }
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
-            cursor.execute(
+            await cursor.execute(
                 """
                 SELECT player_id, name
                 FROM player_basic
@@ -4834,7 +4878,7 @@ class DatabaseQueryTool:
                 """,
                 (player_name, f"%{player_name}%", player_name),
             )
-            player_row = cursor.fetchone()
+            player_row = await cursor.fetchone()
             if not player_row:
                 result["error"] = f"선수 '{player_name}'을 찾을 수 없습니다."
                 return result
@@ -4843,14 +4887,14 @@ class DatabaseQueryTool:
             player_id = self.safe_int(player_row.get("player_id"))
             result["player_name"] = resolved_name
 
-            batting_stats = self._fetch_player_wpa_window(
+            batting_stats = await self._fetch_player_wpa_window(
                 cursor,
                 player_id=player_id,
                 year=year,
                 role="batter",
                 recent_games=recent_games,
             )
-            pitching_stats = self._fetch_player_wpa_window(
+            pitching_stats = await self._fetch_player_wpa_window(
                 cursor,
                 player_id=player_id,
                 year=year,
@@ -4887,11 +4931,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_player_wpa_leaders(
+    async def get_player_wpa_leaders(
         self, year: int, limit: int = 10, team_name: Optional[str] = None
     ) -> Dict[str, Any]:
         logger.info(
@@ -4914,6 +4958,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             where_clauses = [
                 "ks.season_year = %s",
@@ -4946,8 +4991,8 @@ class DatabaseQueryTool:
                 ORDER BY total_wpa DESC, plate_appearances DESC
                 LIMIT %s
             """
-            cursor.execute(query, tuple(params + [limit]))
-            rows = cursor.fetchall() or []
+            await cursor.execute(query, tuple(params + [limit]))
+            rows = await cursor.fetchall() or []
             for index, row in enumerate(rows, start=1):
                 total_wpa = self.safe_float(row.get("total_wpa"))
                 plate_appearances = self.safe_int(row.get("plate_appearances"))
@@ -4976,11 +5021,11 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_team_monthly_trend(self, team_name: str, year: int) -> Dict[str, Any]:
+    async def get_team_monthly_trend(self, team_name: str, year: int) -> Dict[str, Any]:
         """
         팀의 월별 승률 트렌드를 조회합니다.
 
@@ -5033,6 +5078,7 @@ class DatabaseQueryTool:
         )
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # Using EXTRACT(MONTH) for filtering
@@ -5057,7 +5103,7 @@ class DatabaseQueryTool:
                 GROUP BY month
                 ORDER BY month
             """
-            cursor.execute(
+            await cursor.execute(
                 query,
                 (
                     team_variants,
@@ -5069,7 +5115,7 @@ class DatabaseQueryTool:
                     year,
                 ),
             )
-            rows = cursor.fetchall()
+            rows = await cursor.fetchall()
 
             if rows:
                 for row in rows:
@@ -5100,7 +5146,7 @@ class DatabaseQueryTool:
         )
         return result
 
-    def get_team_matchup_stats(self, team_name: str, year: int) -> Dict[str, Any]:
+    async def get_team_matchup_stats(self, team_name: str, year: int) -> Dict[str, Any]:
         """
         특정 팀의 상대 전적을 조회합니다.
 
@@ -5153,6 +5199,7 @@ class DatabaseQueryTool:
         )
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             query = """
@@ -5175,7 +5222,7 @@ class DatabaseQueryTool:
                 GROUP BY opponent
                 ORDER BY wins DESC
             """
-            cursor.execute(
+            await cursor.execute(
                 query,
                 (
                     team_variants,
@@ -5186,7 +5233,7 @@ class DatabaseQueryTool:
                     year,
                 ),
             )
-            rows = cursor.fetchall()
+            rows = await cursor.fetchall()
 
             if rows:
                 for row in rows:
@@ -5210,7 +5257,7 @@ class DatabaseQueryTool:
         )
         return result
 
-    def get_team_tough_matchups(
+    async def get_team_tough_matchups(
         self, team_name: str, year: int, limit: int = 3
     ) -> Dict[str, Any]:
         """상대전적 기준으로 가장 까다로웠던 팀을 정렬해 반환합니다."""
@@ -5222,7 +5269,7 @@ class DatabaseQueryTool:
             "error": None,
         }
 
-        matchup_result = self.get_team_matchup_stats(team_name, year)
+        matchup_result = await self.get_team_matchup_stats(team_name, year)
         result["team_name"] = matchup_result.get("team_name") or team_name
         if matchup_result.get("error"):
             result["error"] = matchup_result["error"]
@@ -5268,7 +5315,7 @@ class DatabaseQueryTool:
         )
         return result
 
-    def get_team_fielding_error_games(
+    async def get_team_fielding_error_games(
         self, team_name: str, year: int, limit: int = 5
     ) -> Dict[str, Any]:
         """game_summary에 기록된 실책/수비 관련 경기 장면을 조회합니다."""
@@ -5293,6 +5340,7 @@ class DatabaseQueryTool:
         limit = max(1, int(limit or 5))
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             query = """
                 SELECT
@@ -5327,7 +5375,7 @@ class DatabaseQueryTool:
                 ORDER BY g.game_date DESC, g.game_id DESC, gs.id
                 LIMIT %s
             """
-            cursor.execute(
+            await cursor.execute(
                 query,
                 (
                     team_variants,
@@ -5341,7 +5389,7 @@ class DatabaseQueryTool:
                     limit,
                 ),
             )
-            rows = cursor.fetchall()
+            rows = await cursor.fetchall()
 
             for row in rows:
                 game = dict(row)
@@ -5390,14 +5438,14 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         self._record_team_query_result(
             "get_team_fielding_error_games", team_name, year, result
         )
         return result
 
-    def get_player_position_average_comparison(
+    async def get_player_position_average_comparison(
         self, player_name: str, year: int, min_plate_appearances: int = 100
     ) -> Dict[str, Any]:
         """선수의 시즌 타격 기록을 같은 주 포지션 평균과 비교합니다."""
@@ -5428,6 +5476,7 @@ class DatabaseQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             target_query = """
                 SELECT
@@ -5453,8 +5502,8 @@ class DatabaseQueryTool:
                 ORDER BY psb.plate_appearances DESC
                 LIMIT 1
             """
-            cursor.execute(target_query, (f"%{player_name}%", year))
-            target_row = cursor.fetchone()
+            await cursor.execute(target_query, (f"%{player_name}%", year))
+            target_row = await cursor.fetchone()
             if not target_row:
                 result["error"] = (
                     f"선수 '{player_name}'의 {year}년 타격 기록을 찾을 수 없습니다."
@@ -5472,8 +5521,8 @@ class DatabaseQueryTool:
                 ORDER BY COALESCE(games, 0) DESC, COALESCE(innings, 0) DESC
                 LIMIT 1
             """
-            cursor.execute(position_query, (target["player_id"], year))
-            position_row = cursor.fetchone()
+            await cursor.execute(position_query, (target["player_id"], year))
+            position_row = await cursor.fetchone()
             if not position_row:
                 result["target"] = target
                 result["error"] = (
@@ -5515,11 +5564,11 @@ class DatabaseQueryTool:
                   AND pp.position_id = %s
                   AND psb.plate_appearances >= %s
             """
-            cursor.execute(
+            await cursor.execute(
                 average_query,
                 (year, year, position_id, max(0, int(min_plate_appearances or 0))),
             )
-            average_row = cursor.fetchone()
+            average_row = await cursor.fetchone()
             if not average_row or self.safe_int(average_row.get("sample_size")) == 0:
                 result["target"] = target
                 result["error"] = (
@@ -5573,7 +5622,7 @@ class DatabaseQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
@@ -5581,7 +5630,7 @@ class DatabaseQueryTool:
     # Coach 전용 어댑터: 도구 호출 + 압축 페이로드
     # ------------------------------------------------------------------
 
-    def build_coach_team_payload(
+    async def build_coach_team_payload(
         self,
         team_name: str,
         year: int,
@@ -5600,9 +5649,9 @@ class DatabaseQueryTool:
         축소하는 것이다.
         """
         team_data = {
-            "summary": self.get_team_summary(team_name, year) or {},
-            "advanced": self.get_team_advanced_metrics(team_name, year) or {},
-            "recent": self.get_team_recent_form(
+            "summary": await self.get_team_summary(team_name, year) or {},
+            "advanced": await self.get_team_advanced_metrics(team_name, year) or {},
+            "recent": await self.get_team_recent_form(
                 team_name,
                 year,
                 limit=recent_form_limit,
@@ -5610,7 +5659,7 @@ class DatabaseQueryTool:
                 exclude_game_id=exclude_game_id,
             )
             or {},
-            "player_form_signals": self.get_team_player_form_signals(
+            "player_form_signals": await self.get_team_player_form_signals(
                 team_name,
                 year,
                 as_of_game_date=as_of_game_date,

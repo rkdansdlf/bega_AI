@@ -13,12 +13,12 @@ import json
 import logging
 import re
 import random
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime
-from functools import lru_cache
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from functools import lru_cache, wraps
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Sequence, Tuple
 import psycopg
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool
 
 import httpx
 
@@ -2404,6 +2404,45 @@ def _build_embedding_failed_context(query: str, entity_filter: Any, year: int) -
     return "\n".join(parts)
 
 
+def _observe_rag_total(coro_func):
+    """RAG 코루틴 전체 소요시간을 ``total`` 스테이지로 관측하는 데코레이터."""
+
+    @wraps(coro_func)
+    async def _wrapper(*args, **kwargs):
+        _start = _rag_perf_counter()
+        try:
+            return await coro_func(*args, **kwargs)
+        finally:
+            try:
+                AI_RAG_STAGE_DURATION_SECONDS.labels(stage="total").observe(
+                    _rag_perf_counter() - _start
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _wrapper
+
+
+def _observe_rag_total_stream(gen_func):
+    """RAG 비동기 제너레이터 전체 소요시간을 ``total`` 스테이지로 관측하는 데코레이터."""
+
+    @wraps(gen_func)
+    async def _wrapper(*args, **kwargs):
+        _start = _rag_perf_counter()
+        try:
+            async for item in gen_func(*args, **kwargs):
+                yield item
+        finally:
+            try:
+                AI_RAG_STAGE_DURATION_SECONDS.labels(stage="total").observe(
+                    _rag_perf_counter() - _start
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    return _wrapper
+
+
 class RAGPipeline:
     """
     검색(Retrieval)과 생성(Generation)을 결합하여 답변을 생성하는 RAG 파이프라인을 관리합니다.
@@ -2413,8 +2452,8 @@ class RAGPipeline:
         self,
         *,
         settings: Settings,
-        connection: Optional[psycopg.Connection] = None,
-        pool: Optional[ConnectionPool] = None,
+        connection: Optional[psycopg.AsyncConnection] = None,
+        pool: Optional[AsyncConnectionPool] = None,
         agent_runtime: BaseballAgentRuntime | None = None,
         context_formatter: Optional[ContextFormatter] = None,
         wpa_calculator: Optional["WPACalculator"] = None,
@@ -2433,22 +2472,22 @@ class RAGPipeline:
         self._agent_fast_path_enabled = agent_runtime is not None or pool is not None
         self.wpa_calculator = wpa_calculator or WPACalculator()
 
-    @contextmanager
-    def _checkout_conn(self) -> Iterator[psycopg.Connection]:
+    @asynccontextmanager
+    async def _checkout_conn(self) -> AsyncIterator[psycopg.AsyncConnection]:
         """풀이 있으면 매 호출마다 짧게 커넥션을 빌리고, 없으면 기존 단일 커넥션 사용."""
         if self._pool is not None:
-            with self._pool.connection() as conn:
+            async with self._pool.connection() as conn:
                 yield conn
         else:
             yield self.connection
 
-    def _build_operator_or_static_kbo_result(
+    async def _build_operator_or_static_kbo_result(
         self, query: str
     ) -> Optional[Dict[str, Any]]:
         if bool(getattr(self.settings, "operator_data_fast_path_enabled", False)):
             try:
-                with self._checkout_conn() as conn:
-                    result = try_build_operator_fast_path_result(conn, query)
+                async with self._checkout_conn() as conn:
+                    result = await try_build_operator_fast_path_result(conn, query)
                 if result is not None:
                     logger.info("[RAG] Operator data fast-path: %s", query)
                     return result
@@ -2619,13 +2658,12 @@ class RAGPipeline:
             _preview_text(keyword),
             _preview_text(query),
         )
-        from fastapi.concurrency import run_in_threadpool
-
-        def _do_search() -> List[Dict[str, Any]]:
+        _search_start = _rag_perf_counter()
+        try:
             # 풀 모드: 매 호출마다 풀에서 짧게 커넥션을 빌림 (멀티 variation 병렬 가능)
             # 단일 커넥션 모드: 기존 방식 유지 (테스트/스크립트용)
-            with self._checkout_conn() as conn:
-                return similarity_search(
+            async with self._checkout_conn() as conn:
+                docs = await similarity_search(
                     conn,
                     embedding,
                     limit=limit,
@@ -2633,10 +2671,6 @@ class RAGPipeline:
                     keyword=keyword,
                     settings=self.settings,
                 )
-
-        _search_start = _rag_perf_counter()
-        try:
-            docs = await run_in_threadpool(_do_search)
         except DBRetrievalError as exc:
             logger.error("[RAG] DB retrieval error in retrieve(): %s", exc)
             _record_retrieval_state_error(
@@ -2712,6 +2746,7 @@ class RAGPipeline:
             limit=effective_limit,
             intent=intent,
             retrieval_state=retrieval_state,
+            settings=self.settings,
         )
 
         logger.info(f"[RAG] Multi-query retrieval returned {len(docs)} documents")
@@ -2763,7 +2798,7 @@ class RAGPipeline:
         )
         return candidates[:context_limit]
 
-    def _record_retrieval_event(
+    async def _record_retrieval_event(
         self,
         *,
         query: str,
@@ -2817,8 +2852,8 @@ class RAGPipeline:
             )
         latency_ms = int((_rag_perf_counter() - retrieval_started_at) * 1000)
         try:
-            with self._checkout_conn() as conn:
-                record_retrieval_event(
+            async with self._checkout_conn() as conn:
+                await record_retrieval_event(
                     conn,
                     user_query=query,
                     intent=intent,
@@ -3297,19 +3332,18 @@ class RAGPipeline:
 
         try:
             # 야구 에이전트를 통한 처리 시도
-            with self._checkout_conn() as conn, self.agent_runtime.request_context(
-                conn
-            ):
-                agent_result = await self.baseball_agent.process_query(
-                    query,
-                    {
-                        "intent": intent,
-                        "filters": filters,
-                        "history": history,
-                        "request_mode": "completion",
-                        "persona": "chat",
-                    },
-                )
+            async with self._checkout_conn() as conn:
+                with self.agent_runtime.request_context(conn):
+                    agent_result = await self.baseball_agent.process_query(
+                        query,
+                        {
+                            "intent": intent,
+                            "filters": filters,
+                            "history": history,
+                            "request_mode": "completion",
+                            "persona": "chat",
+                        },
+                    )
 
             if agent_result["verified"] and not agent_result.get("error"):
                 logger.info(
@@ -3444,6 +3478,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             "verified": True,
         }
 
+    @_observe_rag_total_stream
     async def run_stream(
         self,
         query: str,
@@ -3462,7 +3497,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         query = full_normalize(query)
         logger.info(f"[RAG] Processing query (stream): {query}")
         retrieval_state = _new_retrieval_state()
-        static_kbo_result = self._build_operator_or_static_kbo_result(query)
+        static_kbo_result = await self._build_operator_or_static_kbo_result(query)
         if static_kbo_result is not None:
             logger.info("[RAG] Static KBO FAQ fast-path (stream): %s", query)
             yield {
@@ -3485,7 +3520,14 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             intent = predict_intent(query)
             logger.info(f"[RAG] Predicted intent: {intent}")
 
+        _entity_extract_start = _rag_perf_counter()
         search_strategy = enhance_search_strategy(query)
+        try:
+            AI_RAG_STAGE_DURATION_SECONDS.labels(stage="entity_extract").observe(
+                _rag_perf_counter() - _entity_extract_start
+            )
+        except Exception:  # noqa: BLE001
+            pass
         entity_filter = search_strategy["entity_filter"]
         extracted_filters = search_strategy["db_filters"]
 
@@ -3527,19 +3569,18 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     "[RAG] Agent fast-path query detected, trying agent stream first"
                 )
                 try:
-                    with self._checkout_conn() as conn, self.agent_runtime.request_context(
-                        conn
-                    ):
-                        async for event in self.baseball_agent.process_query_stream(
-                            query,
-                            context={
-                                "filters": filters,
-                                "history": history,
-                                "request_mode": "stream",
-                                "persona": "chat",
-                            },
-                        ):
-                            yield event
+                    async with self._checkout_conn() as conn:
+                        with self.agent_runtime.request_context(conn):
+                            async for event in self.baseball_agent.process_query_stream(
+                                query,
+                                context={
+                                    "filters": filters,
+                                    "history": history,
+                                    "request_mode": "stream",
+                                    "persona": "chat",
+                                },
+                            ):
+                                yield event
                     return
                 except Exception as e:
                     logger.error("[RAG] Agent stream error: %s", e)
@@ -3564,33 +3605,42 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 f"[RAG] Regulation query (stream): increasing search_limit to {search_limit}"
             )
 
-        # 문서 검색 (규정 쿼리는 2-패스 전략으로 규정 소스 우선 확보)
+        # 문서 검색 (규정 쿼리는 규정/일반 검색을 병렬 실행 후 병합)
         if is_regulation:
             reg_filters = {
                 **final_filters,
                 "source_table_in": list(_REGULATION_SOURCES),
             }
-            reg_docs = await self.retrieve(
-                query,
-                filters=reg_filters,
-                entity_filter=entity_filter,
-                limit=20,
-                retrieval_state=retrieval_state,
-            )
-            if len(reg_docs) >= 8:
-                docs = reg_docs
-            else:
-                general_docs = await self.retrieve(
+            _reg_result, _general_result = await asyncio.gather(
+                self.retrieve(
+                    query,
+                    filters=reg_filters,
+                    entity_filter=entity_filter,
+                    limit=20,
+                    retrieval_state=retrieval_state,
+                ),
+                self.retrieve(
                     query,
                     filters=final_filters,
                     entity_filter=entity_filter,
                     limit=search_limit,
                     retrieval_state=retrieval_state,
-                )
+                ),
+                return_exceptions=True,
+            )
+            reg_docs = _reg_result if not isinstance(_reg_result, BaseException) else []
+            general_docs = (
+                _general_result
+                if not isinstance(_general_result, BaseException)
+                else []
+            )
+            if len(reg_docs) >= 8:
+                docs = reg_docs
+            else:
                 seen = {d["id"] for d in reg_docs}
                 docs = reg_docs + [d for d in general_docs if d["id"] not in seen]
             logger.info(
-                f"[RAG] Regulation 2-pass retrieval (stream): {len(docs)} docs (reg_docs={len(reg_docs)})"
+                f"[RAG] Regulation parallel retrieval (stream): {len(docs)} docs (reg_docs={len(reg_docs)})"
             )
         else:
             docs = await self.retrieve(
@@ -3643,6 +3693,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             return
         # --- DB 연결 장애 스트림 폴백 끝 ---
 
+        _format_start = _rag_perf_counter()
         processed_data = await self._process_and_enrich_docs(docs, year)
         formatted_context = self.context_formatter.format_context(
             processed_data, intent, query, entity_filter, year
@@ -3652,6 +3703,12 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             formatted_context = self.context_formatter.format_zero_hit_guidance(
                 query, entity_filter, year, final_filters
             )
+        try:
+            AI_RAG_STAGE_DURATION_SECONDS.labels(stage="format").observe(
+                _rag_perf_counter() - _format_start
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         history_block = _history_context_block(history)
         if history_block:
@@ -3682,6 +3739,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 "content": chunk,
             }
 
+    @_observe_rag_total
     async def run(
         self,
         query: str,
@@ -3694,7 +3752,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         query = full_normalize(query)  # 특수문자 제거, 한영 정규화, 공백 정리
         logger.info(f"[RAG] Processing query: {query}")
         retrieval_state = _new_retrieval_state()
-        static_kbo_result = self._build_operator_or_static_kbo_result(query)
+        static_kbo_result = await self._build_operator_or_static_kbo_result(query)
         if static_kbo_result is not None:
             logger.info("[RAG] Static KBO FAQ fast-path: %s", query)
             return static_kbo_result
@@ -3707,7 +3765,14 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             logger.info(f"[RAG] Predicted intent: {intent}")
 
         # Extract entities and enhance search strategy
+        _entity_extract_start = _rag_perf_counter()
         search_strategy = enhance_search_strategy(query)
+        try:
+            AI_RAG_STAGE_DURATION_SECONDS.labels(stage="entity_extract").observe(
+                _rag_perf_counter() - _entity_extract_start
+            )
+        except Exception:  # noqa: BLE001
+            pass
         entity_filter = search_strategy["entity_filter"]
         extracted_filters = search_strategy["db_filters"]
         raw_search_limit = search_strategy.get("search_limit")
@@ -3818,23 +3883,59 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         fallback_stage = "none"
         retrieval_started_at = _rag_perf_counter()
 
+        _sig_retrieve = inspect.signature(self.retrieve).parameters
+        _sig_multi_query = inspect.signature(self.retrieve_with_multi_query).parameters
+
         async def _run_retrieve(*args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
-            _sig = inspect.signature(self.retrieve).parameters
-            if "retrieval_state" in _sig:
+            if "retrieval_state" in _sig_retrieve:
                 kwargs["retrieval_state"] = retrieval_state
-            if "intent" in _sig:
+            if "intent" in _sig_retrieve:
                 kwargs.setdefault("intent", intent)
             return await self.retrieve(*args, **kwargs)
 
         async def _run_multi_query(*args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
-            _sig = inspect.signature(self.retrieve_with_multi_query).parameters
-            if "retrieval_state" in _sig:
+            if "retrieval_state" in _sig_multi_query:
                 kwargs["retrieval_state"] = retrieval_state
-            if "intent" in _sig:
+            if "intent" in _sig_multi_query:
                 kwargs.setdefault("intent", intent)
             return await self.retrieve_with_multi_query(*args, **kwargs)
 
-        if search_strategy["is_ranking_query"]:
+        if is_regulation:
+            # 규정 쿼리: 규정 소스 필터와 일반 필터를 병렬로 검색 후 병합
+            reg_filters = {
+                **final_filters,
+                "source_table_in": list(_REGULATION_SOURCES),
+            }
+            _reg_result, _general_result = await asyncio.gather(
+                _run_retrieve(
+                    query,
+                    filters=reg_filters,
+                    entity_filter=entity_filter,
+                    limit=search_limit,
+                ),
+                _run_retrieve(
+                    query,
+                    filters=final_filters,
+                    entity_filter=entity_filter,
+                    limit=search_limit,
+                ),
+                return_exceptions=True,
+            )
+            reg_docs = _reg_result if not isinstance(_reg_result, BaseException) else []
+            general_docs = (
+                _general_result
+                if not isinstance(_general_result, BaseException)
+                else []
+            )
+            if len(reg_docs) >= 5:
+                docs = reg_docs
+            else:
+                seen = {d["id"] for d in reg_docs}
+                docs = reg_docs + [d for d in general_docs if d["id"] not in seen]
+            actual_filters = reg_filters
+            logger.info("[RAG] Regulation parallel retrieval (run): %d docs", len(docs))
+
+        elif search_strategy["is_ranking_query"]:
             logger.info("[RAG] Ranking query detected - using multi-query retrieval")
 
             # For ranking queries, use multi-query retrieval for better coverage
@@ -3990,31 +4091,9 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         logger.info(f"[RAG] Final retrieval result: {len(docs)} documents")
 
-        # 규정 쿼리: 규정 소스 청크가 부족하면 타겟 검색으로 보충
-        if is_regulation and docs:
-            markdown_count = sum(
-                1 for d in docs if d.get("source_table") in _REGULATION_SOURCES
-            )
-            if markdown_count < 5:
-                reg_filters = {
-                    **final_filters,
-                    "source_table_in": list(_REGULATION_SOURCES),
-                }
-                try:
-                    top_up_docs = await _run_retrieve(
-                        query,
-                        filters=reg_filters,
-                        entity_filter=entity_filter,
-                        limit=15,
-                    )
-                    seen = {d["id"] for d in docs}
-                    new_docs = [d for d in top_up_docs if d["id"] not in seen]
-                    docs = new_docs + docs
-                    logger.info(
-                        f"[RAG] Regulation top-up: added {len(new_docs)} markdown_docs chunks"
-                    )
-                except Exception as e:
-                    logger.warning(f"[RAG] Regulation top-up failed: {e}")
+        # 규정 쿼리 top-up: 일반 검색 경로를 탄 경우에만 필요 (병렬 경로는 이미 처리됨)
+        # is_regulation=True 인 경우 위의 병렬 블록에서 이미 처리되었으므로 스킵
+        pass
 
         # --- DB 연결 장애 폴백 ---
         # docs가 있으면 일부 검색이 성공한 것이므로 에러가 있어도 폴백하지 않음
@@ -4037,18 +4116,20 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             db_unavailable_messages.append({"role": "user", "content": prompt})
             answer = await self._generate(db_unavailable_messages)
             answer = _ensure_answer_prefix(answer, DB_UNAVAILABLE_PREFIX)
-            self._record_retrieval_event(
-                query=query,
-                intent=intent,
-                final_filters=final_filters,
-                docs=[],
-                retrieval_started_at=retrieval_started_at,
-                success=False,
-                error_type="db_unavailable",
-                original_filters=final_filters,
-                actual_filters=actual_filters,
-                fallback_used=fallback_used,
-                fallback_stage=fallback_stage,
+            asyncio.create_task(
+                self._record_retrieval_event(
+                    query=query,
+                    intent=intent,
+                    final_filters=final_filters,
+                    docs=[],
+                    retrieval_started_at=retrieval_started_at,
+                    success=False,
+                    error_type="db_unavailable",
+                    original_filters=final_filters,
+                    actual_filters=actual_filters,
+                    fallback_used=fallback_used,
+                    fallback_stage=fallback_stage,
+                )
             )
             return {
                 "answer": answer,
@@ -4087,18 +4168,20 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             embedding_messages.append({"role": "user", "content": prompt})
             answer = await self._generate(embedding_messages)
             answer = _ensure_answer_prefix(answer, EMBEDDING_FAILED_PREFIX)
-            self._record_retrieval_event(
-                query=query,
-                intent=intent,
-                final_filters=final_filters,
-                docs=[],
-                retrieval_started_at=retrieval_started_at,
-                success=False,
-                error_type="embedding_failed",
-                original_filters=final_filters,
-                actual_filters=actual_filters,
-                fallback_used=fallback_used,
-                fallback_stage=fallback_stage,
+            asyncio.create_task(
+                self._record_retrieval_event(
+                    query=query,
+                    intent=intent,
+                    final_filters=final_filters,
+                    docs=[],
+                    retrieval_started_at=retrieval_started_at,
+                    success=False,
+                    error_type="embedding_failed",
+                    original_filters=final_filters,
+                    actual_filters=actual_filters,
+                    fallback_used=fallback_used,
+                    fallback_stage=fallback_stage,
+                )
             )
             return {
                 "answer": answer,
@@ -4117,23 +4200,25 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         retrieved_docs = list(docs)
         docs = self._rerank_docs(docs)
-        self._record_retrieval_event(
-            query=query,
-            intent=intent,
-            final_filters=final_filters,
-            docs=retrieved_docs,
-            selected_docs=docs,
-            retrieval_started_at=retrieval_started_at,
-            success=bool(retrieved_docs),
-            error_type=(
-                None
-                if retrieved_docs
-                else retrieval_state.get("error_type") or "zero_hit"
-            ),
-            original_filters=final_filters,
-            actual_filters=actual_filters,
-            fallback_used=fallback_used,
-            fallback_stage=fallback_stage,
+        asyncio.create_task(
+            self._record_retrieval_event(
+                query=query,
+                intent=intent,
+                final_filters=final_filters,
+                docs=retrieved_docs,
+                selected_docs=docs,
+                retrieval_started_at=retrieval_started_at,
+                success=bool(retrieved_docs),
+                error_type=(
+                    None
+                    if retrieved_docs
+                    else retrieval_state.get("error_type") or "zero_hit"
+                ),
+                original_filters=final_filters,
+                actual_filters=actual_filters,
+                fallback_used=fallback_used,
+                fallback_stage=fallback_stage,
+            )
         )
 
         # 문서 정렬: markdown_docs를 우선적으로 배치 (규정/지식 답변 품질 향상)
@@ -4147,6 +4232,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 docs = filtered[:8]
 
         # 2. 데이터 처리 및 보강
+        _format_start = _rag_perf_counter()
         processed_data = await self._process_and_enrich_docs(docs, year)
 
         # 3. 의도별 컨텍스트 생성 (새로운 컨텍스트 포맷터 사용)
@@ -4162,6 +4248,12 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             formatted_context = self.context_formatter.format_zero_hit_guidance(
                 query, entity_filter, year, final_filters
             )
+        try:
+            AI_RAG_STAGE_DURATION_SECONDS.labels(stage="format").observe(
+                _rag_perf_counter() - _format_start
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         # 대화 기록 컨텍스트 추가
         history_block = _history_context_block(history)

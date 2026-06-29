@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from datetime import date
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -21,16 +23,16 @@ class _OperatorCursor:
     def __init__(self, rows: list[Mapping[str, Any]]) -> None:
         self.rows = rows
 
-    def __enter__(self) -> "_OperatorCursor":
+    async def __aenter__(self) -> "_OperatorCursor":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
 
-    def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
+    async def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         del query, params
 
-    def fetchall(self) -> list[Mapping[str, Any]]:
+    async def fetchall(self) -> list[Mapping[str, Any]]:
         return list(self.rows)
 
 
@@ -263,7 +265,9 @@ def test_operator_data_fast_path_flag_off_keeps_manual_contract() -> None:
         ],
     )
 
-    result = pipeline._build_operator_or_static_kbo_result("오늘 KBO 경기 일정 알려줘.")
+    result = asyncio.run(
+        pipeline._build_operator_or_static_kbo_result("오늘 KBO 경기 일정 알려줘.")
+    )
 
     assert result is not None
     assert result["strategy"] == "manual_baseball_data_required"
@@ -289,7 +293,9 @@ def test_operator_data_fast_path_flag_on_returns_operator_answer() -> None:
         ],
     )
 
-    result = pipeline._build_operator_or_static_kbo_result("오늘 KBO 경기 일정 알려줘.")
+    result = asyncio.run(
+        pipeline._build_operator_or_static_kbo_result("오늘 KBO 경기 일정 알려줘.")
+    )
 
     assert result is not None
     assert result["strategy"] == "operator_data_fast_path"
@@ -301,7 +307,9 @@ def test_operator_data_fast_path_flag_on_returns_operator_answer() -> None:
 def test_operator_data_fast_path_without_rows_keeps_manual_contract() -> None:
     pipeline = _operator_pipeline(True, [])
 
-    result = pipeline._build_operator_or_static_kbo_result("오늘 KBO 경기 일정 알려줘.")
+    result = asyncio.run(
+        pipeline._build_operator_or_static_kbo_result("오늘 KBO 경기 일정 알려줘.")
+    )
 
     assert result is not None
     assert result["strategy"] == "manual_baseball_data_required"
@@ -338,9 +346,11 @@ def test_operator_data_fast_path_underspecified_rows_keep_manual_contract() -> N
         ],
     )
 
-    lineup = pipeline._build_operator_or_static_kbo_result("LG 라인업 알려줘.")
-    roster = pipeline._build_operator_or_static_kbo_result(
-        "LG 부상자 명단은 어디서 봐?"
+    lineup = asyncio.run(
+        pipeline._build_operator_or_static_kbo_result("LG 라인업 알려줘.")
+    )
+    roster = asyncio.run(
+        pipeline._build_operator_or_static_kbo_result("LG 부상자 명단은 어디서 봐?")
     )
 
     assert lineup is not None
@@ -370,8 +380,8 @@ def test_operator_data_fast_path_malformed_lineup_notes_keep_manual_contract() -
         ],
     )
 
-    result = pipeline._build_operator_or_static_kbo_result(
-        "2026-06-05 LG 라인업 알려줘."
+    result = asyncio.run(
+        pipeline._build_operator_or_static_kbo_result("2026-06-05 LG 라인업 알려줘.")
     )
 
     assert result is not None
