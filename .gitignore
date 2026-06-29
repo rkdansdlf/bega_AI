@@ -39,7 +39,10 @@ test_rag_search.py
 /reports
 /tests/*
 !/tests/
+!/tests/test_baseball_external_collection_policy.py
 !/tests/test_audit_embedding_256_migration.py
+!/tests/test_chat_queue.py
+!/tests/test_llm_model_candidates.py
 !/tests/test_cleanup_embedding_256_warnings.py
 !/tests/test_hnsw_migration.py
 !/tests/test_rag_storage_schema.py

@@ -23,3 +23,7 @@ prometheus_client>=0.25.0
 sentry-sdk[fastapi]
 structlog>=25.5.0
 Pillow>=12.2.0
+
+# Test tooling (PR gate runs `pytest tests/`; async tests use @pytest.mark.asyncio)
+pytest>=8.0
+pytest-asyncio>=1.3.0
