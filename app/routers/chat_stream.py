@@ -48,6 +48,7 @@ from ..core.ratelimit import (
     rate_limit_chat_dependency,
     rate_limit_chat_voice_dependency,
 )
+from ..core.chat_queue import ChatQueueFull, ChatQueueReservation, get_chat_queue
 from ..core.chat_cache_key import (
     CHAT_CACHE_SCHEMA_VERSION,
     build_chat_cache_key,
@@ -361,13 +362,13 @@ def _ensure_quality_answer_text(answer: str) -> str:
     return _normalize_chatbot_answer_text(answer or "")
 
 
-def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
+async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
     settings = get_settings()
     if settings.operator_data_fast_path_enabled:
         try:
             pool = get_connection_pool()
-            with pool.connection() as conn:
-                result = try_build_operator_fast_path_result(conn, question)
+            async with pool.connection() as conn:
+                result = await try_build_operator_fast_path_result(conn, question)
             if result is not None:
                 payload = dict(result)
                 payload["answer"] = _ensure_quality_answer_text(
@@ -387,7 +388,7 @@ def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
-def _make_static_sse_response(
+async def _make_static_sse_response(
     result: Dict[str, Any], style: str
 ) -> EventSourceResponse:
     async def static_generator():
@@ -480,7 +481,7 @@ async def _async_update_hit_count(cache_key: str) -> None:
     """백그라운드에서 hit_count를 업데이트합니다 (응답 지연 없음)."""
     try:
         pool = get_connection_pool()
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             await update_hit_count(conn, cache_key)
     except Exception as exc:
         logger.warning("[ChatCache] hit_count background update failed: %s", exc)
@@ -490,7 +491,7 @@ async def _async_delete_cache_key(cache_key: str) -> None:
     """백그라운드에서 stale 캐시를 삭제합니다."""
     try:
         pool = get_connection_pool()
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             deleted = await delete_by_key(conn, cache_key)
         if deleted:
             logger.info("[ChatCache] Deleted stale key=%s...", cache_key[:8])
@@ -832,7 +833,7 @@ async def _chat_event_generator(
         )
         try:
             pool = get_connection_pool()
-            with pool.connection() as conn:
+            async with pool.connection() as conn:
                 await save_to_cache(
                     conn,
                     cache_key=cache_key,
@@ -1076,7 +1077,7 @@ async def _chat_live_event_generator(
         )
         try:
             pool = get_connection_pool()
-            with pool.connection() as conn:
+            async with pool.connection() as conn:
                 await save_to_cache(
                     conn,
                     cache_key=cache_key,
@@ -1132,6 +1133,34 @@ async def _stream_response(
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
     settings = get_settings()
+    return EventSourceResponse(
+        _chat_stream_event_generator(
+            request=request,
+            question=question,
+            filters=filters,
+            style=style,
+            history=history,
+            agent=agent,
+            cache_key=cache_key,
+        ),
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Nginx 등 프록시에서 버퍼링 방지
+        },
+        ping=max(1, int(settings.chat_sse_ping_seconds)),
+    )
+
+
+async def _chat_stream_event_generator(
+    *,
+    request: Request,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    style: str,
+    history: Optional[List[Dict[str, str]]],
+    agent: BaseballStatisticsAgent,
+    cache_key: Optional[str],
+) -> AsyncGenerator[Dict[str, str], None]:
     context_messages = history if history else [{"role": "user", "content": question}]
     agent_context = {
         "filters": filters,
@@ -1148,21 +1177,16 @@ async def _stream_response(
             logger.exception("chat_stream live stream initialization failed.")
             live_stream = None
         else:
-            return EventSourceResponse(
-                _chat_live_event_generator(
-                    request=request,
-                    question=question,
-                    filters=filters,
-                    style=style,
-                    cache_key=cache_key,
-                    stream=live_stream,
-                ),
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-                ping=max(1, int(settings.chat_sse_ping_seconds)),
-            )
+            async for event in _chat_live_event_generator(
+                request=request,
+                question=question,
+                filters=filters,
+                style=style,
+                cache_key=cache_key,
+                stream=live_stream,
+            ):
+                yield event
+            return
 
     result: Optional[Dict[str, Any]] = None
     error_payload: Optional[Dict[str, Any]] = None
@@ -1184,19 +1208,87 @@ async def _stream_response(
             "detail": "지금은 응답 템포가 잠깐 흔들리고 있어요. 같은 질문을 다시 보내주세요.",
         }
 
-    return EventSourceResponse(
-        _chat_event_generator(
+    async for event in _chat_event_generator(
+        request=request,
+        question=question,
+        filters=filters,
+        style=style,
+        result=result,
+        error_payload=error_payload,
+        cache_key=cache_key,
+    ):
+        yield event
+
+
+async def _queued_chat_stream_event_generator(
+    *,
+    request: Request,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    style: str,
+    history: Optional[List[Dict[str, str]]],
+    agent: BaseballStatisticsAgent,
+    cache_key: Optional[str],
+    reservation: ChatQueueReservation,
+) -> AsyncGenerator[Dict[str, str], None]:
+    async def is_disconnected() -> bool:
+        return await _request_is_disconnected(request)
+
+    if not reservation.admitted:
+        async for status in reservation.iter_statuses(
+            disconnect_checker=is_disconnected
+        ):
+            yield {
+                "event": "queue",
+                "data": json.dumps(status.to_payload(), ensure_ascii=False),
+            }
+            if status.state == "processing":
+                break
+
+    if not reservation.admitted:
+        return
+
+    try:
+        async for event in _chat_stream_event_generator(
             request=request,
             question=question,
             filters=filters,
             style=style,
-            result=result,
-            error_payload=error_payload,
+            history=history,
+            agent=agent,
             cache_key=cache_key,
+        ):
+            yield event
+    finally:
+        await reservation.release()
+
+
+def _make_queued_stream_response(
+    *,
+    request: Request,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    style: str,
+    history: Optional[List[Dict[str, str]]],
+    agent: BaseballStatisticsAgent,
+    cache_key: Optional[str],
+    reservation: ChatQueueReservation,
+) -> EventSourceResponse:
+    settings = get_settings()
+    return EventSourceResponse(
+        _queued_chat_stream_event_generator(
+            request=request,
+            question=question,
+            filters=filters,
+            style=style,
+            history=history,
+            agent=agent,
+            cache_key=cache_key,
+            reservation=reservation,
         ),
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # Nginx 등 프록시에서 버퍼링 방지
+            "X-Accel-Buffering": "no",
         },
         ping=max(1, int(settings.chat_sse_ping_seconds)),
     )
@@ -1275,7 +1367,7 @@ async def chat_completion(
     filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
 
-    static_result = _build_static_chat_result(question)
+    static_result = await _build_static_chat_result(question)
     if static_result is not None:
         logger.info("[ChatStatic] completion fast-path question=%s", question[:120])
         return JSONResponse(_safe_serialize(static_result))
@@ -1290,7 +1382,7 @@ async def chat_completion(
             schema_version=CHAT_CACHE_SCHEMA_VERSION,
         )
         pool = get_connection_pool()
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             cached = await get_cached_response(conn, cache_key)
 
         if cached:
@@ -1446,7 +1538,7 @@ async def chat_completion(
             )
             try:
                 pool = get_connection_pool()
-                with pool.connection() as conn:
+                async with pool.connection() as conn:
                     await save_to_cache(
                         conn,
                         cache_key=cache_key,
@@ -1511,7 +1603,6 @@ async def chat_stream_post(
     payload: Dict[str, Any] = Body(...),
     style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
     agent: BaseballStatisticsAgent = Depends(get_agent),
-    __: None = Depends(rate_limit_chat_dependency),
     _: None = Depends(require_ai_internal_token),
     request: Request = None,
 ):
@@ -1526,10 +1617,10 @@ async def chat_stream_post(
     if style_override in {"markdown", "json", "compact"}:
         style = style_override
 
-    static_result = _build_static_chat_result(question)
+    static_result = await _build_static_chat_result(question)
     if static_result is not None:
         logger.info("[ChatStatic] stream fast-path question=%s", question[:120])
-        return _make_static_sse_response(static_result, style)
+        return await _make_static_sse_response(static_result, style)
 
     # 캐시 적용 조건: history-free 쿼리이고 실시간 키워드 없음
     # history가 있으면 대화 맥락이 있으므로 캐싱 불가
@@ -1544,7 +1635,7 @@ async def chat_stream_post(
             schema_version=CHAT_CACHE_SCHEMA_VERSION,
         )
         pool = get_connection_pool()
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             cached = await get_cached_response(conn, cache_key)
 
         if cached:
@@ -1565,6 +1656,29 @@ async def chat_stream_post(
                 # hit_count는 background에서 업데이트 (응답 지연 없음)
                 asyncio.create_task(_async_update_hit_count(cache_key))
                 return _make_cached_sse_response(cached, style, cache_key)
+
+    settings = get_settings()
+    if bool(getattr(settings, "chat_queue_enabled", True)):
+        queue = get_chat_queue(settings)
+        try:
+            reservation = await queue.reserve()
+        except ChatQueueFull as exc:
+            raise HTTPException(
+                status_code=429,
+                detail="요청이 많아 잠시 후 다시 시도해주세요.",
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
+
+        return _make_queued_stream_response(
+            request=request,
+            question=question,
+            filters=filters,
+            style=style,
+            history=history,
+            agent=agent,
+            cache_key=cache_key,
+            reservation=reservation,
+        )
 
     return await _stream_response(
         request,
@@ -1705,7 +1819,7 @@ async def _require_chat_cache_admin(
 async def chat_cache_stats(_: None = Depends(_require_chat_cache_admin)):
     """캐시 현황 통계를 반환합니다."""
     pool = get_connection_pool()
-    with pool.connection() as conn:
+    async with pool.connection() as conn:
         stats = await get_stats(conn)
     return {"stats": stats}
 
@@ -1717,7 +1831,7 @@ async def flush_cache_by_intent(
 ):
     """특정 intent의 캐시 항목을 모두 삭제합니다."""
     pool = get_connection_pool()
-    with pool.connection() as conn:
+    async with pool.connection() as conn:
         deleted = await delete_by_intent(conn, intent)
     return {"deleted": deleted, "intent": intent}
 
@@ -1729,6 +1843,6 @@ async def invalidate_cache_entry(
 ):
     """특정 캐시 키를 무효화합니다."""
     pool = get_connection_pool()
-    with pool.connection() as conn:
+    async with pool.connection() as conn:
         deleted = await delete_by_key(conn, cache_key)
     return {"deleted": deleted, "cache_key": cache_key}

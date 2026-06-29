@@ -38,7 +38,7 @@
 ## 2-3. Post DB Fast-Path Docker Gate 기준선
 - 기준일: `2026-06-03`
 - 실행 기준: `docker:kbo_platform-ai-chatbot-1`
-- 런타임 로그 기준: `provider=openrouter`, `model=openrouter/owl-alpha`
+- 런타임 로그 기준: `provider=openrouter`, `model=openrouter/free`
 - focused 23 no-cache: `46 / 46`
   - `reports/post_db_fast_path_docker_focused23_nocache_summary.json`
 - focused 23 normal cache: `46 / 46`
@@ -56,6 +56,30 @@
   - completion p95: `151.19ms`
   - stream p95: `244.90ms`
   - 현재 기준 추가 코드 최적화 불필요
+
+## 2-4. Chat Queue 운영 경계
+- `CHAT_QUEUE_ENABLED=true` 기준으로 `/ai/chat/stream`은 프로세스 내부 queue admission을 거친다.
+- 현재 queue는 in-memory per-process 구조다. AI 서비스를 2개 이상 worker/process/container로 늘리면 전역 RPM 제한이나 전역 FIFO queue로 간주하지 않는다.
+- 다중 worker 배포가 필요하면 릴리스 전에 `docs/chat_queue_redis_design.md` 기준으로 Redis 등 공유 admission 계층을 별도로 적용하거나, 단일 worker 운영을 명시적으로 선택한다.
+- 배포 후에는 instance별 `ai_chat_queue_depth`, `ai_chat_queue_events_total`, `Retry-After` 429 응답을 함께 확인한다.
+
+## 2-5. Chat Stream Focused Gate
+- queue admission, SSE lifecycle, OpenRouter 429 fallback, chat cache async DB context를 건드린 변경은 먼저 focused gate를 통과해야 한다.
+- 실행:
+```bash
+bash bega_AI/scripts/chat_stream_release_gate.sh
+```
+- 포함 테스트:
+  - `tests/test_chat_queue.py`
+  - `tests/test_chat_stream_live.py`
+  - `tests/test_llm_model_candidates.py`
+  - `tests/test_chat_api_smoke.py`
+
+## 2-6. Chat Endpoint Admission 정책
+- `POST /ai/chat/completion`: 기존 `rate_limit_chat_dependency`가 429 admission을 담당한다.
+- `GET /ai/chat/stream`: 디버그/브라우저 스트림 경로로 기존 `rate_limit_chat_dependency`가 429 admission을 담당한다.
+- `POST /ai/chat/stream`: queue admission이 429/대기 상태를 담당하므로 기존 chat rate-limit dependency를 중복 적용하지 않는다.
+- `POST /ai/chat/stream`의 queue overflow는 `Retry-After` 헤더와 함께 429를 반환해야 한다.
 
 ## 3. 최소 검증 순서
 1. 설명형 canary
