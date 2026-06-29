@@ -30,6 +30,9 @@ def create_app() -> FastAPI:
     """
     settings = get_settings()  # 애플리케이션 설정 로드
 
+    # [Security] 운영 환경에서 내부 토큰 오설정(미설정/공개 기본값) 시 기동 거부.
+    settings.validate_internal_token_security()
+
     # Sentry Init
     import sentry_sdk
 
@@ -41,10 +44,14 @@ def create_app() -> FastAPI:
         )
 
     # FastAPI 앱 인스턴스 생성 및 기본 설정
+    api_docs_enabled = settings.api_docs_enabled
     app = FastAPI(
         title=settings.app_name,
         debug=settings.debug,
         lifespan=lifespan,  # 애플리케이션 시작/종료 시 이벤트 처리
+        docs_url="/docs" if api_docs_enabled else None,
+        redoc_url="/redoc" if api_docs_enabled else None,
+        openapi_url="/openapi.json" if api_docs_enabled else None,
     )
 
     # CORS(Cross-Origin Resource Sharing) 미들웨어 추가
@@ -70,19 +77,20 @@ def create_app() -> FastAPI:
     app.include_router(moderation.router)
     app.include_router(release_decision.router)
 
-    # Prometheus /metrics 엔드포인트 마운트
-    # /ai/metrics와 /metrics 양쪽 모두 노출하여 운영자/스크레이퍼 호환성 확보
-    try:
-        from app.observability.metrics import metrics_asgi_app
+    if settings.metrics_enabled:
+        # Prometheus /metrics 엔드포인트 마운트
+        # /ai/metrics와 /metrics 양쪽 모두 노출하여 운영자/스크레이퍼 호환성 확보
+        try:
+            from app.observability.metrics import metrics_asgi_app
 
-        app.mount("/metrics", metrics_asgi_app())
-        app.mount("/ai/metrics", metrics_asgi_app())
-    except Exception as exc:  # noqa: BLE001
-        import logging
+            app.mount("/metrics", metrics_asgi_app())
+            app.mount("/ai/metrics", metrics_asgi_app())
+        except Exception as exc:  # noqa: BLE001
+            import logging
 
-        logging.getLogger(__name__).warning(
-            "[Observability] failed to mount /metrics endpoint: %s", exc
-        )
+            logging.getLogger(__name__).warning(
+                "[Observability] failed to mount /metrics endpoint: %s", exc
+            )
 
     def _custom_openapi():
         if app.openapi_schema:
