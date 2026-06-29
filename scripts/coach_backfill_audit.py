@@ -1602,9 +1602,7 @@ def _baseball_data_sync_required_rows(
             continue
         seen_rows.add(row_key)
         request_identity = (
-            manual_row.get("game_id")
-            or manual_row.get("game_date")
-            or "unknown"
+            manual_row.get("game_id") or manual_row.get("game_date") or "unknown"
         )
         missing_code = manual_row.get("missing_code", "")
         rows.append(

@@ -36,7 +36,7 @@ from pydantic import BaseModel, model_validator
 import psycopg
 from psycopg.rows import dict_row
 
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool
 
 from ..deps import (
     get_agent,
@@ -133,6 +133,10 @@ MAX_COACH_QUESTION_OVERRIDE_LENGTH = 2000
 PENDING_STALE_SECONDS = 90
 PENDING_WAIT_TIMEOUT_SECONDS = 45
 PENDING_WAIT_POLL_MS = 1000
+# Coach 도구 병렬 실행 시 동시 DB 커넥션 체크아웃 상한.
+# get_team_data 병렬화로 1요청당 최대 ~10개 커넥션을 동시 사용할 수 있어
+# DB_POOL_MAX_SIZE(30) 고갈을 막기 위해 전역 fan-out을 제한한다.
+COACH_DB_FANOUT_MAX = int(os.getenv("COACH_DB_FANOUT_MAX", "12"))
 FAILED_RETRY_AFTER_SECONDS = 30
 COACH_CACHE_HEARTBEAT_INTERVAL_SECONDS = 5
 COACH_CACHE_LEASE_STALE_SECONDS = 90
@@ -181,9 +185,7 @@ COACH_UNSUPPORTED_ENTITY_ERROR_CODE = "unsupported_entity_name"
 COACH_UNSUPPORTED_CLAIM_ERROR_CODE = "grounding_validation_failed"
 COACH_NON_RETRYABLE_ERROR_CODE = "non_retryable_internal_error"
 MANUAL_BASEBALL_DATA_REQUIRED_CODE = "MANUAL_BASEBALL_DATA_REQUIRED"
-MANUAL_BASEBALL_DATA_REQUIRED_MESSAGE = (
-    "야구 데이터 준비가 필요합니다. trusted baseball data sync 반영 후 다시 확인할 수 있습니다."
-)
+MANUAL_BASEBALL_DATA_REQUIRED_MESSAGE = "야구 데이터 준비가 필요합니다. trusted baseball data sync 반영 후 다시 확인할 수 있습니다."
 BASEBALL_DATA_SYNC_REQUIRED_CODE = "BASEBALL_DATA_SYNC_REQUIRED"
 BASEBALL_DATA_SYNC_EXTERNAL_SOURCE = "trusted_baseball_data_project"
 BASEBALL_DATA_SYNC_HANDOFF = "external_trusted_baseball_data_sync"
@@ -236,7 +238,7 @@ FOCUS_SECTION_HEADERS: Dict[str, str] = {
     "bullpen": "## 불펜 상태",
     "starter": "## 선발 투수",
     "matchup": "## 상대 전적",
-    "batting": "## 타격 생산성",
+    "batting": "## 득점 연결력",
 }
 FOCUS_SECTION_METRIC_LABELS: Dict[str, Tuple[str, ...]] = {
     "recent_form": ("최근 흐름", "폼 진단", "득실점 마진"),
@@ -257,7 +259,7 @@ FOCUS_SECTION_GENERIC_SUMMARIES: Dict[str, str] = {
     "bullpen": "불펜 운용 근거가 제한적이어서 경기 중반 이후 대응력이 변수입니다.",
     "starter": "선발 정보가 확정되지 않아 선발 맞대결 평가는 제한됩니다.",
     "matchup": "상대 전적 근거가 충분하지 않아 직접 비교는 보수적으로 해석해야 합니다.",
-    "batting": "타격 생산성 근거가 제한적이어서 장타와 출루 비교는 보수적으로 봐야 합니다.",
+    "batting": "득점 연결 근거가 제한적이어서 출루와 장타 흐름 비교는 보수적으로 봐야 합니다.",
 }
 COMPLETED_FOCUS_FALLBACK_VARIANTS: Dict[str, Tuple[str, ...]] = {
     "recent_form": (
@@ -281,8 +283,8 @@ COMPLETED_FOCUS_FALLBACK_VARIANTS: Dict[str, Tuple[str, ...]] = {
         "맞대결 근거가 부족해 전적 비교보다 실제 득점 흐름을 우선 봐야 합니다.",
     ),
     "batting": (
-        "확인 가능한 타격 생산성 근거가 제한적입니다.",
-        "타격 생산성 표본이 부족해 장타와 출루 비교는 보수적으로 봐야 합니다.",
+        "확인 가능한 득점 연결 근거가 제한적입니다.",
+        "출루와 장타 흐름 표본이 부족해 직접 비교는 보수적으로 봐야 합니다.",
         "공격 지표 근거가 제한적이라 득점 연결 평가는 확인된 결과 중심으로 봐야 합니다.",
     ),
     "matchup_warning": (
@@ -302,7 +304,7 @@ COMPLETED_FOCUS_FALLBACK_VARIANTS: Dict[str, Tuple[str, ...]] = {
     ),
     "batting_warning": (
         "타격 지표 표본이 부족합니다.",
-        "타격 생산성 근거가 제한적입니다.",
+        "득점 연결 근거가 제한적입니다.",
         "공격 지표 표본이 부족해 직접 비교는 제한적입니다.",
     ),
 }
@@ -1488,6 +1490,36 @@ def _normalize_name_token(value: Optional[str]) -> Optional[str]:
     return normalized or None
 
 
+UNANNOUNCED_PITCHER_LABELS = {
+    "발표 전",
+    "발표전",
+    "미정",
+    "선발 발표 전",
+    "선발발표전",
+    "선발 미정",
+    "선발미정",
+    "선발 미발표",
+    "선발미발표",
+    "TBD",
+    "N/A",
+    "-",
+}
+
+
+def _normalize_pitcher_name_token(value: Optional[str]) -> Optional[str]:
+    normalized = _normalize_name_token(value)
+    if not normalized:
+        return None
+    normalized_key = normalized.upper()
+    compact_key = "".join(normalized_key.split())
+    if (
+        normalized_key in UNANNOUNCED_PITCHER_LABELS
+        or compact_key in UNANNOUNCED_PITCHER_LABELS
+    ):
+        return None
+    return normalized
+
+
 def _is_scheduled_partial_context(
     game_status_bucket: str,
     grounding_reasons: List[str],
@@ -1850,10 +1882,7 @@ def assess_game_evidence(
             root_causes.append("missing_starters")
     if not lineup_announced:
         root_causes.append("missing_lineups")
-    if (
-        normalized_analysis_type == COACH_ANALYSIS_TYPE_REVIEW
-        and not summary_present
-    ):
+    if normalized_analysis_type == COACH_ANALYSIS_TYPE_REVIEW and not summary_present:
         root_causes.append("missing_summary")
     if not metadata_present:
         root_causes.append("missing_metadata")
@@ -2036,9 +2065,9 @@ def _build_baseball_data_sync_request(
         "blocking": True,
         "entity": {
             "gameId": request_game_id,
-            "gameDate": request_game_date.isoformat()
-            if request_game_date is not None
-            else None,
+            "gameDate": (
+                request_game_date.isoformat() if request_game_date is not None else None
+            ),
             "seasonYear": season_year,
             "homeTeamId": home_team_id,
             "awayTeamId": away_team_id,
@@ -2067,17 +2096,18 @@ def _parse_iso_date(value: Optional[str]) -> Optional[date_cls]:
         return None
 
 
-def _lookup_stage_start_date(
-    pool: ConnectionPool,
+async def _lookup_stage_start_date(
+    pool: AsyncConnectionPool,
     *,
     season_year: int,
     league_type_code: int,
 ) -> Optional[date_cls]:
     try:
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             cursor = conn.cursor(row_factory=dict_row)
-            row = cursor.execute(
-                """
+            row = await (
+                await cursor.execute(
+                    """
                 SELECT start_date
                 FROM kbo_seasons
                 WHERE season_year = %s
@@ -2086,7 +2116,8 @@ def _lookup_stage_start_date(
                 ORDER BY season_id DESC
                 LIMIT 1
                 """,
-                (season_year, league_type_code),
+                    (season_year, league_type_code),
+                )
             ).fetchone()
             if row and row.get("start_date") is not None:
                 start_date = row["start_date"]
@@ -2094,15 +2125,17 @@ def _lookup_stage_start_date(
                     return start_date.date()
                 return start_date
 
-            fallback_row = cursor.execute(
-                """
+            fallback_row = await (
+                await cursor.execute(
+                    """
                 SELECT MIN(g.game_date) AS start_date
                 FROM game g
                 LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
                 WHERE COALESCE(ks.season_year, EXTRACT(YEAR FROM g.game_date)::int) = %s
                   AND COALESCE(ks.league_type_code, 0) = %s
                 """,
-                (season_year, league_type_code),
+                    (season_year, league_type_code),
+                )
             ).fetchone()
             if fallback_row and fallback_row.get("start_date") is not None:
                 start_date = fallback_row["start_date"]
@@ -2119,8 +2152,8 @@ def _lookup_stage_start_date(
     return None
 
 
-def _has_stage_context_mismatch(
-    pool: ConnectionPool,
+async def _has_stage_context_mismatch(
+    pool: AsyncConnectionPool,
     evidence: GameEvidence,
     game_date: Optional[date_cls],
 ) -> bool:
@@ -2135,7 +2168,7 @@ def _has_stage_context_mismatch(
     ):
         return False
 
-    stage_start = _lookup_stage_start_date(
+    stage_start = await _lookup_stage_start_date(
         pool,
         season_year=season_year,
         league_type_code=league_type_code,
@@ -2181,8 +2214,8 @@ def _is_past_game_missing_final_state(
     }
 
 
-def _build_manual_data_request(
-    pool: ConnectionPool,
+async def _build_manual_data_request(
+    pool: AsyncConnectionPool,
     payload: "AnalyzeRequest",
     evidence: GameEvidence,
     assessment: GameEvidenceAssessment,
@@ -2233,7 +2266,7 @@ def _build_manual_data_request(
             season_year_for_context is None
             or season_year_for_context != request_game_date.year
         )
-    ) or _has_stage_context_mismatch(pool, evidence, request_game_date)
+    ) or await _has_stage_context_mismatch(pool, evidence, request_game_date)
     missing_final_state = _is_past_game_missing_final_state(
         request_game_date,
         evidence_game_status,
@@ -2270,10 +2303,7 @@ def _build_manual_data_request(
             "season_id, season_year, league_type_code",
         )
 
-    if (
-        normalized_analysis_type == COACH_ANALYSIS_TYPE_REVIEW
-        and missing_final_state
-    ):
+    if normalized_analysis_type == COACH_ANALYSIS_TYPE_REVIEW and missing_final_state:
         add_item(
             "game_status",
             "경기 상태",
@@ -2307,8 +2337,7 @@ def _build_manual_data_request(
             )
     elif (
         normalized_analysis_type == COACH_ANALYSIS_TYPE_REVIEW
-        and
-        _normalize_game_status_bucket(evidence_game_status) == "SCHEDULED"
+        and _normalize_game_status_bucket(evidence_game_status) == "SCHEDULED"
         and not _is_starter_announcement_pending(evidence)
         and not (assessment.home_pitcher_present and assessment.away_pitcher_present)
     ):
@@ -3074,10 +3103,9 @@ def _extract_cached_payload(
     else:
         response = cached_data
         meta = {}
-    normalized_analysis_type = (
-        _normalize_analysis_type(analysis_type)
-        or _normalize_analysis_type(meta.get("analysis_type"))
-    )
+    normalized_analysis_type = _normalize_analysis_type(
+        analysis_type
+    ) or _normalize_analysis_type(meta.get("analysis_type"))
     normalized = _attach_response_analysis_type(
         _normalize_cached_response(response),
         normalized_analysis_type,
@@ -3420,26 +3448,30 @@ def _should_generate_from_gate(gate: str) -> bool:
 
 
 async def _wait_for_cache_terminal_state(
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     cache_key: str,
     timeout_seconds: float = PENDING_WAIT_TIMEOUT_SECONDS,
     poll_ms: int = PENDING_WAIT_POLL_MS,
 ) -> Optional[Dict[str, Any]]:
+    _BACKOFF_MULTIPLIER = 2.0
+    _MAX_SLEEP_SECONDS = 30.0
     deadline = perf_counter() + timeout_seconds
     sleep_seconds = max(float(poll_ms), 1.0) / 1000.0
 
     while perf_counter() < deadline:
         await asyncio.sleep(sleep_seconds)
         try:
-            with pool.connection() as conn:
-                row = conn.execute(
-                    """
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        """
                     SELECT status, response_json, error_message, error_code, attempt_count, updated_at,
                            lease_expires_at, last_heartbeat_at
                     FROM coach_analysis_cache
                     WHERE cache_key = %s
                     """,
-                    (cache_key,),
+                        (cache_key,),
+                    )
                 ).fetchone()
             if not row:
                 return {"status": "MISSING_ROW"}
@@ -3478,6 +3510,7 @@ async def _wait_for_cache_terminal_state(
         except Exception as exc:
             logger.warning("[Coach] Cache wait poll failed for %s: %s", cache_key, exc)
             return None
+        sleep_seconds = min(sleep_seconds * _BACKOFF_MULTIPLIER, _MAX_SLEEP_SECONDS)
     return None
 
 
@@ -3513,7 +3546,7 @@ def _collect_dependency_degraded_reasons(tool_results: Dict[str, Any]) -> List[s
     return list(dict.fromkeys(reasons))
 
 
-def _insert_pending_cache_row(
+async def _insert_pending_cache_row(
     conn: Any,
     *,
     cache_key: str,
@@ -3524,8 +3557,9 @@ def _insert_pending_cache_row(
     lease_owner: str,
     attempt_count: int,
 ) -> bool:
-    inserted = conn.execute(
-        """
+    inserted = await (
+        await conn.execute(
+            """
         INSERT INTO coach_analysis_cache (
             cache_key, team_id, year, prompt_version, model_name, status,
             error_message, error_code, attempt_count,
@@ -3538,23 +3572,24 @@ def _insert_pending_cache_row(
         ON CONFLICT (cache_key) DO NOTHING
         RETURNING cache_key
         """,
-        (
-            cache_key,
-            team_id,
-            year,
-            prompt_version,
-            model_name,
-            max(1, _normalize_attempt_count(attempt_count)),
-            lease_owner,
-            COACH_CACHE_LEASE_STALE_SECONDS,
-        ),
+            (
+                cache_key,
+                team_id,
+                year,
+                prompt_version,
+                model_name,
+                max(1, _normalize_attempt_count(attempt_count)),
+                lease_owner,
+                COACH_CACHE_LEASE_STALE_SECONDS,
+            ),
+        )
     ).fetchone()
     return bool(inserted)
 
 
 async def _heartbeat_cache_lease(
     *,
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     cache_key: str,
     lease_owner: str,
     lease_lost_event: Optional[asyncio.Event] = None,
@@ -3562,8 +3597,8 @@ async def _heartbeat_cache_lease(
     while True:
         await asyncio.sleep(COACH_CACHE_HEARTBEAT_INTERVAL_SECONDS)
         try:
-            with pool.connection() as conn:
-                result = conn.execute(
+            async with pool.connection() as conn:
+                result = await conn.execute(
                     """
                     UPDATE coach_analysis_cache
                     SET updated_at = now(),
@@ -3579,7 +3614,7 @@ async def _heartbeat_cache_lease(
                         lease_owner,
                     ),
                 )
-                conn.commit()
+                await conn.commit()
                 if not result.rowcount:
                     if lease_lost_event is not None:
                         lease_lost_event.set()
@@ -3609,7 +3644,7 @@ async def _cancel_heartbeat_task(task: Optional[asyncio.Task]) -> None:
 
 async def _generate_auto_brief_cache_background(
     *,
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     cache_key: str,
     lease_owner: str,
     home_team_canonical: str,
@@ -3631,7 +3666,7 @@ async def _generate_auto_brief_cache_background(
     """
     lease_lost_event = asyncio.Event()
     heartbeat_task: Optional[asyncio.Task] = asyncio.create_task(
-        _heartbeat_cache_lease(
+        await _heartbeat_cache_lease(
             pool=pool,
             cache_key=cache_key,
             lease_owner=lease_owner,
@@ -3772,7 +3807,7 @@ async def _generate_auto_brief_cache_background(
             if pre_game_prob is not None:
                 meta_defaults["win_probability_home"] = pre_game_prob
 
-        _store_completed_cache(
+        await _store_completed_cache(
             pool=pool,
             cache_key=cache_key,
             lease_owner=lease_owner,
@@ -3805,7 +3840,7 @@ async def _generate_auto_brief_cache_background(
             exc,
         )
         try:
-            _store_failed_cache(
+            await _store_failed_cache(
                 pool=pool,
                 cache_key=cache_key,
                 lease_owner=lease_owner,
@@ -3827,9 +3862,9 @@ async def _generate_auto_brief_cache_background(
         await _cancel_heartbeat_task(heartbeat_task)
 
 
-def _claim_cache_generation_once(
+async def _claim_cache_generation_once(
     *,
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     cache_key: str,
     team_id: str,
     year: int,
@@ -3843,9 +3878,9 @@ def _claim_cache_generation_once(
     expected_game_status_bucket: Optional[str] = None,
     current_root_causes: Optional[Sequence[str]] = None,
 ) -> tuple[str, Any, Optional[str], Optional[str], int]:
-    with pool.connection() as conn:
-        with conn.transaction():
-            inserted = _insert_pending_cache_row(
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            inserted = await _insert_pending_cache_row(
                 conn,
                 cache_key=cache_key,
                 team_id=team_id,
@@ -3855,22 +3890,24 @@ def _claim_cache_generation_once(
                 lease_owner=lease_owner,
                 attempt_count=1,
             )
-            row = conn.execute(
-                """
+            row = await (
+                await conn.execute(
+                    """
                 SELECT status, response_json, error_message, error_code, attempt_count,
                        updated_at, lease_expires_at, last_heartbeat_at
                 FROM coach_analysis_cache
                 WHERE cache_key = %s
                 FOR UPDATE
                 """,
-                (cache_key,),
+                    (cache_key,),
+                )
             ).fetchone()
 
             if inserted:
                 return "MISS_GENERATE", None, None, None, 1
 
             if not row:
-                recreated = _insert_pending_cache_row(
+                recreated = await _insert_pending_cache_row(
                     conn,
                     cache_key=cache_key,
                     team_id=team_id,
@@ -3883,15 +3920,17 @@ def _claim_cache_generation_once(
                 if recreated:
                     return "ROW_RECREATED", None, None, None, 1
 
-                row = conn.execute(
-                    """
+                row = await (
+                    await conn.execute(
+                        """
                     SELECT status, response_json, error_message, error_code, attempt_count,
                            updated_at, lease_expires_at, last_heartbeat_at
                     FROM coach_analysis_cache
                     WHERE cache_key = %s
                     FOR UPDATE
                     """,
-                    (cache_key,),
+                        (cache_key,),
+                    )
                 ).fetchone()
                 if not row:
                     return "MISS_GENERATE", None, None, None, 1
@@ -3938,7 +3977,7 @@ def _claim_cache_generation_once(
 
             if cache_state in {"MISS_GENERATE", "PENDING_STALE_TAKEOVER"}:
                 next_attempt = max(1, _normalize_attempt_count(attempt_count) + 1)
-                conn.execute(
+                await conn.execute(
                     """
                     UPDATE coach_analysis_cache
                     SET status = 'PENDING',
@@ -3977,9 +4016,9 @@ def _claim_cache_generation_once(
             )
 
 
-def _read_completed_cache_if_fresh(
+async def _read_completed_cache_if_fresh(
     *,
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     cache_key: str,
     completed_ttl_seconds: Optional[int],
     request_mode: str = COACH_REQUEST_MODE_MANUAL,
@@ -3988,15 +4027,17 @@ def _read_completed_cache_if_fresh(
     expected_game_status_bucket: Optional[str] = None,
     current_root_causes: Optional[Sequence[str]] = None,
 ) -> tuple[str, Any, Optional[str], Optional[str], int]:
-    with pool.connection() as conn:
-        row = conn.execute(
-            """
+    async with pool.connection() as conn:
+        row = await (
+            await conn.execute(
+                """
             SELECT status, response_json, error_message, error_code, attempt_count,
                    updated_at, lease_expires_at, last_heartbeat_at
             FROM coach_analysis_cache
             WHERE cache_key = %s
             """,
-            (cache_key,),
+                (cache_key,),
+            )
         ).fetchone()
 
     if not row:
@@ -4052,7 +4093,7 @@ def _read_completed_cache_if_fresh(
 
 
 def _refresh_cache_pool_after_operational_error(
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     *,
     cache_key: str,
     exc: Exception,
@@ -4071,9 +4112,9 @@ def _refresh_cache_pool_after_operational_error(
         )
 
 
-def _claim_cache_generation(
+async def _claim_cache_generation(
     *,
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     cache_key: str,
     team_id: str,
     year: int,
@@ -4104,7 +4145,7 @@ def _claim_cache_generation(
     }
     for attempt in range(1, COACH_CACHE_CLAIM_DB_ATTEMPTS + 1):
         try:
-            return _claim_cache_generation_once(**kwargs)
+            return await _claim_cache_generation_once(**kwargs)
         except psycopg.OperationalError as exc:
             if attempt >= COACH_CACHE_CLAIM_DB_ATTEMPTS:
                 raise
@@ -4121,9 +4162,9 @@ def _claim_cache_generation(
     raise RuntimeError("unreachable cache claim retry state")
 
 
-def _store_completed_cache(
+async def _store_completed_cache(
     *,
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     cache_key: str,
     lease_owner: str,
     team_id: str,
@@ -4137,8 +4178,8 @@ def _store_completed_cache(
         _wrap_cached_payload(response_payload, meta_defaults),
         ensure_ascii=False,
     )
-    with pool.connection() as conn:
-        result = conn.execute(
+    async with pool.connection() as conn:
+        result = await conn.execute(
             """
             UPDATE coach_analysis_cache
             SET status = 'COMPLETED',
@@ -4160,20 +4201,23 @@ def _store_completed_cache(
             ),
         )
         if result.rowcount:
-            conn.commit()
+            await conn.commit()
             return {"outcome": "updated"}
 
-        row = conn.execute(
-            """
+        row = await (
+            await conn.execute(
+                """
             SELECT status, response_json, lease_owner
             FROM coach_analysis_cache
             WHERE cache_key = %s
             """,
-            (cache_key,),
+                (cache_key,),
+            )
         ).fetchone()
         if not row:
-            inserted = conn.execute(
-                """
+            inserted = await (
+                await conn.execute(
+                    """
                 INSERT INTO coach_analysis_cache (
                     cache_key, team_id, year, prompt_version, model_name, status,
                     response_json, error_message, error_code, attempt_count,
@@ -4186,30 +4230,36 @@ def _store_completed_cache(
                 ON CONFLICT (cache_key) DO NOTHING
                 RETURNING cache_key
                 """,
-                (
-                    cache_key,
-                    team_id,
-                    year,
-                    prompt_version,
-                    model_name,
-                    wrapped_payload,
-                    max(
-                        1, _normalize_attempt_count(meta_defaults.get("attempt_count"))
+                    (
+                        cache_key,
+                        team_id,
+                        year,
+                        prompt_version,
+                        model_name,
+                        wrapped_payload,
+                        max(
+                            1,
+                            _normalize_attempt_count(
+                                meta_defaults.get("attempt_count")
+                            ),
+                        ),
                     ),
-                ),
+                )
             ).fetchone()
             if inserted:
-                conn.commit()
+                await conn.commit()
                 return {"outcome": "inserted_missing_row"}
-            row = conn.execute(
-                """
+            row = await (
+                await conn.execute(
+                    """
                 SELECT status, response_json, lease_owner
                 FROM coach_analysis_cache
                 WHERE cache_key = %s
                 """,
-                (cache_key,),
+                    (cache_key,),
+                )
             ).fetchone()
-        conn.commit()
+        await conn.commit()
     return {
         "outcome": "finalize_conflict",
         "status": row[0] if row else None,
@@ -4218,9 +4268,9 @@ def _store_completed_cache(
     }
 
 
-def _store_failed_cache(
+async def _store_failed_cache(
     *,
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     cache_key: str,
     lease_owner: str,
     team_id: str,
@@ -4233,8 +4283,8 @@ def _store_failed_cache(
 ) -> Dict[str, Any]:
     normalized_error_code = _sanitize_cache_error_code(error_code)
     stored_error_message = str(error_message or "").strip() or normalized_error_code
-    with pool.connection() as conn:
-        result = conn.execute(
+    async with pool.connection() as conn:
+        result = await conn.execute(
             """
             UPDATE coach_analysis_cache
             SET status = 'FAILED',
@@ -4257,20 +4307,23 @@ def _store_failed_cache(
             ),
         )
         if result.rowcount:
-            conn.commit()
+            await conn.commit()
             return {"outcome": "updated"}
 
-        row = conn.execute(
-            """
+        row = await (
+            await conn.execute(
+                """
             SELECT status, response_json, lease_owner
             FROM coach_analysis_cache
             WHERE cache_key = %s
             """,
-            (cache_key,),
+                (cache_key,),
+            )
         ).fetchone()
         if not row:
-            inserted = conn.execute(
-                """
+            inserted = await (
+                await conn.execute(
+                    """
                 INSERT INTO coach_analysis_cache (
                     cache_key, team_id, year, prompt_version, model_name, status,
                     response_json, error_message, error_code, attempt_count,
@@ -4283,35 +4336,144 @@ def _store_failed_cache(
                 ON CONFLICT (cache_key) DO NOTHING
                 RETURNING cache_key
                 """,
-                (
-                    cache_key,
-                    team_id,
-                    year,
-                    prompt_version,
-                    model_name,
-                    stored_error_message,
-                    normalized_error_code,
-                    max(1, _normalize_attempt_count(attempt_count)),
-                ),
+                    (
+                        cache_key,
+                        team_id,
+                        year,
+                        prompt_version,
+                        model_name,
+                        stored_error_message,
+                        normalized_error_code,
+                        max(1, _normalize_attempt_count(attempt_count)),
+                    ),
+                )
             ).fetchone()
             if inserted:
-                conn.commit()
+                await conn.commit()
                 return {"outcome": "inserted_missing_row"}
-            row = conn.execute(
-                """
+            row = await (
+                await conn.execute(
+                    """
                 SELECT status, response_json, lease_owner
                 FROM coach_analysis_cache
                 WHERE cache_key = %s
                 """,
-                (cache_key,),
+                    (cache_key,),
+                )
             ).fetchone()
-        conn.commit()
+        await conn.commit()
     return {
         "outcome": "finalize_conflict",
         "status": row[0] if row else None,
         "response_json": row[1] if row else None,
         "lease_owner": row[2] if row else None,
     }
+
+
+async def _reset_failed_coach_cache_rows(
+    pool: AsyncConnectionPool,
+    *,
+    cache_key: Optional[str] = None,
+    team_id: Optional[str] = None,
+    year: Optional[int] = None,
+    include_stale_pending: bool = True,
+    retryable_only: bool = False,
+    max_rows: int = 500,
+) -> Dict[str, int]:
+    """
+    FAILED(잠긴 캐시 포함) row를 삭제해 다음 요청에서 자연 재생성되도록 한다.
+
+    배치 스크립트의 ``force_rebuild_delete`` 안전 규칙(활성 PENDING 보호)을 런타임
+    async 경로에 맞춰 재구현한 헬퍼다. ``cache_key`` 가 주어지면 단건을, 아니면
+    ``team_id``+``year`` 로 묶인 FAILED row를 일괄 처리한다. ``COMPLETED`` row와
+    아직 살아있는 PENDING lease는 절대 건드리지 않는다.
+    """
+    stats: Dict[str, int] = {
+        "matched_rows": 0,
+        "deleted_failed_rows": 0,
+        "deleted_stale_pending_rows": 0,
+        "active_pending_blocked_count": 0,
+        "completed_skipped_count": 0,
+        "non_retryable_skipped_count": 0,
+        "missing_cache_row_count": 0,
+    }
+    async with pool.connection() as conn:
+        if cache_key:
+            rows = await (
+                await conn.execute(
+                    """
+                SELECT cache_key, status, error_code, updated_at,
+                       lease_expires_at, last_heartbeat_at
+                FROM coach_analysis_cache
+                WHERE cache_key = %s
+                FOR UPDATE
+                """,
+                    (cache_key,),
+                )
+            ).fetchall()
+            if not rows:
+                stats["missing_cache_row_count"] = 1
+        else:
+            rows = await (
+                await conn.execute(
+                    """
+                SELECT cache_key, status, error_code, updated_at,
+                       lease_expires_at, last_heartbeat_at
+                FROM coach_analysis_cache
+                WHERE team_id = %s AND year = %s
+                  AND status IN ('FAILED', 'PENDING')
+                ORDER BY updated_at ASC
+                LIMIT %s
+                FOR UPDATE
+                """,
+                    (team_id, year, max_rows),
+                )
+            ).fetchall()
+
+        deletable: List[Tuple[str, str]] = []
+        for row in rows:
+            (
+                row_cache_key,
+                status,
+                error_code,
+                updated_at,
+                lease_expires_at,
+                last_heartbeat_at,
+            ) = row
+            stats["matched_rows"] += 1
+            normalized_status = str(status or "").strip().upper()
+            if normalized_status == "FAILED":
+                if retryable_only and not _is_retryable_cache_error_code(error_code):
+                    stats["non_retryable_skipped_count"] += 1
+                    continue
+                deletable.append(("failed", str(row_cache_key)))
+            elif normalized_status == "PENDING":
+                if include_stale_pending and _is_pending_cache_stale(
+                    updated_at=updated_at,
+                    last_heartbeat_at=last_heartbeat_at,
+                    lease_expires_at=lease_expires_at,
+                    pending_stale_seconds=PENDING_STALE_SECONDS,
+                ):
+                    deletable.append(("stale_pending", str(row_cache_key)))
+                else:
+                    stats["active_pending_blocked_count"] += 1
+            else:
+                stats["completed_skipped_count"] += 1
+
+        delete_keys = [key for _, key in deletable]
+        if delete_keys:
+            await conn.execute(
+                "DELETE FROM coach_analysis_cache WHERE cache_key = ANY(%s)",
+                (delete_keys,),
+            )
+            stats["deleted_failed_rows"] = sum(
+                1 for kind, _ in deletable if kind == "failed"
+            )
+            stats["deleted_stale_pending_rows"] = sum(
+                1 for kind, _ in deletable if kind == "stale_pending"
+            )
+        await conn.commit()
+    return stats
 
 
 def _normalize_cached_response(cached_data: dict) -> dict:
@@ -4379,7 +4541,9 @@ def _is_valid_analysis_year(year: int) -> bool:
     return COACH_YEAR_MIN <= year <= datetime.now().year + 1
 
 
-def _resolve_year_from_season_id(pool: ConnectionPool, season_id: Any) -> Optional[int]:
+async def _resolve_year_from_season_id(
+    pool: AsyncConnectionPool, season_id: Any
+) -> Optional[int]:
     if season_id is None:
         return None
     try:
@@ -4388,10 +4552,12 @@ def _resolve_year_from_season_id(pool: ConnectionPool, season_id: Any) -> Option
         return None
 
     try:
-        with pool.connection() as conn:
-            row = conn.execute(
-                "SELECT season_year FROM kbo_seasons WHERE season_id = %s LIMIT 1",
-                (normalized_season_id,),
+        async with pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT season_year FROM kbo_seasons WHERE season_id = %s LIMIT 1",
+                    (normalized_season_id,),
+                )
             ).fetchone()
         if not row:
             return None
@@ -4404,8 +4570,8 @@ def _resolve_year_from_season_id(pool: ConnectionPool, season_id: Any) -> Option
         return None
 
 
-def _resolve_year_from_game_context(
-    pool: ConnectionPool, game_id: Optional[str], game_date: Any
+async def _resolve_year_from_game_context(
+    pool: AsyncConnectionPool, game_id: Optional[str], game_date: Any
 ) -> Optional[int]:
     explicit_game_year = _parse_year_from_date_like(game_date)
     if explicit_game_year is not None:
@@ -4413,16 +4579,18 @@ def _resolve_year_from_game_context(
 
     if game_id:
         try:
-            with pool.connection() as conn:
-                row = conn.execute(
-                    """
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        """
                     SELECT COALESCE(ks.season_year, EXTRACT(YEAR FROM g.game_date)::int) AS season_year
                     FROM game g
                     LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
                     WHERE g.game_id = %s
                     LIMIT 1
                     """,
-                    (game_id,),
+                        (game_id,),
+                    )
                 ).fetchone()
             if row and row[0]:
                 return int(row[0])
@@ -4438,8 +4606,8 @@ def _resolve_year_from_game_context(
     return None
 
 
-def _resolve_target_year(
-    payload: "AnalyzeRequest", pool: ConnectionPool
+async def _resolve_target_year(
+    payload: "AnalyzeRequest", pool: AsyncConnectionPool
 ) -> tuple[int, str]:
     league_context = payload.league_context or {}
 
@@ -4453,11 +4621,11 @@ def _resolve_target_year(
         return parsed_year, "league_context.season_year"
 
     season_id = league_context.get("season")
-    season_year = _resolve_year_from_season_id(pool, season_id)
+    season_year = await _resolve_year_from_season_id(pool, season_id)
     if season_year is not None and _is_valid_analysis_year(season_year):
         return season_year, "league_context.season->kbo_seasons"
 
-    game_year = _resolve_year_from_game_context(
+    game_year = await _resolve_year_from_game_context(
         pool,
         payload.game_id,
         league_context.get("game_date"),
@@ -4485,16 +4653,18 @@ def _build_fallback_evidence(
         league_context.get("stage_label") or league_context.get("round"),
     )
     round_display = _round_display_for_stage(stage_label)
-    home_pitcher = _normalize_name_token(league_context.get("home_pitcher"))
-    away_pitcher = _normalize_name_token(league_context.get("away_pitcher"))
+    game_status = _normalize_name_token(league_context.get("game_status")) or "UNKNOWN"
+    game_status_bucket = _normalize_game_status_bucket(game_status)
+    home_pitcher = _normalize_pitcher_name_token(league_context.get("home_pitcher"))
+    away_pitcher = _normalize_pitcher_name_token(league_context.get("away_pitcher"))
     lineup_announced = bool(league_context.get("lineup_announced"))
     evidence = GameEvidence(
         game_id=payload.game_id,
         season_year=year,
         season_id=_parse_optional_int(league_context.get("season")),
         game_date=str(league_context.get("game_date") or "").strip() or None,
-        game_status="UNKNOWN",
-        game_status_bucket="UNKNOWN",
+        game_status=game_status,
+        game_status_bucket=game_status_bucket,
         home_team_code=home_team_code,
         away_team_code=away_team_code,
         home_team_name=home_team_name,
@@ -4519,7 +4689,7 @@ def _build_fallback_evidence(
     return evidence
 
 
-def _fetch_series_state(
+async def _fetch_series_state(
     conn: Any,
     evidence: GameEvidence,
 ) -> Optional[EvidenceSeriesState]:
@@ -4527,8 +4697,9 @@ def _fetch_series_state(
         return None
 
     previous_games = list(
-        conn.execute(
-            """
+        await (
+            await conn.execute(
+                """
             SELECT
                 g.game_id,
                 g.game_date,
@@ -4560,17 +4731,18 @@ def _fetch_series_state(
               )
             ORDER BY g.game_date ASC NULLS LAST, g.game_id ASC
             """,
-            (
-                evidence.season_year,
-                evidence.league_type_code,
-                evidence.home_team_code,
-                evidence.away_team_code,
-                evidence.away_team_code,
-                evidence.home_team_code,
-                evidence.game_date,
-                evidence.game_date,
-                evidence.game_id,
-            ),
+                (
+                    evidence.season_year,
+                    evidence.league_type_code,
+                    evidence.home_team_code,
+                    evidence.away_team_code,
+                    evidence.away_team_code,
+                    evidence.home_team_code,
+                    evidence.game_date,
+                    evidence.game_date,
+                    evidence.game_id,
+                ),
+            )
         ).fetchall()
         or []
     )
@@ -4783,8 +4955,8 @@ def _sanitize_matchup_result_for_evidence(
     return sanitized
 
 
-def _collect_game_evidence(
-    pool: ConnectionPool,
+async def _collect_game_evidence(
+    pool: AsyncConnectionPool,
     payload: "AnalyzeRequest",
     *,
     year: int,
@@ -4807,10 +4979,11 @@ def _collect_game_evidence(
 
     try:
         league_context = payload.league_context or {}
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             cursor = conn.cursor(row_factory=dict_row)
-            game_row = cursor.execute(
-                """
+            game_row = await (
+                await cursor.execute(
+                    """
                 SELECT
                     g.game_id,
                     g.game_date,
@@ -4833,7 +5006,8 @@ def _collect_game_evidence(
                 WHERE g.game_id = %s
                 LIMIT 1
                 """,
-                (payload.game_id,),
+                    (payload.game_id,),
+                )
             ).fetchone()
 
             if not game_row:
@@ -4946,15 +5120,17 @@ def _collect_game_evidence(
                 weather=_normalize_name_token(game_row.get("weather")),
             )
 
-            lineup_rows = cursor.execute(
-                """
+            lineup_rows = await (
+                await cursor.execute(
+                    """
                 SELECT team_code, player_name, batting_order, is_starter
                 FROM game_lineups
                 WHERE game_id = %s
                   AND COALESCE(is_starter, true) = true
                 ORDER BY team_code, batting_order ASC NULLS LAST, player_name ASC
                 """,
-                (payload.game_id,),
+                    (payload.game_id,),
+                )
             ).fetchall()
             for lineup_row in lineup_rows or []:
                 team_code = team_resolver.resolve_canonical(
@@ -4971,20 +5147,22 @@ def _collect_game_evidence(
                 evidence.home_lineup or evidence.away_lineup
             ) or bool(league_context.get("lineup_announced"))
 
-            summary_rows = cursor.execute(
-                """
+            summary_rows = await (
+                await cursor.execute(
+                    """
                 SELECT summary_type, player_name, detail_text
                 FROM game_summary
                 WHERE game_id = %s
                 ORDER BY id ASC
                 LIMIT 30
                 """,
-                (payload.game_id,),
+                    (payload.game_id,),
+                )
             ).fetchall()
             evidence.summary_items = _format_game_summary_items(summary_rows or [])
 
             evidence.series_state = _reconcile_series_state_with_hint(
-                _fetch_series_state(conn, evidence),
+                await _fetch_series_state(conn, evidence),
                 evidence,
             )
 
@@ -5449,12 +5627,12 @@ def _scheduled_team_level_batting_summary(
             else evidence.home_team_name
         )
         return (
-            f"{evidence.away_team_name} OPS {away_ops_value:.3f} / "
-            f"{evidence.home_team_name} OPS {home_ops_value:.3f}로 "
-            f"{edge_team}가 팀 타격 생산성 우위를 보입니다."
+            f"{evidence.away_team_name} 출루·장타 지표 {away_ops_value:.3f} / "
+            f"{evidence.home_team_name} 출루·장타 지표 {home_ops_value:.3f}로 "
+            f"{edge_team}의 득점 연결력이 더 좋아 보입니다."
         )
 
-    return "타격 생산성 비교에 필요한 팀 단위 OPS 데이터가 충분하지 않습니다."
+    return "득점 연결력 비교에 필요한 출루·장타 지표가 충분하지 않습니다."
 
 
 def _scheduled_team_level_swing_summary(evidence: GameEvidence) -> str:
@@ -5500,7 +5678,7 @@ def _build_scheduled_team_level_snapshot_lines(
             fragments.append(f"최근 **{recent}**")
         if ops_value is not None:
             try:
-                fragments.append(f"정규시즌 OPS **{float(ops_value):.3f}**")
+                fragments.append(f"출루·장타 지표 **{float(ops_value):.3f}**")
             except (TypeError, ValueError):
                 pass
         if bullpen_share:
@@ -5693,11 +5871,11 @@ def _scheduled_team_level_verdict(
     if not edge_team:
         return "절대 우위를 단정하기 어렵습니다."
     if edge_source == "recent_ops":
-        return f"{edge_team}가 최근 전력과 팀 타격 생산성에서 앞섭니다."
+        return f"{edge_team}가 최근 흐름과 득점 연결력에서 앞섭니다."
     if edge_source == "ops":
-        return f"{edge_team}가 팀 타격 생산성에서 한 발 앞섭니다."
+        return f"{edge_team}가 득점 연결력에서 한 발 앞섭니다."
     if edge_source == "ops_slight":
-        return f"{edge_team}가 팀 타격 생산성 우세로 근소하게 앞섭니다."
+        return f"{edge_team}가 득점 연결력 우세로 근소하게 앞섭니다."
     if edge_source == "recent":
         return f"{edge_team}가 최근 흐름에서 한 발 앞섭니다."
     if edge_source == "recent_slight":
@@ -5721,7 +5899,7 @@ def _build_scheduled_team_level_why_it_matters(
     if edge_team and edge_source == "recent_ops":
         _append_distinct_note_part(
             ordered,
-            f"{edge_team}가 최근 전력과 팀 OPS를 함께 앞세워 초중반 주도권을 먼저 잡을 가능성이 있습니다.",
+            f"{edge_team}가 최근 흐름과 출루·장타 지표를 함께 앞세워 초중반 주도권을 먼저 잡을 가능성이 있습니다.",
         )
     elif edge_team and edge_source == "recent_slight":
         _append_distinct_note_part(
@@ -5730,12 +5908,12 @@ def _build_scheduled_team_level_why_it_matters(
         )
         _append_distinct_note_part(
             ordered,
-            f"{secondary_edge_team or trailing_team}도 팀 OPS 우위로 초반 선취점 반격 여지는 남아 있습니다.",
+            f"{secondary_edge_team or trailing_team}도 출루·장타 지표 우위로 초반 선취점 반격 여지는 남아 있습니다.",
         )
     elif edge_team and edge_source == "ops_slight":
         _append_distinct_note_part(
             ordered,
-            f"{edge_team}가 팀 OPS 우위로 초반 선취점 압박을 먼저 걸 수 있습니다.",
+            f"{edge_team}가 출루·장타 지표 우위로 초반 선취점 압박을 먼저 걸 수 있습니다.",
         )
         _append_distinct_note_part(
             ordered,
@@ -5744,7 +5922,7 @@ def _build_scheduled_team_level_why_it_matters(
     elif edge_team and edge_source == "composite":
         _append_distinct_note_part(
             ordered,
-            f"{edge_team}가 최근 흐름과 팀 타격 생산성을 종합하면 운영 선택지를 조금 더 넓게 가져갈 가능성이 있습니다.",
+            f"{edge_team}가 최근 흐름과 득점 연결력을 종합하면 운영 선택지를 조금 더 넓게 가져갈 가능성이 있습니다.",
         )
 
     if edge_source in {"recent_ops", "recent_slight", "recent", "composite"}:
@@ -5946,9 +6124,9 @@ def _completed_ops_weakness_text(
     ops: float,
 ) -> str:
     variants = (
-        f"{team_name}는 정규시즌 OPS {ops:.3f} 기준 득점 연결 보강이 필요합니다.",
-        f"{team_name}는 정규시즌 OPS {ops:.3f} 기준 득점 연결을 먼저 보강해야 합니다.",
-        f"{team_name}는 정규시즌 OPS {ops:.3f}라 출루 이후 장타 연결이 관건입니다.",
+        f"{team_name}는 출루·장타 지표 {ops:.3f} 기준 득점 연결력 보강이 필요합니다.",
+        f"{team_name}는 출루·장타 지표 {ops:.3f} 기준 득점 기회를 먼저 살려야 합니다.",
+        f"{team_name}는 출루·장타 지표 {ops:.3f}라 출루 이후 장타 연결이 관건입니다.",
     )
     index = _stable_completed_copy_index(
         evidence,
@@ -6295,8 +6473,8 @@ def _build_scheduled_team_level_deterministic_metrics(
     if "팀 타격 생산성" not in existing_labels:
         metrics.append(
             {
-                "label": "팀 타격 생산성",
-                "value": "OPS 데이터 집계 부족 — 정규시즌 누적 기준 보강 대기",
+                "label": "득점 연결력",
+                "value": "출루·장타 지표 집계 부족 — 정규시즌 누적 기준 보강 대기",
                 "status": "neutral",
                 "trend": "neutral",
                 "is_critical": False,
@@ -6403,12 +6581,12 @@ def _build_scheduled_team_level_deterministic_analysis(
         ops_trailing_value = min(home_ops, away_ops)
         ops_trailing_team = home_name if ops_edge_team == away_name else away_name
         strengths.append(
-            f"{ops_edge_team}는 정규시즌 OPS {ops_lead_value:.3f}로 팀 타격 생산성 우위를 보입니다."
+            f"{ops_edge_team}는 출루·장타 지표 {ops_lead_value:.3f}로 득점 연결력이 더 좋습니다."
         )
         weaknesses.append(
-            f"{ops_trailing_team}는 정규시즌 OPS {ops_trailing_value:.3f}로 초반 득점 설계가 과제입니다."
+            f"{ops_trailing_team}는 출루·장타 지표 {ops_trailing_value:.3f}로 초반 득점 기회를 만드는 힘을 보강해야 합니다."
         )
-        ops_reason = f"{ops_edge_team}가 팀 OPS에서 앞서 초반 선취점 압박을 먼저 걸 가능성이 있습니다."
+        ops_reason = f"{ops_edge_team}가 출루·장타 지표에서 앞서 초반 선취점 압박을 먼저 걸 가능성이 있습니다."
 
     if recent_edge_team:
         strengths.append(f"{recent_edge_team}는 최근 득실 흐름에서 앞섰습니다.")
@@ -6488,17 +6666,17 @@ def _build_scheduled_team_level_deterministic_analysis(
     if edge_team and trailing_team:
         if edge_source == "recent_ops":
             summary = (
-                f"{edge_team}가 최근 전력과 팀 타격 생산성에서 모두 앞서 있지만, "
+                f"{edge_team}가 최근 흐름과 득점 연결력에서 모두 앞서 있지만, "
                 f"{trailing_team}도 운영 변수 하나로 흐름을 뒤집을 여지는 남아 있습니다."
             )
         elif edge_source == "recent_slight":
             summary = (
                 f"{edge_team}가 최근 전력 우세로 근소하게 앞서지만, "
-                f"{(secondary_edge_team or trailing_team)}의 팀 타격 생산성 반격 여지는 남아 있습니다."
+                f"{(secondary_edge_team or trailing_team)}의 득점 연결력 반격 여지는 남아 있습니다."
             )
         elif edge_source == "ops_slight":
             summary = (
-                f"{edge_team}가 팀 타격 생산성 우세로 근소하게 앞서지만, "
+                f"{edge_team}가 득점 연결력 우세로 근소하게 앞서지만, "
                 f"{(secondary_edge_team or trailing_team)}의 최근 전력 반등 가능성도 열려 있습니다."
             )
         else:
@@ -6539,7 +6717,7 @@ def _build_scheduled_team_level_deterministic_analysis(
     if not strengths:
         if ops_edge_team:
             strengths.append(
-                f"{ops_edge_team}는 팀 OPS 우위로 초반 득점 설계에서 앞섭니다."
+                f"{ops_edge_team}는 득점 연결력 우위로 초반 득점 기회를 만드는 힘이 더 좋습니다."
             )
         elif edge_team:
             strengths.append(f"{edge_team}는 확인된 팀 지표에서 우위를 보입니다.")
@@ -6553,7 +6731,7 @@ def _build_scheduled_team_level_deterministic_analysis(
         if ops_edge_team:
             ops_trailing_name = home_name if ops_edge_team == away_name else away_name
             weaknesses.append(
-                f"{ops_trailing_name}는 팀 OPS 열세로 초반 득점 설계가 과제입니다."
+                f"{ops_trailing_name}는 득점 연결력 열세로 초반 득점 기회를 만드는 힘을 보강해야 합니다."
             )
         elif trailing_team:
             weaknesses.append(
@@ -6584,7 +6762,7 @@ def _build_scheduled_team_level_deterministic_analysis(
             {
                 "area": "offense",
                 "level": 1,
-                "description": f"{ops_trailing_name}는 팀 OPS 열세로 초반 득점 설계가 막히면 추격 부담이 커집니다.",
+                "description": f"{ops_trailing_name}는 득점 연결력 열세로 초반 득점 기회를 살리지 못하면 추격 부담이 커집니다.",
             }
         )
     if not evidence.home_pitcher or not evidence.away_pitcher:
@@ -6603,7 +6781,7 @@ def _build_scheduled_team_level_deterministic_analysis(
             "level": 1 if edge_team else 2,
             "description": "확인된 지표상 결정적 리스크는 낮지만, 초반 선취점과 첫 불펜 선택이 경기 흐름을 좌우할 변수입니다.",
         },
-        minimum=1,
+        minimum=2,
     )
 
     return {
@@ -6844,28 +7022,28 @@ def _build_deterministic_analysis(
         if home_ops >= away_ops:
             edge_scores[home_name] += 2
             strengths.append(
-                f"{home_name} 정규시즌 OPS {home_ops:.3f}로 {away_name}({away_ops:.3f})보다 앞섭니다."
+                f"{home_name} 출루·장타 지표 {home_ops:.3f}로 {away_name}({away_ops:.3f})보다 득점 연결력이 좋습니다."
             )
             weaknesses.append(
                 _completed_ops_weakness_text(evidence, away_name, away_ops)
                 if review_mode
-                else f"{away_name}는 정규시즌 OPS {away_ops:.3f} 기준 득점 연결 보강이 필요합니다."
+                else f"{away_name}는 출루·장타 지표 {away_ops:.3f} 기준 득점 연결력 보강이 필요합니다."
             )
             why_it_matters.append(
-                f"{home_name}가 출루·장타 베이스라인에서 앞서 선취점 압박을 먼저 걸 가능성이 있습니다."
+                f"{home_name}가 출루·장타 지표에서 앞서 선취점 압박을 먼저 걸 가능성이 있습니다."
             )
         else:
             edge_scores[away_name] += 2
             strengths.append(
-                f"{away_name} 정규시즌 OPS {away_ops:.3f}가 {home_name}({home_ops:.3f})보다 높습니다."
+                f"{away_name} 출루·장타 지표 {away_ops:.3f}가 {home_name}({home_ops:.3f})보다 좋아 득점 연결력이 앞섭니다."
             )
             weaknesses.append(
                 _completed_ops_weakness_text(evidence, home_name, home_ops)
                 if review_mode
-                else f"{home_name}는 정규시즌 OPS {home_ops:.3f} 기준 초반 득점 루트 보강이 필요합니다."
+                else f"{home_name}는 출루·장타 지표 {home_ops:.3f} 기준 초반 득점 루트 보강이 필요합니다."
             )
             why_it_matters.append(
-                f"{away_name}가 장타 생산성에서 앞서 있어 초반 득점 루트를 더 쉽게 만들 수 있습니다."
+                f"{away_name}가 장타 흐름에서 앞서 있어 초반 득점 루트를 더 쉽게 만들 수 있습니다."
             )
 
     for team_name, batter_form, opponent_name in (
@@ -6886,7 +7064,7 @@ def _build_deterministic_analysis(
                 f"{team_name}는 {player_name}의 폼 점수 {score_text}로 타선 중심축이 살아 있습니다."
             )
             why_it_matters.append(
-                f"{player_name}의 최근 장타/WPA 흐름이 유지되면 {team_name}가 선취점과 빅이닝 연결 확률을 키울 수 있습니다."
+                f"{player_name}의 최근 장타 흐름이 유지되면 {team_name}가 선취점과 큰 득점 이닝을 만들 가능성을 키울 수 있습니다."
             )
         elif status == "cold":
             weaknesses.append(
@@ -6896,12 +7074,12 @@ def _build_deterministic_analysis(
                 {
                     "area": "batting",
                     "level": 1,
-                    "description": f"{team_name} 핵심 타자 {player_name}의 최근 클러치 생산성이 둔화됐습니다.",
+                    "description": f"{team_name} 핵심 타자 {player_name}의 최근 득점 연결력이 둔화됐습니다.",
                 }
             )
             if not review_mode:
                 watch_points.append(
-                    f"{team_name}는 {player_name} 앞뒤 타순에서 출루를 얼마나 이어 주는지가 공격 변동성을 줄일 포인트입니다."
+                    f"{team_name}는 {player_name} 앞뒤 타순에서 출루를 얼마나 이어 주는지가 득점 변동성을 줄일 포인트입니다."
                 )
 
     for team_name, pitcher_form in (
@@ -6933,7 +7111,7 @@ def _build_deterministic_analysis(
                         else "bullpen"
                     ),
                     "level": 0,
-                    "description": f"{team_name} {player_name}의 최근 실점/WPA 허용 흐름이 좋지 않습니다.",
+                    "description": f"{team_name} {player_name}의 최근 실점 흐름이 좋지 않아 경기 흐름을 흔들 수 있습니다.",
                 }
             )
 
@@ -10473,8 +10651,28 @@ def _build_coach_query(
     return query
 
 
+_coach_fanout_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_coach_fanout_semaphore() -> asyncio.Semaphore:
+    """Coach 도구 fan-out DB 체크아웃을 제한하는 lazy 세마포어.
+
+    모듈 import 시점에는 실행 중인 이벤트 루프가 없으므로 첫 사용 시 생성한다.
+    """
+    global _coach_fanout_semaphore
+    if _coach_fanout_semaphore is None:
+        _coach_fanout_semaphore = asyncio.Semaphore(COACH_DB_FANOUT_MAX)
+    return _coach_fanout_semaphore
+
+
+def _reset_coach_fanout_semaphore_for_tests() -> None:
+    """테스트 격리용. 세마포어 싱글톤을 초기화한다."""
+    global _coach_fanout_semaphore
+    _coach_fanout_semaphore = None
+
+
 async def _execute_coach_tools_parallel(
-    pool: ConnectionPool,
+    pool: AsyncConnectionPool,
     home_team_id: str,
     year: int,
     focus: List[str],
@@ -10489,60 +10687,102 @@ async def _execute_coach_tools_parallel(
     Coach에 필요한 도구들을 병렬로 실행합니다.
     홈팀과 원정팀 데이터를 모두 조회합니다.
     """
-    loop = asyncio.get_running_loop()
     tool_timings: Dict[str, float] = {}
 
     def _timed(name: str, func):
-        def _wrapper(*args, **kwargs):
+        async def _wrapper(*args, **kwargs):
             started = perf_counter()
             try:
-                return func(*args, **kwargs)
+                return await func(*args, **kwargs)
             finally:
                 tool_timings[name] = perf_counter() - started
 
         return _wrapper
 
-    def get_team_data(team_code: str):
-        """특정 팀의 모든 데이터 조회"""
-        results = {}
-        with pool.connection() as conn:
-            db_query = DatabaseQueryTool(conn)
-            results["summary"] = db_query.get_team_summary(team_code, year)
-            results["advanced"] = db_query.get_team_advanced_metrics(team_code, year)
-            results["player_form_signals"] = db_query.get_team_player_form_signals(
-                team_code,
-                year,
-                as_of_game_date=as_of_game_date,
-                exclude_game_id=exclude_game_id,
-            )
-            if "recent_form" in focus or not focus:
-                results["recent"] = db_query.get_team_recent_form(
+    async def get_team_data(team_code: str):
+        """특정 팀의 모든 데이터 조회 — 4쿼리 병렬 실행"""
+        degraded_state: List[Optional[str]] = [None]  # [reason] or [None]
+
+        async def _get_summary():
+            async with _get_coach_fanout_semaphore(), pool.connection() as conn:
+                db_query = DatabaseQueryTool(conn)
+                result = await db_query.get_team_summary(team_code, year)
+                if getattr(db_query, "mapping_dependency_degraded", False):
+                    degraded_state[0] = (
+                        getattr(db_query, "mapping_dependency_reason", None)
+                        or "defaults"
+                    )
+                return result
+
+        async def _get_advanced():
+            async with _get_coach_fanout_semaphore(), pool.connection() as conn:
+                return await DatabaseQueryTool(conn).get_team_advanced_metrics(
+                    team_code, year
+                )
+
+        async def _get_form_signals():
+            async with _get_coach_fanout_semaphore(), pool.connection() as conn:
+                return await DatabaseQueryTool(conn).get_team_player_form_signals(
                     team_code,
                     year,
                     as_of_game_date=as_of_game_date,
                     exclude_game_id=exclude_game_id,
                 )
-            if "matchup" in focus and away_team_id:
-                # 상대 전적은 홈팀 기준 한번만 조회해도 됨
-                pass
-            if getattr(db_query, "mapping_dependency_degraded", False):
-                results["_dependency_degraded"] = True
-                results["_dependency_degraded_reason"] = (
-                    getattr(db_query, "mapping_dependency_reason", None) or "defaults"
+
+        async def _get_recent():
+            if "recent_form" not in focus and focus:
+                return None
+            async with _get_coach_fanout_semaphore(), pool.connection() as conn:
+                return await DatabaseQueryTool(conn).get_team_recent_form(
+                    team_code,
+                    year,
+                    as_of_game_date=as_of_game_date,
+                    exclude_game_id=exclude_game_id,
                 )
+
+        summary, advanced, form_signals, recent = await asyncio.gather(
+            _get_summary(),
+            _get_advanced(),
+            _get_form_signals(),
+            _get_recent(),
+            return_exceptions=True,
+        )
+
+        results: Dict[str, Any] = {}
+        for key, val in [
+            ("summary", summary),
+            ("advanced", advanced),
+            ("player_form_signals", form_signals),
+        ]:
+            if not isinstance(val, BaseException):
+                results[key] = val
+            else:
+                logger.warning("[CoachData] %s failed for %s: %s", key, team_code, val)
+
+        if recent is not None and not isinstance(recent, BaseException):
+            results["recent"] = recent
+        elif isinstance(recent, BaseException):
+            logger.warning(
+                "[CoachData] recent_form failed for %s: %s", team_code, recent
+            )
+
+        if degraded_state[0] is not None:
+            results["_dependency_degraded"] = True
+            results["_dependency_degraded_reason"] = degraded_state[0]
+
         return results
 
-    def get_clutch_moments_sync(target_game_id: str):
-        with pool.connection() as conn:
+    async def get_clutch_moments_sync(target_game_id: str):
+        async with _get_coach_fanout_semaphore(), pool.connection() as conn:
             db_query = DatabaseQueryTool(conn)
-            return db_query.get_clutch_moments(target_game_id, limit=3)
+            return await db_query.get_clutch_moments(target_game_id, limit=3)
 
-    def get_matchup_stats_sync(team1: str, team2: str):
-        with pool.connection() as conn:
+    async def get_matchup_stats_sync(team1: str, team2: str):
+        async with _get_coach_fanout_semaphore(), pool.connection() as conn:
             from app.tools.game_query import GameQueryTool
 
             game_query = GameQueryTool(conn)
-            result = game_query.get_head_to_head(
+            result = await game_query.get_head_to_head(
                 team1,
                 team2,
                 year,
@@ -10564,32 +10804,19 @@ async def _execute_coach_tools_parallel(
     gather_started = perf_counter()
 
     # 1. 홈팀 데이터
-    tasks.append(
-        loop.run_in_executor(None, _timed("home_team", get_team_data), home_team_id)
-    )
+    tasks.append(_timed("home_team", get_team_data)(home_team_id))
 
     # 2. 원정팀 데이터 (있을 경우)
     if away_team_id:
-        tasks.append(
-            loop.run_in_executor(None, _timed("away_team", get_team_data), away_team_id)
-        )
+        tasks.append(_timed("away_team", get_team_data)(away_team_id))
 
     # 3. 상대 전적 (Matchup focus일 경우)
     if "matchup" in focus and away_team_id:
         tasks.append(
-            loop.run_in_executor(
-                None,
-                _timed("matchup", get_matchup_stats_sync),
-                home_team_id,
-                away_team_id,
-            )
+            _timed("matchup", get_matchup_stats_sync)(home_team_id, away_team_id)
         )
     if include_clutch and game_id:
-        tasks.append(
-            loop.run_in_executor(
-                None, _timed("clutch_moments", get_clutch_moments_sync), game_id
-            )
-        )
+        tasks.append(_timed("clutch_moments", get_clutch_moments_sync)(game_id))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     gather_elapsed = perf_counter() - gather_started
@@ -11124,6 +11351,75 @@ class AnalyzeRequest(BaseModel):
         return values
 
 
+class CoachCacheResetRequest(BaseModel):
+    """``POST /coach/cache/reset`` 입력. cache_key 단건 또는 team_id+year 일괄."""
+
+    cache_key: Optional[str] = None
+    team_id: Optional[str] = None
+    year: Optional[int] = None
+    include_stale_pending: bool = True
+    retryable_only: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            for key in ("cache_key", "team_id"):
+                value = values.get(key)
+                if isinstance(value, str):
+                    values[key] = value.strip() or None
+        return values
+
+
+@router.post("/cache/reset")
+async def reset_coach_cache(
+    payload: CoachCacheResetRequest,
+    _: None = Depends(require_ai_internal_token),
+):
+    """
+    FAILED_LOCKED 상태의 Coach 분석 캐시를 운영자가 수동으로 즉시 복구한다.
+
+    삭제된 row는 다음 분석 요청에서 자연 재생성된다. 활성 PENDING lease와
+    COMPLETED row는 보호된다. cache_key 단건 또는 (team_id, year) 묶음을 받는다.
+    """
+    if not payload.cache_key and not (payload.team_id and payload.year is not None):
+        raise HTTPException(
+            status_code=400,
+            detail="cache_key 또는 (team_id, year) 조합이 필요합니다.",
+        )
+
+    team_id_canonical: Optional[str] = None
+    year = payload.year
+    if payload.cache_key is None:
+        if year is None or not _is_valid_analysis_year(year):
+            raise HTTPException(status_code=400, detail="analysis_year_out_of_range")
+        resolver = TeamCodeResolver()
+        team_id_canonical = resolver.resolve_canonical(payload.team_id)
+        if team_id_canonical not in CANONICAL_CODES:
+            raise HTTPException(
+                status_code=400,
+                detail="unsupported_team_for_regular_analysis",
+            )
+
+    pool = get_connection_pool()
+    stats = await _reset_failed_coach_cache_rows(
+        pool,
+        cache_key=payload.cache_key,
+        team_id=team_id_canonical,
+        year=year,
+        include_stale_pending=payload.include_stale_pending,
+        retryable_only=payload.retryable_only,
+    )
+    logger.info(
+        "[Coach] cache reset cache_key=%s team_id=%s year=%s stats=%s",
+        payload.cache_key,
+        team_id_canonical,
+        year,
+        stats,
+    )
+    return {"status": "ok", "meta": stats}
+
+
 @router.post("/analyze")
 async def analyze_team(
     payload: AnalyzeRequest,
@@ -11166,7 +11462,7 @@ async def analyze_team(
                 detail="unsupported_team_for_regular_analysis",
             )
 
-        year, resolve_source = _resolve_target_year(payload, pool)
+        year, resolve_source = await _resolve_target_year(payload, pool)
         if not _is_valid_analysis_year(year):
             raise HTTPException(status_code=400, detail="analysis_year_out_of_range")
 
@@ -11176,7 +11472,7 @@ async def analyze_team(
             if payload.away_team_id
             else None
         )
-        game_evidence = _collect_game_evidence(
+        game_evidence = await _collect_game_evidence(
             pool,
             payload,
             year=year,
@@ -11324,7 +11620,7 @@ async def analyze_team(
             game_evidence,
             analysis_type=analysis_type,
         )
-        manual_data_request = _build_manual_data_request(
+        manual_data_request = await _build_manual_data_request(
             pool,
             payload,
             game_evidence,
@@ -11419,8 +11715,12 @@ async def analyze_team(
                     structured_response = payload_data.get("structured_response")
                     if isinstance(structured_response, dict):
                         enriched_response = dict(structured_response)
-                        enriched_response.setdefault("analysisType", payload_analysis_type)
-                        enriched_response.setdefault("analysis_type", payload_analysis_type)
+                        enriched_response.setdefault(
+                            "analysisType", payload_analysis_type
+                        )
+                        enriched_response.setdefault(
+                            "analysis_type", payload_analysis_type
+                        )
                         payload_data["structured_response"] = enriched_response
                     payload_data = _ensure_stream_meta_contract(payload_data)
                     _log_coach_stream_meta(
@@ -11480,7 +11780,7 @@ async def analyze_team(
                         cache_error_message,
                         cache_error_code,
                         cache_attempt_count,
-                    ) = _read_completed_cache_if_fresh(
+                    ) = await _read_completed_cache_if_fresh(
                         pool=pool,
                         cache_key=cache_key,
                         completed_ttl_seconds=completed_ttl_seconds,
@@ -11523,7 +11823,7 @@ async def analyze_team(
                         cache_error_message,
                         cache_error_code,
                         cache_attempt_count,
-                    ) = _claim_cache_generation(
+                    ) = await _claim_cache_generation(
                         pool=pool,
                         cache_key=cache_key,
                         team_id=home_team_canonical,
@@ -11625,7 +11925,7 @@ async def analyze_team(
                         auto_brief_data_quality,
                     )
                     asyncio.create_task(
-                        _generate_auto_brief_cache_background(
+                        await _generate_auto_brief_cache_background(
                             pool=pool,
                             cache_key=cache_key,
                             lease_owner=cache_lease_owner,
@@ -11778,7 +12078,7 @@ async def analyze_team(
                                 cache_error_message,
                                 cache_error_code,
                                 cache_attempt_count,
-                            ) = _claim_cache_generation(
+                            ) = await _claim_cache_generation(
                                 pool=pool,
                                 cache_key=cache_key,
                                 team_id=home_team_canonical,
@@ -12020,7 +12320,7 @@ async def analyze_team(
                         return
 
                 heartbeat_task = asyncio.create_task(
-                    _heartbeat_cache_lease(
+                    await _heartbeat_cache_lease(
                         pool=pool,
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
@@ -12312,7 +12612,7 @@ async def analyze_team(
                         tool_results=tool_results,
                         response_payload=response_payload,
                     )
-                    finalize_result = _store_completed_cache(
+                    finalize_result = await _store_completed_cache(
                         pool=pool,
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
@@ -13103,7 +13403,7 @@ async def analyze_team(
                     tool_results=tool_results,
                     response_payload=response_payload,
                 )
-                finalize_result = _store_completed_cache(
+                finalize_result = await _store_completed_cache(
                     pool=pool,
                     cache_key=cache_key,
                     lease_owner=cache_lease_owner,
@@ -13240,7 +13540,7 @@ async def analyze_team(
                     cache_attempt_count,
                 )
                 try:
-                    cancelled_store_result = _store_failed_cache(
+                    cancelled_store_result = await _store_failed_cache(
                         pool=get_connection_pool(),
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
@@ -13283,7 +13583,7 @@ async def analyze_team(
                 retryable_failure = _is_retryable_cache_error_code(masked_error_code)
                 try:
                     fallback_pool = get_connection_pool()
-                    failed_store_result = _store_failed_cache(
+                    failed_store_result = await _store_failed_cache(
                         pool=fallback_pool,
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
