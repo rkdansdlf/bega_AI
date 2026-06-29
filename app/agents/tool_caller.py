@@ -298,7 +298,7 @@ class ToolCaller:
             self._tool_descriptions = "\n".join(descriptions)
         return self._tool_descriptions
 
-    def execute_tool(self, tool_call: ToolCall) -> ToolResult:
+    async def execute_tool(self, tool_call: ToolCall) -> ToolResult:
         """
         도구 호출을 실행합니다.
 
@@ -346,8 +346,10 @@ class ToolCaller:
                     message=f"매개변수 누락: {', '.join(sorted(missing_required))}",
                 )
 
-            # 도구 함수 실행
+            # 도구 함수 실행 (async 도구는 coroutine을 반환하므로 await 처리)
             result = tool_function(**normalized_parameters)
+            if inspect.isawaitable(result):
+                result = await result
 
             # 결과 타입 확인
             if isinstance(result, ToolResult):
@@ -375,7 +377,9 @@ class ToolCaller:
             logger.error(f"[ToolCaller] Execution error for {tool_call.tool_name}: {e}")
             return ToolResult(success=False, data={}, message=error_msg)
 
-    def execute_multiple_tools(self, tool_calls: List[ToolCall]) -> List[ToolResult]:
+    async def execute_multiple_tools(
+        self, tool_calls: List[ToolCall]
+    ) -> List[ToolResult]:
         """
         여러 도구를 순차적으로 실행합니다.
 
@@ -392,7 +396,7 @@ class ToolCaller:
             logger.info(
                 f"[ToolCaller] Executing tool {i + 1}/{len(tool_calls)}: {tool_call.tool_name}"
             )
-            result = self.execute_tool(tool_call)
+            result = await self.execute_tool(tool_call)
             results.append(result)
 
             # 실패 시 로깅 (계속 진행)
@@ -404,8 +408,8 @@ class ToolCaller:
         return results
 
     async def execute_tool_async(self, tool_call: ToolCall) -> ToolResult:
-        """단일 도구를 event loop 밖에서 실행합니다."""
-        return await asyncio.to_thread(self.execute_tool, tool_call)
+        """단일 도구를 native async로 실행합니다 (DB 도구는 async psycopg3)."""
+        return await self.execute_tool(tool_call)
 
     async def execute_multiple_tools_parallel(
         self, tool_calls: List[ToolCall], max_concurrency: int | None = None

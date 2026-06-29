@@ -15,12 +15,12 @@ from ..core.rag_storage import (
     base_source_row_id,
     build_chunk_storage_fields,
     build_upsert_tuple,
-    fetch_existing_embedding_texts,
+    fetch_existing_embedding_texts_async,
     is_search_worthy_content,
     resolve_embedding_model,
     resolve_embedding_version,
     scan_sensitive_content,
-    soft_deactivate_missing_parts,
+    soft_deactivate_missing_parts_async,
     vector_literal,
 )
 from ..deps import get_db_connection, require_ai_internal_token
@@ -100,10 +100,10 @@ async def ingest_document(
     if not records:
         return {"status": "ok", "chunks": 0, "skipped": chunk_count}
 
-    with conn.cursor() as cur:
-        cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
+    async with conn.cursor() as cur:
+        await cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
         existing_embeddings = (
-            fetch_existing_embedding_texts(
+            await fetch_existing_embedding_texts_async(
                 cur,
                 content_hashes=(record[4]["content_hash"] for record in records),
                 embedding_model=embedding_model,
@@ -141,13 +141,13 @@ async def ingest_document(
         for duplicate_idx, original_idx in duplicate_links:
             vector_literals[duplicate_idx] = vector_literals[original_idx]
 
-    with conn.cursor() as cur:
-        cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
+    async with conn.cursor() as cur:
+        await cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
         active_source_row_ids: list[str] = []
         for record, embedding_text in zip(records, vector_literals):
             _idx, source_row_id, title, chunk, storage_fields = record
             active_source_row_ids.append(source_row_id)
-            cur.execute(
+            await cur.execute(
                 RAG_CHUNKS_UPSERT_SQL,
                 build_upsert_tuple(
                     meta=None,
@@ -164,7 +164,7 @@ async def ingest_document(
                     embedding_text=embedding_text,
                 ),
             )
-        soft_deactivate_missing_parts(
+        await soft_deactivate_missing_parts_async(
             cur,
             source_table=payload.source_table,
             source_prefix=base_source_row_id(payload.source_row_id),

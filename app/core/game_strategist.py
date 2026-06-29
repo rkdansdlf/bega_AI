@@ -12,18 +12,18 @@ logger = logging.getLogger(__name__)
 
 
 class GameStrategist:
-    def __init__(self, connection: psycopg.Connection):
+    def __init__(self, connection: psycopg.AsyncConnection):
         self.connection = connection
 
-    def _get_team_id(self, team_name: str) -> Optional[str]:
+    async def _get_team_id(self, team_name: str) -> Optional[str]:
         """팀 이름으로 ID 조회"""
         try:
-            cursor = self.connection.cursor(row_factory=dict_row)
-            # 매핑 로직은 간단하게 처리하거나 DB 조회
-            # 여기서는 DB 조회 사용
-            query = "SELECT team_id FROM teams WHERE team_name = %s LIMIT 1"
-            cursor.execute(query, (team_name,))
-            row = cursor.fetchone()
+            async with self.connection.cursor(row_factory=dict_row) as cursor:
+                # 매핑 로직은 간단하게 처리하거나 DB 조회
+                # 여기서는 DB 조회 사용
+                query = "SELECT team_id FROM teams WHERE team_name = %s LIMIT 1"
+                await cursor.execute(query, (team_name,))
+                row = await cursor.fetchone()
             if row:
                 return row["team_id"]
 
@@ -31,10 +31,8 @@ class GameStrategist:
             return team_name
         except Exception:
             return team_name
-        finally:
-            cursor.close()
 
-    def check_bullpen_availability(
+    async def check_bullpen_availability(
         self, team_name: str, target_date: str = None
     ) -> Dict[str, Any]:
         """
@@ -48,40 +46,41 @@ class GameStrategist:
         if not target_date:
             target_date = date.today().strftime("%Y-%m-%d")
 
-        team_id = self._get_team_id(team_name)
+        team_id = await self._get_team_id(team_name)
         target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
 
         # 최근 3일 데이터 조회 범위
         start_date = target_dt - timedelta(days=3)
 
         try:
-            cursor = self.connection.cursor(row_factory=dict_row)
-
             # 해당 팀의 불펜 투수 명단 조회 (선발 제외, 혹은 최근 구원 등판 기록 있는 선수)
             # 여기서는 'pitcher' 포지션 선수 중 선발(GS) 비중이 적은 선수 필터링 등의 로직이 필요하지만,
             # 단순화를 위해 최근 기록이 있는 모든 투수를 대상으로 함.
 
             # 최근 3일간 투구 기록 조회
             query = """
-                SELECT 
-                    pb.name, 
+                SELECT
+                    pb.name,
                     pb.player_id,
                     g.game_date,
                     gps.innings_pitched as ip,
                     gps.earned_runs as er,
                     -- 투구수 컬럼이 있다고 가정 (없으면 이닝 기반 추정)
-                    -- gps.pitch_count 
+                    -- gps.pitch_count
                     (gps.innings_pitched * 15) as estimated_pitch_count -- 임시 추정치
                 FROM game_pitching_stats gps
                 JOIN game g ON gps.game_id = g.game_id
                 JOIN player_basic pb ON gps.player_id = pb.player_id
-                WHERE gps.team_code = %s 
+                WHERE gps.team_code = %s
                 AND g.game_date BETWEEN %s AND %s
                 AND g.game_date < %s -- 당일 제외
                 ORDER BY pb.name, g.game_date DESC
             """
-            cursor.execute(query, (team_id, start_date, target_date, target_date))
-            rows = cursor.fetchall()
+            async with self.connection.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(
+                    query, (team_id, start_date, target_date, target_date)
+                )
+                rows = await cursor.fetchall()
 
             pitcher_status = {}
 
@@ -169,16 +168,14 @@ class GameStrategist:
         except Exception as e:
             logger.error(f"[GameStrategist] Availability check failed: {e}")
             return {"error": str(e)}
-        finally:
-            cursor.close()
 
-    def recommend_pitcher(self, team_name: str, situation: str) -> Dict[str, Any]:
+    async def recommend_pitcher(self, team_name: str, situation: str) -> Dict[str, Any]:
         """
         상황별 투수 추천
         situation: "winning_close" (필승조), "losing" (추격조), "lefty_batter" (좌타자 상대)
         """
         # 1. 가용 자원 확인
-        availability = self.check_bullpen_availability(team_name)
+        availability = await self.check_bullpen_availability(team_name)
         if "error" in availability:
             return availability
 

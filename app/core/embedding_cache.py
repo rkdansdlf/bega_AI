@@ -13,9 +13,10 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections import OrderedDict
 from datetime import datetime
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Tuple
 
 from app.observability.metrics import AI_EMBEDDING_CACHE_TOTAL
 
@@ -47,13 +48,16 @@ class EmbeddingCacheBackend(Protocol):
 
 
 class InMemoryLRUBackend:
-    """프로세스 로컬 OrderedDict LRU 캐시."""
+    """프로세스 로컬 OrderedDict LRU 캐시 (TTL 만료 + LRU eviction)."""
 
     backend_label = "memory"
 
     def __init__(self, max_size: int) -> None:
         self._max_size = max(0, int(max_size))
-        self._store: "OrderedDict[str, List[float]]" = OrderedDict()
+        # 값은 (embedding, expires_at) 튜플. expires_at이 None이면 무기한(LRU만 적용).
+        self._store: "OrderedDict[str, Tuple[List[float], Optional[float]]]" = (
+            OrderedDict()
+        )
         self._lock = asyncio.Lock()
 
     async def get(self, key: str) -> Optional[List[float]]:
@@ -61,22 +65,28 @@ class InMemoryLRUBackend:
             _record_cache_result(self.backend_label, hit=False)
             return None
         async with self._lock:
-            value = self._store.get(key)
-            if value is None:
+            entry = self._store.get(key)
+            if entry is None:
+                _record_cache_result(self.backend_label, hit=False)
+                return None
+            embedding, expires_at = entry
+            if expires_at is not None and time.monotonic() >= expires_at:
+                # TTL 만료 → 삭제하고 miss로 처리
+                del self._store[key]
                 _record_cache_result(self.backend_label, hit=False)
                 return None
             self._store.move_to_end(key)
         _record_cache_result(self.backend_label, hit=True)
-        return value
+        return embedding
 
     async def set(
         self, key: str, embedding: List[float], *, ttl: Optional[int] = None
     ) -> None:
-        # ttl is ignored — LRU eviction only
         if self._max_size <= 0:
             return
+        expires_at = time.monotonic() + ttl if ttl is not None and ttl > 0 else None
         async with self._lock:
-            self._store[key] = embedding
+            self._store[key] = (embedding, expires_at)
             self._store.move_to_end(key)
             while len(self._store) > self._max_size:
                 self._store.popitem(last=False)

@@ -730,6 +730,52 @@ async def async_embed_query(
     return embedding
 
 
+async def async_embed_queries_batch(
+    queries: Sequence[str],
+    settings: Settings,
+    max_concurrency: int = 1,
+) -> List[List[float]]:
+    """여러 쿼리를 배치로 임베딩합니다.
+
+    각 쿼리에 대해 캐시를 먼저 확인하고, 캐시 미스분만 1회 배치 API 호출로 처리합니다.
+    결과를 캐시에 등록하여 이후 async_embed_query 호출이 캐시 히트하도록 합니다.
+    """
+    if not queries:
+        return []
+
+    sig = _embed_signature(settings)
+    normalized = [_normalize_query(q) for q in queries]
+    cache_keys = [f"{sig}:{n}" for n in normalized]
+
+    cached_results: List[Optional[List[float]]] = list(
+        await asyncio.gather(*[_get_cached_query_embedding(k) for k in cache_keys])
+    )
+
+    miss_indices = [i for i, c in enumerate(cached_results) if c is None]
+
+    if miss_indices:
+        miss_texts = [queries[i] for i in miss_indices]
+        start_time = time.perf_counter()
+        miss_vectors = await async_embed_texts(
+            miss_texts, settings, max_concurrency=max_concurrency
+        )
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(
+            "[Embeddings] Batch query embedding: %d texts in %.2fms",
+            len(miss_texts),
+            elapsed_ms,
+        )
+        for list_idx, vec in zip(miss_indices, miss_vectors):
+            cached_results[list_idx] = vec
+            asyncio.create_task(
+                _set_cached_query_embedding(
+                    cache_keys[list_idx], vec, query=queries[list_idx]
+                )
+            )
+
+    return [c if c is not None else [] for c in cached_results]
+
+
 def embed_texts(
     texts: Sequence[str],
     settings: Settings,
