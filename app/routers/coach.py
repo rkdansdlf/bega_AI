@@ -240,6 +240,38 @@ FOCUS_SECTION_HEADERS: Dict[str, str] = {
     "matchup": "## 상대 전적",
     "batting": "## 득점 연결력",
 }
+COMPLETED_REVIEW_FOCUS_SECTION_HEADERS: Dict[str, str] = {
+    **FOCUS_SECTION_HEADERS,
+    "batting": "## 타격 생산성",
+}
+
+
+def _focus_section_headers_for_status(
+    game_status_bucket: Optional[str] = None,
+) -> Dict[str, str]:
+    if _normalize_game_status_bucket(game_status_bucket) == "COMPLETED":
+        return COMPLETED_REVIEW_FOCUS_SECTION_HEADERS
+    return FOCUS_SECTION_HEADERS
+
+
+def _focus_section_header(
+    focus: str,
+    game_status_bucket: Optional[str] = None,
+) -> Optional[str]:
+    return _focus_section_headers_for_status(game_status_bucket).get(focus)
+
+
+def _all_focus_section_headers() -> Tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            [
+                *FOCUS_SECTION_HEADERS.values(),
+                *COMPLETED_REVIEW_FOCUS_SECTION_HEADERS.values(),
+            ]
+        )
+    )
+
+
 FOCUS_SECTION_METRIC_LABELS: Dict[str, Tuple[str, ...]] = {
     "recent_form": ("최근 흐름", "폼 진단", "득실점 마진"),
     "bullpen": ("불펜 비중", "불펜 운용", "불펜 데이터"),
@@ -5239,7 +5271,11 @@ def _format_evidence_context(evidence: GameEvidence) -> str:
     return "\n".join(parts)
 
 
-def _build_focus_section_requirements(resolved_focus: List[str]) -> str:
+def _build_focus_section_requirements(
+    resolved_focus: List[str],
+    *,
+    game_status_bucket: Optional[str] = None,
+) -> str:
     """
     선택 focus에 해당하는 상세 섹션 제목 요구사항을 생성합니다.
     """
@@ -5249,15 +5285,14 @@ def _build_focus_section_requirements(resolved_focus: List[str]) -> str:
             "- 다만 detailed_markdown은 최소 2개 이상의 소제목(##)으로 구성하세요."
         )
 
+    headers = _focus_section_headers_for_status(game_status_bucket)
     header_lines = [
-        f"- 반드시 `{FOCUS_SECTION_HEADERS[focus]}` 제목을 포함하세요."
+        f"- 반드시 `{headers[focus]}` 제목을 포함하세요."
         for focus in resolved_focus
-        if focus in FOCUS_SECTION_HEADERS
+        if focus in headers
     ]
     non_selected = [
-        header
-        for key, header in FOCUS_SECTION_HEADERS.items()
-        if key not in resolved_focus
+        header for key, header in headers.items() if key not in resolved_focus
     ]
     omit_lines = [
         f"- 미선택 focus는 가능하면 생략하세요: `{header}`" for header in non_selected
@@ -5266,7 +5301,9 @@ def _build_focus_section_requirements(resolved_focus: List[str]) -> str:
 
 
 def _find_missing_focus_sections(
-    response_data: Dict[str, Any], resolved_focus: List[str]
+    response_data: Dict[str, Any],
+    resolved_focus: List[str],
+    game_status_bucket: Optional[str] = None,
 ) -> List[str]:
     """
     detailed_markdown에서 선택 focus 섹션 누락 여부를 확인합니다.
@@ -5274,15 +5311,29 @@ def _find_missing_focus_sections(
     if not resolved_focus:
         return []
 
+    effective_status_bucket = game_status_bucket or response_data.get(
+        "game_status_bucket"
+    )
     markdown = str(response_data.get("detailed_markdown") or "")
     missing: List[str] = []
     for focus in resolved_focus:
-        header = FOCUS_SECTION_HEADERS.get(focus)
+        header = _focus_section_header(focus, effective_status_bucket)
         if not header:
             continue
         if header not in markdown or not _markdown_section_has_body(markdown, header):
             missing.append(focus)
     return missing
+
+
+def _with_focus_status_context(
+    response_data: Dict[str, Any],
+    game_status_bucket: Optional[str],
+) -> Dict[str, Any]:
+    if not game_status_bucket or response_data.get("game_status_bucket"):
+        return response_data
+    updated = dict(response_data)
+    updated["game_status_bucket"] = game_status_bucket
+    return updated
 
 
 def _has_recent_form_support(team_data: Dict[str, Any]) -> bool:
@@ -5401,7 +5452,7 @@ def _resolve_supported_focuses(
 
 
 def _focus_display_label(focus: str) -> str:
-    header = FOCUS_SECTION_HEADERS.get(focus)
+    header = _focus_section_header(focus)
     if isinstance(header, str) and header.startswith("## "):
         return header[3:]
     return focus
@@ -6672,7 +6723,7 @@ def _build_scheduled_team_level_deterministic_analysis(
         elif edge_source == "recent_slight":
             summary = (
                 f"{edge_team}가 최근 전력 우세로 근소하게 앞서지만, "
-                f"{(secondary_edge_team or trailing_team)}의 득점 연결력 반격 여지는 남아 있습니다."
+                f"{(secondary_edge_team or trailing_team)}의 팀 타격 생산성 반격 여지는 남아 있습니다."
             )
         elif edge_source == "ops_slight":
             summary = (
@@ -7622,7 +7673,7 @@ def _build_deterministic_markdown(
 
         if resolved_focus:
             for focus in resolved_focus:
-                header = FOCUS_SECTION_HEADERS.get(focus)
+                header = _focus_section_header(focus, evidence.game_status_bucket)
                 if not header:
                     continue
                 sections.append(header)
@@ -7669,7 +7720,7 @@ def _build_deterministic_markdown(
 
     if resolved_focus:
         for focus in resolved_focus:
-            header = FOCUS_SECTION_HEADERS.get(focus)
+            header = _focus_section_header(focus, evidence.game_status_bucket)
             if not header:
                 continue
             sections.append(header)
@@ -7810,8 +7861,9 @@ def _build_missing_focus_section_blocks(
 ) -> List[str]:
     existing_md = str(response_payload.get("detailed_markdown") or "")
     blocks: List[str] = []
+    game_status_bucket = evidence.game_status_bucket if evidence is not None else None
     for focus in resolved_focus or []:
-        header = FOCUS_SECTION_HEADERS.get(focus)
+        header = _focus_section_header(focus, game_status_bucket)
         if not header or _markdown_section_has_body(existing_md, header):
             continue
         summary = _build_missing_focus_section_summary(
@@ -7839,8 +7891,9 @@ def _populate_empty_focus_sections(
     if not updated:
         return updated
 
+    game_status_bucket = evidence.game_status_bucket if evidence is not None else None
     for focus in resolved_focus or []:
-        header = FOCUS_SECTION_HEADERS.get(focus)
+        header = _focus_section_header(focus, game_status_bucket)
         if (
             not header
             or header not in updated
@@ -7880,7 +7933,7 @@ def _normalize_completed_review_focus_sections(
         return updated
 
     for focus in resolved_focus or []:
-        header = FOCUS_SECTION_HEADERS.get(focus)
+        header = _focus_section_header(focus, evidence.game_status_bucket)
         if not header or header not in updated:
             continue
         summary = _completed_review_focus_summary(
@@ -8381,8 +8434,11 @@ def _ensure_detailed_markdown(
     else:
         prefix = "\n".join(missing_focus_sections)
         insertion_end = 0
+        game_status_bucket = (
+            evidence.game_status_bucket if evidence is not None else None
+        )
         for focus in resolved_focus or []:
-            header = FOCUS_SECTION_HEADERS.get(focus)
+            header = _focus_section_header(focus, game_status_bucket)
             if not header:
                 continue
             span = _find_markdown_section_span(existing_md, header)
@@ -10250,7 +10306,7 @@ def _normalize_detailed_markdown_layout(text: str) -> str:
     updated = str(text or "").replace("\r\n", "\n")
     if not updated:
         return updated
-    for header in FOCUS_SECTION_HEADERS.values():
+    for header in _all_focus_section_headers():
         updated = re.sub(
             rf"(?m)^\s*[-*]\s*\*{{1,2}}\s*\n+\s*({re.escape(header)})\*{{1,2}}\s*:\s*(.+?)\s*$",
             r"\1\n- \2",
@@ -11869,7 +11925,11 @@ async def analyze_team(
                         cache_contract_meta,
                     )
                     missing_focus_sections = _find_missing_focus_sections(
-                        cached_data, resolved_focus
+                        _with_focus_status_context(
+                            cached_data,
+                            game_evidence.game_status_bucket,
+                        ),
+                        resolved_focus,
                     )
                     yield {
                         "event": "status",
@@ -12023,7 +12083,11 @@ async def analyze_team(
                                 cache_contract_meta,
                             )
                             missing_focus_sections = _find_missing_focus_sections(
-                                cached_wait_data, resolved_focus
+                                _with_focus_status_context(
+                                    cached_wait_data,
+                                    game_evidence.game_status_bucket,
+                                ),
+                                resolved_focus,
                             )
                             yield {
                                 "event": "status",
@@ -12110,7 +12174,11 @@ async def analyze_team(
                                     },
                                 )
                                 missing_focus_sections = _find_missing_focus_sections(
-                                    cached_data, resolved_focus
+                                    _with_focus_status_context(
+                                        cached_data,
+                                        game_evidence.game_status_bucket,
+                                    ),
+                                    resolved_focus,
                                 )
                                 yield {
                                     "event": "status",
@@ -12691,7 +12759,11 @@ async def analyze_team(
                         return
 
                     missing_focus_sections = _find_missing_focus_sections(
-                        response_payload, response_focus_targets
+                        _with_focus_status_context(
+                            response_payload,
+                            game_evidence.game_status_bucket,
+                        ),
+                        response_focus_targets,
                     )
                     yield {
                         "event": "message",
@@ -12749,7 +12821,8 @@ async def analyze_team(
                 }
 
                 focus_section_requirements = _build_focus_section_requirements(
-                    llm_focus
+                    llm_focus,
+                    game_status_bucket=game_evidence.game_status_bucket,
                 )
                 prompt_query = query
                 if (
@@ -13371,7 +13444,11 @@ async def analyze_team(
                 )
                 response_json = json.dumps(response_payload, ensure_ascii=False)
                 missing_focus_sections = _find_missing_focus_sections(
-                    response_payload, response_focus_targets
+                    _with_focus_status_context(
+                        response_payload,
+                        game_evidence.game_status_bucket,
+                    ),
+                    response_focus_targets,
                 )
                 if missing_focus_sections:
                     logger.warning(
