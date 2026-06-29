@@ -11,7 +11,11 @@ import pytest
 from app.agents import baseball_agent as agent_module
 from app.agents.baseball_agent import BaseballAgentRuntime
 from app.config import get_settings
-from app.core.http_clients import close_shared_httpx_clients, get_shared_httpx_client
+from app.core.http_clients import (
+    close_shared_httpx_clients,
+    get_shared_httpx_client,
+    reset_shared_httpx_clients_for_tests,
+)
 from app.core.rag import RAGPipeline
 
 
@@ -32,6 +36,9 @@ class _FakeDbTool(_FakeTool):
 
 
 def test_shared_httpx_client_reuses_instance_and_resets_on_close() -> None:
+    # 선행 테스트가 다른 이벤트 루프에 바인딩된 클라이언트를 레지스트리에 남길 수 있으므로
+    # 깨끗한 상태에서 시작해 순서 독립적으로 만든다.
+    reset_shared_httpx_clients_for_tests()
     client1 = get_shared_httpx_client(
         "openrouter",
         timeout=120.0,

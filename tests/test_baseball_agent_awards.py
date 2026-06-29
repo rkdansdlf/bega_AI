@@ -1,4 +1,6 @@
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from app.agents.baseball_agent import BaseballStatisticsAgent
 from app.agents.chat_intent_router import ChatIntentRouter
@@ -101,14 +103,14 @@ class _FakeCursor:
     def __init__(self, rows):
         self.rows = rows
 
-    def execute(self, query, params=None):
+    async def execute(self, query, params=None):
         self.query = query
         self.params = params
 
-    def fetchall(self):
+    async def fetchall(self):
         return self.rows
 
-    def close(self):
+    async def close(self):
         return None
 
 
@@ -141,9 +143,9 @@ def test_database_query_awards_dedupes_duplicate_rows() -> None:
         ]
     )
     tool._table_columns_cache = {}
-    tool._get_table_columns = lambda table_name: {"award_year", "position"}
+    tool._get_table_columns = AsyncMock(return_value={"award_year", "position"})
 
-    result = DatabaseQueryTool.get_award_winners(tool, 2025, "mvp")
+    result = asyncio.run(DatabaseQueryTool.get_award_winners(tool, 2025, "mvp"))
 
     assert result["found"] is True
     assert len(result["awards"]) == 1

@@ -12,16 +12,16 @@ class _FakeCursor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...] | None]] = []
 
-    def execute(self, query: str, params: tuple[object, ...] | None = None) -> None:
+    async def execute(self, query: str, params: tuple[object, ...] | None = None) -> None:
         self.calls.append((query, params))
 
-    def fetchall(self) -> list[tuple[object, ...]]:
+    async def fetchall(self) -> list[tuple[object, ...]]:
         return []
 
-    def __enter__(self) -> "_FakeCursor":
+    async def __aenter__(self) -> "_FakeCursor":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
 
 
