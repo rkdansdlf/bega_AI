@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 from fastapi import FastAPI
@@ -8,6 +9,8 @@ from fastapi.testclient import TestClient
 from app.routers import vision
 
 AI_INTERNAL_TEST_TOKEN = "local-test-token"
+GEMMA_VISION_MODEL = "google/gemma-4-31b-it:free"
+MISTRAL_VISION_FALLBACK_MODEL = "mistralai/mistral-small-3.2-24b-instruct"
 
 
 @pytest.fixture
@@ -85,7 +88,11 @@ def test_analyze_ticket_openrouter_success(client, mock_settings):
     # Configure settings for OpenRouter
     mock_settings.llm_provider = "openrouter"
     mock_settings.openrouter_api_key = "test_router_key"
-    mock_settings.vision_model = "google/gemini-2.0-flash-001"
+    mock_settings.vision_model = GEMMA_VISION_MODEL
+    mock_settings.vision_fallback_models = []
+    mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
+    mock_settings.openrouter_referer = None
+    mock_settings.openrouter_app_title = None
 
     # Mock shared OpenRouter client
     with patch("app.routers.vision.get_shared_httpx_client") as mock_get_client:
@@ -112,3 +119,60 @@ def test_analyze_ticket_openrouter_success(client, mock_settings):
         data = response.json()
         assert data["stadium"] == "Incheon"
         assert data["homeTeam"] == "SSG"
+        _, kwargs = mock_instance.post.call_args
+        assert kwargs["json"]["model"] == GEMMA_VISION_MODEL
+        content = kwargs["json"]["messages"][0]["content"]
+        assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_analyze_ticket_openrouter_falls_back_to_mistral_on_primary_error(
+    client, mock_settings
+):
+    mock_settings.llm_provider = "openrouter"
+    mock_settings.openrouter_api_key = "test_router_key"
+    mock_settings.vision_model = GEMMA_VISION_MODEL
+    mock_settings.vision_fallback_models = [MISTRAL_VISION_FALLBACK_MODEL]
+    mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
+    mock_settings.openrouter_referer = None
+    mock_settings.openrouter_app_title = None
+
+    with patch("app.routers.vision.get_shared_httpx_client") as mock_get_client:
+        mock_instance = AsyncMock()
+        mock_get_client.return_value = mock_instance
+
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        primary_response = MagicMock()
+        primary_response.status_code = 429
+        primary_response.text = "quota exceeded"
+        primary_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "quota exceeded",
+            request=request,
+            response=primary_response,
+        )
+
+        fallback_response = MagicMock()
+        fallback_response.status_code = 200
+        fallback_response.raise_for_status.return_value = None
+        fallback_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"date": "2026-05-07", "stadium": "Incheon", "homeTeam": "SSG", "awayTeam": "NC", "seat": 5, "price": "19,000"}'
+                    }
+                }
+            ]
+        }
+        mock_instance.post.side_effect = [primary_response, fallback_response]
+
+        files = {"file": ("ticket.jpg", b"fake_image_content", "image/jpeg")}
+        response = client.post("/vision/ticket", files=files)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["date"] == "2026-05-07"
+        assert data["homeTeam"] == "SSG"
+        assert data["seat"] == "5"
+        assert data["price"] == 19000
+        calls = mock_instance.post.call_args_list
+        assert calls[0].kwargs["json"]["model"] == GEMMA_VISION_MODEL
+        assert calls[1].kwargs["json"]["model"] == MISTRAL_VISION_FALLBACK_MODEL

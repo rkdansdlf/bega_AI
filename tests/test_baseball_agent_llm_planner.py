@@ -890,7 +890,7 @@ def test_execute_tool_batch_async_mixed_mode_preserves_original_order() -> None:
 def test_execute_tool_batch_async_uses_batched_player_stats_lookup() -> None:
     agent = _build_agent()
     agent.db_query_tool = SimpleNamespace(
-        get_player_season_stats_batch=lambda player_names, year, position: [
+        get_player_season_stats_batch=AsyncMock(side_effect=lambda player_names, year, position: [
             {
                 "requested_player_name": "안현민",
                 "player_name": "안현민",
@@ -936,7 +936,7 @@ def test_execute_tool_batch_async_uses_batched_player_stats_lookup() -> None:
                 "error": None,
                 "batch_lookup": True,
             },
-        ]
+        ])
     )
     agent._execute_tool_call_async = AsyncMock(
         side_effect=AssertionError("individual tool execution should not run")

@@ -75,3 +75,104 @@ def _reset_settings_state():
     _clear_settings_cache()
     yield
     _clear_settings_cache()
+
+
+# ---------------------------------------------------------------------------
+# Shared async DB fakes (§4 psycopg3 async hot-path migration)
+#
+# Phases 1–2 convert RAG vector search and chat_cache to native async psycopg3.
+# These fakes mirror the existing sync ``_DummyConnection``/``_DummyCursor``
+# patterns but support the async protocol (``async with`` cursors, awaitable
+# execute/fetch). Use ``make_async_db(rows)`` to build a connection/pool pair.
+# ---------------------------------------------------------------------------
+
+
+class FakeAsyncCursor:
+    """Async cursor stub. Captures executed SQL and returns preset rows."""
+
+    def __init__(self, rows=None):
+        self._rows = list(rows or [])
+        self.executed: list[tuple] = []
+
+    async def execute(self, query, params=None):
+        self.executed.append((query, params))
+        return self
+
+    async def fetchall(self):
+        return list(self._rows)
+
+    async def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class FakeAsyncConnection:
+    """Async connection stub yielding ``FakeAsyncCursor``."""
+
+    def __init__(self, rows=None):
+        self._rows = list(rows or [])
+        self.closed = False
+        self.last_cursor: FakeAsyncCursor | None = None
+
+    def cursor(self, *args, **kwargs):
+        self.last_cursor = FakeAsyncCursor(self._rows)
+        return self.last_cursor
+
+    async def execute(self, query, params=None):
+        # psycopg3 shorthand: ``(await conn.execute(...)).fetchone()``
+        cur = FakeAsyncCursor(self._rows)
+        await cur.execute(query, params)
+        self.last_cursor = cur
+        return cur
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeAsyncConnCtx:
+    def __init__(self, conn):
+        self._conn = conn
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class FakeAsyncPool:
+    """Async connection-pool stub. ``async with pool.connection() as conn``."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def connection(self):
+        return _FakeAsyncConnCtx(self._conn)
+
+    async def open(self, *args, **kwargs):
+        return None
+
+    async def close(self, *args, **kwargs):
+        return None
+
+    def get_stats(self):
+        return {}
+
+
+@pytest.fixture
+def make_async_db():
+    """Factory: ``conn, pool = make_async_db(rows)`` for async DB-path tests."""
+
+    def _factory(rows=None):
+        conn = FakeAsyncConnection(rows)
+        return conn, FakeAsyncPool(conn)
+
+    return _factory

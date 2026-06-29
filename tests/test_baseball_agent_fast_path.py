@@ -1,4 +1,6 @@
 from app.agents.baseball_agent import BaseballStatisticsAgent
+import asyncio
+from unittest.mock import AsyncMock
 from app.agents.chat_intent_router import ChatIntent, ChatIntentRouter, IntentDecision
 from app.agents.tool_caller import ToolCall, ToolResult
 from app.core.entity_extractor import extract_entities_from_query
@@ -189,7 +191,7 @@ def test_get_team_comparison_combines_rank_metrics_and_recent_form() -> None:
     tool.get_team_code = lambda team, year=None: team
     tool.get_team_name = lambda team, year=None: f"{team} 트윈스" if team == "LG" else f"{team} 위즈"
     tool.get_team_variants = lambda team, year=None: [team]
-    tool.get_team_form_table = lambda **kwargs: {
+    tool.get_team_form_table = AsyncMock(return_value={
         "form_rows": [
             {
                 "team_code": "LG",
@@ -208,17 +210,20 @@ def test_get_team_comparison_combines_rank_metrics_and_recent_form() -> None:
                 "win_pct": 0.5,
             },
         ]
-    }
-    tool.get_team_season_rank = lambda team, year: {
-        "found": True,
-        "rank": 1 if team == "LG" else 2,
-        "wins": 30,
-        "losses": 20,
-        "draws": 1,
-        "win_pct": 0.6,
-        "as_of_date": "2026-05-31",
-    }
-    tool.get_team_advanced_metrics = lambda team, year: {
+    })
+    async def _stub_season_rank(team, year):
+        return {
+            "found": True,
+            "rank": 1 if team == "LG" else 2,
+            "wins": 30,
+            "losses": 20,
+            "draws": 1,
+            "win_pct": 0.6,
+            "as_of_date": "2026-05-31",
+        }
+
+    tool.get_team_season_rank = _stub_season_rank
+    tool.get_team_advanced_metrics = AsyncMock(return_value={
         "found": True,
         "metrics": {
             "batting": {"ops": 0.755, "avg": 0.274, "total_hr": 52},
@@ -228,9 +233,9 @@ def test_get_team_comparison_combines_rank_metrics_and_recent_form() -> None:
             "bullpen_share": "38.1%",
             "bullpen_load_rank": "4위 (높을수록 과부하)",
         },
-    }
+    })
 
-    result = tool.get_team_comparison("LG", "KT", 2026)
+    result = asyncio.run(tool.get_team_comparison("LG", "KT", 2026))
 
     assert result["found"] is True
     assert len(result["teams"]) == 2
