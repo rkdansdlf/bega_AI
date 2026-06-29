@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from app.core.retrieval import (
     _RRF_K_BY_INTENT,
     _resolve_rrf_k,
@@ -15,16 +17,18 @@ class _DummyCursor:
         self.rows = rows
         self.executed: list[tuple[str, list[Any] | None]] = []
 
-    def execute(self, query: str, params: list[Any] | tuple[Any, ...] | None = None):
+    async def execute(
+        self, query: str, params: list[Any] | tuple[Any, ...] | None = None
+    ):
         if params is None:
             self.executed.append((str(query), None))
         else:
             self.executed.append((str(query), list(params)))
 
-    def fetchall(self):
+    async def fetchall(self):
         return self.rows
 
-    def fetchone(self):
+    async def fetchone(self):
         if not self.executed:
             return None
         query, _ = self.executed[-1]
@@ -32,10 +36,10 @@ class _DummyCursor:
             return (True,)
         return None
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
 
@@ -50,8 +54,10 @@ class _DummyConnection:
 
 
 class _RaisingEventCursor(_DummyCursor):
-    def execute(self, query: str, params: list[Any] | tuple[Any, ...] | None = None):
-        super().execute(query, params)
+    async def execute(
+        self, query: str, params: list[Any] | tuple[Any, ...] | None = None
+    ):
+        await super().execute(query, params)
         if "INSERT INTO rag_retrieval_events" in query:
             raise RuntimeError("event table unavailable")
 
@@ -62,7 +68,8 @@ class _RaisingEventConnection(_DummyConnection):
         return self.last_cursor
 
 
-def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() -> None:
+@pytest.mark.asyncio
+async def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() -> None:
     rows = [
         {
             "id": 1,
@@ -81,7 +88,7 @@ def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() -> Non
     keyword = "KIA MVP"
     filters = {"season_year": 2025, "meta.league": "정규시즌"}
 
-    result = similarity_search(
+    result = await similarity_search(
         conn,
         embedding,
         limit=5,
@@ -128,7 +135,8 @@ def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() -> Non
     ]
 
 
-def test_similarity_search_without_keyword_keeps_vector_path() -> None:
+@pytest.mark.asyncio
+async def test_similarity_search_without_keyword_keeps_vector_path() -> None:
     rows = [
         {
             "id": 7,
@@ -143,7 +151,7 @@ def test_similarity_search_without_keyword_keeps_vector_path() -> None:
     conn = _DummyConnection(rows)
     embedding = [0.4, 0.5, 0.6]
 
-    result = similarity_search(
+    result = await similarity_search(
         conn,
         embedding,
         limit=3,
@@ -171,7 +179,8 @@ def test_similarity_search_without_keyword_keeps_vector_path() -> None:
     assert params == [expected_vector, "game_inning_scores", 2025, expected_vector, 3]
 
 
-def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> None:
+@pytest.mark.asyncio
+async def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> None:
     rows = [
         {
             "id": 9,
@@ -186,7 +195,7 @@ def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> None:
     conn = _DummyConnection(rows)
     embedding = [0.7, 0.8, 0.9]
 
-    result = similarity_search(
+    result = await similarity_search(
         conn,
         embedding,
         limit=2,
@@ -206,7 +215,8 @@ def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> None:
     assert params == [expected_vector, 2025, expected_vector, 2]
 
 
-def test_similarity_search_internal_exclude_source_tables_appends_filters() -> None:
+@pytest.mark.asyncio
+async def test_similarity_search_internal_exclude_source_tables_appends_filters() -> None:
     rows = [
         {
             "id": 11,
@@ -221,7 +231,7 @@ def test_similarity_search_internal_exclude_source_tables_appends_filters() -> N
     conn = _DummyConnection(rows)
     embedding = [0.9, 0.1, 0.2]
 
-    result = similarity_search(
+    result = await similarity_search(
         conn,
         embedding,
         limit=2,
@@ -251,10 +261,11 @@ def test_similarity_search_internal_exclude_source_tables_appends_filters() -> N
     ]
 
 
-def test_record_retrieval_event_inserts_best_effort_payload() -> None:
+@pytest.mark.asyncio
+async def test_record_retrieval_event_inserts_best_effort_payload() -> None:
     conn = _DummyConnection([])
 
-    record_retrieval_event(
+    await record_retrieval_event(
         conn,
         user_query="김도영 홈런",
         intent="stat",
@@ -276,10 +287,11 @@ def test_record_retrieval_event_inserts_best_effort_payload() -> None:
     assert '"season_year": 2025' in params[3]
 
 
-def test_record_retrieval_event_swallows_event_insert_failure() -> None:
+@pytest.mark.asyncio
+async def test_record_retrieval_event_swallows_event_insert_failure() -> None:
     conn = _RaisingEventConnection([])
 
-    record_retrieval_event(
+    await record_retrieval_event(
         conn,
         user_query="DB 장애",
         intent="stat",

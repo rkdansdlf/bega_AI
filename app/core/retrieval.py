@@ -50,10 +50,10 @@ def _json_payload(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
-def _ensure_pgvector_search_path(conn: psycopg.Connection) -> None:
+async def _ensure_pgvector_search_path(conn: psycopg.AsyncConnection) -> None:
     """pgvector 타입과 연산자를 찾을 수 있도록 search_path를 보정합니다."""
-    with conn.cursor() as cursor:
-        cursor.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
+    async with conn.cursor() as cursor:
+        await cursor.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
 
 
 def _resolve_settings(settings: Optional[Settings]) -> Settings:
@@ -62,7 +62,7 @@ def _resolve_settings(settings: Optional[Settings]) -> Settings:
     return get_settings()
 
 
-def _detect_active_index(conn: psycopg.Connection) -> str:
+async def _detect_active_index(conn: psycopg.AsyncConnection) -> str:
     """pg_indexes에서 rag_chunks embedding 인덱스 타입을 감지합니다.
 
     결과를 모듈 레벨 변수에 캐싱하여 반복 조회를 방지합니다.
@@ -73,14 +73,14 @@ def _detect_active_index(conn: psycopg.Connection) -> str:
     if _detected_vector_index is not None:
         return _detected_vector_index
     try:
-        with conn.cursor() as cur:
-            cur.execute("""
+        async with conn.cursor() as cur:
+            await cur.execute("""
                 SELECT indexdef
                 FROM pg_indexes
                 WHERE tablename = 'rag_chunks'
                   AND indexname LIKE '%embedding%'
                 """)
-            rows = cur.fetchall()
+            rows = await cur.fetchall()
             for row in rows:
                 idx_def = (row[0] or "").lower()
                 if "hnsw" in idx_def:
@@ -120,8 +120,8 @@ def _embedding_distance_sql(
     return f"{column} <=> %s::vector"
 
 
-def _ensure_pgvector_session(
-    conn: psycopg.Connection,
+async def _ensure_pgvector_session(
+    conn: psycopg.AsyncConnection,
     settings: Optional[Settings] = None,
 ) -> None:
     """pgvector 검색 세션 설정을 보정합니다.
@@ -134,20 +134,20 @@ def _ensure_pgvector_session(
     active_settings = _resolve_settings(settings)
     mode = (active_settings.ai_vector_index or "auto").lower().strip()
     if mode == "auto":
-        mode = _detect_active_index(conn)
+        mode = await _detect_active_index(conn)
 
-    with conn.cursor() as cursor:
-        cursor.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
+    async with conn.cursor() as cursor:
+        await cursor.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
         if mode == "hnsw":
             ef_search = max(1, int(active_settings.retrieval_hnsw_ef_search))
-            cursor.execute(f"SET hnsw.ef_search = {ef_search}")
+            await cursor.execute(f"SET hnsw.ef_search = {ef_search}")
         else:
             probes = max(1, int(active_settings.retrieval_ivfflat_probes))
-            cursor.execute(f"SET ivfflat.probes = {probes}")
+            await cursor.execute(f"SET ivfflat.probes = {probes}")
 
 
-def _rag_chunks_exists(
-    conn: psycopg.Connection,
+async def _rag_chunks_exists(
+    conn: psycopg.AsyncConnection,
     settings: Optional[Settings] = None,
 ) -> bool:
     """`rag_chunks` 테이블이 존재하는지 확인합니다.
@@ -160,9 +160,9 @@ def _rag_chunks_exists(
     if _rag_chunks_table_exists is True:
         return True
     try:
-        _ensure_pgvector_session(conn, settings)
-        with conn.cursor() as cursor:
-            cursor.execute("""
+        await _ensure_pgvector_session(conn, settings)
+        async with conn.cursor() as cursor:
+            await cursor.execute("""
                 SELECT EXISTS(
                     SELECT 1
                     FROM information_schema.tables
@@ -170,7 +170,7 @@ def _rag_chunks_exists(
                       AND table_name = 'rag_chunks'
                 );
                 """)
-            row = cursor.fetchone()
+            row = await cursor.fetchone()
             result = bool(row[0]) if row else False
             if result:
                 _rag_chunks_table_exists = True
@@ -179,8 +179,8 @@ def _rag_chunks_exists(
         return False
 
 
-def similarity_search(
-    conn: psycopg.Connection,
+async def similarity_search(
+    conn: psycopg.AsyncConnection,
     embedding: Sequence[float],
     *,
     limit: int,
@@ -210,7 +210,7 @@ def similarity_search(
 
     active_settings = _resolve_settings(settings)
 
-    if not _rag_chunks_exists(conn, active_settings):
+    if not await _rag_chunks_exists(conn, active_settings):
         logger.warning("[Search] rag_chunks table is not available.")
         return []
 
@@ -394,14 +394,14 @@ def similarity_search(
     try:
         # _ensure_pgvector_session이 인덱스 종류에 맞는 GUC(hnsw.ef_search 또는
         # ivfflat.probes)를 설정한다. 여기서는 쿼리 타임아웃만 별도로 제한한다.
-        _ensure_pgvector_session(conn, active_settings)
-        with conn.cursor(row_factory=dict_row) as cur:
+        await _ensure_pgvector_session(conn, active_settings)
+        async with conn.cursor(row_factory=dict_row) as cur:
             statement_timeout_ms = max(
                 1, int(active_settings.retrieval_statement_timeout_ms)
             )
-            cur.execute(f"SET LOCAL statement_timeout = {statement_timeout_ms};")
-            cur.execute(sql, final_params)
-            rows = cur.fetchall()
+            await cur.execute(f"SET LOCAL statement_timeout = {statement_timeout_ms};")
+            await cur.execute(sql, final_params)
+            rows = await cur.fetchall()
     except UndefinedTable:
         return []
     except QueryCanceled as exc:
@@ -446,8 +446,8 @@ def _resolve_rrf_k(intent: str) -> int:
 _FALLBACK_FILTER_KEYS = ("source_table", "team_id", "season_year")
 
 
-def similarity_search_with_fallback(
-    conn: psycopg.Connection,
+async def similarity_search_with_fallback(
+    conn: psycopg.AsyncConnection,
     embedding: Sequence[float],
     *,
     limit: int,
@@ -485,7 +485,7 @@ def similarity_search_with_fallback(
     for level in range(len(removable_keys) + 1):
         level_name = f"level_{level + 1}"
         merged = {**current_filters, **internal_filters}
-        results = similarity_search(
+        results = await similarity_search(
             conn,
             embedding,
             limit=limit,
@@ -524,8 +524,8 @@ def similarity_search_with_fallback(
     return [], f"level_{len(removable_keys) + 1}_exhausted"
 
 
-def record_retrieval_event(
-    conn: psycopg.Connection,
+async def record_retrieval_event(
+    conn: psycopg.AsyncConnection,
     *,
     user_query: str,
     intent: Optional[str],
@@ -544,9 +544,9 @@ def record_retrieval_event(
     if not bool(getattr(active_settings, "rag_retrieval_event_logging_enabled", True)):
         return
     try:
-        with conn.cursor() as cur:
-            cur.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
-            cur.execute(
+        async with conn.cursor() as cur:
+            await cur.execute(f"SET search_path TO {_PGVECTOR_SEARCH_PATH}")
+            await cur.execute(
                 """
                 INSERT INTO rag_retrieval_events (
                     user_query,
