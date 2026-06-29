@@ -709,6 +709,37 @@ def normalize_risk_levels(data: Dict[str, Any]) -> List[str]:
     return reasons
 
 
+def _plain_language_risk_text(text: str) -> str:
+    normalized = " ".join(str(text or "").split()).strip()
+    if not normalized:
+        return ""
+
+    normalized = re.sub(
+        r"팀\s+OPS\s+열세로\s+초반\s+득점\s+설계가\s+과제입니다\.?",
+        "득점 연결력이 밀려 초반에 득점 기회를 만드는 힘을 보강해야 합니다.",
+        normalized,
+    )
+    normalized = re.sub(
+        r"정규시즌\s+OPS\s+[0-9.]+\s*기준\s*",
+        "출루·장타 지표 기준 ",
+        normalized,
+    )
+    replacements = (
+        ("팀 OPS 열세", "득점 연결력 열세"),
+        ("팀 OPS 우위", "득점 연결력 우위"),
+        ("정규시즌 OPS", "출루·장타 지표"),
+        ("OPS", "출루·장타 지표"),
+        ("타격 생산성", "득점 연결력"),
+        ("공격 생산성", "득점 연결력"),
+        ("클러치 생산성", "승부처 대응"),
+        ("WPA/PA", "운영 지표"),
+        ("WPA", "운영 지표"),
+    )
+    for before, after in replacements:
+        normalized = normalized.replace(before, after)
+    return normalized
+
+
 def backfill_empty_risks(data: Dict[str, Any]) -> List[str]:
     """analysis.risks가 비어 있으면 weaknesses/uncertainty에서 1~2건을 유도합니다.
 
@@ -739,10 +770,22 @@ def backfill_empty_risks(data: Dict[str, Any]) -> List[str]:
     derived: List[Dict[str, Any]] = []
     weakness = _first_text("weaknesses")
     if weakness:
-        derived.append({"area": "overall", "level": 1, "description": weakness})
+        derived.append(
+            {
+                "area": "overall",
+                "level": 1,
+                "description": _plain_language_risk_text(weakness),
+            }
+        )
     uncertainty = _first_text("uncertainty")
     if uncertainty and len(derived) < 2:
-        derived.append({"area": "lineup", "level": 1, "description": uncertainty})
+        derived.append(
+            {
+                "area": "lineup",
+                "level": 1,
+                "description": _plain_language_risk_text(uncertainty),
+            }
+        )
     if not derived:
         derived.append(
             {

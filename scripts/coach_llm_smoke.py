@@ -21,6 +21,8 @@ os.environ.setdefault("BEGA_SKIP_APP_INIT", "1")
 
 from app.config import get_settings
 
+EXPECTED_SMOKE_SOURCE = "coach_smoke"
+
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Coach LLM smoke check")
@@ -50,16 +52,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _resolve_configured_coach_models() -> list[str]:
+    from app.deps import resolve_coach_openrouter_models
+
+    settings = get_settings()
+    return resolve_coach_openrouter_models(
+        settings.coach_openrouter_model or settings.openrouter_model,
+        list(settings.coach_openrouter_fallback_models),
+    )
+
+
 def _print_configuration() -> bool:
     settings = get_settings()
-    models: list[str] = []
-    for model in [
-        settings.coach_openrouter_model or settings.openrouter_model,
-        *settings.coach_openrouter_fallback_models,
-    ]:
-        clean_model = str(model or "").strip()
-        if clean_model and clean_model not in models:
-            models.append(clean_model)
+    models = _resolve_configured_coach_models()
     key_present = bool(settings.openrouter_api_key)
 
     print(f"coach_llm_provider={settings.coach_llm_provider}")
@@ -67,6 +72,21 @@ def _print_configuration() -> bool:
     print(f"openrouter_base_url={settings.openrouter_base_url.rstrip('/')}")
     print(f"openrouter_api_key={'present' if key_present else 'absent'}")
     return key_present
+
+
+def _validate_smoke_response(text: str) -> tuple[bool, str | None]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False, "invalid_json"
+
+    if not isinstance(payload, dict):
+        return False, "unexpected_response_contract"
+    if payload.get("ok") is not True:
+        return False, "unexpected_response_contract"
+    if payload.get("source") != EXPECTED_SMOKE_SOURCE:
+        return False, "unexpected_response_contract"
+    return True, None
 
 
 async def _run_real_smoke(max_tokens: int, timeout: float) -> int:
@@ -80,25 +100,45 @@ async def _run_real_smoke(max_tokens: int, timeout: float) -> int:
         },
         {
             "role": "user",
-            "content": 'Return exactly this JSON shape with ok=true and source="coach_smoke".',
+            "content": (
+                "Return only valid minified JSON with exactly these fields: "
+                '{"ok":true,"source":"coach_smoke"}.'
+            ),
         },
     ]
 
-    chunks: list[str] = []
-    async for chunk in llm(
-        messages,
-        max_tokens=max_tokens,
-        empty_chunk_retry_limit=0,
-        request_timeout_seconds=timeout,
-    ):
-        chunks.append(str(chunk))
+    try:
+        chunks: list[str] = []
+        async for chunk in llm(
+            messages,
+            max_tokens=max_tokens,
+            empty_chunk_retry_limit=0,
+            request_timeout_seconds=timeout,
+        ):
+            chunks.append(str(chunk))
+    except Exception as exc:  # noqa: BLE001
+        print(f"ok=false error=provider_call_failed detail={str(exc)[:240]}")
+        return 1
 
     text = "".join(chunks).strip()
     if not text:
         print("ok=false error=empty_response")
         return 1
 
-    print(f"ok=true chars={len(text)} sample={json.dumps(text[:240], ensure_ascii=False)}")
+    valid, error = _validate_smoke_response(text)
+    if not valid:
+        print(
+            "ok=false "
+            f"error={error} "
+            f"chars={len(text)} "
+            f"sample={json.dumps(text[:240], ensure_ascii=False)}"
+        )
+        return 1
+
+    print(
+        f"ok=true chars={len(text)} "
+        f"sample={json.dumps(text[:240], ensure_ascii=False)}"
+    )
     return 0
 
 
