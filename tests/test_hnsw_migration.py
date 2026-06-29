@@ -16,6 +16,41 @@ from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
+
+# Async psycopg mocks (retrieval.py is async over psycopg.AsyncConnection).
+class _AsyncCursor:
+    def __init__(self, rows=None, executed=None):
+        self._rows = rows or []
+        self._executed = executed
+
+    async def execute(self, sql, *args, **kw):
+        if self._executed is not None:
+            self._executed.append(sql)
+
+    async def fetchall(self):
+        return list(self._rows)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _AsyncConn:
+    def __init__(self, rows=None, executed=None, cursor_error=None):
+        self._rows = rows or []
+        self._executed = executed
+        self._cursor_error = cursor_error
+
+    def cursor(self, *args, **kw):
+        if self._cursor_error is not None:
+            raise self._cursor_error
+        return _AsyncCursor(self._rows, self._executed)
+
+
 # ---------------------------------------------------------------------------
 # config.py — AI_VECTOR_INDEX 설정
 # ---------------------------------------------------------------------------
@@ -72,19 +107,14 @@ def test_ai_vector_quantization_halfvec(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_conn(indexdefs: List[str]) -> MagicMock:
-    """pg_indexes 조회 결과를 반환하는 psycopg 연결 mock."""
+def _make_mock_conn(indexdefs: List[str]) -> _AsyncConn:
+    """pg_indexes 조회 결과를 반환하는 psycopg 비동기 연결 mock."""
     rows = [(idef,) for idef in indexdefs]
-    cur = MagicMock()
-    cur.__enter__ = lambda s: s
-    cur.__exit__ = MagicMock(return_value=False)
-    cur.fetchall.return_value = rows
-    conn = MagicMock()
-    conn.cursor.return_value = cur
-    return conn
+    return _AsyncConn(rows=rows)
 
 
-def test_detect_active_index_returns_hnsw_when_hnsw_index_found() -> None:
+@pytest.mark.asyncio
+async def test_detect_active_index_returns_hnsw_when_hnsw_index_found() -> None:
     """pg_indexes에 hnsw 키워드가 포함된 indexdef가 있으면 'hnsw' 반환."""
     import app.core.retrieval as retrieval
 
@@ -95,13 +125,14 @@ def test_detect_active_index_returns_hnsw_when_hnsw_index_found() -> None:
             "CREATE INDEX idx_rag_chunks_embedding_hnsw ON rag_chunks USING hnsw (embedding vector_cosine_ops) WITH (m='16', ef_construction='64')"
         ]
     )
-    result = retrieval._detect_active_index(conn)
+    result = await retrieval._detect_active_index(conn)
     assert result == "hnsw"
     # 캐시에 저장됐는지 확인
     assert retrieval._detected_vector_index == "hnsw"
 
 
-def test_detect_active_index_falls_back_to_ivfflat_when_no_hnsw() -> None:
+@pytest.mark.asyncio
+async def test_detect_active_index_falls_back_to_ivfflat_when_no_hnsw() -> None:
     """pg_indexes에 hnsw가 없으면 'ivfflat' 반환."""
     import app.core.retrieval as retrieval
 
@@ -111,29 +142,31 @@ def test_detect_active_index_falls_back_to_ivfflat_when_no_hnsw() -> None:
             "CREATE INDEX idx_rag_chunks_embedding ON rag_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists='644')"
         ]
     )
-    result = retrieval._detect_active_index(conn)
+    result = await retrieval._detect_active_index(conn)
     assert result == "ivfflat"
     assert retrieval._detected_vector_index == "ivfflat"
 
 
-def test_detect_active_index_falls_back_to_ivfflat_on_empty_result() -> None:
+@pytest.mark.asyncio
+async def test_detect_active_index_falls_back_to_ivfflat_on_empty_result() -> None:
     """pg_indexes 결과가 없으면 'ivfflat' 반환."""
     import app.core.retrieval as retrieval
 
     retrieval._detected_vector_index = None
     conn = _make_mock_conn([])
-    result = retrieval._detect_active_index(conn)
+    result = await retrieval._detect_active_index(conn)
     assert result == "ivfflat"
 
 
-def test_detect_active_index_uses_cache_on_second_call() -> None:
+@pytest.mark.asyncio
+async def test_detect_active_index_uses_cache_on_second_call() -> None:
     """캐시 히트 시 DB 조회를 생략한다."""
     import app.core.retrieval as retrieval
 
     retrieval._detected_vector_index = "hnsw"
-    conn = MagicMock()  # cursor() 호출이 있으면 테스트 실패
-    conn.cursor.side_effect = AssertionError("DB 조회가 발생하면 안 됩니다")
-    result = retrieval._detect_active_index(conn)
+    # cursor() 호출이 있으면 AssertionError (캐시 히트로 호출되지 않아야 함)
+    conn = _AsyncConn(cursor_error=AssertionError("DB 조회가 발생하면 안 됩니다"))
+    result = await retrieval._detect_active_index(conn)
     assert result == "hnsw"
 
 
@@ -142,21 +175,14 @@ def test_detect_active_index_uses_cache_on_second_call() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_session_conn() -> tuple[MagicMock, list[str]]:
-    """cursor.execute() 호출 내역을 기록하는 mock 연결을 반환."""
+def _make_session_conn() -> tuple[_AsyncConn, list[str]]:
+    """cursor.execute() 호출 내역을 기록하는 비동기 mock 연결을 반환."""
     executed: list[str] = []
-
-    cur = MagicMock()
-    cur.__enter__ = lambda s: s
-    cur.__exit__ = MagicMock(return_value=False)
-    cur.execute.side_effect = lambda sql, *args, **kw: executed.append(sql)
-
-    conn = MagicMock()
-    conn.cursor.return_value = cur
-    return conn, executed
+    return _AsyncConn(executed=executed), executed
 
 
-def test_ensure_pgvector_session_hnsw_mode_sets_ef_search(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_ensure_pgvector_session_hnsw_mode_sets_ef_search(monkeypatch) -> None:
     """AI_VECTOR_INDEX=hnsw → hnsw.ef_search GUC 설정, ivfflat.probes 미설정."""
     monkeypatch.setenv("AI_VECTOR_INDEX", "hnsw")
 
@@ -166,14 +192,15 @@ def test_ensure_pgvector_session_hnsw_mode_sets_ef_search(monkeypatch) -> None:
     retrieval._detected_vector_index = None  # 캐시 초기화
     settings = Settings()
     conn, executed = _make_session_conn()
-    retrieval._ensure_pgvector_session(conn, settings)
+    await retrieval._ensure_pgvector_session(conn, settings)
 
     joined = " | ".join(executed)
     assert "hnsw.ef_search" in joined
     assert "ivfflat.probes" not in joined
 
 
-def test_ensure_pgvector_session_ivfflat_mode_sets_probes(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_ensure_pgvector_session_ivfflat_mode_sets_probes(monkeypatch) -> None:
     """AI_VECTOR_INDEX=ivfflat → ivfflat.probes GUC 설정, hnsw.ef_search 미설정."""
     monkeypatch.setenv("AI_VECTOR_INDEX", "ivfflat")
 
@@ -183,14 +210,17 @@ def test_ensure_pgvector_session_ivfflat_mode_sets_probes(monkeypatch) -> None:
     retrieval._detected_vector_index = None
     settings = Settings()
     conn, executed = _make_session_conn()
-    retrieval._ensure_pgvector_session(conn, settings)
+    await retrieval._ensure_pgvector_session(conn, settings)
 
     joined = " | ".join(executed)
     assert "ivfflat.probes" in joined
     assert "hnsw.ef_search" not in joined
 
 
-def test_ensure_pgvector_session_auto_mode_delegates_to_detect(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_ensure_pgvector_session_auto_mode_delegates_to_detect(
+    monkeypatch,
+) -> None:
     """AI_VECTOR_INDEX=auto → _detect_active_index() 결과에 따라 분기."""
     monkeypatch.setenv("AI_VECTOR_INDEX", "auto")
 
@@ -201,7 +231,7 @@ def test_ensure_pgvector_session_auto_mode_delegates_to_detect(monkeypatch) -> N
     retrieval._detected_vector_index = "hnsw"
     settings = Settings()
     conn, executed = _make_session_conn()
-    retrieval._ensure_pgvector_session(conn, settings)
+    await retrieval._ensure_pgvector_session(conn, settings)
 
     joined = " | ".join(executed)
     assert "hnsw.ef_search" in joined
