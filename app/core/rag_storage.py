@@ -730,6 +730,53 @@ def build_upsert_tuple(
     )
 
 
+async def fetch_existing_embedding_texts_async(
+    cur: Any,
+    *,
+    content_hashes: Iterable[str],
+    embedding_model: str,
+    embedding_dim: int,
+    embedding_version: int,
+    chunking_version: int,
+) -> Dict[str, str]:
+    """Async (psycopg3 AsyncCursor) variant of ``fetch_existing_embedding_texts``.
+
+    Used by the async ingest router. The standalone sync ingest scripts keep
+    using the sync version above (they manage their own sync connections).
+    """
+    hashes = sorted({value for value in content_hashes if value})
+    if not hashes:
+        return {}
+    await cur.execute(
+        """
+        SELECT DISTINCT ON (content_hash)
+            content_hash,
+            embedding::text AS embedding_text
+        FROM rag_chunks
+        WHERE content_hash = ANY(%s)
+          AND embedding_model = %s
+          AND embedding_dim = %s
+          AND embedding_version = %s
+          AND chunking_version = %s
+          AND embedding IS NOT NULL
+        ORDER BY content_hash, updated_at DESC
+        """,
+        (hashes, embedding_model, embedding_dim, embedding_version, chunking_version),
+    )
+    rows = await cur.fetchall()
+    found: Dict[str, str] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            hash_value = row.get("content_hash")
+            embedding_text = row.get("embedding_text")
+        else:
+            hash_value = row[0]
+            embedding_text = row[1]
+        if hash_value and embedding_text:
+            found[str(hash_value)] = str(embedding_text)
+    return found
+
+
 def soft_deactivate_missing_parts(
     cur: Any,
     *,
@@ -745,6 +792,39 @@ def soft_deactivate_missing_parts(
     if len(active_ids) == 1 and active_ids[0] == source_prefix:
         return
     cur.execute(
+        """
+        UPDATE rag_chunks
+        SET is_active = false,
+            updated_at = now()
+        WHERE source_table = %s
+          AND (source_row_id = %s OR source_row_id LIKE %s)
+          AND NOT (source_row_id = ANY(%s))
+        """,
+        (
+            source_table,
+            source_prefix,
+            f"{source_prefix}#part%",
+            active_ids,
+        ),
+    )
+
+
+async def soft_deactivate_missing_parts_async(
+    cur: Any,
+    *,
+    source_table: str,
+    source_prefix: str,
+    active_source_row_ids: Sequence[str],
+) -> None:
+    """Async variant of ``soft_deactivate_missing_parts`` for the ingest router."""
+    if not source_prefix:
+        return
+    if source_table == "game_summary":
+        return
+    active_ids = [value for value in active_source_row_ids if value]
+    if len(active_ids) == 1 and active_ids[0] == source_prefix:
+        return
+    await cur.execute(
         """
         UPDATE rag_chunks
         SET is_active = false,

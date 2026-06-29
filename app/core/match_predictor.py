@@ -11,57 +11,53 @@ logger = logging.getLogger(__name__)
 
 
 class MatchPredictor:
-    def __init__(self, connection: psycopg.Connection):
+    def __init__(self, connection: psycopg.AsyncConnection):
         self.connection = connection
 
-    def _get_player_id_and_team(
+    async def _get_player_id_and_team(
         self, name: str, year: int
     ) -> Optional[Tuple[str, str, str]]:
         """선수 이름으로 ID, 팀, 포지션(투수/타자)을 조회합니다."""
         try:
-            cursor = self.connection.cursor(row_factory=dict_row)
+            async with self.connection.cursor(row_factory=dict_row) as cursor:
+                # 1. 투수 확인
+                query_pitcher = """
+                    SELECT pb.player_id, t.team_name, 'pitcher' as role
+                    FROM player_season_pitching psp
+                    JOIN player_basic pb ON psp.player_id = pb.player_id
+                    LEFT JOIN teams t ON psp.team_code = t.team_id
+                    WHERE pb.name = %s AND psp.season = %s
+                    LIMIT 1
+                """
+                await cursor.execute(query_pitcher, (name, year))
+                row = await cursor.fetchone()
+                if row:
+                    return row["player_id"], row["team_name"], "pitcher"
 
-            # 1. 투수 확인
-            query_pitcher = """
-                SELECT pb.player_id, t.team_name, 'pitcher' as role
-                FROM player_season_pitching psp
-                JOIN player_basic pb ON psp.player_id = pb.player_id
-                LEFT JOIN teams t ON psp.team_code = t.team_id
-                WHERE pb.name = %s AND psp.season = %s
-                LIMIT 1
-            """
-            cursor.execute(query_pitcher, (name, year))
-            row = cursor.fetchone()
-            if row:
-                return row["player_id"], row["team_name"], "pitcher"
-
-            # 2. 타자 확인
-            query_batter = """
-                SELECT pb.player_id, t.team_name, 'batter' as role
-                FROM player_season_batting psb
-                JOIN player_basic pb ON psb.player_id = pb.player_id
-                LEFT JOIN teams t ON psb.team_code = t.team_id
-                WHERE pb.name = %s AND psb.season = %s
-                LIMIT 1
-            """
-            cursor.execute(query_batter, (name, year))
-            row = cursor.fetchone()
-            if row:
-                return row["player_id"], row["team_name"], "batter"
+                # 2. 타자 확인
+                query_batter = """
+                    SELECT pb.player_id, t.team_name, 'batter' as role
+                    FROM player_season_batting psb
+                    JOIN player_basic pb ON psb.player_id = pb.player_id
+                    LEFT JOIN teams t ON psb.team_code = t.team_id
+                    WHERE pb.name = %s AND psb.season = %s
+                    LIMIT 1
+                """
+                await cursor.execute(query_batter, (name, year))
+                row = await cursor.fetchone()
+                if row:
+                    return row["player_id"], row["team_name"], "batter"
 
             return None
         except Exception as e:
             logger.error(f"[MatchPredictor] Player lookup failed: {e}")
             return None
-        finally:
-            cursor.close()
 
-    def _get_recent_form(
+    async def _get_recent_form(
         self, player_id: str, role: str, limit: int = 5
     ) -> Dict[str, Any]:
         """최근 N경기 성적을 조회합니다."""
         try:
-            cursor = self.connection.cursor(row_factory=dict_row)
             if role == "batter":
                 query = """
                     SELECT 
@@ -97,22 +93,22 @@ class MatchPredictor:
                     ORDER BY g.game_date DESC LIMIT %s
                 """
 
-            cursor.execute(query, (player_id, limit))
-            row = cursor.fetchone()
+            async with self.connection.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(query, (player_id, limit))
+                row = await cursor.fetchone()
             return dict(row) if row else {}
         except Exception as e:
             logger.warning(f"[MatchPredictor] Recent form query failed: {e}")
             return {}
-        finally:
-            cursor.close()
 
-    def _get_head_to_head(self, pitcher_id: str, batter_id: str) -> Dict[str, Any]:
+    async def _get_head_to_head(
+        self, pitcher_id: str, batter_id: str
+    ) -> Dict[str, Any]:
         """투수 vs 타자 상대 전적 조회 (game_events 테이블 활용)"""
         try:
-            cursor = self.connection.cursor(row_factory=dict_row)
             # game_events 테이블이 있다고 가정
             query = """
-                SELECT 
+                SELECT
                     COUNT(*) as pa,
                     SUM(CASE WHEN result_type = 'hit' THEN 1 ELSE 0 END) as hits,
                     SUM(CASE WHEN result_type = 'homerun' THEN 1 ELSE 0 END) as hr,
@@ -121,8 +117,9 @@ class MatchPredictor:
                 FROM game_events
                 WHERE pitcher_id = %s AND batter_id = %s
             """
-            cursor.execute(query, (pitcher_id, batter_id))
-            row = cursor.fetchone()
+            async with self.connection.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(query, (pitcher_id, batter_id))
+                row = await cursor.fetchone()
             if row and row["pa"] > 0:
                 avg = (
                     row["hits"] / (row["pa"] - row["bb"])
@@ -136,10 +133,8 @@ class MatchPredictor:
                 f"[MatchPredictor] Head-to-head query failed (Table might not exist): {e}"
             )
             return {"pa": 0, "error": str(e)}
-        finally:
-            cursor.close()
 
-    def predict(
+    async def predict(
         self, pitcher_name: str, batter_name: str, year: int = 2024
     ) -> Dict[str, Any]:
         """
@@ -151,8 +146,8 @@ class MatchPredictor:
         3. Adjust for Recent Form (Weight: Medium)
         4. Adjust for Season Stats (Weight: Low)
         """
-        pitcher_info = self._get_player_id_and_team(pitcher_name, year)
-        batter_info = self._get_player_id_and_team(batter_name, year)
+        pitcher_info = await self._get_player_id_and_team(pitcher_name, year)
+        batter_info = await self._get_player_id_and_team(batter_name, year)
 
         if not pitcher_info:
             return {"error": f"Pitcher '{pitcher_name}' not found."}
@@ -169,9 +164,9 @@ class MatchPredictor:
             }
 
         # 1. Stats Lookup
-        h2h = self._get_head_to_head(p_id, b_id)
-        p_recent = self._get_recent_form(p_id, "pitcher")
-        b_recent = self._get_recent_form(b_id, "batter")
+        h2h = await self._get_head_to_head(p_id, b_id)
+        p_recent = await self._get_recent_form(p_id, "pitcher")
+        b_recent = await self._get_recent_form(b_id, "batter")
 
         # 2. Score Calculation (0-100, >50 means Batter Advantage)
         score = 50.0
