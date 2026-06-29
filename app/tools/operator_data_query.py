@@ -64,7 +64,7 @@ _ROSTER_TOKENS = (
 )
 
 
-def try_build_operator_fast_path_result(
+async def try_build_operator_fast_path_result(
     conn: Any,
     query: str,
     *,
@@ -84,19 +84,21 @@ def try_build_operator_fast_path_result(
         resolver = TeamCodeResolver()
         today_value = today or date.today()
         if _is_lineup_query(normalized_query):
-            result = _lineup_result(conn, normalized_query, resolver, today_value)
+            result = await _lineup_result(conn, normalized_query, resolver, today_value)
             if result is not None:
                 return result
         if _is_schedule_query(normalized_query):
-            result = _schedule_result(conn, normalized_query, resolver, today_value)
+            result = await _schedule_result(
+                conn, normalized_query, resolver, today_value
+            )
             if result is not None:
                 return result
         if _is_roster_query(normalized_query):
-            result = _roster_result(conn, normalized_query, resolver)
+            result = await _roster_result(conn, normalized_query, resolver)
             if result is not None:
                 return result
         if _is_season_event_query(normalized_query):
-            result = _season_event_result(conn, normalized_query)
+            result = await _season_event_result(conn, normalized_query)
             if result is not None:
                 return result
     except Exception as exc:  # noqa: BLE001
@@ -170,7 +172,7 @@ def _build_result(
     }
 
 
-def _schedule_result(
+async def _schedule_result(
     conn: Any,
     query: str,
     resolver: TeamCodeResolver,
@@ -181,7 +183,7 @@ def _schedule_result(
         return None
     team_code = _extract_team_code(query, resolver)
     start_date, end_date = date_range
-    rows = _fetch_schedule_rows(conn, start_date, end_date, team_code)
+    rows = await _fetch_schedule_rows(conn, start_date, end_date, team_code)
     if not rows:
         return None
 
@@ -208,10 +210,10 @@ def _schedule_result(
     )
 
 
-def _season_event_result(conn: Any, query: str) -> Optional[Dict[str, Any]]:
+async def _season_event_result(conn: Any, query: str) -> Optional[Dict[str, Any]]:
     year = _extract_year(query)
     event_token = _season_event_token(query)
-    rows = _fetch_season_event_rows(conn, year, event_token)
+    rows = await _fetch_season_event_rows(conn, year, event_token)
     if not rows:
         return None
 
@@ -233,7 +235,7 @@ def _season_event_result(conn: Any, query: str) -> Optional[Dict[str, Any]]:
     )
 
 
-def _roster_result(
+async def _roster_result(
     conn: Any,
     query: str,
     resolver: TeamCodeResolver,
@@ -242,7 +244,7 @@ def _roster_result(
     team_code = _extract_team_code(query, resolver)
     if year is None or team_code is None:
         return None
-    rows = _fetch_roster_rows(conn, year, team_code)
+    rows = await _fetch_roster_rows(conn, year, team_code)
     if not rows:
         return None
 
@@ -266,7 +268,7 @@ def _roster_result(
     )
 
 
-def _lineup_result(
+async def _lineup_result(
     conn: Any,
     query: str,
     resolver: TeamCodeResolver,
@@ -276,7 +278,7 @@ def _lineup_result(
     if date_range is None:
         return None
     team_code = _extract_team_code(query, resolver)
-    rows = _fetch_lineup_rows(conn, date_range, team_code)
+    rows = await _fetch_lineup_rows(conn, date_range, team_code)
     if not rows:
         return None
 
@@ -308,7 +310,7 @@ def _lineup_result(
     )
 
 
-def _fetch_schedule_rows(
+async def _fetch_schedule_rows(
     conn: Any,
     start_date: date,
     end_date: date,
@@ -332,10 +334,10 @@ def _fetch_schedule_rows(
         params.extend([team_code, team_code])
     query += " ORDER BY game_date, start_time, game_id LIMIT %s"
     params.append(MAX_ROWS)
-    return _verified_source_rows(_fetch_rows(conn, query, params))
+    return _verified_source_rows(await _fetch_rows(conn, query, params))
 
 
-def _fetch_season_event_rows(
+async def _fetch_season_event_rows(
     conn: Any,
     year: Optional[int],
     event_token: Optional[str],
@@ -356,10 +358,10 @@ def _fetch_season_event_rows(
         params.append(f"%{event_token}%")
     query += " ORDER BY event_date, event_name LIMIT %s"
     params.append(MAX_ROWS)
-    return _verified_source_rows(_fetch_rows(conn, query, params))
+    return _verified_source_rows(await _fetch_rows(conn, query, params))
 
 
-def _fetch_roster_rows(
+async def _fetch_roster_rows(
     conn: Any,
     year: Optional[int],
     team_code: Optional[str],
@@ -380,10 +382,10 @@ def _fetch_roster_rows(
         params.append(team_code)
     query += " ORDER BY effective_date DESC, queue_id LIMIT %s"
     params.append(MAX_ROWS)
-    return _verified_source_rows(_fetch_rows(conn, query, params))
+    return _verified_source_rows(await _fetch_rows(conn, query, params))
 
 
-def _fetch_lineup_rows(
+async def _fetch_lineup_rows(
     conn: Any,
     date_range: Optional[tuple[date, date]],
     team_code: Optional[str],
@@ -405,7 +407,7 @@ def _fetch_lineup_rows(
         params.append(team_code)
     query += " ORDER BY g.game_date DESC, gl.game_id, gl.team_code, gl.batting_order LIMIT %s"
     params.append(MAX_ROWS)
-    rows = _fetch_rows(conn, query, params)
+    rows = await _fetch_rows(conn, query, params)
     normalized: List[Mapping[str, Any]] = []
     for row in rows:
         notes = _notes_payload(row.get("notes"))
@@ -430,12 +432,12 @@ def _fetch_lineup_rows(
     return normalized
 
 
-def _fetch_rows(
+async def _fetch_rows(
     conn: Any, query: str, params: Sequence[Any]
 ) -> List[Mapping[str, Any]]:
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, tuple(params))
-        return [dict(row) for row in list(cur.fetchall() or [])]
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, tuple(params))
+        return [dict(row) for row in list(await cur.fetchall() or [])]
 
 
 def _verified_source_rows(rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:

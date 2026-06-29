@@ -76,7 +76,7 @@ from ..config import Settings
 @dataclass(slots=True)
 class AgentRequestContext:
     runtime_id: int
-    connection: psycopg.Connection
+    connection: psycopg.AsyncConnection
     db_query_tool: DatabaseQueryTool
     regulation_query_tool: RegulationQueryTool
     game_query_tool: GameQueryTool
@@ -89,7 +89,7 @@ class AgentRequestContext:
         cls,
         *,
         runtime_id: int,
-        connection: psycopg.Connection,
+        connection: psycopg.AsyncConnection,
         settings: Optional[Settings],
     ) -> "AgentRequestContext":
         from ..core.game_strategist import GameStrategist
@@ -326,7 +326,7 @@ class BaseballAgentRuntime:
             self._team_name_cache = dict(mapping)
 
     def enter_request_context(
-        self, connection: psycopg.Connection
+        self, connection: psycopg.AsyncConnection
     ) -> AgentRequestContextHandle:
         with self._lock:
             self._request_context_count += 1
@@ -366,7 +366,7 @@ class BaseballAgentRuntime:
         )
 
     @contextmanager
-    def request_context(self, connection: psycopg.Connection):
+    def request_context(self, connection: psycopg.AsyncConnection):
         handle = self.enter_request_context(connection)
         try:
             yield handle.request_context
@@ -643,7 +643,7 @@ class BaseballStatisticsAgent:
 
     def __init__(
         self,
-        connection: psycopg.Connection,
+        connection: psycopg.AsyncConnection,
         llm_generator,
         settings: Optional[Settings] = None,
         fast_path_enabled: bool = True,
@@ -932,8 +932,7 @@ class BaseballStatisticsAgent:
             return None
 
         try:
-            raw_results = await asyncio.to_thread(
-                db_query_tool.get_player_season_stats_batch,
+            raw_results = await db_query_tool.get_player_season_stats_batch(
                 batch_spec["player_names"],
                 batch_spec["year"],
                 batch_spec["position"],
@@ -1637,11 +1636,11 @@ class BaseballStatisticsAgent:
             self._tool_recommend_pitcher,
         )
 
-    def _tool_check_bullpen(self, team_name: str, date: str = None) -> ToolResult:
+    async def _tool_check_bullpen(self, team_name: str, date: str = None) -> ToolResult:
         """불펜 가용성 확인 도구"""
         try:
             strategist = self._current_request_context().game_strategist
-            result = strategist.check_bullpen_availability(team_name, date)
+            result = await strategist.check_bullpen_availability(team_name, date)
 
             if "error" in result:
                 return ToolResult(success=False, data=result, message=result["error"])
@@ -1670,11 +1669,13 @@ class BaseballStatisticsAgent:
             logger.error(f"Bullpen check error: {e}")
             return ToolResult(success=False, data={}, message=f"불펜 확인 중 오류: {e}")
 
-    def _tool_recommend_pitcher(self, team_name: str, situation: str) -> ToolResult:
+    async def _tool_recommend_pitcher(
+        self, team_name: str, situation: str
+    ) -> ToolResult:
         """투수 추천 도구"""
         try:
             strategist = self._current_request_context().game_strategist
-            result = strategist.recommend_pitcher(team_name, situation)
+            result = await strategist.recommend_pitcher(team_name, situation)
 
             if "error" in result:
                 return ToolResult(success=False, data=result, message=result["error"])
@@ -1691,7 +1692,7 @@ class BaseballStatisticsAgent:
             logger.error(f"Pitcher recommendation error: {e}")
             return ToolResult(success=False, data={}, message=f"투수 추천 중 오류: {e}")
 
-    def _tool_predict_matchup(
+    async def _tool_predict_matchup(
         self, pitcher_name: str, batter_name: str, year: int = None
     ) -> ToolResult:
         """투타 맞대결 예측 도구"""
@@ -1700,7 +1701,7 @@ class BaseballStatisticsAgent:
 
         try:
             predictor = self._current_request_context().match_predictor
-            result = predictor.predict(pitcher_name, batter_name, year)
+            result = await predictor.predict(pitcher_name, batter_name, year)
 
             if "error" in result:
                 return ToolResult(success=False, data=result, message=result["error"])
@@ -1766,11 +1767,13 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"승리 확률 계산 중 오류: {e}"
             )
 
-    def _tool_search_documents(self, query: str, limit: int = 10) -> ToolResult:
+    async def _tool_search_documents(self, query: str, limit: int = 10) -> ToolResult:
         """문서 검색 도구의 래퍼 함수"""
         try:
             effective_limit = max(1, min(limit, 2))
-            result = self.document_query_tool.search_documents(query, effective_limit)
+            result = await self.document_query_tool.search_documents(
+                query, effective_limit
+            )
 
             if result.get("error"):
                 return ToolResult(
@@ -1960,13 +1963,13 @@ class BaseballStatisticsAgent:
 
         return stadium_mapping.get(stadium, stadium)
 
-    def _tool_get_season_final_game_date(
+    async def _tool_get_season_final_game_date(
         self, year: int, league_type: str = "korean_series"
     ) -> ToolResult:
         """시즌 마지막 경기 정보 조회 도구 (날짜 + 경기 결과)"""
         try:
             # 1단계: 마지막 경기 날짜 조회
-            date_result = self.game_query_tool.get_season_final_game_date(
+            date_result = await self.game_query_tool.get_season_final_game_date(
                 year, league_type
             )
 
@@ -1987,7 +1990,7 @@ class BaseballStatisticsAgent:
             final_date = date_result["final_game_date"]
 
             # 2단계: 해당 날짜의 경기 결과 조회
-            games_result = self.game_query_tool.get_games_by_date(final_date)
+            games_result = await self.game_query_tool.get_games_by_date(final_date)
 
             combined_result = {
                 "year": year,
@@ -2057,12 +2060,14 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_game_lineup(
+    async def _tool_get_game_lineup(
         self, game_id: str = None, date: str = None, team_name: str = None
     ) -> ToolResult:
         """경기 라인업 조회 도구"""
         try:
-            result = self.game_query_tool.get_game_lineup(game_id, date, team_name)
+            result = await self.game_query_tool.get_game_lineup(
+                game_id, date, team_name
+            )
 
             if result.get("error"):
                 return ToolResult(
@@ -2093,12 +2098,12 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_player_stats(
+    async def _tool_get_player_stats(
         self, player_name: str, year: int, position: str = "both"
     ) -> ToolResult:
         """선수 개별 통계 조회 도구"""
         try:
-            result = self.db_query_tool.get_player_season_stats(
+            result = await self.db_query_tool.get_player_season_stats(
                 player_name, year, position
             )
 
@@ -2128,12 +2133,14 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_career_stats(
+    async def _tool_get_career_stats(
         self, player_name: str, position: str = "both"
     ) -> ToolResult:
         """선수 통산 통계 조회 도구"""
         try:
-            result = self.db_query_tool.get_player_career_stats(player_name, position)
+            result = await self.db_query_tool.get_player_career_stats(
+                player_name, position
+            )
 
             if result["error"]:
                 return ToolResult(
@@ -2169,7 +2176,7 @@ class BaseballStatisticsAgent:
             return "pitching"
         return None
 
-    def _tool_get_leaderboard(
+    async def _tool_get_leaderboard(
         self,
         stat_name: str,
         year: int,
@@ -2197,7 +2204,7 @@ class BaseballStatisticsAgent:
                     message="도구 가드레일: get_leaderboard position은 batting 또는 pitching만 허용됩니다.",
                 )
 
-            result = self.db_query_tool.get_team_leaderboard(
+            result = await self.db_query_tool.get_team_leaderboard(
                 stat_name, year, normalized_position, team_filter, limit
             )
 
@@ -2227,14 +2234,16 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_validate_player(self, player_name: str, year: int = None) -> ToolResult:
+    async def _tool_validate_player(
+        self, player_name: str, year: int = None
+    ) -> ToolResult:
         """선수 존재 여부 확인 도구"""
         try:
             if year is None:
                 import datetime as dt
 
                 year = dt.datetime.now().year
-            result = self.db_query_tool.validate_player_exists(player_name, year)
+            result = await self.db_query_tool.validate_player_exists(player_name, year)
 
             if result["error"]:
                 return ToolResult(
@@ -2259,10 +2268,10 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_summary(self, team_name: str, year: int) -> ToolResult:
+    async def _tool_get_team_summary(self, team_name: str, year: int) -> ToolResult:
         """팀 요약 정보 조회 도구"""
         try:
-            result = self.db_query_tool.get_team_summary(team_name, year)
+            result = await self.db_query_tool.get_team_summary(team_name, year)
 
             if result["error"]:
                 return ToolResult(
@@ -2290,10 +2299,12 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_advanced_metrics(self, team_name: str, year: int) -> ToolResult:
+    async def _tool_get_team_advanced_metrics(
+        self, team_name: str, year: int
+    ) -> ToolResult:
         """팀 심층 지표 조회 도구 래퍼"""
         try:
-            result = self.db_query_tool.get_team_advanced_metrics(team_name, year)
+            result = await self.db_query_tool.get_team_advanced_metrics(team_name, year)
 
             if result.get("error"):
                 return ToolResult(
@@ -2318,12 +2329,14 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_tough_matchups(
+    async def _tool_get_team_tough_matchups(
         self, team_name: str, year: int, limit: int = 3
     ) -> ToolResult:
         """상대전적상 까다로운 팀 조회 도구"""
         try:
-            result = self.db_query_tool.get_team_tough_matchups(team_name, year, limit)
+            result = await self.db_query_tool.get_team_tough_matchups(
+                team_name, year, limit
+            )
             if result.get("error"):
                 return ToolResult(
                     success=False,
@@ -2347,12 +2360,12 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_fielding_error_games(
+    async def _tool_get_team_fielding_error_games(
         self, team_name: str, year: int, limit: int = 5
     ) -> ToolResult:
         """수비 실책 기반 경기 장면 조회 도구"""
         try:
-            result = self.db_query_tool.get_team_fielding_error_games(
+            result = await self.db_query_tool.get_team_fielding_error_games(
                 team_name, year, limit
             )
             if result.get("error"):
@@ -2440,12 +2453,14 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_defensive_stats(
+    async def _tool_get_defensive_stats(
         self, player_name: str, year: int = None
     ) -> ToolResult:
         """선수 수비 통계 조회 도구"""
         try:
-            result = self.db_query_tool.get_player_defensive_stats(player_name, year)
+            result = await self.db_query_tool.get_player_defensive_stats(
+                player_name, year
+            )
 
             if result["error"]:
                 return ToolResult(
@@ -2473,10 +2488,14 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_velocity_data(self, player_name: str, year: int = None) -> ToolResult:
+    async def _tool_get_velocity_data(
+        self, player_name: str, year: int = None
+    ) -> ToolResult:
         """투수 구속 데이터 조회 도구"""
         try:
-            result = self.db_query_tool.get_pitcher_velocity_data(player_name, year)
+            result = await self.db_query_tool.get_pitcher_velocity_data(
+                player_name, year
+            )
 
             if result["error"]:
                 return ToolResult(
@@ -2504,10 +2523,10 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_search_regulations(self, query: str) -> ToolResult:
+    async def _tool_search_regulations(self, query: str) -> ToolResult:
         """KBO 규정 검색 도구"""
         try:
-            result = self.regulation_query_tool.search_regulation(query)
+            result = await self.regulation_query_tool.search_regulation(query)
 
             if result["error"]:
                 return ToolResult(
@@ -2535,10 +2554,12 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_regulations_by_category(self, category: str) -> ToolResult:
+    async def _tool_get_regulations_by_category(self, category: str) -> ToolResult:
         """규정 카테고리별 조회 도구"""
         try:
-            result = self.regulation_query_tool.get_regulation_by_category(category)
+            result = await self.regulation_query_tool.get_regulation_by_category(
+                category
+            )
 
             if result["error"]:
                 return ToolResult(
@@ -2566,7 +2587,7 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_game_box_score(
+    async def _tool_get_game_box_score(
         self,
         game_id: str = None,
         date: str = None,
@@ -2575,7 +2596,7 @@ class BaseballStatisticsAgent:
     ) -> ToolResult:
         """경기 박스스코어 조회 도구"""
         try:
-            result = self.game_query_tool.get_game_box_score(
+            result = await self.game_query_tool.get_game_box_score(
                 game_id, date, home_team, away_team
             )
 
@@ -2605,11 +2626,11 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_games_by_date(self, date: str, **kwargs) -> ToolResult:
+    async def _tool_get_games_by_date(self, date: str, **kwargs) -> ToolResult:
         """날짜별 경기 조회 도구"""
         try:
             team = kwargs.get("team", None)
-            result = self.game_query_tool.get_games_by_date(date, team)
+            result = await self.game_query_tool.get_games_by_date(date, team)
 
             if result["error"]:
                 return ToolResult(
@@ -2638,13 +2659,13 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_schedule(
+    async def _tool_get_schedule(
         self, start_date: str, end_date: str, team: str | None = None, **kwargs
     ) -> ToolResult:
         """기간별 경기 일정 조회 도구"""
         del kwargs
         try:
-            result = self.game_query_tool.get_schedule(start_date, end_date, team)
+            result = await self.game_query_tool.get_schedule(start_date, end_date, team)
 
             if result["error"]:
                 return ToolResult(
@@ -2678,7 +2699,7 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_recent_games_by_team(
+    async def _tool_get_recent_games_by_team(
         self,
         team_name: str,
         limit: int = 5,
@@ -2686,7 +2707,9 @@ class BaseballStatisticsAgent:
     ) -> ToolResult:
         """팀 최근 경기 조회 도구"""
         try:
-            result = self.game_query_tool.get_team_recent_games(team_name, limit, year)
+            result = await self.game_query_tool.get_team_recent_games(
+                team_name, limit, year
+            )
 
             if result["error"]:
                 return ToolResult(
@@ -2714,12 +2737,14 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_advanced_stats(
+    async def _tool_get_advanced_stats(
         self, player_name: str, year: int, position: str = "both"
     ) -> ToolResult:
         """고급 통계 조회 도구"""
         try:
-            result = self.db_query_tool.get_advanced_stats(player_name, year, position)
+            result = await self.db_query_tool.get_advanced_stats(
+                player_name, year, position
+            )
 
             if "error" in result and result["error"]:
                 return ToolResult(
@@ -2747,7 +2772,7 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"고급 통계 도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_player_position_average_comparison(
+    async def _tool_get_player_position_average_comparison(
         self,
         player_name: str,
         year: int,
@@ -2755,7 +2780,7 @@ class BaseballStatisticsAgent:
     ) -> ToolResult:
         """같은 포지션 평균 대비 선수 기록 비교 도구"""
         try:
-            result = self.db_query_tool.get_player_position_average_comparison(
+            result = await self.db_query_tool.get_player_position_average_comparison(
                 player_name,
                 year,
                 min_plate_appearances=min_plate_appearances,
@@ -2783,12 +2808,14 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_head_to_head(
+    async def _tool_get_head_to_head(
         self, team1: str, team2: str, year: int = None, limit: int = 10
     ) -> ToolResult:
         """팀 간 직접 대결 조회 도구"""
         try:
-            result = self.game_query_tool.get_head_to_head(team1, team2, year, limit)
+            result = await self.game_query_tool.get_head_to_head(
+                team1, team2, year, limit
+            )
 
             if result["error"]:
                 return ToolResult(
@@ -2855,7 +2882,7 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_compare_players(
+    async def _tool_compare_players(
         self,
         player1: str,
         player2: str,
@@ -2872,19 +2899,19 @@ class BaseballStatisticsAgent:
             # 두 선수의 통계를 모두 조회
             if comparison_type == "season" and year:
                 # 특정 시즌 비교
-                player1_result = self.db_query_tool.get_player_season_stats(
+                player1_result = await self.db_query_tool.get_player_season_stats(
                     player1, year, position
                 )
-                player2_result = self.db_query_tool.get_player_season_stats(
+                player2_result = await self.db_query_tool.get_player_season_stats(
                     player2, year, position
                 )
                 comparison_label = f"{year}년 시즌"
             else:
                 # 통산 비교
-                player1_result = self.db_query_tool.get_player_career_stats(
+                player1_result = await self.db_query_tool.get_player_career_stats(
                     player1, position
                 )
-                player2_result = self.db_query_tool.get_player_career_stats(
+                player2_result = await self.db_query_tool.get_player_career_stats(
                     player2, position
                 )
                 comparison_label = "통산"
@@ -2943,11 +2970,11 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"선수 비교 도구 실행 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_rank(self, team_name: str, year: int) -> ToolResult:
+    async def _tool_get_team_rank(self, team_name: str, year: int) -> ToolResult:
         """팀 순위 조회 도구"""
         try:
             request_context = self._current_request_context()
-            with request_context.connection.cursor() as cursor:
+            async with request_context.connection.cursor() as cursor:
                 # 팀명을 team_id로 매핑
                 from ..core.entity_extractor import TEAM_MAPPING
 
@@ -2961,7 +2988,9 @@ class BaseballStatisticsAgent:
                     team_id = team_name  # 직접 매핑 실패시 원본 사용
 
                 # v_team_rank_all 뷰 대신 동적 계산 도구 사용
-                rank_result = self.db_query_tool.get_team_season_rank(team_name, year)
+                rank_result = await self.db_query_tool.get_team_season_rank(
+                    team_name, year
+                )
 
                 if rank_result["found"]:
                     return ToolResult(
@@ -2991,7 +3020,7 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"팀 순위 조회 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_by_rank(
+    async def _tool_get_team_by_rank(
         self, year: int, rank: int, season_phase: str = "regular", **kwargs
     ) -> ToolResult:
         """정규시즌 순위 역질의 도구"""
@@ -3010,7 +3039,7 @@ class BaseballStatisticsAgent:
                     message="정규시즌 순위 역질의만 지원합니다.",
                 )
 
-            rank_result = self.db_query_tool.get_team_by_season_rank(year, rank)
+            rank_result = await self.db_query_tool.get_team_by_season_rank(year, rank)
             if rank_result["found"]:
                 return ToolResult(
                     success=True,
@@ -3044,13 +3073,13 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"순위 기반 팀 조회 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_standings(
+    async def _tool_get_team_standings(
         self, year: int, as_of_date: str | None = None, **kwargs
     ) -> ToolResult:
         """팀별 순위표 조회 도구"""
         del kwargs
         try:
-            standings_result = self.db_query_tool.get_team_standings(
+            standings_result = await self.db_query_tool.get_team_standings(
                 year, as_of_date=as_of_date
             )
             if standings_result.get("error"):
@@ -3079,7 +3108,7 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"팀 순위표 조회 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_metric_leaderboard(
+    async def _tool_get_team_metric_leaderboard(
         self,
         metric_name: str,
         year: int,
@@ -3090,7 +3119,7 @@ class BaseballStatisticsAgent:
         """팀 지표 리더보드 조회 도구"""
         del kwargs
         try:
-            result = self.db_query_tool.get_team_metric_leaderboard(
+            result = await self.db_query_tool.get_team_metric_leaderboard(
                 metric_name=metric_name,
                 year=year,
                 limit=limit,
@@ -3124,7 +3153,7 @@ class BaseballStatisticsAgent:
                 message=f"팀 지표 리더보드 조회 중 오류 발생: {e}",
             )
 
-    def _tool_get_team_form_table(
+    async def _tool_get_team_form_table(
         self,
         year: int,
         form_type: str = "recent",
@@ -3137,7 +3166,7 @@ class BaseballStatisticsAgent:
         """팀 흐름 표 조회 도구"""
         del kwargs
         try:
-            result = self.db_query_tool.get_team_form_table(
+            result = await self.db_query_tool.get_team_form_table(
                 year=year,
                 form_type=form_type,
                 team_name=team_name,
@@ -3170,7 +3199,7 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"팀 흐름 조회 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_comparison(
+    async def _tool_get_team_comparison(
         self,
         team1: str,
         team2: str,
@@ -3181,7 +3210,7 @@ class BaseballStatisticsAgent:
         """두 팀 비교 조회 도구"""
         del kwargs
         try:
-            result = self.db_query_tool.get_team_comparison(
+            result = await self.db_query_tool.get_team_comparison(
                 team1=team1,
                 team2=team2,
                 year=year,
@@ -3210,11 +3239,11 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"팀 비교 조회 중 오류 발생: {e}"
             )
 
-    def _tool_get_team_last_game(self, team_name: str, year: int) -> ToolResult:
+    async def _tool_get_team_last_game(self, team_name: str, year: int) -> ToolResult:
         """지능적 팀별 마지막 경기 조회 도구"""
         try:
             # 1단계: 팀 순위 조회로 포스트시즌 진출 여부 확인
-            rank_result = self._tool_get_team_rank(team_name, year)
+            rank_result = await self._tool_get_team_rank(team_name, year)
             rank_found = (
                 bool(rank_result.data.get("found")) if rank_result.data else False
             )
@@ -3240,7 +3269,7 @@ class BaseballStatisticsAgent:
             )
 
             # 2단계: 해당 팀의 실제 마지막 경기 날짜 조회
-            final_date_result = self.game_query_tool.get_team_last_game_date(
+            final_date_result = await self.game_query_tool.get_team_last_game_date(
                 team_name, year, league_type
             )
 
@@ -3249,8 +3278,10 @@ class BaseballStatisticsAgent:
                 logger.warning(
                     f"[BaseballAgent] 팀별 마지막 경기 날짜를 못 찾음 ({team_name}, {year}). 전체 시즌 날짜로 시도."
                 )
-                final_game_result = self.game_query_tool.get_season_final_game_date(
-                    year, league_type
+                final_game_result = (
+                    await self.game_query_tool.get_season_final_game_date(
+                        year, league_type
+                    )
                 )
                 if not final_game_result.get("found"):
                     return ToolResult(
@@ -3263,7 +3294,7 @@ class BaseballStatisticsAgent:
                 final_date = final_date_result["last_game_date"]
 
             # 3단계: 해당 날짜의 경기 결과 조회
-            games_result = self.game_query_tool.get_games_by_date(final_date)
+            games_result = await self.game_query_tool.get_games_by_date(final_date)
 
             if not games_result.get("found"):
                 return ToolResult(
@@ -3325,11 +3356,11 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"팀 마지막 경기 조회 중 오류 발생: {e}"
             )
 
-    def _tool_get_korean_series_winner(self, year: int) -> ToolResult:
+    async def _tool_get_korean_series_winner(self, year: int) -> ToolResult:
         """한국시리즈 우승팀 조회 도구"""
         try:
             # 1단계: 한국시리즈 마지막 경기 조회
-            final_game_result = self._tool_get_season_final_game_date(
+            final_game_result = await self._tool_get_season_final_game_date(
                 year, "korean_series"
             )
 
@@ -3387,7 +3418,7 @@ class BaseballStatisticsAgent:
                 )
 
             # 우승팀 순위 정보도 함께 조회
-            rank_result = self._tool_get_team_rank(winner_team_name, year)
+            rank_result = await self._tool_get_team_rank(winner_team_name, year)
             winner_rank = (
                 rank_result.data.get("team_rank") if rank_result.success else None
             )
@@ -3461,10 +3492,12 @@ class BaseballStatisticsAgent:
 
         return None
 
-    def _tool_get_award_winners(self, year: int, award_type: str = None) -> ToolResult:
+    async def _tool_get_award_winners(
+        self, year: int, award_type: str = None
+    ) -> ToolResult:
         """시즌 수상자 조회 도구"""
         try:
-            result = self.db_query_tool.get_award_winners(year, award_type)
+            result = await self.db_query_tool.get_award_winners(year, award_type)
 
             if result["error"]:
                 return ToolResult(
@@ -11786,7 +11819,7 @@ class BaseballStatisticsAgent:
                 "error": f"답변 생성 오류: {e}",
             }
 
-    def _tool_get_player_wpa_leaders(
+    async def _tool_get_player_wpa_leaders(
         self, year: int = None, limit: int = 10, team_name: str = None
     ) -> ToolResult:
         """WPA 순위 조회 도구 wrapper"""
@@ -11796,7 +11829,7 @@ class BaseballStatisticsAgent:
             year = datetime.datetime.now().year
 
         try:
-            result = self.db_query_tool.get_player_wpa_leaders(
+            result = await self.db_query_tool.get_player_wpa_leaders(
                 year=year, limit=limit, team_name=team_name
             )
             return ToolResult(
@@ -11810,10 +11843,14 @@ class BaseballStatisticsAgent:
                 success=False, data={}, message=f"WPA 순위 조회 실패: {e}"
             )
 
-    def _tool_get_clutch_moments(self, game_id: str, limit: int = 5) -> ToolResult:
+    async def _tool_get_clutch_moments(
+        self, game_id: str, limit: int = 5
+    ) -> ToolResult:
         """승부처 조회 도구 wrapper"""
         try:
-            result = self.db_query_tool.get_clutch_moments(game_id=game_id, limit=limit)
+            result = await self.db_query_tool.get_clutch_moments(
+                game_id=game_id, limit=limit
+            )
             return ToolResult(
                 success=True,
                 data=result,
@@ -11823,7 +11860,7 @@ class BaseballStatisticsAgent:
             logger.error(f"Error in _tool_get_clutch_moments: {e}")
             return ToolResult(success=False, data={}, message=f"승부처 조회 실패: {e}")
 
-    def _tool_get_player_wpa_stats(
+    async def _tool_get_player_wpa_stats(
         self, player_name: str, year: int = None
     ) -> ToolResult:
         """선수별 WPA 통계 조회 도구 wrapper"""
@@ -11833,7 +11870,7 @@ class BaseballStatisticsAgent:
             year = datetime.datetime.now().year
 
         try:
-            result = self.db_query_tool.get_player_wpa_stats(
+            result = await self.db_query_tool.get_player_wpa_stats(
                 player_name=player_name, year=year
             )
             return ToolResult(
