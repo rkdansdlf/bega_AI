@@ -38,6 +38,11 @@ PYTHON="$(find_python)"
 export BEGA_SKIP_APP_INIT=1
 export EMBED_PROVIDER=local          # 일별 ingest는 local 임베딩 (비용 없음)
 export PYTHONPATH="$BEGA_AI_DIR"
+SOURCE_DB_URL="${OCI_DB_URL:-${POSTGRES_DB_URL:-}}"
+if [[ -z "$SOURCE_DB_URL" ]]; then
+    echo "ERROR: OCI_DB_URL or POSTGRES_DB_URL is required." >&2
+    exit 1
+fi
 
 # ── since 계산 (KST 기준 전날 00:00 UTC) ─────────────────────────────────────
 # macOS: date -u -v-1d +%Y-%m-%dT00:00:00
@@ -56,7 +61,7 @@ echo "[$LOG_STAMP] daily_ingest_kbo.sh 시작 -- season=$SEASON_YEAR since=$SINC
 
 # ── 인제스트 실행 ──────────────────────────────────────────────────────────────
 "$PYTHON" "$BEGA_AI_DIR/scripts/ingest_from_kbo.py" \
-    --source-db-url "${OCI_DB_URL:-postgresql://postgres:rkdansdlf@134.185.107.178:5432/bega_backend}" \
+    --source-db-url "$SOURCE_DB_URL" \
     --season-year "$SEASON_YEAR" \
     --since "$SINCE" \
     --tables \

@@ -109,6 +109,12 @@ AI_COACH_PAYLOAD_COMPRESSION_TOTAL = Counter(
     ["enabled"],  # on|off
 )
 
+AI_COACH_LLM_SKIP_TOTAL = Counter(
+    "ai_coach_llm_skip_total",
+    "Coach stream meta events where the LLM was skipped.",
+    ["reason", "request_mode", "analysis_type"],
+)
+
 AI_RETRIEVAL_FALLBACK_LEVEL_TOTAL = Counter(
     "ai_retrieval_fallback_level_total",
     "Number of times each fallback level was reached in similarity_search_with_fallback.",
@@ -119,6 +125,18 @@ AI_RESPONSE_CACHE_BY_INTENT = Counter(
     "ai_response_cache_by_intent_total",
     "Chat response cache hits and misses segmented by query intent.",
     ["intent", "result"],  # intent: stats_lookup|player_profile|… ; result: hit|miss
+)
+
+AI_CHAT_QUEUE_EVENTS_TOTAL = Counter(
+    "ai_chat_queue_events_total",
+    "Chat queue lifecycle events.",
+    ["event"],  # event: admitted|queued|admitted_from_queue|overflow|cancelled|released
+)
+
+AI_LLM_FALLBACK_TOTAL = Counter(
+    "ai_llm_fallback_total",
+    "LLM fallback attempts after a model failure.",
+    ["provider", "reason"],  # provider: openrouter ; reason: http_status_429|...
 )
 
 # ---------------------------------------------------------------------------
@@ -141,6 +159,14 @@ AI_LLM_CALL_DURATION_SECONDS = Histogram(
     "End-to-end LLM call duration including retries.",
     ["provider", "route"],  # route: rag|coach|hyde|query_transform
     buckets=_LLM_CALL_BUCKETS,
+)
+
+_CHAT_QUEUE_WAIT_BUCKETS = (0, 1, 2, 5, 10, 15, 30, 60, 90, 120, 180, 240)
+AI_CHAT_QUEUE_ESTIMATED_WAIT_SECONDS = Histogram(
+    "ai_chat_queue_estimated_wait_seconds",
+    "Estimated chat queue wait time when a request is queued or rejected.",
+    [],
+    buckets=_CHAT_QUEUE_WAIT_BUCKETS,
 )
 
 # Coach 동적 프롬프트 사이즈 (B 작업 효과 추적). 문자 수 단위.
@@ -173,6 +199,12 @@ AI_DB_POOL_SIZE = Gauge(
     ["state"],  # max|min|available|requests_waiting
 )
 
+AI_CHAT_QUEUE_DEPTH = Gauge(
+    "ai_chat_queue_depth",
+    "Current in-memory chat queue depth.",
+    ["state"],  # state: waiting|admitted
+)
+
 
 # ---------------------------------------------------------------------------
 # ASGI 통합
@@ -190,11 +222,16 @@ def metrics_asgi_app() -> Any:
 
 __all__ = [
     "AI_COACH_DYNAMIC_PROMPT_CHARS",
+    "AI_COACH_LLM_SKIP_TOTAL",
     "AI_COACH_PAYLOAD_COMPRESSION_TOTAL",
     "AI_COACH_REQUEST_TOTAL",
+    "AI_CHAT_QUEUE_DEPTH",
+    "AI_CHAT_QUEUE_ESTIMATED_WAIT_SECONDS",
+    "AI_CHAT_QUEUE_EVENTS_TOTAL",
     "AI_DB_POOL_SIZE",
     "AI_EMBEDDING_CACHE_TOTAL",
     "AI_LLM_CALL_DURATION_SECONDS",
+    "AI_LLM_FALLBACK_TOTAL",
     "AI_LLM_RETRY_ATTEMPTS_TOTAL",
     "AI_RAG_STAGE_DURATION_SECONDS",
     "AI_RESPONSE_CACHE_BY_INTENT",

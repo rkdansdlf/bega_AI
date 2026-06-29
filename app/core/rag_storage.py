@@ -167,6 +167,8 @@ CANONICAL_KBO_SOURCE_TABLES = {
     "game_pitching_stats",
     "game_summary",
 }
+DEFAULT_RAG_EMBEDDING_DIM = 256
+DEFAULT_RAG_EMBEDDING_VERSION = 2
 
 
 def normalize_content_for_hash(text: str) -> str:
@@ -337,7 +339,27 @@ def resolve_embedding_model(settings: Any) -> str:
 
 
 def resolve_embedding_version(settings: Any) -> int:
-    return max(1, int(getattr(settings, "rag_embedding_version", 1) or 1))
+    return max(
+        1,
+        int(
+            getattr(
+                settings,
+                "rag_embedding_version",
+                DEFAULT_RAG_EMBEDDING_VERSION,
+            )
+            or DEFAULT_RAG_EMBEDDING_VERSION
+        ),
+    )
+
+
+def resolve_embedding_dim(settings: Any) -> int:
+    return max(
+        1,
+        int(
+            getattr(settings, "embed_dim", DEFAULT_RAG_EMBEDDING_DIM)
+            or DEFAULT_RAG_EMBEDDING_DIM
+        ),
+    )
 
 
 def resolve_chunking_version(settings: Any) -> int:
@@ -521,9 +543,16 @@ def build_chunk_storage_fields(
             content_hash_value=hash_value,
         ),
         "embedding_model": embedding_model or resolve_embedding_model(settings),
-        "embedding_dim": embedding_dim
-        or int(getattr(settings, "embed_dim", 1536) or 1536),
-        "embedding_version": embedding_version or resolve_embedding_version(settings),
+        "embedding_dim": (
+            max(1, int(embedding_dim))
+            if embedding_dim is not None
+            else resolve_embedding_dim(settings)
+        ),
+        "embedding_version": (
+            max(1, int(embedding_version))
+            if embedding_version is not None
+            else resolve_embedding_version(settings)
+        ),
         "chunking_version": chunking_version or resolve_chunking_version(settings),
         "quality_score": infer_quality_score(
             resolved_source_type,
@@ -701,6 +730,53 @@ def build_upsert_tuple(
     )
 
 
+async def fetch_existing_embedding_texts_async(
+    cur: Any,
+    *,
+    content_hashes: Iterable[str],
+    embedding_model: str,
+    embedding_dim: int,
+    embedding_version: int,
+    chunking_version: int,
+) -> Dict[str, str]:
+    """Async (psycopg3 AsyncCursor) variant of ``fetch_existing_embedding_texts``.
+
+    Used by the async ingest router. The standalone sync ingest scripts keep
+    using the sync version above (they manage their own sync connections).
+    """
+    hashes = sorted({value for value in content_hashes if value})
+    if not hashes:
+        return {}
+    await cur.execute(
+        """
+        SELECT DISTINCT ON (content_hash)
+            content_hash,
+            embedding::text AS embedding_text
+        FROM rag_chunks
+        WHERE content_hash = ANY(%s)
+          AND embedding_model = %s
+          AND embedding_dim = %s
+          AND embedding_version = %s
+          AND chunking_version = %s
+          AND embedding IS NOT NULL
+        ORDER BY content_hash, updated_at DESC
+        """,
+        (hashes, embedding_model, embedding_dim, embedding_version, chunking_version),
+    )
+    rows = await cur.fetchall()
+    found: Dict[str, str] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            hash_value = row.get("content_hash")
+            embedding_text = row.get("embedding_text")
+        else:
+            hash_value = row[0]
+            embedding_text = row[1]
+        if hash_value and embedding_text:
+            found[str(hash_value)] = str(embedding_text)
+    return found
+
+
 def soft_deactivate_missing_parts(
     cur: Any,
     *,
@@ -709,6 +785,11 @@ def soft_deactivate_missing_parts(
     active_source_row_ids: Sequence[str],
 ) -> None:
     if not source_prefix:
+        return
+    if source_table == "game_summary":
+        return
+    active_ids = [value for value in active_source_row_ids if value]
+    if len(active_ids) == 1 and active_ids[0] == source_prefix:
         return
     cur.execute(
         """
@@ -723,7 +804,40 @@ def soft_deactivate_missing_parts(
             source_table,
             source_prefix,
             f"{source_prefix}#part%",
-            list(active_source_row_ids),
+            active_ids,
+        ),
+    )
+
+
+async def soft_deactivate_missing_parts_async(
+    cur: Any,
+    *,
+    source_table: str,
+    source_prefix: str,
+    active_source_row_ids: Sequence[str],
+) -> None:
+    """Async variant of ``soft_deactivate_missing_parts`` for the ingest router."""
+    if not source_prefix:
+        return
+    if source_table == "game_summary":
+        return
+    active_ids = [value for value in active_source_row_ids if value]
+    if len(active_ids) == 1 and active_ids[0] == source_prefix:
+        return
+    await cur.execute(
+        """
+        UPDATE rag_chunks
+        SET is_active = false,
+            updated_at = now()
+        WHERE source_table = %s
+          AND (source_row_id = %s OR source_row_id LIKE %s)
+          AND NOT (source_row_id = ANY(%s))
+        """,
+        (
+            source_table,
+            source_prefix,
+            f"{source_prefix}#part%",
+            active_ids,
         ),
     )
 

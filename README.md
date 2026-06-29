@@ -243,7 +243,7 @@ FastAPI Application (8001)
     
     # --- OpenRouter 설정 (기본) ---
     OPENROUTER_API_KEY=sk-or-...
-    OPENROUTER_MODEL=openai/gpt-4o-mini
+    OPENROUTER_MODEL=openrouter/free
     OPENROUTER_EMBED_MODEL=openai/text-embedding-3-small
     OPENROUTER_REFERER=https://begabaseball.xyz
     OPENROUTER_APP_TITLE=BEGA 챗봇

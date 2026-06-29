@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 
@@ -21,10 +22,10 @@ def _make_pool(connection):
     class _FakePool:
         def connection(self):
             class _Ctx:
-                def __enter__(self_inner):
+                async def __aenter__(self_inner):
                     return connection
 
-                def __exit__(self_inner, exc_type, exc, tb):
+                async def __aexit__(self_inner, exc_type, exc, tb):
                     return False
 
             return _Ctx()
@@ -37,8 +38,11 @@ def test_connection_scope_uses_pool_when_primary_connection_is_closed(monkeypatc
     pooled_conn = SimpleNamespace(closed=False, label="pooled")
     monkeypatch.setattr("app.deps.get_connection_pool", lambda: _make_pool(pooled_conn))
 
-    with connection_scope(primary_conn) as conn:
-        assert conn is pooled_conn
+    async def _run():
+        async with connection_scope(primary_conn) as conn:
+            assert conn is pooled_conn
+
+    asyncio.run(_run())
 
 
 def test_document_query_tool_retries_with_fresh_connection(monkeypatch, caplog):
@@ -50,7 +54,7 @@ def test_document_query_tool_retries_with_fresh_connection(monkeypatch, caplog):
 
     calls = []
 
-    def _fake_search(conn, query, limit):
+    async def _fake_search(conn, query, limit):
         calls.append((conn, query, limit))
         if conn is primary_conn:
             raise RuntimeError("connection is closed")
@@ -58,7 +62,7 @@ def test_document_query_tool_retries_with_fresh_connection(monkeypatch, caplog):
 
     monkeypatch.setattr(tool, "_search_documents_once", _fake_search)
 
-    result = tool.search_documents("테스트", limit=3)
+    result = asyncio.run(tool.search_documents("테스트", limit=3))
 
     assert (
         f"[{DOCUMENT_QUERY_COMPONENT}] event=query_start action={ACTION_SEARCH_DOCUMENTS} value=테스트"
@@ -126,7 +130,7 @@ def test_document_query_tool_uses_exact_term_fallback_on_similarity_timeout(
 
     monkeypatch.setattr(tool, "_embed_query", lambda query: [0.1, 0.2, 0.3])
 
-    def _fake_similarity_search(
+    async def _fake_similarity_search(
         conn, embedding, *, limit, keyword=None, filters=None, settings=None, intent="", **kwargs
     ):
         similarity_calls.append(keyword)
@@ -138,10 +142,9 @@ def test_document_query_tool_uses_exact_term_fallback_on_similarity_timeout(
     monkeypatch.setattr(
         "app.core.retrieval.similarity_search", _fake_similarity_search
     )
-    monkeypatch.setattr(
-        tool,
-        "_search_exact_term_documents",
-        lambda conn, query_lower, limit: [
+
+    async def _fake_exact_term(conn, query_lower, limit):
+        return [
             {
                 "title": "WHIP 설명",
                 "content": "설명",
@@ -151,10 +154,13 @@ def test_document_query_tool_uses_exact_term_fallback_on_similarity_timeout(
                 "similarity": 1.0,
                 "combined_score": 1.0,
             }
-        ],
-    )
+        ]
 
-    docs = tool._search_documents_once(SimpleNamespace(), "WHIP 뜻이 뭐야?", limit=1)
+    monkeypatch.setattr(tool, "_search_exact_term_documents", _fake_exact_term)
+
+    docs = asyncio.run(
+        tool._search_documents_once(SimpleNamespace(), "WHIP 뜻이 뭐야?", limit=1)
+    )
 
     assert similarity_calls == ["WHIP 뜻이 뭐야?", None]
     assert len(docs) == 1
@@ -170,7 +176,7 @@ def test_regulation_query_tool_retries_with_fresh_connection(monkeypatch, caplog
 
     calls = []
 
-    def _fake_search(conn, query, limit):
+    async def _fake_search(conn, query, limit):
         calls.append((conn, query, limit))
         if conn is primary_conn:
             raise RuntimeError("connection is closed")
@@ -188,7 +194,7 @@ def test_regulation_query_tool_retries_with_fresh_connection(monkeypatch, caplog
 
     monkeypatch.setattr(tool, "_search_regulation_once", _fake_search)
 
-    result = tool.search_regulation("FA 보상선수", limit=2)
+    result = asyncio.run(tool.search_regulation("FA 보상선수", limit=2))
 
     assert (
         f"[{REGULATION_QUERY_COMPONENT}] event=query_start action={ACTION_SEARCH_REGULATION} value=FA 보상선수"

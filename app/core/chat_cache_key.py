@@ -13,11 +13,12 @@ import hashlib
 import json
 import re
 import unicodedata
+from datetime import date
 from typing import Any, Dict, Optional, Tuple
 
 # 캐시 스키마 버전.
 # 프롬프트·정규화 방식이 변경될 때 올리면 기존 캐시가 자동 미스 처리됨.
-CHAT_CACHE_SCHEMA_VERSION = "v2"
+CHAT_CACHE_SCHEMA_VERSION = "v12"
 
 # intent별 TTL (초 단위).
 # stats_lookup/comparison/recent_form은 짧게, 선수 프로필·규정 설명은 길게.
@@ -117,6 +118,23 @@ def has_temporal_keyword(question: str) -> bool:
     """
     normalized = question.lower()
     if any(kw in normalized for kw in TEMPORAL_KEYWORDS):
+        return True
+    current_year_marker = f"{date.today().year}년"
+    if current_year_marker in normalized and any(
+        kw in normalized
+        for kw in (
+            "홈런왕",
+            "홈런 1위",
+            "최다 홈런",
+            "최다안타",
+            "안타왕",
+            "안타 1위",
+            "순위",
+            "승률",
+            "리더보드",
+            "랭킹",
+        )
+    ):
         return True
     if re.search(r"\d{1,2}월\s*\d{1,2}일", normalized):
         return True

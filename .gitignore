@@ -26,6 +26,7 @@ scripts/migration_progress.json
 migration.log
 server_log.txt
 *.txt
+!scripts/smoke_chatbot_quality_db_fast_path_candidates_23.txt
 
 # Local diagnostics and generated artifacts
 logs/
@@ -36,4 +37,25 @@ check_embedding.py
 test_diagnosis.py
 test_rag_search.py
 /reports
-/tests
+/tests/*
+!/tests/
+!/tests/test_baseball_external_collection_policy.py
+!/tests/test_audit_embedding_256_migration.py
+!/tests/test_chat_queue.py
+!/tests/test_llm_model_candidates.py
+!/tests/test_cleanup_embedding_256_warnings.py
+!/tests/test_hnsw_migration.py
+!/tests/test_rag_storage_schema.py
+!/tests/test_analyze_operator_data_required.py
+!/tests/test_build_operator_data_handoff.py
+!/tests/test_operator_data_db_prereqs.py
+!/tests/test_operator_data_ingest.py
+!/tests/test_operator_data_p0_filled_intake.py
+!/tests/test_operator_data_p0_input_audit.py
+!/tests/test_operator_data_p0_input_packet.py
+!/tests/test_operator_data_p0_recovery_status.py
+!/tests/test_operator_data_p0_smoke.py
+!/tests/test_operator_data_query.py
+!/tests/test_operator_data_recovery_gate.py
+!/tests/test_operator_data_validation.py
+!/tests/test_rag_recovered_fast_path.py

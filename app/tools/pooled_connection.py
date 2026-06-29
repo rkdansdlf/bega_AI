@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 import logging
-from typing import Callable, Iterator, TypeVar
+from typing import Awaitable, Callable, AsyncIterator, TypeVar
 
 import psycopg
 
 T = TypeVar("T")
 
 
-@contextmanager
-def connection_scope(
-    connection: psycopg.Connection | None,
+@asynccontextmanager
+async def connection_scope(
+    connection: psycopg.AsyncConnection | None,
     *,
     force_fresh: bool = False,
-) -> Iterator[psycopg.Connection]:
+) -> AsyncIterator[psycopg.AsyncConnection]:
     conn = connection
     if (
         not force_fresh
@@ -26,23 +26,23 @@ def connection_scope(
 
     from ..deps import get_connection_pool
 
-    with get_connection_pool().connection() as pooled_conn:
+    async with get_connection_pool().connection() as pooled_conn:
         yield pooled_conn
 
 
-def run_with_fresh_connection_retry(
+async def run_with_fresh_connection_retry(
     *,
-    connection: psycopg.Connection | None,
-    operation: Callable[[psycopg.Connection], T],
+    connection: psycopg.AsyncConnection | None,
+    operation: Callable[[psycopg.AsyncConnection], Awaitable[T]],
     logger: logging.Logger,
     retry_warning_message: str,
 ) -> T:
     try:
-        with connection_scope(connection) as conn:
-            return operation(conn)
+        async with connection_scope(connection) as conn:
+            return await operation(conn)
     except Exception as exc:
         if "connection is closed" not in str(exc).lower():
             raise
         logger.warning(retry_warning_message, exc)
-        with connection_scope(connection, force_fresh=True) as conn:
-            return operation(conn)
+        async with connection_scope(connection, force_fresh=True) as conn:
+            return await operation(conn)

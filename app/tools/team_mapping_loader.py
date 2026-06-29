@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any, Callable, Dict, List
 
-from psycopg import Connection as PgConnection
+from psycopg import AsyncConnection as PgConnection
 from psycopg.rows import dict_row
 
 TEAM_MAPPING_ROWS_QUERY = """
@@ -62,19 +62,16 @@ def load_cached_team_mapping_rows(
         return [dict(row) for row in _team_mapping_cache_rows]
 
 
-def fetch_team_mapping_rows(connection: PgConnection) -> List[Dict[str, Any]]:
-    cursor = connection.cursor(row_factory=dict_row)
-    try:
-        cursor.execute(TEAM_MAPPING_ROWS_QUERY)
-        return cursor.fetchall()
-    finally:
-        cursor.close()
+async def fetch_team_mapping_rows(connection: PgConnection) -> List[Dict[str, Any]]:
+    async with connection.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(TEAM_MAPPING_ROWS_QUERY)
+        return await cursor.fetchall()
 
 
-def load_team_mappings_with_retry(
+async def load_team_mappings_with_retry(
     *,
     connection: PgConnection,
-    fetch_rows: Callable[[PgConnection], List[Dict[str, Any]]],
+    fetch_rows: Callable[[PgConnection], Any],
     apply_rows: Callable[[List[Dict[str, Any]], str], None],
     apply_snapshot_rows: Callable[[List[Dict[str, Any]]], None],
     load_snapshot: Callable[[], List[Dict[str, Any]] | None],
@@ -87,7 +84,7 @@ def load_team_mappings_with_retry(
     defaults_warning_message: str,
 ) -> TeamMappingLoadResult:
     try:
-        rows = fetch_rows(connection)
+        rows = await fetch_rows(connection)
         if rows:
             apply_rows(rows, primary_source)
             update_cached_team_mapping_rows(rows)
@@ -98,8 +95,8 @@ def load_team_mappings_with_retry(
     try:
         from app.deps import get_connection_pool
 
-        with get_connection_pool().connection() as retry_conn:
-            rows = fetch_rows(retry_conn)
+        async with get_connection_pool().connection() as retry_conn:
+            rows = await fetch_rows(retry_conn)
         if rows:
             apply_rows(rows, retry_source)
             update_cached_team_mapping_rows(rows)

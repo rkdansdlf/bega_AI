@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import psycopg
@@ -16,10 +17,10 @@ class _PoolTimeoutPool:
 
     def connection(self):
         class _Ctx:
-            def __enter__(self_inner):
+            async def __aenter__(self_inner):
                 raise PoolTimeout("timed out waiting for pool")
 
-            def __exit__(self_inner, exc_type, exc, tb):
+            async def __aexit__(self_inner, exc_type, exc, tb):
                 return False
 
         return _Ctx()
@@ -31,10 +32,10 @@ class _OperationalErrorPool:
 
     def connection(self):
         class _Ctx:
-            def __enter__(self_inner):
+            async def __aenter__(self_inner):
                 raise psycopg.OperationalError("could not connect")
 
-            def __exit__(self_inner, exc_type, exc, tb):
+            async def __aexit__(self_inner, exc_type, exc, tb):
                 return False
 
         return _Ctx()
@@ -64,7 +65,7 @@ def test_get_connection_pool_checks_connection_before_borrow(monkeypatch) -> Non
         "get_settings",
         lambda: type("_Settings", (), {"database_url": "postgresql://example/db"})(),
     )
-    monkeypatch.setattr(deps, "ConnectionPool", _FakeConnectionPool)
+    monkeypatch.setattr(deps, "AsyncConnectionPool", _FakeConnectionPool)
 
     pool = deps.get_connection_pool()
 
@@ -78,7 +79,7 @@ def test_get_db_connection_logs_pool_stats_on_pool_timeout(monkeypatch, caplog) 
     caplog.set_level(logging.ERROR)
 
     with pytest.raises(HTTPException) as excinfo:
-        next(deps.get_db_connection())
+        asyncio.run(deps.get_db_connection().__anext__())
 
     assert excinfo.value.status_code == 503
     assert "Pool timeout while acquiring connection" in caplog.text
@@ -93,7 +94,7 @@ def test_get_db_connection_logs_pool_stats_on_operational_error(
     caplog.set_level(logging.ERROR)
 
     with pytest.raises(HTTPException) as excinfo:
-        next(deps.get_db_connection())
+        asyncio.run(deps.get_db_connection().__anext__())
 
     assert excinfo.value.status_code == 503
     assert "Operational error while acquiring connection" in caplog.text

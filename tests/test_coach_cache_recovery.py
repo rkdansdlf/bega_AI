@@ -8,15 +8,15 @@ class _Result:
         self._fetchone_value = fetchone_value
         self.rowcount = rowcount
 
-    def fetchone(self):
+    async def fetchone(self):
         return self._fetchone_value
 
 
 class _TransactionCtx:
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
 
@@ -24,10 +24,10 @@ class _ConnectionCtx:
     def __init__(self, conn):
         self._conn = conn
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self._conn
 
-    def __exit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
 
@@ -36,7 +36,7 @@ class _ScriptedConn:
         self._steps = list(steps)
         self.commits = 0
 
-    def execute(self, sql, params):
+    async def execute(self, sql, params):
         if not self._steps:
             raise AssertionError(f"Unexpected SQL: {sql}")
         step = self._steps.pop(0)
@@ -48,7 +48,7 @@ class _ScriptedConn:
             rowcount=step.get("rowcount", 0),
         )
 
-    def commit(self):
+    async def commit(self):
         self.commits += 1
 
     def transaction(self):
@@ -73,7 +73,7 @@ def test_claim_cache_generation_recreates_missing_row():
     )
 
     gate, cached, error_message, error_code, attempt_count = (
-        coach_router._claim_cache_generation(
+        asyncio.run(coach_router._claim_cache_generation(
             pool=_Pool(conn),
             cache_key="cache",
             team_id="LG",
@@ -82,7 +82,7 @@ def test_claim_cache_generation_recreates_missing_row():
             model_name="openrouter/free",
             lease_owner="lease-owner",
             completed_ttl_seconds=None,
-        )
+        ))
     )
 
     assert gate == "ROW_RECREATED"
@@ -90,6 +90,70 @@ def test_claim_cache_generation_recreates_missing_row():
     assert error_message is None
     assert error_code is None
     assert attempt_count == 1
+
+
+def test_read_completed_cache_if_fresh_returns_manual_cache_without_claiming():
+    cached_payload = {
+        "response": {
+            "headline": "캐시된 AI 코치 분석",
+            "detailed_markdown": "## 경기 복기\n- 기존 분석을 조회합니다.",
+            "coach_note": "완료된 캐시를 재사용합니다.",
+            "analysis": {
+                "summary": "기존 분석입니다.",
+                "verdict": "캐시 조회 결과입니다.",
+                "strengths": [],
+                "weaknesses": [],
+                "risks": [],
+                "why_it_matters": [],
+                "swing_factors": [],
+                "watch_points": [],
+                "uncertainty": [],
+            },
+            "key_metrics": [],
+        },
+        "_meta": {
+            "data_quality": "insufficient",
+            "game_status_bucket": "COMPLETED",
+            "used_evidence": ["game", "kbo_seasons"],
+            "grounding_reasons": ["missing_summary"],
+        },
+    }
+    conn = _ScriptedConn(
+        [
+            {
+                "contains": "SELECT status, response_json",
+                "fetchone": (
+                    "COMPLETED",
+                    cached_payload,
+                    None,
+                    None,
+                    3,
+                    None,
+                    None,
+                    None,
+                ),
+            },
+        ]
+    )
+
+    gate, cached, error_message, error_code, attempt_count = (
+        asyncio.run(coach_router._read_completed_cache_if_fresh(
+            pool=_Pool(conn),
+            cache_key="cache",
+            completed_ttl_seconds=None,
+            request_mode=coach_router.COACH_REQUEST_MODE_MANUAL,
+            expected_data_quality="insufficient",
+            expected_used_evidence=["game", "kbo_seasons"],
+            expected_game_status_bucket="COMPLETED",
+            current_root_causes=["missing_summary"],
+        ))
+    )
+
+    assert gate == "HIT"
+    assert cached == cached_payload
+    assert error_message is None
+    assert error_code is None
+    assert attempt_count == 3
 
 
 def test_store_completed_cache_reinserts_missing_row():
@@ -101,7 +165,7 @@ def test_store_completed_cache_reinserts_missing_row():
         ]
     )
 
-    result = coach_router._store_completed_cache(
+    result = asyncio.run(coach_router._store_completed_cache(
         pool=_Pool(conn),
         cache_key="cache",
         lease_owner="lease-owner",
@@ -116,7 +180,7 @@ def test_store_completed_cache_reinserts_missing_row():
             used_evidence=["team_summary"],
             attempt_count=1,
         ),
-    )
+    ))
 
     assert result["outcome"] == "inserted_missing_row"
     assert conn.commits == 1
@@ -131,7 +195,7 @@ def test_store_failed_cache_reinserts_missing_row():
         ]
     )
 
-    result = coach_router._store_failed_cache(
+    result = asyncio.run(coach_router._store_failed_cache(
         pool=_Pool(conn),
         cache_key="cache",
         lease_owner="lease-owner",
@@ -142,7 +206,7 @@ def test_store_failed_cache_reinserts_missing_row():
         attempt_count=2,
         error_code="empty_response",
         error_message="empty_response",
-    )
+    ))
 
     assert result["outcome"] == "inserted_missing_row"
     assert conn.commits == 1
@@ -159,7 +223,7 @@ def test_store_completed_cache_reports_finalize_conflict():
         ]
     )
 
-    result = coach_router._store_completed_cache(
+    result = asyncio.run(coach_router._store_completed_cache(
         pool=_Pool(conn),
         cache_key="cache",
         lease_owner="lease-owner",
@@ -174,7 +238,7 @@ def test_store_completed_cache_reports_finalize_conflict():
             used_evidence=["team_summary"],
             attempt_count=1,
         ),
-    )
+    ))
 
     assert result["outcome"] == "finalize_conflict"
     assert result["lease_owner"] == "other-owner"
