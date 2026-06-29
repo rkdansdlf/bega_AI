@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 import psycopg
 import httpx
-from psycopg_pool import ConnectionPool, PoolTimeout
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from fastapi import Depends, Header, HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ from .core.chat_cache import CREATE_TABLE_SQL as CHAT_CACHE_DDL
 from .core.chat_cache import cleanup_expired as _cleanup_expired_cache
 from .core.security_metrics import record_security_event
 
-# 전역 커넥션 풀 (앱 시작 시 한 번만 생성)
-_connection_pool: Optional[ConnectionPool] = None
+# 전역 커넥션 풀 (앱 시작 시 한 번만 생성). 전 계층이 async psycopg3로 통일됨.
+_connection_pool: Optional[AsyncConnectionPool] = None
 DB_POOL_MIN_SIZE = 1
 DB_POOL_MAX_SIZE = 30
 
@@ -82,7 +82,6 @@ def get_shared_baseball_agent_runtime() -> BaseballAgentRuntime:
 
 COACH_OPENROUTER_BLOCKED_MODELS = {
     "openrouter/auto",
-    "upstage/solar-pro-3:free",
 }
 COACH_OPENROUTER_RETRY_LIMIT = 1
 COACH_OPENROUTER_RETRY_BACKOFF_SECONDS = 0.75
@@ -169,9 +168,6 @@ def resolve_coach_openrouter_models(
     if candidates:
         return candidates
 
-    fallback = str(primary_model or "").strip()
-    if fallback:
-        return [fallback]
     return ["openrouter/free"]
 
 
@@ -198,17 +194,22 @@ def clamp_coach_openrouter_max_tokens(requested_tokens: int) -> int:
     return min(normalized, COACH_OPENROUTER_MAX_TOKENS)
 
 
-def get_connection_pool() -> ConnectionPool:
-    """커넥션 풀을 가져오거나 생성합니다."""
+def get_connection_pool() -> AsyncConnectionPool:
+    """커넥션 풀을 가져오거나 생성합니다.
+
+    AsyncConnectionPool은 실행 중인 이벤트 루프에서 ``await pool.open()``으로 열어야
+    하므로 ``open=False``로 생성하고, lifespan startup에서 한 번 open 한다.
+    """
     global _connection_pool
 
     if _connection_pool is None:
         settings = get_settings()
-        _connection_pool = ConnectionPool(
+        _connection_pool = AsyncConnectionPool(
             conninfo=settings.database_url,
             min_size=DB_POOL_MIN_SIZE,
             max_size=DB_POOL_MAX_SIZE,
-            check=ConnectionPool.check_connection,
+            check=AsyncConnectionPool.check_connection,
+            open=False,  # lifespan에서 await pool.open()으로 명시적 오픈
             # TCP keepalive 옵션 및 기타 설정
             kwargs={
                 "keepalives": 1,
@@ -220,7 +221,7 @@ def get_connection_pool() -> ConnectionPool:
             },
         )
         logger.info(
-            "[DB] Connection pool initialized pool_stats=%s",
+            "[DB] Connection pool created (open pending) pool_stats=%s",
             _format_connection_pool_stats(_connection_pool),
         )
 
@@ -264,11 +265,11 @@ def _format_connection_pool_stats(pool_instance: Optional[Any] = None) -> str:
     )
 
 
-def close_connection_pool():
+async def close_connection_pool() -> None:
     """앱 종료 시 커넥션 풀을 닫습니다."""
     global _connection_pool
     if _connection_pool is not None:
-        _connection_pool.close()
+        await _connection_pool.close()
         _connection_pool = None
 
 
@@ -282,7 +283,7 @@ async def _chat_cache_cleanup_loop(interval_seconds: int = 3600) -> None:
         await asyncio.sleep(interval_seconds)
         try:
             pool = get_connection_pool()
-            with pool.connection() as conn:
+            async with pool.connection() as conn:
                 deleted = await _cleanup_expired_cache(conn)
             if deleted:
                 logger.info("[ChatCache] Cleanup: %d expired entries deleted", deleted)
@@ -323,24 +324,96 @@ async def _db_pool_metrics_loop(interval_seconds: int = 30) -> None:
             logger.debug("[DBPoolMetrics] publish loop error: %s", exc)
 
 
+async def _coach_failed_cache_recovery_loop() -> None:
+    """FAILED_LOCKED Coach 캐시를 주기적으로 풀어주는 백그라운드 루프.
+
+    재시도 가능(retryable) 오류로 최대 시도 횟수에 도달해 잠긴 row만 대상으로 하며,
+    쿨다운(updated_at 경과)과 사이클당 처리 상한으로 무한 재생성/LLM 비용 폭주를
+    방지한다. non-retryable 오류 row와 살아있는 PENDING/COMPLETED는 건드리지 않는다.
+    삭제된 row는 다음 분석 요청에서 자연 재생성된다. 기본 비활성(env로 opt-in).
+    """
+    settings = get_settings()
+    interval_seconds = max(60, int(settings.coach_failed_recovery_interval_seconds))
+    cooldown_seconds = max(0, int(settings.coach_failed_recovery_cooldown_seconds))
+    max_rows = max(1, int(settings.coach_failed_recovery_max_rows_per_cycle))
+
+    # coach 모듈은 deps를 import하므로 순환 방지를 위해 지연 import한다.
+    from .routers.coach import (
+        RETRYABLE_CACHE_ERROR_CODES,
+        COACH_CACHE_MAX_RETRYABLE_ATTEMPTS,
+    )
+
+    retryable_codes = list(RETRYABLE_CACHE_ERROR_CODES)
+    logger.info(
+        "[CoachRecovery] FAILED_LOCKED recovery loop started "
+        "(interval=%ss, cooldown=%ss, max_rows=%s)",
+        interval_seconds,
+        cooldown_seconds,
+        max_rows,
+    )
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            pool = get_connection_pool()
+            async with pool.connection() as conn:
+                rows = await (
+                    await conn.execute(
+                        """
+                    DELETE FROM coach_analysis_cache
+                    WHERE cache_key IN (
+                        SELECT cache_key FROM coach_analysis_cache
+                        WHERE status = 'FAILED'
+                          AND error_code = ANY(%s)
+                          AND attempt_count >= %s
+                          AND updated_at < now() - make_interval(secs => %s)
+                        ORDER BY updated_at ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING cache_key
+                    """,
+                        (
+                            retryable_codes,
+                            COACH_CACHE_MAX_RETRYABLE_ATTEMPTS,
+                            cooldown_seconds,
+                            max_rows,
+                        ),
+                    )
+                ).fetchall()
+                await conn.commit()
+            if rows:
+                logger.info(
+                    "[CoachRecovery] released %d FAILED_LOCKED row(s) for regeneration",
+                    len(rows),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CoachRecovery] recovery loop error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app):
     """앱 시작/종료 시 실행되는 lifespan 이벤트"""
     # 시작 시
     load_clf()
-    pool = get_connection_pool()  # 커넥션 풀 초기화
+    pool = get_connection_pool()  # 커넥션 풀 생성
+    # AsyncConnectionPool은 이벤트 루프 내에서 열어야 한다.
+    try:
+        await pool.open(wait=True, timeout=10.0)
+        logger.info("[Lifespan] connection pool opened")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Lifespan] connection pool open failed: %s", exc)
     _initialize_shared_baseball_agent_runtime()
 
     # [Coach Caching] 캐시 테이블 자동 생성 (편의성)
     try:
-        with pool.connection() as conn:
-            conn.execute("""
+        async with pool.connection() as conn:
+            await conn.execute("""
             CREATE TABLE IF NOT EXISTS coach_analysis_cache (
                 cache_key varchar(64) primary key,  -- SHA256 Hash of (team_id, year, focus, question)
                 team_id varchar(10) not null,
                 year int not null,
                 prompt_version varchar(32) not null, -- e.g. "v2"
-                model_name varchar(50) not null,     -- e.g. "upstage/solar-pro-3:free"
+                model_name varchar(50) not null,     -- e.g. "openrouter/free"
                 status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
                 response_json jsonb,                 -- Completed analysis result
                 error_message text,                  -- Failure reason
@@ -374,8 +447,8 @@ async def lifespan(app):
 
     # [Chat Caching] chat_response_cache 테이블 자동 생성
     try:
-        with pool.connection() as conn:
-            conn.execute(CHAT_CACHE_DDL)
+        async with pool.connection() as conn:
+            await conn.execute(CHAT_CACHE_DDL)
         logger.info("[Lifespan] chat_response_cache table ensured")
     except Exception as exc:
         logger.warning("[Lifespan] chat_response_cache DDL failed: %s", exc)
@@ -387,6 +460,12 @@ async def lifespan(app):
     # [Observability] DB 풀 stats를 주기적으로 Prometheus gauge에 publish
     db_pool_metrics_task = asyncio.create_task(_db_pool_metrics_loop())
     logger.info("[Lifespan] db pool metrics publisher started (interval=30s)")
+
+    # [Coach Recovery] FAILED_LOCKED 캐시 자동 복구 루프 (기본 비활성, env opt-in)
+    coach_recovery_task: Optional[asyncio.Task] = None
+    if get_settings().coach_failed_recovery_enabled:
+        coach_recovery_task = asyncio.create_task(_coach_failed_cache_recovery_loop())
+        logger.info("[Lifespan] coach FAILED_LOCKED recovery loop started")
 
     # [Embedding Cache] 백엔드 미리 초기화 (startup 로그 출력)
     try:
@@ -401,7 +480,12 @@ async def lifespan(app):
     # 종료 시: cleanup 태스크 취소 후 리소스 정리
     cleanup_task.cancel()
     db_pool_metrics_task.cancel()
-    for task in (cleanup_task, db_pool_metrics_task):
+    if coach_recovery_task is not None:
+        coach_recovery_task.cancel()
+    background_tasks = [cleanup_task, db_pool_metrics_task]
+    if coach_recovery_task is not None:
+        background_tasks.append(coach_recovery_task)
+    for task in background_tasks:
         try:
             await task
         except asyncio.CancelledError:
@@ -424,18 +508,16 @@ async def lifespan(app):
         logger.warning("[Lifespan] embedding cache cleanup failed: %s", exc)
 
     reset_shared_baseball_agent_runtime()
-    close_connection_pool()  # 모든 커넥션 정리
+    await close_connection_pool()  # 모든 커넥션 정리
 
 
-def get_db_connection() -> Generator[psycopg.Connection, None, None]:
-    """커넥션 풀에서 커넥션을 가져와서 사용 후 반환합니다."""
+async def get_db_connection() -> AsyncGenerator[psycopg.AsyncConnection, None]:
+    """커넥션 풀에서 비동기 커넥션을 가져와서 사용 후 반환합니다."""
     pool_instance = get_connection_pool()
 
-    # psycopg_pool은 context manager를 지원하여 안전하게 반환함
+    # AsyncConnectionPool은 async context manager를 지원하여 안전하게 반환함
     try:
-        with pool_instance.connection() as conn:
-            # 연결 상태 확인은 psycopg3에서 더 지능적으로 처리되지만
-            # 명시적인 확인이 필요한 경우 execute("SELECT 1") 등을 사용 가능
+        async with pool_instance.connection() as conn:
             yield conn
     except PoolTimeout as exc:
         logger.error(
@@ -477,7 +559,7 @@ def get_rag_pipeline() -> RAGPipeline:
 
 
 async def get_agent(
-    conn: psycopg.Connection = Depends(get_db_connection),
+    conn: psycopg.AsyncConnection = Depends(get_db_connection),
 ) -> AsyncGenerator[BaseballStatisticsAgent, None]:
     """Dependency to get an instance of the BaseballStatisticsAgent."""
     runtime = get_shared_baseball_agent_runtime()
