@@ -70,4 +70,3 @@ If a required row is missing, stale, unverified, or inconsistent:
 2. Emit `BASEBALL_DATA_SYNC_REQUIRED` details in stream meta or reports.
 3. Wait for the external trusted baseball data project to sync verified data.
 4. Re-run Coach/backfill/smoke after the trusted sync is reflected in the internal DB.
-

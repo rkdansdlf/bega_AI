@@ -96,4 +96,3 @@ COACH_ANALYZE_LEGACY_ENABLED=0
 | 날짜 | 환경 | legacy 호출량 | 410 발생량 | 정상 analyze 5xx | 정상 SSE 완료율 | 판단 |
 |---|---|---:|---:|---:|---:|---|
 | YYYY-MM-DD | staging/prod | 0 | 0 | 0 | 100% | continue |
-
