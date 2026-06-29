@@ -23,6 +23,8 @@ DEFAULT_CORS_ORIGINS = [
 ]
 LOCAL_DEV_AI_INTERNAL_TOKEN = "local-dev-ai-internal-token"
 LOCAL_DEV_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "host.docker.internal"}
+DEFAULT_VISION_MODEL = "google/gemma-4-31b-it:free"
+DEFAULT_VISION_FALLBACK_MODELS = "mistralai/mistral-small-3.2-24b-instruct"
 
 
 class Settings(BaseSettings):
@@ -43,11 +45,19 @@ class Settings(BaseSettings):
     # --- 기본 애플리케이션 설정 ---
     app_name: str = "KBO AI Service"
     debug: bool = False
+    # 배포 환경 명시 신호. prod 배포에서 APP_ENV=production 으로 설정하면
+    # 로컬 전용 내부 토큰 폴백이 비활성화되고 기동 시 토큰 검증 가드가 작동한다.
+    # 미설정(빈 값)이면 CORS origin 휴리스틱으로 로컬 여부를 추론한다(기존 동작 유지).
+    app_env: str = Field("", validation_alias="APP_ENV")
     # CORS 설정(자격 증명 쿠키 사용 시 '* '는 허용되지 않음)
     # 로컬 개발 기준 기본값은 Vite/개발 서버에서 사용되는 대표 도메인으로 제한
     cors_origins_raw: str = Field(
         default=",".join(DEFAULT_CORS_ORIGINS),
         validation_alias="CORS_ORIGINS",
+    )
+    ai_docs_enabled: Optional[bool] = Field(None, validation_alias="AI_DOCS_ENABLED")
+    ai_metrics_enabled: Optional[bool] = Field(
+        None, validation_alias="AI_METRICS_ENABLED"
     )
 
     # --- 데이터베이스 설정 ---
@@ -102,7 +112,7 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_API_KEY"
     )
     openrouter_model: str = Field(
-        "openrouter/owl-alpha", validation_alias="OPENROUTER_MODEL"
+        "openrouter/free", validation_alias="OPENROUTER_MODEL"
     )
     # Pydantic Settings tries to parse List[str] as JSON. read as str to avoid error.
     # Default: no fallback by default; use OPENROUTER_FALLBACK_MODELS when explicitly set.
@@ -132,8 +142,10 @@ class Settings(BaseSettings):
     openrouter_embed_model: Optional[str] = Field(
         "openai/text-embedding-3-small", validation_alias="OPENROUTER_EMBED_MODEL"
     )
-    vision_model: str = Field(
-        "google/gemini-2.0-flash-001", validation_alias="VISION_MODEL"
+    vision_model: str = Field(DEFAULT_VISION_MODEL, validation_alias="VISION_MODEL")
+    vision_fallback_models_raw: str = Field(
+        DEFAULT_VISION_FALLBACK_MODELS,
+        validation_alias="VISION_FALLBACK_MODELS",
     )
 
     # --- Coach LLM 설정 ---
@@ -163,6 +175,23 @@ class Settings(BaseSettings):
     )
     coach_brief_max_output_tokens: int = Field(
         8000, validation_alias="COACH_BRIEF_MAX_OUTPUT_TOKENS"
+    )
+
+    # --- Coach FAILED_LOCKED 자동 복구 루프 ---
+    # 기본 비활성: 운영자가 명시적으로 켤 때만 백그라운드 자동 삭제가 동작한다.
+    coach_failed_recovery_enabled: bool = Field(
+        False, validation_alias="COACH_FAILED_RECOVERY_ENABLED"
+    )
+    coach_failed_recovery_interval_seconds: int = Field(
+        1800, validation_alias="COACH_FAILED_RECOVERY_INTERVAL_SECONDS"
+    )
+    # 재시도 가능 오류로 잠긴 row를 풀기 전 최소 경과 시간(쿨다운).
+    coach_failed_recovery_cooldown_seconds: int = Field(
+        3600, validation_alias="COACH_FAILED_RECOVERY_COOLDOWN_SECONDS"
+    )
+    # 한 사이클당 처리 상한(무한 재생성/LLM 비용 폭주 방지).
+    coach_failed_recovery_max_rows_per_cycle: int = Field(
+        50, validation_alias="COACH_FAILED_RECOVERY_MAX_ROWS_PER_CYCLE"
     )
 
     @property
@@ -287,6 +316,18 @@ class Settings(BaseSettings):
     chat_sse_ping_seconds: int = Field(15, validation_alias="CHAT_SSE_PING_SECONDS")
     chat_cached_stream_chunk_size: int = Field(
         200, validation_alias="CHAT_CACHED_STREAM_CHUNK_SIZE"
+    )
+    chat_queue_enabled: bool = Field(True, validation_alias="CHAT_QUEUE_ENABLED")
+    chat_queue_rpm_limit: int = Field(18, validation_alias="CHAT_QUEUE_RPM_LIMIT")
+    chat_queue_window_seconds: int = Field(
+        60, validation_alias="CHAT_QUEUE_WINDOW_SECONDS"
+    )
+    chat_queue_max_size: int = Field(60, validation_alias="CHAT_QUEUE_MAX_SIZE")
+    chat_queue_max_wait_seconds: int = Field(
+        180, validation_alias="CHAT_QUEUE_MAX_WAIT_SECONDS"
+    )
+    chat_queue_status_interval_seconds: int = Field(
+        1, validation_alias="CHAT_QUEUE_STATUS_INTERVAL_SECONDS"
     )
     chat_dynamic_token_enabled: bool = Field(
         True, validation_alias="CHAT_DYNAMIC_TOKEN_ENABLED"
@@ -564,6 +605,10 @@ class Settings(BaseSettings):
         return self._parse_string_list(self.chat_tool_parallel_serial_tools_raw)
 
     @property
+    def vision_fallback_models(self) -> List[str]:
+        return self._parse_string_list(self.vision_fallback_models_raw)
+
+    @property
     def cors_allowed_origins(self) -> List[str]:
         """CORS 정책에 따라 허용된 출처 목록을 반환합니다."""
         origins = self.cors_origins
@@ -585,13 +630,63 @@ class Settings(BaseSettings):
         return all(self._is_local_origin(origin) for origin in origins)
 
     @property
+    def is_production_environment(self) -> bool:
+        """배포가 운영(production)인지 판별한다.
+
+        APP_ENV이 명시되면 그 값을 신뢰하고, 미설정이면 CORS origin이 모두
+        로컬인지로 추론한다(기존 휴리스틱).
+        """
+        env = (self.app_env or "").strip().lower()
+        if env in {"prod", "production"}:
+            return True
+        if env in {"local", "dev", "development", "test", "testing", "ci"}:
+            return False
+        return not self.is_local_dev_environment
+
+    @property
+    def api_docs_enabled(self) -> bool:
+        if self.ai_docs_enabled is not None:
+            return self.ai_docs_enabled
+        return not self.is_production_environment
+
+    @property
+    def metrics_enabled(self) -> bool:
+        if self.ai_metrics_enabled is not None:
+            return self.ai_metrics_enabled
+        return not self.is_production_environment
+
+    @property
     def resolved_ai_internal_token(self) -> Optional[str]:
         configured = (self.ai_internal_token or "").strip()
         if configured:
             return configured
-        if self.is_local_dev_environment:
+        # 로컬 개발 편의 폴백 — 운영 환경에서는 절대 사용하지 않는다.
+        if self.is_local_dev_environment and not self.is_production_environment:
             return LOCAL_DEV_AI_INTERNAL_TOKEN
         return None
+
+    def validate_internal_token_security(self) -> None:
+        """운영 배포(APP_ENV=production)에서 내부 토큰 설정이 안전한지 기동 시 검증한다.
+
+        - 토큰 미설정: 공개 폴백으로 빠질 위험을 막기 위해 기동을 거부한다.
+        - 토큰이 공개된 로컬 기본값과 동일: 명백한 오설정이므로 기동을 거부한다.
+
+        로컬/개발/테스트 및 미설정 환경에서는 편의 폴백을 유지하기 위해 통과시킨다.
+        """
+        env = (self.app_env or "").strip().lower()
+        if env not in {"prod", "production"}:
+            return
+        configured = (self.ai_internal_token or "").strip()
+        if not configured:
+            raise RuntimeError(
+                "AI_INTERNAL_TOKEN must be configured when APP_ENV=production; "
+                "the local-dev fallback token is disabled in production."
+            )
+        if configured == LOCAL_DEV_AI_INTERNAL_TOKEN:
+            raise RuntimeError(
+                "AI_INTERNAL_TOKEN must not be set to the local-dev default value "
+                "when APP_ENV=production."
+            )
 
     @staticmethod
     def _parse_string_list(raw_value: str) -> List[str]:
