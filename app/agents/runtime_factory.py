@@ -16,10 +16,12 @@ from tenacity import (
 
 from ..config import get_settings
 from ..core.http_clients import get_shared_httpx_client
+from ..observability.metrics import AI_LLM_FALLBACK_TOTAL
 from .baseball_agent import BaseballAgentRuntime
 
 logger = logging.getLogger(__name__)
 _gemini_configured = False
+OPENROUTER_BLOCKED_MODELS = {"openrouter/auto"}
 
 
 def _ensure_gemini_configured(settings: Any) -> None:
@@ -87,6 +89,42 @@ def _parse_openrouter_stream_delta(payload: Any) -> tuple[str, str]:
     return "", "empty_content"
 
 
+def resolve_openrouter_model_candidates(
+    primary_model: str, fallback_models: list[str]
+) -> list[str]:
+    candidates: list[str] = []
+    for model in [primary_model] + list(fallback_models):
+        normalized = str(model or "").strip()
+        if not normalized:
+            continue
+        if normalized in OPENROUTER_BLOCKED_MODELS:
+            logger.warning("[LLM] Skipping blocked model: %s", normalized)
+            continue
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    if candidates:
+        return candidates
+
+    if primary_model:
+        normalized_primary = str(primary_model).strip()
+        logger.warning(
+            "[LLM] All configured models are blocked; fallback to primary: %s",
+            normalized_primary,
+        )
+        return [normalized_primary]
+
+    return [str(model).strip() for model in fallback_models if str(model or "").strip()]
+
+
+def _classify_openrouter_fallback_reason(exception: Exception | None) -> str:
+    if isinstance(exception, httpx.HTTPStatusError):
+        return f"http_status_{exception.response.status_code}"
+    if exception is None:
+        return "unknown"
+    return exception.__class__.__name__
+
+
 def build_baseball_llm_generator(settings: Any):
     llm_logger = logging.getLogger("BaseballAgent")
 
@@ -95,32 +133,6 @@ def build_baseball_llm_generator(settings: Any):
             isinstance(exception, httpx.HTTPStatusError)
             and exception.response.status_code >= 500
         )
-
-    def _resolve_model_candidates(
-        primary_model: str, fallback_models: list[str]
-    ) -> list[str]:
-        blocked = {"openrouter/auto"}
-        candidates: list[str] = []
-        for model in [primary_model] + list(fallback_models):
-            if not model:
-                continue
-            if model in blocked:
-                llm_logger.warning("[LLM] Skipping blocked model: %s", model)
-                continue
-            if model not in candidates:
-                candidates.append(model)
-
-        if candidates:
-            return candidates
-
-        if primary_model:
-            llm_logger.warning(
-                "[LLM] All configured models are blocked; fallback to primary: %s",
-                primary_model,
-            )
-            return [primary_model]
-
-        return [model for model in fallback_models if model]
 
     @retry(
         stop=stop_after_attempt(2),
@@ -162,7 +174,7 @@ def build_baseball_llm_generator(settings: Any):
             "HTTP-Referer": settings.openrouter_referer or "",
             "X-Title": settings.openrouter_app_title or "",
         }
-        models_to_try = _resolve_model_candidates(
+        models_to_try = resolve_openrouter_model_candidates(
             settings.openrouter_model,
             settings.openrouter_fallback_models,
         )
@@ -180,6 +192,10 @@ def build_baseball_llm_generator(settings: Any):
 
         for index, model in enumerate(models_to_try):
             if index > 0:
+                AI_LLM_FALLBACK_TOTAL.labels(
+                    provider="openrouter",
+                    reason=_classify_openrouter_fallback_reason(last_exception),
+                ).inc()
                 llm_logger.warning(
                     "[LLM Fallback] Trying model %d/%d: %s",
                     index + 1,
