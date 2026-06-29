@@ -48,17 +48,18 @@ def _make_dummy_conn(error_cls=None):
     error_cls가 주어지면 cursor().execute()에서 해당 예외를 발생시킵니다.
     """
     mock_cursor = MagicMock()
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
     if error_cls is not None:
-        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
-        mock_cursor.__exit__ = MagicMock(return_value=False)
-        mock_cursor.execute = MagicMock(side_effect=error_cls("mock db error"))
+        mock_cursor.execute = AsyncMock(side_effect=error_cls("mock db error"))
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_cursor.fetchone = AsyncMock(return_value=None)
     else:
-        mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
-        mock_cursor.__exit__ = MagicMock(return_value=False)
-        mock_cursor.execute = MagicMock()
-        mock_cursor.fetchall = MagicMock(return_value=[])
+        mock_cursor.execute = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_cursor.fetchone = AsyncMock(return_value=None)
 
-    mock_conn = MagicMock(spec=psycopg.Connection)
+    mock_conn = MagicMock(spec=psycopg.AsyncConnection)
     mock_conn.cursor = MagicMock(return_value=mock_cursor)
     return mock_conn
 
@@ -76,7 +77,7 @@ class TestSimilaritySearchExceptions:
         # _rag_chunks_exists() 가 True를 반환하도록 패치
         with patch("app.core.retrieval._rag_chunks_exists", return_value=True):
             with pytest.raises(DBRetrievalError) as exc_info:
-                similarity_search(conn, [0.1] * 768, limit=5)
+                asyncio.run(similarity_search(conn, [0.1] * 768, limit=5))
         assert isinstance(exc_info.value.cause, psycopg.OperationalError)
 
     def test_interface_error_raises_db_retrieval_error(self):
@@ -84,7 +85,7 @@ class TestSimilaritySearchExceptions:
         conn = _make_dummy_conn(psycopg.InterfaceError)
         with patch("app.core.retrieval._rag_chunks_exists", return_value=True):
             with pytest.raises(DBRetrievalError) as exc_info:
-                similarity_search(conn, [0.1] * 768, limit=5)
+                asyncio.run(similarity_search(conn, [0.1] * 768, limit=5))
         assert isinstance(exc_info.value.cause, psycopg.InterfaceError)
 
     def test_query_canceled_raises_db_retrieval_error(self):
@@ -92,14 +93,14 @@ class TestSimilaritySearchExceptions:
         conn = _make_dummy_conn(psycopg.errors.QueryCanceled)
         with patch("app.core.retrieval._rag_chunks_exists", return_value=True):
             with pytest.raises(DBRetrievalError) as exc_info:
-                similarity_search(conn, [0.1] * 768, limit=5)
+                asyncio.run(similarity_search(conn, [0.1] * 768, limit=5))
         assert isinstance(exc_info.value.cause, psycopg.errors.QueryCanceled)
 
     def test_undefined_table_returns_empty_list(self):
         """UndefinedTable은 기존처럼 예외 없이 [] 반환이어야 한다."""
         conn = _make_dummy_conn(psycopg.errors.UndefinedTable)
         with patch("app.core.retrieval._rag_chunks_exists", return_value=True):
-            result = similarity_search(conn, [0.1] * 768, limit=5)
+            result = asyncio.run(similarity_search(conn, [0.1] * 768, limit=5))
         assert result == []
 
 
@@ -304,6 +305,7 @@ class TestRunDbDownPath:
                             return_value="DB 장애로 인한 일반 지식 기반 답변입니다.",
                         ):
                             result = await pipeline.run("2024년 홈런왕은 누구야?")
+                            await asyncio.sleep(0)
             return result, mock_event
 
         result, mock_event = asyncio.run(run())
@@ -332,6 +334,7 @@ class TestRunDbDownPath:
                         return_value="제한적인 참고 답변입니다.",
                     ):
                         result = await pipeline.run("2024년 홈런왕은 누구야?")
+                        await asyncio.sleep(0)
             return result, mock_event
 
         result, mock_event = asyncio.run(run())
@@ -460,6 +463,7 @@ class TestRunDbDownPath:
                                                     result = await pipeline.run(
                                                         "LG 요약", intent="stats_lookup"
                                                     )
+                                                    await asyncio.sleep(0)
             return result, mock_event
 
         result, mock_event = asyncio.run(run())
@@ -620,6 +624,7 @@ class TestRunZeroHitContext:
                                 "없는선수123 2099년 타율은?",
                                 intent="stats_lookup",
                             )
+                            await asyncio.sleep(0)
             return result, mock_event
 
         result, mock_event = asyncio.run(run())

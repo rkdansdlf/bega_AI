@@ -6,7 +6,8 @@
 set -e
 cd "$(dirname "$0")/.."
 source .venv/bin/activate
-export POSTGRES_DB_URL="postgresql://postgres:rkdansdlf@134.185.107.178:5432/bega_backend"
+: "${POSTGRES_DB_URL:?POSTGRES_DB_URL is required for manual_detail batch}"
+export POSTGRES_DB_URL
 
 API_KEY="local-dev-ai-internal-token"
 DELAY=3.0

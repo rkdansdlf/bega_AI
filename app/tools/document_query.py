@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from threading import RLock
 from typing import Any, Dict, List
 
@@ -77,15 +77,15 @@ class DocumentQueryTool:
 
     def __init__(
         self,
-        connection: psycopg.Connection,
+        connection: psycopg.AsyncConnection,
         settings: Settings | None = None,
     ):
         self.connection = connection
         self.settings = settings or Settings()
 
-    @contextmanager
-    def _connection_scope(self, force_fresh: bool = False):
-        with connection_scope(self.connection, force_fresh=force_fresh) as conn:
+    @asynccontextmanager
+    async def _connection_scope(self, force_fresh: bool = False):
+        async with connection_scope(self.connection, force_fresh=force_fresh) as conn:
             yield conn
 
     def _retry_warning_message(self, action: str) -> str:
@@ -228,8 +228,8 @@ class DocumentQueryTool:
                 return True
         return False
 
-    def _search_exact_term_documents(
-        self, conn: psycopg.Connection, query_lower: str, limit: int
+    async def _search_exact_term_documents(
+        self, conn: psycopg.AsyncConnection, query_lower: str, limit: int
     ) -> list[Dict[str, Any]]:
         focus_terms = self._focus_terms(query_lower)
         if not focus_terms:
@@ -261,9 +261,9 @@ class DocumentQueryTool:
         LIMIT %s
         """
 
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, params)
-            return [dict(row) for row in cur.fetchall()]
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(sql, params)
+            return [dict(row) for row in await cur.fetchall()]
 
     def _score_document(self, query_lower: str, doc: Dict[str, Any]) -> float:
         score = float(doc.get("combined_score") or doc.get("similarity") or 0.0)
@@ -356,9 +356,9 @@ class DocumentQueryTool:
         cause = getattr(exc, "cause", exc)
         return cause.__class__.__name__ == "QueryCanceled"
 
-    def _search_similarity_documents(
+    async def _search_similarity_documents(
         self,
-        conn: psycopg.Connection,
+        conn: psycopg.AsyncConnection,
         embedding: list[float],
         *,
         query: str,
@@ -366,7 +366,7 @@ class DocumentQueryTool:
         keyword: str | None,
     ) -> list[Dict[str, Any]]:
         try:
-            results, _level = similarity_search_with_fallback(
+            results, _level = await similarity_search_with_fallback(
                 conn,
                 embedding,
                 limit=limit,
@@ -385,13 +385,13 @@ class DocumentQueryTool:
             )
             return []
 
-    def _search_documents_once(
-        self, conn: psycopg.Connection, query: str, limit: int
+    async def _search_documents_once(
+        self, conn: psycopg.AsyncConnection, query: str, limit: int
     ) -> list[Dict[str, Any]]:
         embedding = self._embed_query(query)
         query_lower = query.lower()
         candidate_limit = max(limit * 4, 12)
-        collected: List[Dict[str, Any]] = self._search_similarity_documents(
+        collected: List[Dict[str, Any]] = await self._search_similarity_documents(
             conn,
             embedding,
             query=query,
@@ -400,7 +400,7 @@ class DocumentQueryTool:
         )
         if len(collected) < limit:
             collected.extend(
-                self._search_similarity_documents(
+                await self._search_similarity_documents(
                     conn,
                     embedding,
                     query=query,
@@ -409,7 +409,9 @@ class DocumentQueryTool:
                 )
             )
         collected.extend(
-            self._search_exact_term_documents(conn, query_lower, limit=candidate_limit)
+            await self._search_exact_term_documents(
+                conn, query_lower, limit=candidate_limit
+            )
         )
 
         deduped: List[Dict[str, Any]] = []
@@ -435,7 +437,7 @@ class DocumentQueryTool:
 
         return deduped
 
-    def search_documents(self, query: str, limit: int = 10) -> Dict[str, Any]:
+    async def search_documents(self, query: str, limit: int = 10) -> Dict[str, Any]:
         """사용자 질문과 가장 관련성 높은 문서 조각(chunk)을 검색합니다."""
         self._log_query_start(ACTION_SEARCH_DOCUMENTS, query)
 
@@ -447,7 +449,7 @@ class DocumentQueryTool:
         )
 
         try:
-            deduped = run_with_fresh_connection_retry(
+            deduped = await run_with_fresh_connection_retry(
                 connection=self.connection,
                 operation=lambda conn: self._search_documents_once(conn, query, limit),
                 logger=logger,

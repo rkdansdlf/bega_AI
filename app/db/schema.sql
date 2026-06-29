@@ -58,9 +58,11 @@ where (metadata is null or metadata = '{}'::jsonb)
   and meta <> '{}'::jsonb;
 
 -- Vector and text search indexes
--- HNSW 인덱스 (신규 설치 기본). 운영 마이그레이션은 scripts/create_vector_index.py 사용.
--- pgvector >= 0.5.0 필요. m=16: 레이어당 최대 연결 수, ef_construction=64: 빌드 정확도.
-create index if not exists idx_rag_chunks_embedding_hnsw on rag_chunks using hnsw (embedding vector_cosine_ops) with (m = 16, ef_construction = 64);
+-- halfvec HNSW 인덱스 (신규 설치 기본). 운영 마이그레이션은 scripts/create_vector_index.py 사용.
+-- pgvector >= 0.7.0 필요. m=16: 레이어당 최대 연결 수, ef_construction=64: 빌드 정확도.
+create index if not exists idx_rag_chunks_embedding_halfvec_hnsw on rag_chunks using hnsw ((embedding::halfvec(256)) halfvec_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
+-- vector HNSW 인덱스는 halfvec 전환 후 운영 cleanup 대상입니다.
+-- create index if not exists idx_rag_chunks_embedding_hnsw on rag_chunks using hnsw (embedding vector_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
 -- 기존 IVFFlat 인덱스 (레거시, 운영 마이그레이션 후 scripts/create_vector_index.py --drop-ivfflat 으로 제거)
 -- create index if not exists idx_rag_chunks_embedding on rag_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 644);
 create index if not exists idx_rag_chunks_content_tsv on rag_chunks using gin (content_tsv);
@@ -141,13 +143,102 @@ create table if not exists rag_ingest_jobs (
 create index if not exists idx_rag_ingest_jobs_started_at on rag_ingest_jobs (started_at);
 create index if not exists idx_rag_ingest_jobs_status on rag_ingest_jobs (status);
 
+create table if not exists operator_data_items (
+  queue_id text primary key,
+  priority text,
+  domain text not null,
+  contract_code text not null,
+  question text not null,
+  operator_status text not null,
+  validation_status text not null,
+  apply_target text,
+  payload jsonb not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_data_items_domain on operator_data_items (domain);
+create index if not exists idx_operator_data_items_payload_hash on operator_data_items (payload_hash);
+create index if not exists idx_operator_data_items_applied_at on operator_data_items (applied_at);
+
+create table if not exists operator_season_events (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  season_year int not null,
+  event_name text not null,
+  event_date date not null,
+  stadium_name text,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_season_events_lookup
+  on operator_season_events (season_year, event_date);
+
+create table if not exists operator_schedule_items (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  game_date date not null,
+  game_id text not null,
+  home_team text not null,
+  away_team text not null,
+  stadium_name text,
+  start_time text not null,
+  game_status text not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_schedule_items_date
+  on operator_schedule_items (game_date, start_time);
+create index if not exists idx_operator_schedule_items_game_id
+  on operator_schedule_items (game_id);
+create index if not exists idx_operator_schedule_items_teams
+  on operator_schedule_items (home_team, away_team);
+
+create table if not exists operator_roster_events (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  season_year int not null,
+  team_code text not null,
+  player_name text not null,
+  roster_event_type text not null,
+  effective_date date not null,
+  status_text text not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_roster_events_lookup
+  on operator_roster_events (season_year, team_code, effective_date);
+create index if not exists idx_operator_roster_events_player
+  on operator_roster_events (player_name);
+
 -- Coach Analysis Cache Table
 create table if not exists coach_analysis_cache (
   cache_key varchar(64) primary key,  -- SHA256 Hash of (team_id, year, focus, question)
   team_id varchar(10) not null,
   year int not null,
   prompt_version varchar(32) not null, -- e.g. "v2"
-  model_name varchar(50) not null,     -- e.g. "upstage/solar-pro-3:free"
+  model_name varchar(50) not null,     -- e.g. "openrouter/free"
   status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
   response_json jsonb,                 -- Completed analysis result
   error_message text,                  -- Failure reason

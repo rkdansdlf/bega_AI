@@ -970,7 +970,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["team_id", "id"],
         "season_filter_column": None,
-        "since_filter_column": "tp.updated_at",
+        "since_filter_column": None,
     },
     "team_season_batting": {
         "description": "KBO 팀 시즌 타격 기록",
@@ -1090,6 +1090,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["id"],
         "season_filter_column": "ks.season_year",
         "since_filter_column": "gs.updated_at",
+        "date_to_exclusive_filter_column": "g.game_date",
     },
 }
 
@@ -1727,10 +1728,12 @@ def build_select_query(
     limit: Optional[int],
     season_year: Optional[int],
     since: Optional[datetime],
+    date_to_exclusive: Optional[Any] = None,
 ):
     custom_sql = profile.get("select_sql")
     season_filter_column = profile.get("season_filter_column", "season_year")
     since_filter_column = profile.get("since_filter_column", "updated_at")
+    date_to_exclusive_filter_column = profile.get("date_to_exclusive_filter_column")
     params: List[Any] = []
     if custom_sql:
         stripped = custom_sql.strip()
@@ -1750,6 +1753,9 @@ def build_select_query(
         if since is not None and since_filter_column:
             where_clauses.append(f"{since_filter_column} >= %s")
             params.append(since)
+        if date_to_exclusive is not None and date_to_exclusive_filter_column:
+            where_clauses.append(f"{date_to_exclusive_filter_column} < %s")
+            params.append(date_to_exclusive)
 
         if where_clauses:
             has_where = bool(_find_top_level_keyword_positions(base_sql, "WHERE"))
@@ -1777,6 +1783,10 @@ def build_select_query(
         column_name = str(since_filter_column).split(".")[-1]
         where_parts.append(sql.SQL("{} >= %s").format(sql.Identifier(column_name)))
         params.append(since)
+    if date_to_exclusive is not None and date_to_exclusive_filter_column:
+        column_name = str(date_to_exclusive_filter_column).split(".")[-1]
+        where_parts.append(sql.SQL("{} < %s").format(sql.Identifier(column_name)))
+        params.append(date_to_exclusive)
     if where_parts:
         query = query + sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
     if pk_columns:
@@ -2274,6 +2284,7 @@ def ingest_table(
     workers: int,
     row_stale_cleanup: str,
     stats: Dict[str, Any],
+    date_to_exclusive: Optional[Any] = None,
 ) -> int:
     if table_name == "rag_chunks":
         print("경고: rag_chunks 테이블은 처리 대상에서 제외됩니다.")
@@ -2344,6 +2355,7 @@ def ingest_table(
             limit,
             season_year,
             since,
+            date_to_exclusive=date_to_exclusive,
         )
 
         fetched_rows = 0
@@ -2476,6 +2488,7 @@ def ingest(
     parallel_engine: str,
     workers: int,
     row_stale_cleanup: str = "off",
+    date_to_exclusive: Optional[Any] = None,
 ) -> None:
     _require_psycopg()
     settings = get_settings()
@@ -2519,6 +2532,7 @@ def ingest(
                 season_year=season_year,
                 use_legacy_renderer=use_legacy_renderer,
                 since=since,
+                date_to_exclusive=date_to_exclusive,
                 skip_embedding=skip_embedding,
                 max_concurrency=max_concurrency,
                 commit_interval=commit_interval,
@@ -2613,6 +2627,15 @@ def parse_args() -> argparse.Namespace:
         help="updated_at 기준 ISO8601 타임스탬프 이후 변경분만 처리합니다 (예: 2025-05-01T00:00:00).",
     )
     parser.add_argument(
+        "--date-to-exclusive",
+        type=str,
+        default=None,
+        help=(
+            "날짜 컬럼 기준 배타적 상한입니다. 현재는 game_summary의 g.game_date에 적용됩니다 "
+            "(예: 2026-05-01)."
+        ),
+    )
+    parser.add_argument(
         "--commit-interval",
         type=int,
         default=500,
@@ -2661,6 +2684,11 @@ if __name__ == "__main__":
         season_year=args.season_year,
         use_legacy_renderer=args.use_legacy_renderer,
         since=datetime.fromisoformat(args.since) if args.since else None,
+        date_to_exclusive=(
+            datetime.fromisoformat(args.date_to_exclusive).date()
+            if args.date_to_exclusive
+            else None
+        ),
         skip_embedding=args.no_embed,
         max_concurrency=max(1, args.max_concurrency),
         commit_interval=max(1, args.commit_interval),

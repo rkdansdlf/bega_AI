@@ -1,5 +1,6 @@
 from scripts.coach_backfill_audit import (
     BackfillCapture,
+    _baseball_data_sync_required_rows,
     _dedupe_messages,
     _manual_baseball_data_required_rows,
     _starter_announcement_pending_rows,
@@ -338,6 +339,73 @@ def test_manual_baseball_data_required_rows_include_response_contract_items():
             "home_pitcher": "",
             "away_pitcher": "",
             "operator_message": "경기 상태와 최종 점수가 필요합니다.",
+        }
+    ]
+
+
+def test_baseball_data_sync_required_rows_map_manual_contract_for_external_sync():
+    record = _record(
+        game_status_bucket="SCHEDULED",
+        game_id="20260423HHLG0",
+        game_date="2026-04-23",
+        home_team_id="LG",
+        away_team_id="HH",
+        root_causes=[],
+    )
+    rows = _baseball_data_sync_required_rows(
+        [
+            {
+                "target": {
+                    "game_id": record["game_id"],
+                    "game_date": record["game_date"],
+                    "game_status_bucket": record["game_status_bucket"],
+                    "home_team_id": record["home_team_id"],
+                    "away_team_id": record["away_team_id"],
+                },
+                "diagnosis": record,
+                "missing_data": [],
+                "response": {
+                    "meta": {
+                        "manual_data_request": {
+                            "code": "MANUAL_BASEBALL_DATA_REQUIRED",
+                            "dataSyncRequest": {
+                                "code": "BASEBALL_DATA_SYNC_REQUIRED",
+                                "requestId": "coach:20260423HHLG0:game_review",
+                                "consumer": "ai_coach",
+                                "targetSource": "trusted_baseball_data_project",
+                            },
+                            "missingItems": [
+                                {
+                                    "key": "final_score",
+                                    "label": "최종 점수",
+                                    "expected_format": "home_score, away_score",
+                                },
+                            ],
+                            "operatorMessage": "최종 점수가 필요합니다.",
+                        }
+                    }
+                },
+            }
+        ]
+    )
+
+    assert rows == [
+        {
+            "game_id": "20260423HHLG0",
+            "game_date": "2026-04-23",
+            "status_bucket": "SCHEDULED",
+            "away_team_id": "HH",
+            "home_team_id": "LG",
+            "data_sync_code": "BASEBALL_DATA_SYNC_REQUIRED",
+            "data_sync_request_id": "coach:20260423HHLG0:game_review",
+            "data_sync_consumer": "ai_coach",
+            "external_source": "trusted_baseball_data_project",
+            "handoff_target": "external_trusted_baseball_data_sync",
+            "sync_status": "required",
+            "legacy_contract_code": "MANUAL_BASEBALL_DATA_REQUIRED",
+            "missing_code": "final_score",
+            "required_fields": "game.home_score|game.away_score",
+            "operator_message": "최종 점수가 필요합니다.",
         }
     ]
 

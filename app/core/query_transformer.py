@@ -285,6 +285,7 @@ async def multi_query_retrieval(
     limit: Optional[int] = None,
     intent: str = "",
     retrieval_state: Optional[Dict[str, Any]] = None,
+    settings: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     여러 쿼리 변형으로 병렬 검색을 수행하고 결과를 결합합니다.
@@ -305,6 +306,24 @@ async def multi_query_retrieval(
     supports_use_hyde = "use_hyde" in retrieve_signature.parameters
     supports_retrieval_state = "retrieval_state" in retrieve_signature.parameters
     supports_intent = "intent" in retrieve_signature.parameters
+
+    # HyDE를 사용하지 않는 variation의 쿼리를 배치 임베딩으로 캐시 워밍
+    # → 이후 retrieve_func 내부의 async_embed_query 호출이 캐시 HIT 처리됨
+    if settings is not None and len(query_variations) > 1:
+        non_hyde_queries = [
+            v.query
+            for v in query_variations
+            if not (supports_use_hyde and v.variation_type == "original")
+        ]
+        if len(non_hyde_queries) > 1:
+            try:
+                from .embeddings import async_embed_queries_batch
+
+                await async_embed_queries_batch(non_hyde_queries, settings)
+            except Exception as _warm_exc:
+                logger.debug(
+                    "[MultiQuery] Cache warming failed (non-fatal): %s", _warm_exc
+                )
 
     # 모든 쿼리 변형에 대한 코루틴 생성 (아직 실행 안 됨)
     coroutines = [

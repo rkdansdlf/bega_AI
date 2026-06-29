@@ -18,7 +18,7 @@ from app.agents.release_decision_agent import (
     render_release_decision_markdown,
 )
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -42,7 +42,7 @@ class GameQueryTool:
     3. 추측이나 해석 없이 실제 DB 데이터만 반환
     """
 
-    def __init__(self, connection: psycopg.Connection):
+    def __init__(self, connection: psycopg.AsyncConnection):
         self.connection = connection
         self.team_resolver = TeamCodeResolver()
         self.team_resolution_metrics = get_team_resolution_metrics()
@@ -56,13 +56,22 @@ class GameQueryTool:
         if cached_rows:
             self.team_resolver.sync_from_team_rows(cached_rows)
             self.mapping_dependency_reason = "shared_cache"
+            self._mapping_load_pending = False
         else:
-            self._load_team_mappings()
+            # Async 컨텍스트가 아닌 __init__에서는 DB 매핑을 로드할 수 없으므로
+            # 첫 비동기 쿼리 진입 시 _ensure_team_mappings_loaded()로 지연 로드한다.
+            self._mapping_load_pending = True
 
-    def _fetch_team_mapping_rows(
-        self, connection: psycopg.Connection
+    async def _ensure_team_mappings_loaded(self) -> None:
+        """지연된 팀 매핑 DB 로드를 첫 쿼리 시 1회 수행한다."""
+        if getattr(self, "_mapping_load_pending", False):
+            self._mapping_load_pending = False
+            await self._load_team_mappings()
+
+    async def _fetch_team_mapping_rows(
+        self, connection: psycopg.AsyncConnection
     ) -> List[Dict[str, Any]]:
-        return fetch_team_mapping_rows(connection)
+        return await fetch_team_mapping_rows(connection)
 
     def _apply_team_mapping_rows(self, rows: List[Dict[str, Any]], source: str) -> None:
         if not rows:
@@ -78,9 +87,9 @@ class GameQueryTool:
             source,
         )
 
-    def _load_team_mappings(self):
+    async def _load_team_mappings(self):
         """OCI DB의 teams 테이블과 franchise_id를 활용하여 팀 매핑 정보를 동적으로 로드합니다."""
-        result = load_team_mappings_with_retry(
+        result = await load_team_mappings_with_retry(
             connection=self.connection,
             fetch_rows=self._fetch_team_mapping_rows,
             apply_rows=self._apply_team_mapping_rows,
@@ -165,7 +174,7 @@ class GameQueryTool:
 
         return game_dict
 
-    def get_game_box_score(
+    async def get_game_box_score(
         self,
         game_id: str = None,
         date: str = None,
@@ -202,6 +211,7 @@ class GameQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 쿼리 조건 구성
@@ -252,8 +262,8 @@ class GameQueryTool:
                 LIMIT 10;
             """
 
-            cursor.execute(game_query, query_params)
-            games = cursor.fetchall()
+            await cursor.execute(game_query, query_params)
+            games = await cursor.fetchall()
 
             if not games:
                 result["error"] = "조건에 맞는 경기를 찾을 수 없습니다"
@@ -272,8 +282,8 @@ class GameQueryTool:
                     WHERE game_id = %s
                     ORDER BY inning, team_side;
                 """
-                cursor.execute(inning_query, (game_id,))
-                innings = cursor.fetchall()
+                await cursor.execute(inning_query, (game_id,))
+                innings = await cursor.fetchall()
 
                 box_score = {
                     "game_id": game_id,
@@ -315,8 +325,8 @@ class GameQueryTool:
                     GROUP BY team_code
                 """
                 try:
-                    cursor.execute(stats_check_query, (game_id,))
-                    team_stats = cursor.fetchall()
+                    await cursor.execute(stats_check_query, (game_id,))
+                    team_stats = await cursor.fetchall()
                     for stat in team_stats:
                         # team_code가 home_team인지 away_team인지 확인
                         # (DB에 저장된 team_code와 game 테이블의 팀 코드가 일치한다고 가정)
@@ -345,11 +355,11 @@ class GameQueryTool:
             result["error"] = f"박스스코어 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_games_by_date(self, date: str, team: str = None) -> Dict[str, Any]:
+    async def get_games_by_date(self, date: str, team: str = None) -> Dict[str, Any]:
         """
         특정 날짜의 모든 경기를 조회합니다.
 
@@ -372,6 +382,7 @@ class GameQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 쿼리 조건 구성
@@ -403,8 +414,8 @@ class GameQueryTool:
                 ORDER BY g.game_date, g.game_id;
             """
 
-            cursor.execute(query, query_params)
-            games = cursor.fetchall()
+            await cursor.execute(query, query_params)
+            games = await cursor.fetchall()
 
             if games:
                 result["games"] = [
@@ -421,11 +432,11 @@ class GameQueryTool:
             result["error"] = f"날짜별 경기 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_team_recent_games(
+    async def get_team_recent_games(
         self,
         team_name: str,
         limit: int = 5,
@@ -453,6 +464,7 @@ class GameQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
             where_conditions = [
                 "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))",
@@ -481,8 +493,8 @@ class GameQueryTool:
                 ORDER BY g.game_date DESC, g.game_id DESC
                 LIMIT %s;
             """
-            cursor.execute(query, query_params)
-            rows = cursor.fetchall()
+            await cursor.execute(query, query_params)
+            rows = await cursor.fetchall()
 
             if rows:
                 normalized_variants = set(team_variants)
@@ -522,11 +534,11 @@ class GameQueryTool:
             result["error"] = f"최근 경기 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_head_to_head(
+    async def get_head_to_head(
         self,
         team1: str,
         team2: str,
@@ -574,6 +586,7 @@ class GameQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 쿼리 조건 구성
@@ -631,8 +644,8 @@ class GameQueryTool:
             """
 
             games_params = [variants1, variants2] + query_params + [limit]
-            cursor.execute(games_query, games_params)
-            games = cursor.fetchall()
+            await cursor.execute(games_query, games_params)
+            games = await cursor.fetchall()
 
             if games:
                 result["games"] = [
@@ -659,11 +672,11 @@ class GameQueryTool:
             result["error"] = f"팀 간 대결 기록 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_schedule(
+    async def get_schedule(
         self, start_date: str, end_date: str, team: str = None
     ) -> Dict[str, Any]:
         """
@@ -692,6 +705,7 @@ class GameQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             where_conditions = ["g.game_date BETWEEN %s AND %s"]
@@ -710,15 +724,18 @@ class GameQueryTool:
                     g.game_date,
                     g.home_team,
                     g.away_team,
+                    g.home_score,
+                    g.away_score,
                     g.game_status,
-                    g.stadium
+                    g.stadium,
+                    g.winning_team
                 FROM game g
                 WHERE {" AND ".join(where_conditions)}
                 ORDER BY g.game_date, g.game_id;
             """
 
-            cursor.execute(query, query_params)
-            games = cursor.fetchall()
+            await cursor.execute(query, query_params)
+            games = await cursor.fetchall()
 
             if games:
                 result["games"] = [
@@ -735,7 +752,7 @@ class GameQueryTool:
             result["error"] = f"경기 일정 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
@@ -859,7 +876,7 @@ class GameQueryTool:
 
         return result
 
-    def get_season_final_game_date(
+    async def get_season_final_game_date(
         self, year: int, league_type: str = "korean_series"
     ) -> Dict[str, Any]:
         """
@@ -891,6 +908,7 @@ class GameQueryTool:
             return result
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             query = """
@@ -902,8 +920,8 @@ class GameQueryTool:
                   AND g.game_status = 'COMPLETED';
             """
 
-            cursor.execute(query, (year, league_code))
-            row = cursor.fetchone()
+            await cursor.execute(query, (year, league_code))
+            row = await cursor.fetchone()
 
             if row and row["final_game_date"]:
                 final_date = row["final_game_date"]
@@ -923,7 +941,7 @@ class GameQueryTool:
             result["error"] = f"마지막 경기 날짜 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
@@ -1015,7 +1033,7 @@ class GameQueryTool:
 
         return result
 
-    def get_game_lineup(
+    async def get_game_lineup(
         self, game_id: str = None, date: str = None, team_name: str = None
     ) -> Dict[str, Any]:
         """
@@ -1041,6 +1059,7 @@ class GameQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 1. 경기 ID 찾기 (ID가 없는 경우)
@@ -1059,10 +1078,10 @@ class GameQueryTool:
                     where_clause += " AND (home_team = ANY(%s) OR away_team = ANY(%s))"
                     params.extend([team_variants, team_variants])
 
-                cursor.execute(
+                await cursor.execute(
                     f"SELECT game_id FROM game WHERE {where_clause} LIMIT 1", params
                 )
-                row = cursor.fetchone()
+                row = await cursor.fetchone()
                 if row:
                     game_id = row["game_id"]
 
@@ -1097,8 +1116,8 @@ class GameQueryTool:
 
             lineup_query += " ORDER BY team_code, batting_order"
 
-            cursor.execute(lineup_query, params)
-            rows = cursor.fetchall()
+            await cursor.execute(lineup_query, params)
+            rows = await cursor.fetchall()
 
             if rows:
                 result["lineups"] = [dict(row) for row in rows]
@@ -1119,11 +1138,11 @@ class GameQueryTool:
             result["error"] = f"라인업 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
-    def get_team_last_game_date(
+    async def get_team_last_game_date(
         self, team_name: str, year: int, league_type: str = "regular_season"
     ) -> Dict[str, Any]:
         """
@@ -1167,6 +1186,7 @@ class GameQueryTool:
         result["team_id"] = normalized_team
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             # 리그 타입 코드 매핑
@@ -1203,10 +1223,10 @@ class GameQueryTool:
             league_code = league_code_map.get(league_type)
 
             if league_code is not None:
-                cursor.execute(
+                await cursor.execute(
                     scoped_query, (year, league_code, team_variants, team_variants)
                 )
-                row = cursor.fetchone()
+                row = await cursor.fetchone()
 
             if (not row or not row["last_game_date"]) and league_type != "all":
                 logger.info(
@@ -1215,8 +1235,10 @@ class GameQueryTool:
                     year,
                     league_type,
                 )
-                cursor.execute(all_games_query, (year, team_variants, team_variants))
-                row = cursor.fetchone()
+                await cursor.execute(
+                    all_games_query, (year, team_variants, team_variants)
+                )
+                row = await cursor.fetchone()
                 resolved_scope = "all"
 
             if row and row["last_game_date"]:
@@ -1239,14 +1261,14 @@ class GameQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         self._record_team_query_result(
             "get_team_last_game_date", team_name, year, result
         )
         return result
 
-    def validate_game_exists(
+    async def validate_game_exists(
         self, game_id: str = None, date: str = None
     ) -> Dict[str, Any]:
         """
@@ -1271,6 +1293,7 @@ class GameQueryTool:
         }
 
         try:
+            await self._ensure_team_mappings_loaded()
             cursor = self.connection.cursor(row_factory=dict_row)
 
             where_conditions = []
@@ -1295,8 +1318,8 @@ class GameQueryTool:
                 ORDER BY game_date;
             """
 
-            cursor.execute(query, query_params)
-            games = cursor.fetchall()
+            await cursor.execute(query, query_params)
+            games = await cursor.fetchall()
 
             if games:
                 result["exists"] = True
@@ -1311,7 +1334,7 @@ class GameQueryTool:
             result["error"] = f"경기 검증 오류: {e}"
         finally:
             if "cursor" in locals():
-                cursor.close()
+                await cursor.close()
 
         return result
 
@@ -1319,7 +1342,7 @@ class GameQueryTool:
     # Coach 전용 어댑터: head-to-head + clutch moments → 압축 페이로드
     # ------------------------------------------------------------------
 
-    def build_coach_matchup_payload(
+    async def build_coach_matchup_payload(
         self,
         home_team_id: str,
         away_team_id: str,
@@ -1341,7 +1364,7 @@ class GameQueryTool:
         h2h_raw: Dict[str, Any] = {}
         try:
             h2h_raw = (
-                self.get_head_to_head(
+                await self.get_head_to_head(
                     home_team_id,
                     away_team_id,
                     year=year,
@@ -1380,7 +1403,9 @@ class GameQueryTool:
         if db_tool is not None and game_id:
             try:
                 clutch_raw = (
-                    db_tool.get_clutch_moments(game_id, limit=clutch_moments_limit)
+                    await db_tool.get_clutch_moments(
+                        game_id, limit=clutch_moments_limit
+                    )
                     or {}
                 )
             except Exception as exc:  # noqa: BLE001

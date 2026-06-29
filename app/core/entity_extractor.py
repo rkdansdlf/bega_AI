@@ -320,8 +320,16 @@ STAT_LEADER_MAPPING: Dict[str, Dict[str, str]] = {
     "안타 가장 많이": {"stat_name": "hits", "position": "batting"},
     # 기타 타자 지표
     "장타왕": {"stat_name": "slg", "position": "batting"},
+    "장타율 1위": {"stat_name": "slg", "position": "batting"},
+    "최고 장타율": {"stat_name": "slg", "position": "batting"},
     "출루율 1위": {"stat_name": "obp", "position": "batting"},
     "OPS 1위": {"stat_name": "ops", "position": "batting"},
+    "ops 1위": {"stat_name": "ops", "position": "batting"},
+    "득점 1위": {"stat_name": "runs", "position": "batting"},
+    "최다 득점": {"stat_name": "runs", "position": "batting"},
+    "삼진이 많은 타자": {"stat_name": "strikeouts", "position": "batting"},
+    "타자 삼진 1위": {"stat_name": "strikeouts", "position": "batting"},
+    "도루 성공률 1위": {"stat_name": "sb_success_rate", "position": "batting"},
     # ── 투수 부문 ────────────────────────────────────────────────────────────
     # 승
     "다승왕": {"stat_name": "wins", "position": "pitching"},
@@ -336,6 +344,20 @@ STAT_LEADER_MAPPING: Dict[str, Dict[str, str]] = {
     "최저 방어율": {"stat_name": "era", "position": "pitching"},
     "최저 평균자책점": {"stat_name": "era", "position": "pitching"},
     "ERA 1위": {"stat_name": "era", "position": "pitching"},
+    "피안타율 1위": {"stat_name": "avg_against", "position": "pitching"},
+    "최저 피안타율": {"stat_name": "avg_against", "position": "pitching"},
+    "피안타율이 낮은": {"stat_name": "avg_against", "position": "pitching"},
+    "피안타율 낮은": {"stat_name": "avg_against", "position": "pitching"},
+    "이닝 소화 1위": {"stat_name": "innings_pitched", "position": "pitching"},
+    "이닝 소화가 많은": {"stat_name": "innings_pitched", "position": "pitching"},
+    "이닝을 많이": {"stat_name": "innings_pitched", "position": "pitching"},
+    "최다 이닝": {"stat_name": "innings_pitched", "position": "pitching"},
+    "완투 1위": {"stat_name": "complete_games", "position": "pitching"},
+    "완투는 누가": {"stat_name": "complete_games", "position": "pitching"},
+    "완투한 투수": {"stat_name": "complete_games", "position": "pitching"},
+    "완봉 1위": {"stat_name": "shutouts", "position": "pitching"},
+    "완봉은 누가": {"stat_name": "shutouts", "position": "pitching"},
+    "완봉한 투수": {"stat_name": "shutouts", "position": "pitching"},
     # 탈삼진
     "탈삼진왕": {"stat_name": "strikeouts", "position": "pitching"},
     "탈삼진 1위": {"stat_name": "strikeouts", "position": "pitching"},
@@ -590,7 +612,9 @@ def extract_stat_leader(query: str) -> Optional[Dict[str, str]]:
     awards 테이블이 아닌 player_season_batting/pitching 테이블 기반이므로
     extract_award_type보다 우선 적용되어야 합니다.
     """
-    for keyword, info in STAT_LEADER_MAPPING.items():
+    for keyword, info in sorted(
+        STAT_LEADER_MAPPING.items(), key=lambda item: len(item[0]), reverse=True
+    ):
         if keyword in query:
             return info
     return None

@@ -8,7 +8,98 @@ import pytest
 import json
 import asyncio
 import logging
+import os
+import re
+from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
 from pydantic import ValidationError
+
+
+async def _collect_sse_text(response) -> str:
+    chunks: list[str] = []
+    async for chunk in response.body_iterator:
+        if isinstance(chunk, bytes):
+            chunks.append(chunk.decode("utf-8"))
+        elif isinstance(chunk, dict):
+            event_name = chunk.get("event")
+            data = chunk.get("data")
+            if event_name:
+                chunks.append(f"event: {event_name}\n")
+            chunks.append(f"data: {data}\n\n")
+        else:
+            chunks.append(str(chunk))
+    return "".join(chunks)
+
+
+def _extract_sse_meta_events(sse_text: str) -> list[dict]:
+    events: list[dict] = []
+    event_name = "message"
+    data_lines: list[str] = []
+    for line in sse_text.splitlines():
+        if line == "":
+            if event_name == "meta" and data_lines:
+                events.append(json.loads("\n".join(data_lines)))
+            event_name = "message"
+            data_lines = []
+            continue
+        if line.startswith("event:"):
+            event_name = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.split(":", 1)[1].strip())
+    if event_name == "meta" and data_lines:
+        events.append(json.loads("\n".join(data_lines)))
+    return events
+
+
+def _install_coach_endpoint_cache_hit(monkeypatch, evidence, cached_payload=None):
+    from app.routers import coach
+
+    class _Agent:
+        def _convert_team_id_to_name(self, team_id):
+            return {
+                "LG": "LG 트윈스",
+                "KT": "KT 위즈",
+            }.get(team_id, str(team_id))
+
+    async def _fake_resolve_target_year(payload, pool):
+        return (2026, "test")
+
+    async def _fake_collect_game_evidence(*args, **kwargs):
+        return evidence
+
+    async def _fake_claim_cache_generation(**kwargs):
+        return (
+            "HIT",
+            cached_payload
+            or {
+                "headline": "테스트 브리핑",
+                "sentiment": "neutral",
+                "key_metrics": [],
+                "analysis": {
+                    "summary": "캐시된 분석입니다.",
+                    "strengths": [],
+                    "weaknesses": [],
+                    "risks": [],
+                },
+                "detailed_markdown": "캐시된 분석입니다.",
+                "coach_note": "캐시된 코치 노트입니다.",
+            },
+            None,
+            None,
+            1,
+        )
+
+    monkeypatch.setattr(coach, "get_connection_pool", lambda: object())
+    monkeypatch.setattr(coach, "_resolve_target_year", _fake_resolve_target_year)
+    monkeypatch.setattr(coach, "_collect_game_evidence", _fake_collect_game_evidence)
+    monkeypatch.setattr(coach, "resolve_coach_openrouter_models", lambda primary, fallback: ["openrouter/free"])
+    monkeypatch.setattr(coach, "_find_missing_focus_sections", lambda response, focus: [])
+    monkeypatch.setattr(coach, "_build_cache_lease_owner", lambda: "test-owner")
+    monkeypatch.setattr(coach, "_claim_cache_generation", _fake_claim_cache_generation)
+    return _Agent()
 
 
 def _build_game_evidence(**overrides):
@@ -40,6 +131,329 @@ def _build_game_evidence(**overrides):
     )
     base.update(overrides)
     return GameEvidence(**base)
+
+
+def test_assess_game_evidence_requires_summary_for_review_only():
+    from app.routers import coach as coach_router
+
+    evidence = _build_game_evidence(summary_items=[])
+
+    review = coach_router.assess_game_evidence(
+        evidence,
+        analysis_type=coach_router.COACH_ANALYSIS_TYPE_REVIEW,
+    )
+    preview = coach_router.assess_game_evidence(
+        evidence,
+        analysis_type=coach_router.COACH_ANALYSIS_TYPE_PREVIEW,
+    )
+
+    assert "missing_summary" in review.root_causes
+    assert "missing_summary" not in preview.root_causes
+    assert preview.expected_data_quality == "grounded"
+
+
+def test_preview_partial_data_does_not_require_manual_baseball_data():
+    from app.routers import coach as coach_router
+
+    evidence = _build_game_evidence(
+        home_pitcher=None,
+        away_pitcher=None,
+        lineup_announced=False,
+        home_lineup=[],
+        away_lineup=[],
+        summary_items=[],
+    )
+    preview_assessment = coach_router.assess_game_evidence(
+        evidence,
+        analysis_type=coach_router.COACH_ANALYSIS_TYPE_PREVIEW,
+    )
+    review_assessment = coach_router.assess_game_evidence(
+        evidence,
+        analysis_type=coach_router.COACH_ANALYSIS_TYPE_REVIEW,
+    )
+    payload = SimpleNamespace(
+        game_id=evidence.game_id,
+        league_context={"game_date": evidence.game_date},
+    )
+
+    preview_request = asyncio.run(coach_router._build_manual_data_request(
+        object(),
+        payload,
+        evidence,
+        preview_assessment,
+        analysis_type=coach_router.COACH_ANALYSIS_TYPE_PREVIEW,
+    ))
+    review_request = asyncio.run(coach_router._build_manual_data_request(
+        object(),
+        payload,
+        evidence,
+        review_assessment,
+        analysis_type=coach_router.COACH_ANALYSIS_TYPE_REVIEW,
+    ))
+
+    assert preview_request is None
+    assert review_request is not None
+    assert review_request["code"] == coach_router.MANUAL_BASEBALL_DATA_REQUIRED_CODE
+
+
+def test_meta_defaults_include_analysis_type():
+    from app.routers import coach as coach_router
+
+    meta = coach_router._build_meta_payload_defaults(
+        generation_mode="deterministic_preview",
+        data_quality="partial",
+        used_evidence=["game"],
+        analysis_type=coach_router.COACH_ANALYSIS_TYPE_PREVIEW,
+        game_status_bucket="SCHEDULED",
+    )
+
+    assert meta["analysis_type"] == "game_preview"
+    assert meta["generation_mode"] == "deterministic_preview"
+
+
+def test_llm_skip_reason_for_cache_hit():
+    from app.routers import coach as coach_router
+
+    assert (
+        coach_router._resolve_llm_skip_reason(
+            request_mode=coach_router.COACH_REQUEST_MODE_MANUAL,
+            generation_mode="llm_manual",
+            cache_state="HIT",
+            cached=True,
+            in_progress=False,
+            manual_data_required=False,
+        )
+        == "cache_hit"
+    )
+
+
+def test_llm_skip_reason_for_auto_brief_pending():
+    from app.routers import coach as coach_router
+
+    assert (
+        coach_router._resolve_llm_skip_reason(
+            request_mode=coach_router.COACH_REQUEST_MODE_AUTO,
+            generation_mode="evidence_fallback",
+            cache_state="PENDING_WAIT",
+            cached=False,
+            in_progress=True,
+            manual_data_required=False,
+        )
+        == "pending_wait"
+    )
+
+
+def test_llm_skip_reason_absent_for_successful_manual_llm():
+    from app.routers import coach as coach_router
+
+    assert (
+        coach_router._resolve_llm_skip_reason(
+            request_mode=coach_router.COACH_REQUEST_MODE_MANUAL,
+            generation_mode="llm_manual",
+            cache_state="COMPLETED",
+            cached=False,
+            in_progress=False,
+            manual_data_required=False,
+        )
+        is None
+    )
+
+
+def test_llm_skip_metric_increments_from_stream_meta():
+    from app.observability.metrics import AI_COACH_LLM_SKIP_TOTAL
+    from app.routers import coach as coach_router
+
+    labels = {
+        "reason": "pending_wait",
+        "request_mode": "auto_brief",
+        "analysis_type": "game_preview",
+    }
+    metric = AI_COACH_LLM_SKIP_TOTAL.labels(**labels)
+    before = metric._value.get()
+
+    coach_router._log_coach_stream_meta(
+        {
+            "request_mode": "auto_brief",
+            "analysis_type": "game_preview",
+            "cache_state": "PENDING_WAIT",
+            "validation_status": "success",
+            "generation_mode": "evidence_fallback",
+            "llm_skip_reason": "pending_wait",
+            "cached": False,
+            "in_progress": True,
+            "data_quality": "sufficient",
+            "supported_fact_count": 0,
+        },
+        game_id="20260405LGKT0",
+    )
+
+    assert metric._value.get() == before + 1
+
+
+def test_coach_llm_smoke_script_dry_run_does_not_print_secret():
+    project_root = Path(__file__).resolve().parents[1]
+    script = project_root / "scripts" / "coach_llm_smoke.py"
+
+    assert script.exists()
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--dry-run"],
+        cwd=project_root,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "mode=dry_run" in result.stdout
+    assert "openrouter_api_key=" in result.stdout
+    assert "sk-" not in result.stdout
+    assert "Bearer" not in result.stdout
+
+
+def test_coach_llm_smoke_script_prints_resolved_models_for_dry_run(monkeypatch):
+    project_root = Path(__file__).resolve().parents[1]
+    script = project_root / "scripts" / "coach_llm_smoke.py"
+    env = os.environ.copy()
+    env.update(
+        {
+            "COACH_OPENROUTER_MODEL": "openrouter/auto",
+            "COACH_OPENROUTER_FALLBACK_MODELS": "",
+            "OPENROUTER_API_KEY": "sk-test-secret",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--dry-run"],
+        cwd=project_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "coach_openrouter_models=openrouter/free" in result.stdout
+    assert "openrouter/auto" not in result.stdout
+    assert "sk-test-secret" not in result.stdout
+
+
+def test_coach_llm_smoke_response_validator_requires_expected_json():
+    from scripts import coach_llm_smoke
+
+    ok, error = coach_llm_smoke._validate_smoke_response(
+        '{"ok": true, "source": "coach_smoke"}'
+    )
+    assert ok is True
+    assert error is None
+
+    ok, error = coach_llm_smoke._validate_smoke_response("not json")
+    assert ok is False
+    assert error == "invalid_json"
+
+    ok, error = coach_llm_smoke._validate_smoke_response(
+        '{"ok": true, "source": "wrong"}'
+    )
+    assert ok is False
+    assert error == "unexpected_response_contract"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_stream_meta_preview_cache_hit_does_not_require_manual_data(monkeypatch):
+    from app.routers import coach
+
+    evidence = _build_game_evidence(
+        game_row_found=True,
+        season_year=2026,
+        season_id=266,
+        game_id="20260405LGKT0",
+        game_date="2026-04-05",
+        game_status="SCHEDULED",
+        game_status_bucket="SCHEDULED",
+        league_type_code=0,
+        home_score=None,
+        away_score=None,
+        summary_items=[],
+    )
+    agent = _install_coach_endpoint_cache_hit(monkeypatch, evidence)
+
+    response = await coach.analyze_team(
+        coach.AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20260405LGKT0",
+            request_mode=coach.COACH_REQUEST_MODE_MANUAL,
+            analysis_type=coach.COACH_ANALYSIS_TYPE_PREVIEW,
+            league_context={
+                "season": 266,
+                "season_year": 2026,
+                "game_date": "2026-04-05",
+                "league_type": "REGULAR",
+                "league_type_code": 0,
+            },
+        ),
+        agent,
+        None,
+        None,
+    )
+
+    sse_text = await _collect_sse_text(response)
+    meta_events = _extract_sse_meta_events(sse_text)
+
+    assert "MANUAL_BASEBALL_DATA_REQUIRED" not in sse_text
+    assert meta_events
+    assert meta_events[-1]["analysis_type"] == "game_preview"
+    assert meta_events[-1]["llm_skip_reason"] == "cache_hit"
+    assert meta_events[-1]["cached"] is True
+
+
+@pytest.mark.asyncio
+async def test_endpoint_stream_meta_completed_review_cache_hit(monkeypatch):
+    from app.routers import coach
+
+    evidence = _build_game_evidence(
+        game_row_found=True,
+        season_year=2026,
+        season_id=266,
+        game_id="20260405LGKT0",
+        game_date="2026-04-05",
+        game_status="COMPLETED",
+        game_status_bucket="COMPLETED",
+        league_type_code=0,
+        home_score=3,
+        away_score=2,
+        winning_team_code="LG",
+        winning_team_name="LG 트윈스",
+        summary_items=["9회말 끝내기 안타"],
+    )
+    agent = _install_coach_endpoint_cache_hit(monkeypatch, evidence)
+
+    response = await coach.analyze_team(
+        coach.AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20260405LGKT0",
+            request_mode=coach.COACH_REQUEST_MODE_MANUAL,
+            analysis_type=coach.COACH_ANALYSIS_TYPE_REVIEW,
+            league_context={
+                "season": 266,
+                "season_year": 2026,
+                "game_date": "2026-04-05",
+                "league_type": "REGULAR",
+                "league_type_code": 0,
+            },
+        ),
+        agent,
+        None,
+        None,
+    )
+
+    meta_events = _extract_sse_meta_events(await _collect_sse_text(response))
+
+    assert meta_events
+    assert meta_events[-1]["analysis_type"] == "game_review"
+    assert meta_events[-1]["llm_skip_reason"] == "cache_hit"
+    assert meta_events[-1]["structured_response"]["analysis_type"] == "game_review"
 
 
 # ============================================================
@@ -1084,11 +1498,11 @@ class TestCoachEvidenceHelpers:
         )
 
         fact_sheet = CoachFactSheet(
-            fact_lines=["홈팀 OPS 0.812"],
+            fact_lines=["홈팀 OPS 0.812", "원정팀 OPS 0.905"],
             caveat_lines=["라인업 미확정"],
             allowed_entity_names={"LG 트윈스"},
-            allowed_numeric_tokens={"0.812"},
-            supported_fact_count=1,
+            allowed_numeric_tokens={"0.812", "0.905"},
+            supported_fact_count=2,
             starters_confirmed=False,
             lineup_confirmed=False,
             series_context_confirmed=True,
@@ -1105,9 +1519,11 @@ class TestCoachEvidenceHelpers:
             is False
         )
 
-    def test_scheduled_partial_manual_short_circuits_when_starter_and_lineup_are_both_missing(
+    def test_scheduled_partial_manual_calls_llm_when_facts_sufficient_despite_missing_lineup(
         self,
     ):
+        # 정책 변경: 선발·라인업이 모두 미확정이어도 팀 단위 실데이터가 충분하면
+        # 경기 예측에서도 LLM 을 호출한다(결정론 boilerplate 로 고정되지 않도록).
         from app.core.coach_grounding import CoachFactSheet
         from app.routers.coach import (
             COACH_REQUEST_MODE_MANUAL,
@@ -1120,6 +1536,42 @@ class TestCoachEvidenceHelpers:
             allowed_entity_names={"LG 트윈스", "롯데 자이언츠"},
             allowed_numeric_tokens={"0.740", "0.905"},
             supported_fact_count=2,
+            starters_confirmed=False,
+            lineup_confirmed=False,
+            series_context_confirmed=True,
+            require_series_context=False,
+            reasons=["missing_starters", "missing_lineups", "missing_summary"],
+            warnings=[],
+        )
+
+        assert (
+            _should_short_circuit_to_deterministic_response(
+                request_mode=COACH_REQUEST_MODE_MANUAL,
+                fact_sheet=fact_sheet,
+                game_status_bucket="SCHEDULED",
+                grounding_reasons=[
+                    "missing_starters",
+                    "missing_lineups",
+                    "missing_summary",
+                ],
+            )
+            is False
+        )
+
+    def test_scheduled_partial_manual_short_circuits_when_facts_insufficient(self):
+        # 안전 경계 유지: 선발·라인업 미확정 + 실데이터 fact 가 빈약하면 결정론으로 단락.
+        from app.core.coach_grounding import CoachFactSheet
+        from app.routers.coach import (
+            COACH_REQUEST_MODE_MANUAL,
+            _should_short_circuit_to_deterministic_response,
+        )
+
+        fact_sheet = CoachFactSheet(
+            fact_lines=["홈팀 OPS 0.740"],
+            caveat_lines=["선발 정보 미확정", "라인업 미확정"],
+            allowed_entity_names={"LG 트윈스", "롯데 자이언츠"},
+            allowed_numeric_tokens={"0.740"},
+            supported_fact_count=1,
             starters_confirmed=False,
             lineup_confirmed=False,
             series_context_confirmed=True,
@@ -1173,16 +1625,48 @@ class TestCoachEvidenceHelpers:
             is False
         )
 
+    def test_live_manual_detail_with_supported_facts_does_not_short_circuit(self):
+        from app.core.coach_grounding import CoachFactSheet
+        from app.routers.coach import (
+            COACH_REQUEST_MODE_MANUAL,
+            _should_short_circuit_to_deterministic_response,
+        )
+
+        fact_sheet = CoachFactSheet(
+            fact_lines=["홈팀 최근 10경기 7승 3패", "원정팀 최근 10경기 5승 5패"],
+            caveat_lines=["경기 진행 중"],
+            allowed_entity_names={"LG 트윈스", "KT 위즈"},
+            allowed_numeric_tokens={"10", "7", "3", "5"},
+            supported_fact_count=2,
+            starters_confirmed=True,
+            lineup_confirmed=True,
+            series_context_confirmed=True,
+            require_series_context=False,
+            reasons=[],
+            warnings=[],
+        )
+
+        assert (
+            _should_short_circuit_to_deterministic_response(
+                request_mode=COACH_REQUEST_MODE_MANUAL,
+                fact_sheet=fact_sheet,
+                game_status_bucket="LIVE",
+                grounding_reasons=[],
+                resolved_focus=["recent_form", "matchup"],
+            )
+            is False
+        )
+
     def test_manual_recent_form_fast_path_requires_flag(self, monkeypatch):
         from app.core.coach_grounding import CoachFactSheet
         from app.routers import coach as coach_module
 
         fact_sheet = CoachFactSheet(
-            fact_lines=["홈팀 최근 10경기 7승 3패"],
+            fact_lines=["홈팀 최근 10경기 7승 3패", "원정팀 최근 10경기 5승 5패"],
             caveat_lines=[],
             allowed_entity_names={"LG 트윈스"},
-            allowed_numeric_tokens={"7", "3"},
-            supported_fact_count=1,
+            allowed_numeric_tokens={"7", "3", "5"},
+            supported_fact_count=2,
             starters_confirmed=True,
             lineup_confirmed=True,
             series_context_confirmed=True,
@@ -1207,11 +1691,11 @@ class TestCoachEvidenceHelpers:
         from app.routers import coach as coach_module
 
         fact_sheet = CoachFactSheet(
-            fact_lines=["홈팀 최근 10경기 7승 3패"],
+            fact_lines=["홈팀 최근 10경기 7승 3패", "원정팀 최근 10경기 5승 5패"],
             caveat_lines=[],
             allowed_entity_names={"LG 트윈스"},
-            allowed_numeric_tokens={"7", "3"},
-            supported_fact_count=1,
+            allowed_numeric_tokens={"7", "3", "5"},
+            supported_fact_count=2,
             starters_confirmed=True,
             lineup_confirmed=True,
             series_context_confirmed=True,
@@ -1334,7 +1818,8 @@ class TestCoachEvidenceHelpers:
             }
         )
 
-        assert payload["generation_mode"] == "deterministic_auto"
+        assert payload["generation_mode"] == "deterministic_preview"
+        assert payload["analysis_type"] == "game_preview"
         assert payload["data_quality"] == "partial"
         assert payload["cache_state"] == "COMPLETED"
         assert payload["cached"] is False
@@ -1371,7 +1856,8 @@ class TestCoachEvidenceHelpers:
             request_mode=COACH_REQUEST_MODE_AUTO,
         )
 
-        assert meta["generation_mode"] == "deterministic_auto"
+        assert meta["generation_mode"] == "deterministic_preview"
+        assert meta["analysis_type"] == "game_preview"
         assert meta["data_quality"] == "partial"
 
     def test_auto_brief_llm_attempt_limit_is_single_pass(self):
@@ -2087,24 +2573,21 @@ class TestToolCallerParallel:
 
         async def _async_test():
             import time
-            import threading
+            import asyncio
             from app.agents.tool_caller import ToolCaller, ToolCall
 
             caller = ToolCaller()
             call_times = []
-            call_lock = threading.Lock()
 
-            # 시작 시간을 기록하는 추적 도구
-            def tracking_tool_1(param1: str) -> dict:
-                with call_lock:
-                    call_times.append(("tool_1", time.time()))
-                time.sleep(0.1)  # 작업 시뮬레이션
+            # 시작 시간을 기록하는 추적 도구 (native async — await 지점에서 진짜 동시 실행)
+            async def tracking_tool_1(param1: str) -> dict:
+                call_times.append(("tool_1", time.time()))
+                await asyncio.sleep(0.1)  # 비동기 I/O 시뮬레이션
                 return {"result": f"tool1: {param1}"}
 
-            def tracking_tool_2(param2: str) -> dict:
-                with call_lock:
-                    call_times.append(("tool_2", time.time()))
-                time.sleep(0.1)  # 작업 시뮬레이션
+            async def tracking_tool_2(param2: str) -> dict:
+                call_times.append(("tool_2", time.time()))
+                await asyncio.sleep(0.1)  # 비동기 I/O 시뮬레이션
                 return {"result": f"tool2: {param2}"}
 
             caller.register_tool(
@@ -2198,7 +2681,7 @@ class TestCoachFastPath:
             def check(self):
                 self.check_count += 1
 
-        def _fake_claim_once(**kwargs):
+        async def _fake_claim_once(**kwargs):
             calls.append(kwargs)
             if len(calls) == 1:
                 raise coach.psycopg.OperationalError("server closed connection")
@@ -2207,7 +2690,7 @@ class TestCoachFastPath:
         pool = _Pool()
         monkeypatch.setattr(coach, "_claim_cache_generation_once", _fake_claim_once)
 
-        result = coach._claim_cache_generation(
+        result = asyncio.run(coach._claim_cache_generation(
             pool=pool,
             cache_key="cache-key",
             team_id="HH",
@@ -2216,7 +2699,7 @@ class TestCoachFastPath:
             model_name="model",
             lease_owner="owner",
             completed_ttl_seconds=None,
-        )
+        ))
 
         assert result == ("HIT", {"ok": True}, None, None, 2)
         assert len(calls) == 2
@@ -2800,11 +3283,11 @@ class TestCoachFastPath:
 
         assert (
             payload["analysis"]["verdict"]
-            == "SSG 랜더스가 최근 전력과 팀 타격 생산성에서 앞섭니다."
+            == "SSG 랜더스가 최근 흐름과 득점 연결력에서 앞섭니다."
         )
         assert (
             payload["analysis"]["why_it_matters"][0]
-            == "SSG 랜더스가 최근 전력과 팀 OPS를 함께 앞세워 초중반 주도권을 먼저 잡을 가능성이 있습니다."
+            == "SSG 랜더스가 최근 흐름과 출루·장타 지표를 함께 앞세워 초중반 주도권을 먼저 잡을 가능성이 있습니다."
         )
         assert (
             payload["analysis"]["swing_factors"][0]
@@ -2815,7 +3298,7 @@ class TestCoachFastPath:
             == "첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
         )
         assert (
-            "## 코치 판단\n- SSG 랜더스가 최근 전력과 팀 타격 생산성에서 앞섭니다."
+            "## 코치 판단\n- SSG 랜더스가 최근 흐름과 득점 연결력에서 앞섭니다."
             in payload["detailed_markdown"]
         )
         assert (
@@ -2826,6 +3309,102 @@ class TestCoachFastPath:
             "## 체크 포인트\n- 첫 득점 직후 어느 팀이 먼저 불펜 카드로 반응하는지 확인할 필요가 있습니다."
             in payload["detailed_markdown"]
         )
+
+    def test_scheduled_deterministic_response_uses_plain_risk_language(self):
+        from app.routers.coach import _build_deterministic_coach_response
+
+        evidence = _build_game_evidence(
+            game_status="SCHEDULED",
+            game_status_bucket="SCHEDULED",
+            home_team_code="HH",
+            away_team_code="SSG",
+            home_team_name="한화 이글스",
+            away_team_name="SSG 랜더스",
+            home_pitcher=None,
+            away_pitcher=None,
+            lineup_announced=False,
+        )
+        tool_results = {
+            "home": {
+                "recent": {
+                    "summary": {"wins": 2, "losses": 3, "draws": 0, "run_diff": -2}
+                },
+                "advanced": {"metrics": {"batting": {"ops": 0.790}}},
+                "summary": {},
+            },
+            "away": {
+                "recent": {
+                    "summary": {"wins": 4, "losses": 1, "draws": 0, "run_diff": 8}
+                },
+                "advanced": {"metrics": {"batting": {"ops": 0.840}}},
+                "summary": {},
+            },
+            "matchup": {},
+            "clutch_moments": {"found": False, "moments": []},
+        }
+
+        payload = _build_deterministic_coach_response(
+            evidence,
+            tool_results,
+            resolved_focus=["recent_form", "starter", "batting"],
+        )
+        analysis = payload["analysis"]
+        narrative_blob = "\n".join(
+            [
+                analysis["summary"],
+                analysis["verdict"],
+                payload["detailed_markdown"],
+                payload["coach_note"],
+                *analysis["strengths"],
+                *analysis["weaknesses"],
+                *[risk["description"] for risk in analysis["risks"]],
+                *analysis["why_it_matters"],
+                *analysis["swing_factors"],
+                *analysis["watch_points"],
+                *analysis["uncertainty"],
+            ]
+        )
+
+        assert analysis["risks"]
+        assert any("득점 연결력" in risk["description"] for risk in analysis["risks"])
+        assert "공격 생산성" not in narrative_blob
+        assert "타격 생산성" not in narrative_blob
+        assert "클러치 생산성" not in narrative_blob
+        assert not re.search(r"\bOPS\b", narrative_blob)
+        assert not re.search(r"\bWPA\b", narrative_blob)
+
+    def test_normalize_coach_payload_backfills_risks_with_plain_language(self):
+        from app.core.coach_validator import normalize_coach_payload
+
+        payload = {
+            "headline": "테스트 분석",
+            "sentiment": "neutral",
+            "key_metrics": [],
+            "analysis": {
+                "summary": "양 팀 지표는 박빙입니다.",
+                "verdict": "득점 연결력이 변수입니다.",
+                "strengths": ["SSG 랜더스는 최근 득점 흐름이 좋습니다."],
+                "weaknesses": [
+                    "한화 이글스는 팀 OPS 열세로 초반 득점 설계가 과제입니다."
+                ],
+                "risks": [],
+                "why_it_matters": [],
+                "swing_factors": [],
+                "watch_points": [],
+                "uncertainty": ["선발 발표 전이라 초반 흐름 해석은 보수적입니다."],
+            },
+            "detailed_markdown": "## 코치 판단\n- 득점 연결력이 변수입니다.",
+            "coach_note": "득점 연결력이 변수입니다.",
+        }
+
+        normalized, reasons = normalize_coach_payload(payload)
+        risks = normalized["analysis"]["risks"]
+
+        assert "backfill_empty_risks" in reasons
+        assert risks
+        assert "득점 연결력" in risks[0]["description"]
+        assert not re.search(r"\bOPS\b", risks[0]["description"])
+        assert "타격 생산성" not in risks[0]["description"]
 
     def test_completed_deterministic_response_avoids_sentence_gluing(self):
         from app.routers.coach import _build_deterministic_coach_response
@@ -3145,10 +3724,10 @@ class TestCoachFastPath:
         class _FakePool:
             def connection(self):
                 class _Ctx:
-                    def __enter__(self_inner):
+                    async def __aenter__(self_inner):
                         return _FakeConn()
 
-                    def __exit__(self_inner, exc_type, exc, tb):
+                    async def __aexit__(self_inner, exc_type, exc, tb):
                         return False
 
                 return _Ctx()
@@ -3157,23 +3736,23 @@ class TestCoachFastPath:
             def __init__(self, _conn):
                 pass
 
-            def get_team_summary(self, *_args, **_kwargs):
+            async def get_team_summary(self, *_args, **_kwargs):
                 return {"found": False}
 
-            def get_team_advanced_metrics(self, *_args, **_kwargs):
+            async def get_team_advanced_metrics(self, *_args, **_kwargs):
                 return {"found": False}
 
-            def get_team_player_form_signals(self, *_args, **_kwargs):
+            async def get_team_player_form_signals(self, *_args, **_kwargs):
                 return {"found": False, "batters": [], "pitchers": []}
 
-            def get_team_recent_form(self, *_args, **_kwargs):
+            async def get_team_recent_form(self, *_args, **_kwargs):
                 return {"found": False}
 
         class _FakeGameQueryTool:
             def __init__(self, _conn):
                 pass
 
-            def get_head_to_head(self, *_args, **kwargs):
+            async def get_head_to_head(self, *_args, **kwargs):
                 captured.update(kwargs)
                 return {"found": False, "games": [], "summary": {}}
 
@@ -3208,6 +3787,82 @@ class TestCoachFastPath:
         assert captured["season_id"] == 264
         assert captured["as_of_game_date"] == "2025-10-31"
         assert captured["exclude_game_id"] == "20251031LGHH0"
+
+    def test_execute_coach_tools_parallel_bounds_concurrent_db_checkouts(
+        self, monkeypatch
+    ):
+        """fan-out 세마포어가 동시 DB 커넥션 체크아웃을 상한 이하로 제한한다."""
+        from app.routers import coach as coach_router
+
+        # 세마포어 상한을 작게 설정하고 싱글톤 초기화
+        monkeypatch.setattr(coach_router, "COACH_DB_FANOUT_MAX", 2)
+        coach_router._reset_coach_fanout_semaphore_for_tests()
+
+        active = 0
+        peak = 0
+        lock = asyncio.Lock()
+
+        class _FakeConn:
+            pass
+
+        class _FakePool:
+            def connection(self):
+                class _Ctx:
+                    async def __aenter__(self_inner):
+                        nonlocal active, peak
+                        async with lock:
+                            active += 1
+                            peak = max(peak, active)
+                        # 동시성 창을 벌리기 위해 잠깐 양보
+                        await asyncio.sleep(0.01)
+                        return _FakeConn()
+
+                    async def __aexit__(self_inner, exc_type, exc, tb):
+                        nonlocal active
+                        async with lock:
+                            active -= 1
+                        return False
+
+                return _Ctx()
+
+        class _FakeDatabaseQueryTool:
+            def __init__(self, _conn):
+                pass
+
+            async def get_team_summary(self, *_a, **_k):
+                await asyncio.sleep(0.01)
+                return {"found": False}
+
+            async def get_team_advanced_metrics(self, *_a, **_k):
+                await asyncio.sleep(0.01)
+                return {"found": False}
+
+            async def get_team_player_form_signals(self, *_a, **_k):
+                await asyncio.sleep(0.01)
+                return {"found": False, "batters": [], "pitchers": []}
+
+            async def get_team_recent_form(self, *_a, **_k):
+                await asyncio.sleep(0.01)
+                return {"found": False}
+
+        monkeypatch.setattr(
+            coach_router, "DatabaseQueryTool", _FakeDatabaseQueryTool
+        )
+
+        async def _run():
+            # 홈+원정 = get_team_data 2회 × 4쿼리 = 8개 fan-out, 상한 2로 제한되어야 함
+            return await coach_router._execute_coach_tools_parallel(
+                _FakePool(),
+                "LG",
+                2025,
+                [],
+                "HH",
+            )
+
+        asyncio.run(_run())
+        coach_router._reset_coach_fanout_semaphore_for_tests()
+
+        assert peak <= 2, f"동시 체크아웃 peak={peak} 가 상한 2를 초과"
 
     def test_build_focus_data_warning_mentions_fallback_when_all_missing(self):
         from app.routers.coach import _build_focus_data_warning
@@ -6175,12 +6830,12 @@ class TestCoachFastPath:
             league_context={"game_date": "2026-04-05"},
         )
 
-        manual_request = _build_manual_data_request(
+        manual_request = asyncio.run(_build_manual_data_request(
             None,
             payload,
             evidence,
             assess_game_evidence(evidence),
-        )
+        ))
 
         assert manual_request is not None
         assert manual_request["scope"] == "coach.analyze"
@@ -6215,12 +6870,12 @@ class TestCoachFastPath:
             league_context={"game_date": "2099-04-05"},
         )
 
-        manual_request = _build_manual_data_request(
+        manual_request = asyncio.run(_build_manual_data_request(
             None,
             payload,
             evidence,
             assess_game_evidence(evidence),
-        )
+        ))
 
         assert manual_request is not None
         assert manual_request["code"] == "MANUAL_BASEBALL_DATA_REQUIRED"
@@ -6249,12 +6904,12 @@ class TestCoachFastPath:
             league_context={"game_date": "2099-04-05"},
         )
 
-        manual_request = _build_manual_data_request(
+        manual_request = asyncio.run(_build_manual_data_request(
             None,
             payload,
             evidence,
             assess_game_evidence(evidence),
-        )
+        ))
 
         assert manual_request is None
 
@@ -6286,14 +6941,210 @@ class TestCoachFastPath:
             league_context={"game_date": "2026-03-22"},
         )
 
-        manual_request = _build_manual_data_request(
+        manual_request = asyncio.run(_build_manual_data_request(
             None,
             payload,
             evidence,
             assess_game_evidence(evidence),
-        )
+        ))
 
         assert manual_request is None
+
+    def test_build_manual_data_request_allows_preview_without_final_score(self):
+        from app.routers.coach import (
+            AnalyzeRequest,
+            COACH_ANALYSIS_TYPE_PREVIEW,
+            _build_manual_data_request,
+            assess_game_evidence,
+        )
+
+        evidence = _build_game_evidence(
+            game_row_found=True,
+            season_year=2026,
+            season_id=266,
+            game_date="2026-04-05",
+            game_status="SCHEDULED",
+            game_status_bucket="SCHEDULED",
+            home_score=None,
+            away_score=None,
+        )
+        payload = AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20260405LGKT0",
+            league_context={"game_date": "2026-04-05"},
+            request_mode="manual_detail",
+            analysis_type=COACH_ANALYSIS_TYPE_PREVIEW,
+        )
+        assessment = assess_game_evidence(
+            evidence,
+            analysis_type=COACH_ANALYSIS_TYPE_PREVIEW,
+        )
+
+        manual_request = asyncio.run(_build_manual_data_request(
+            None,
+            payload,
+            evidence,
+            assessment,
+            analysis_type=COACH_ANALYSIS_TYPE_PREVIEW,
+        ))
+
+        assert manual_request is None
+
+    def test_build_fallback_evidence_preserves_scheduled_status_from_payload(self):
+        from app.routers.coach import AnalyzeRequest, _build_fallback_evidence
+
+        payload = AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20260405LGKT0",
+            league_context={
+                "game_date": "2026-04-05",
+                "game_status": "SCHEDULED",
+                "league_type_code": 0,
+            },
+            request_mode="auto_brief",
+            analysis_type="game_preview",
+        )
+
+        evidence = _build_fallback_evidence(
+            payload,
+            2026,
+            "LG",
+            "KT",
+            "LG 트윈스",
+            "KT 위즈",
+        )
+
+        assert evidence.game_status == "SCHEDULED"
+        assert evidence.game_status_bucket == "SCHEDULED"
+
+    def test_build_fallback_evidence_ignores_unannounced_pitcher_labels(
+        self, monkeypatch
+    ):
+        from app.routers.coach import (
+            AnalyzeRequest,
+            _build_fallback_evidence,
+            assess_game_evidence,
+        )
+
+        monkeypatch.setenv("COACH_AUDIT_NOW_KST", "2026-04-04T19:00:00+09:00")
+        payload = AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20260405LGKT0",
+            league_context={
+                "game_date": "2026-04-05",
+                "game_status": "SCHEDULED",
+                "league_type_code": 0,
+                "home_pitcher": "발표 전",
+                "away_pitcher": "미정",
+            },
+            request_mode="auto_brief",
+            analysis_type="game_preview",
+        )
+
+        evidence = _build_fallback_evidence(
+            payload,
+            2026,
+            "LG",
+            "KT",
+            "LG 트윈스",
+            "KT 위즈",
+        )
+        assessment = assess_game_evidence(
+            evidence,
+            analysis_type="game_preview",
+        )
+
+        assert evidence.home_pitcher is None
+        assert evidence.away_pitcher is None
+        assert "missing_starters" in assessment.root_causes
+
+    def test_build_manual_data_request_requires_final_score_for_review(self):
+        from app.routers.coach import (
+            AnalyzeRequest,
+            BASEBALL_DATA_SYNC_REQUIRED_CODE,
+            COACH_ANALYSIS_TYPE_REVIEW,
+            MANUAL_BASEBALL_DATA_REQUIRED_CODE,
+            _build_manual_data_request,
+            assess_game_evidence,
+        )
+
+        evidence = _build_game_evidence(
+            game_row_found=True,
+            season_year=2026,
+            season_id=266,
+            game_date="2026-04-05",
+            game_status="COMPLETED",
+            game_status_bucket="COMPLETED",
+            home_score=None,
+            away_score=None,
+        )
+        payload = AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20260405LGKT0",
+            league_context={"game_date": "2026-04-05"},
+            request_mode="manual_detail",
+            analysis_type=COACH_ANALYSIS_TYPE_REVIEW,
+        )
+        assessment = assess_game_evidence(
+            evidence,
+            analysis_type=COACH_ANALYSIS_TYPE_REVIEW,
+        )
+
+        manual_request = asyncio.run(_build_manual_data_request(
+            None,
+            payload,
+            evidence,
+            assessment,
+            analysis_type=COACH_ANALYSIS_TYPE_REVIEW,
+        ))
+
+        assert manual_request is not None
+        assert manual_request["code"] == MANUAL_BASEBALL_DATA_REQUIRED_CODE
+        assert manual_request["dataSyncRequired"] is True
+        assert manual_request["dataSyncCode"] == BASEBALL_DATA_SYNC_REQUIRED_CODE
+        assert manual_request["externalSource"] == "trusted_baseball_data_project"
+        assert manual_request["dataSyncRequest"] == {
+            "code": BASEBALL_DATA_SYNC_REQUIRED_CODE,
+            "requestId": "coach:20260405LGKT0:game_review",
+            "consumer": "ai_coach",
+            "scope": "coach.analyze",
+            "analysisType": COACH_ANALYSIS_TYPE_REVIEW,
+            "targetSource": "trusted_baseball_data_project",
+            "handoff": "external_trusted_baseball_data_sync",
+            "blocking": True,
+            "entity": {
+                "gameId": "20260405LGKT0",
+                "gameDate": "2026-04-05",
+                "seasonYear": 2026,
+                "homeTeamId": "LG",
+                "awayTeamId": "KT",
+                "stage": "REGULAR",
+            },
+            "missingItems": [
+                {
+                    "key": "game_status",
+                    "label": "경기 상태",
+                    "reason": "과거 경기의 상태가 종료 기준으로 확정되지 않았습니다.",
+                    "expectedFormat": "SCHEDULED, COMPLETED, CANCELLED 등",
+                    "requiredFields": ["game.game_status"],
+                },
+                {
+                    "key": "final_score",
+                    "label": "최종 점수",
+                    "reason": "과거 경기의 최종 점수가 비어 있습니다.",
+                    "expectedFormat": "home_score, away_score",
+                    "requiredFields": ["game.home_score", "game.away_score"],
+                },
+            ],
+        }
+        assert {item["key"] for item in manual_request["missingItems"]} == {
+            "game_status",
+            "final_score",
+        }
 
     def test_format_game_summary_item_normalizes_db_row(self):
         from app.routers.coach import _format_game_summary_item
@@ -6894,6 +7745,78 @@ class TestCoachFastPath:
         assert "- 발표 선발: LG 트윈스 웰스 / KT 위즈 사우어" in markdown
         assert "## 최근 전력" in markdown
         assert "## 불펜 상태" in markdown
+
+
+# ============================================================
+# _attach_scheduled_win_probability (예측 다이얼로그 승률 hero)
+# ============================================================
+
+
+class TestAttachScheduledWinProbability:
+    def _tool_results(self, home=(7, 3, 0), away=(5, 5, 0)):
+        def block(record):
+            wins, losses, draws = record
+            return {
+                "recent": {
+                    "summary": {
+                        "wins": wins,
+                        "losses": losses,
+                        "draws": draws,
+                        "run_diff": wins - losses,
+                    }
+                }
+            }
+
+        return {"home": block(home), "away": block(away)}
+
+    def test_uses_payload_value_when_valid(self):
+        from app.routers.coach import _attach_scheduled_win_probability
+
+        meta = {}
+        _attach_scheduled_win_probability(
+            meta,
+            game_status_bucket="SCHEDULED",
+            tool_results=self._tool_results(),
+            response_payload={"win_probability_home": 0.6123},
+        )
+        assert meta["win_probability_home"] == 0.612
+
+    def test_computes_when_payload_missing_and_data_sufficient(self):
+        from app.routers.coach import _attach_scheduled_win_probability
+
+        meta = {}
+        _attach_scheduled_win_probability(
+            meta,
+            game_status_bucket="SCHEDULED",
+            tool_results=self._tool_results(),
+            response_payload=None,
+        )
+        assert "win_probability_home" in meta
+        assert 0.30 <= meta["win_probability_home"] <= 0.75
+
+    def test_no_key_when_data_insufficient(self):
+        from app.routers.coach import _attach_scheduled_win_probability
+
+        meta = {}
+        _attach_scheduled_win_probability(
+            meta,
+            game_status_bucket="SCHEDULED",
+            tool_results={"home": {}, "away": {}},
+            response_payload={"win_probability_home": 1.5},  # 범위 밖 → 무시
+        )
+        assert "win_probability_home" not in meta
+
+    def test_no_key_when_not_scheduled(self):
+        from app.routers.coach import _attach_scheduled_win_probability
+
+        meta = {}
+        _attach_scheduled_win_probability(
+            meta,
+            game_status_bucket="COMPLETED",
+            tool_results=self._tool_results(),
+            response_payload={"win_probability_home": 0.55},
+        )
+        assert "win_probability_home" not in meta
 
 
 # ============================================================

@@ -40,7 +40,9 @@ def test_tool_caller_from_definitions_resolves_bound_handlers() -> None:
         lambda handler_attr: getattr(handlers, handler_attr),
     )
 
-    result = caller.execute_tool(ToolCall("alpha", {"value": "hello"}))
+    import asyncio
+
+    result = asyncio.run(caller.execute_tool(ToolCall("alpha", {"value": "hello"})))
 
     assert result.success is True
     assert result.data == {"value": "hello"}

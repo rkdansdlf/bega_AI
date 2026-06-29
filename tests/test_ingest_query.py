@@ -45,6 +45,25 @@ def test_build_select_query_with_alias(sample_since):
     assert params == (2025, sample_since)
 
 
+def test_build_select_query_applies_date_to_exclusive_for_game_summary() -> None:
+    profile = TABLE_PROFILES["game_summary"]
+
+    query, params = build_select_query(
+        table="game_summary",
+        profile=profile,
+        pk_columns=["id"],
+        limit=None,
+        season_year=2026,
+        since=None,
+        date_to_exclusive=datetime(2026, 5, 1).date(),
+    )
+
+    assert "ks.season_year = %s" in query
+    assert "g.game_date < %s" in query
+    assert "ORDER BY g.game_date DESC" in query
+    assert params == (2026, datetime(2026, 5, 1).date())
+
+
 def test_build_select_query_without_alias(sample_since):
     profile = {
         "select_sql": "SELECT * FROM team_name_mapping",
@@ -225,6 +244,26 @@ def test_player_basic_profile_disables_incremental_since_filter(sample_since) ->
     )
 
     assert "updated_at" not in query
+    assert params == ()
+
+
+def test_team_profiles_profile_disables_incremental_since_filter(sample_since) -> None:
+    profile = TABLE_PROFILES["team_profiles"]
+
+    assert profile["since_filter_column"] is None
+
+    query, params = build_select_query(
+        table="team_profiles",
+        profile=profile,
+        pk_columns=["team_id", "id"],
+        limit=None,
+        season_year=None,
+        since=sample_since,
+    )
+
+    assert "tp.updated_at" not in query
+    assert "updated_at >=" not in query
+    assert "ORDER BY tp.team_id" in query
     assert params == ()
 
 
