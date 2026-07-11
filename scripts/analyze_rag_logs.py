@@ -302,9 +302,7 @@ def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
     p99_latency = _percentile(latencies, 0.99)
 
     zero_hit_count = sum(1 for _query, _ms, results in queries if int(results) == 0)
-    zero_hit_rate = (
-        round(zero_hit_count / len(queries) * 100, 1) if queries else None
-    )
+    zero_hit_rate = round(zero_hit_count / len(queries) * 100, 1) if queries else None
 
     recommendations = _build_tuning_recommendations(
         data,
@@ -320,12 +318,12 @@ def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
             "total_log_lines": data["total_lines"],
             "total_queries_tracked": len(queries),
             "avg_search_latency_ms": avg_latency,
-            "p95_search_latency_ms": round(p95_latency, 1)
-            if p95_latency is not None
-            else None,
-            "p99_search_latency_ms": round(p99_latency, 1)
-            if p99_latency is not None
-            else None,
+            "p95_search_latency_ms": (
+                round(p95_latency, 1) if p95_latency is not None else None
+            ),
+            "p99_search_latency_ms": (
+                round(p99_latency, 1) if p99_latency is not None else None
+            ),
             "zero_hit_rate_pct": zero_hit_rate,
             "zero_hit_total": zero_hit_count,
             "cache_hit_rate_pct": cache_hit_rate,

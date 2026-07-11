@@ -471,9 +471,7 @@ async def lifespan(app):
             await conn.execute(CHAT_SEMANTIC_CACHE_DDL)
         logger.info("[Lifespan] chat_semantic_response_cache table ensured")
     except Exception as exc:
-        logger.warning(
-            "[Lifespan] chat_semantic_response_cache DDL failed: %s", exc
-        )
+        logger.warning("[Lifespan] chat_semantic_response_cache DDL failed: %s", exc)
     if bool(getattr(settings, "chat_semantic_cache_vector_index_enabled", False)):
         try:
             async with pool.connection() as conn:

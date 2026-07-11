@@ -86,9 +86,7 @@ def test_build_report_fails_coverage_when_comparison_answer_is_missing() -> None
     assert report["summary"]["skipped_count"] == 1
     assert report["summary"]["coverage_complete"] is False
     assert report["summary"]["gate_passed"] is False
-    assert report["details"][0]["failure_reasons"] == [
-        "missing_comparison_answer"
-    ]
+    assert report["details"][0]["failure_reasons"] == ["missing_comparison_answer"]
 
 
 def test_compare_answers_normalizes_decimal_and_percent_rates() -> None:

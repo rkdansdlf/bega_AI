@@ -341,7 +341,9 @@ class BaseballAgentRuntime:
         return getattr(self.settings, "openrouter_model", "unknown")
 
     def _settings_optional_str(self, name: str) -> Optional[str]:
-        value = getattr(self.settings, name, None) if self.settings is not None else None
+        value = (
+            getattr(self.settings, name, None) if self.settings is not None else None
+        )
         normalized = str(value or "").strip()
         return normalized or None
 
@@ -819,9 +821,7 @@ class BaseballStatisticsAgent:
         return re.sub(r"\s+", " ", str(query or "")).strip().casefold()
 
     @classmethod
-    def _build_planner_context_signature(
-        cls, context: Optional[Dict[str, Any]]
-    ) -> str:
+    def _build_planner_context_signature(cls, context: Optional[Dict[str, Any]]) -> str:
         if not isinstance(context, dict):
             return "none"
 

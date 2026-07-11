@@ -37,7 +37,10 @@ def test_classify_chat_question_type_uses_stable_low_cardinality_buckets() -> No
         chat_cost_metrics.classify_chat_question_type("김도영의 2026년 기록 알려줘.")
         == "player_analysis"
     )
-    assert chat_cost_metrics.classify_chat_question_type("오늘 볼 만한 건 뭐야?") == "general"
+    assert (
+        chat_cost_metrics.classify_chat_question_type("오늘 볼 만한 건 뭐야?")
+        == "general"
+    )
 
 
 def test_record_chat_token_estimate_attributes_type_and_planner(monkeypatch) -> None:
@@ -45,8 +48,12 @@ def test_record_chat_token_estimate_attributes_type_and_planner(monkeypatch) -> 
     legacy_cost = _CounterRecorder()
     typed_tokens = _CounterRecorder()
     typed_cost = _CounterRecorder()
-    monkeypatch.setattr(chat_cost_metrics, "AI_CHAT_TOKEN_ESTIMATE_TOTAL", legacy_tokens)
-    monkeypatch.setattr(chat_cost_metrics, "AI_CHAT_COST_ESTIMATE_USD_TOTAL", legacy_cost)
+    monkeypatch.setattr(
+        chat_cost_metrics, "AI_CHAT_TOKEN_ESTIMATE_TOTAL", legacy_tokens
+    )
+    monkeypatch.setattr(
+        chat_cost_metrics, "AI_CHAT_COST_ESTIMATE_USD_TOTAL", legacy_cost
+    )
     monkeypatch.setattr(
         chat_cost_metrics,
         "AI_CHAT_TOKEN_ESTIMATE_BY_TYPE_TOTAL",

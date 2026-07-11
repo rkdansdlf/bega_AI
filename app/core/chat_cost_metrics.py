@@ -115,9 +115,7 @@ def record_chat_token_estimate(
     output_tokens = estimate_text_tokens(answer)
     provider = str(getattr(settings, "llm_provider", None) or "unknown")
     model = str(model_name or resolve_chat_model_name(settings))
-    resolved_question_type = str(
-        question_type or classify_chat_question_type(question)
-    )
+    resolved_question_type = str(question_type or classify_chat_question_type(question))
     resolved_planner_mode = str(planner_mode or "unknown")
 
     try:

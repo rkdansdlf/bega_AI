@@ -494,8 +494,7 @@ def _coerce_filters_dict(filters: Any) -> Dict[str, Any]:
 
 def _extract_semantic_guard_years(text: str, filters: Dict[str, Any]) -> set[int]:
     years = {
-        int(match)
-        for match in re.findall(r"(?<!\d)(19[8-9]\d|20[0-5]\d)(?!\d)", text)
+        int(match) for match in re.findall(r"(?<!\d)(19[8-9]\d|20[0-5]\d)(?!\d)", text)
     }
     for key, value in filters.items():
         if "year" not in str(key).lower() and "season" not in str(key).lower():
@@ -511,16 +510,16 @@ def _extract_semantic_guard_years(text: str, filters: Dict[str, Any]) -> set[int
     return years
 
 
-def _extract_semantic_guard_game_types(
-    text: str, filters: Dict[str, Any]
-) -> set[str]:
+def _extract_semantic_guard_game_types(text: str, filters: Dict[str, Any]) -> set[str]:
     normalized = text.upper()
     game_types: set[str] = set()
     if any(token in normalized for token in ("REGULAR", "정규", "페넌트")):
         game_types.add("REGULAR")
     if any(token in normalized for token in ("PRE", "시범")):
         game_types.add("PRE")
-    if any(token in normalized for token in ("POST", "포스트", "가을", "KS", "한국시리즈")):
+    if any(
+        token in normalized for token in ("POST", "포스트", "가을", "KS", "한국시리즈")
+    ):
         game_types.add("POST")
 
     for key, value in filters.items():
@@ -621,9 +620,7 @@ def _build_semantic_guard_signature(
         "game_types": sorted(
             _extract_semantic_guard_game_types(question, filters_dict)
         ),
-        "source_tier": _extract_semantic_guard_source_tier(
-            filters_dict, source_tier
-        ),
+        "source_tier": _extract_semantic_guard_source_tier(filters_dict, source_tier),
         "question_type": question_type,
     }
 
@@ -1880,9 +1877,7 @@ async def chat_completion(
         return JSONResponse(_safe_serialize(static_result))
 
     cacheable = (
-        not cache_bypass
-        and (history is None)
-        and (not has_temporal_keyword(question))
+        not cache_bypass and (history is None) and (not has_temporal_keyword(question))
     )
     cache_key: Optional[str] = None
 
@@ -2146,9 +2141,7 @@ async def chat_stream_post(
     # history가 있으면 대화 맥락이 있으므로 캐싱 불가
     # 실시간 키워드("오늘", "지금" 등)가 있으면 최신성이 중요하므로 캐싱 불가
     cacheable = (
-        not cache_bypass
-        and (history is None)
-        and (not has_temporal_keyword(question))
+        not cache_bypass and (history is None) and (not has_temporal_keyword(question))
     )
     cache_key: Optional[str] = None
 

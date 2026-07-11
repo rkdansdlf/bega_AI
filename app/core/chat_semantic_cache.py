@@ -73,9 +73,7 @@ def _record_semantic_cache(operation: str, result: str) -> None:
 
 def record_semantic_shadow_decision(route: str, result: str) -> None:
     try:
-        AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL.labels(
-            route=route, result=result
-        ).inc()
+        AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL.labels(route=route, result=result).inc()
     except Exception:  # noqa: BLE001
         pass
 
@@ -373,5 +371,7 @@ async def delete_semantic_by_key(conn, cache_key: str) -> int:
     try:
         return await _delete_semantic_by_key_sync(conn, cache_key)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[ChatSemanticCache] delete failed for key %.8s: %s", cache_key, exc)
+        logger.warning(
+            "[ChatSemanticCache] delete failed for key %.8s: %s", cache_key, exc
+        )
         return 0

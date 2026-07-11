@@ -509,9 +509,7 @@ def _report_passes(report: Dict[str, Any], *, variants: Sequence[str]) -> bool:
     if has_errors:
         return False
     if "baseline" in variants and "candidate" in variants:
-        acceptance = (
-            report.get("summary", {}).get("overall", {}).get("acceptance", {})
-        )
+        acceptance = report.get("summary", {}).get("overall", {}).get("acceptance", {})
         if not bool(acceptance.get("passed")):
             return False
         category_summaries = report.get("summary", {}).get("by_category", {})
