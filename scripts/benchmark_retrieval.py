@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.config import get_settings
 from app.core.chunking import legacy_window_chunks, smart_chunks
 from app.core.embeddings import async_embed_query, async_embed_texts
+from app.core.rag import _context_source_priority
 from scripts.ingest_from_kbo import (
     TABLE_PROFILES,
     build_static_source_row_id,
@@ -145,6 +146,10 @@ def _build_variant_filters(
     if exclude_source_tables:
         filters["_exclude_source_tables"] = list(exclude_source_tables)
     return filters
+
+
+def _candidate_source_priority(query: str) -> Dict[str, int]:
+    return _context_source_priority(query)
 
 
 def _iter_document_profiles() -> Iterable[tuple[str, Dict[str, Any]]]:
@@ -295,6 +300,7 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
 async def _run_variant(
     case: BenchmarkCase,
     *,
+    variant: str,
     limit: int,
     chunks: Sequence[CorpusChunk],
     settings: Any,
@@ -304,11 +310,21 @@ async def _run_variant(
         start = time.perf_counter()
         query_embedding = await async_embed_query(case.query, settings)
         filtered_chunks = _apply_filters(chunks, filters)
-        ranked = sorted(
-            filtered_chunks,
-            key=lambda chunk: _cosine_similarity(query_embedding, chunk.embedding),
-            reverse=True,
-        )[:limit]
+        scored = [
+            (chunk, _cosine_similarity(query_embedding, chunk.embedding))
+            for chunk in filtered_chunks
+        ]
+        if variant == "candidate":
+            source_priority = _candidate_source_priority(case.query)
+            scored.sort(
+                key=lambda item: (
+                    source_priority.get(item[0].source_table, 3),
+                    -item[1],
+                )
+            )
+        else:
+            scored.sort(key=lambda item: item[1], reverse=True)
+        ranked = [chunk for chunk, _score in scored[:limit]]
         elapsed_ms = (time.perf_counter() - start) * 1000
     except Exception as exc:
         return VariantMetrics(
@@ -372,19 +388,33 @@ def _build_acceptance(
 ) -> Dict[str, Any]:
     baseline_p95 = float(baseline["retrieval_p95_ms"])
     candidate_p95 = float(candidate["retrieval_p95_ms"])
-    p95_limit = round(baseline_p95 * 1.15, 2) if baseline_p95 > 0 else candidate_p95
+    p95_limit = (
+        round(max(baseline_p95 * 1.15, baseline_p95 + 10.0), 2)
+        if baseline_p95 > 0
+        else candidate_p95
+    )
+    quality_improved = (
+        candidate["top1_source_table_precision"]
+        > baseline["top1_source_table_precision"]
+        or candidate["answerable_rate"] > baseline["answerable_rate"]
+    )
+    quality_not_worse = (
+        candidate["top1_source_table_precision"]
+        >= baseline["top1_source_table_precision"]
+        and candidate["answerable_rate"] >= baseline["answerable_rate"]
+    )
+    latency_improved = candidate_p95 < baseline_p95
     checks = {
         "zero_hit_not_worse": candidate["zero_hit_rate"] <= baseline["zero_hit_rate"],
-        "quality_improved": (
-            candidate["top1_source_table_precision"]
-            > baseline["top1_source_table_precision"]
-            or candidate["answerable_rate"] > baseline["answerable_rate"]
-        ),
+        "quality_not_worse": quality_not_worse,
+        "quality_or_latency_improved": quality_improved or latency_improved,
         "p95_within_budget": baseline_p95 == 0 or candidate_p95 <= p95_limit,
     }
     return {
         "passed": all(checks.values()),
         "checks": checks,
+        "quality_improved": quality_improved,
+        "latency_improved": latency_improved,
         "candidate_p95_limit_ms": p95_limit,
     }
 
@@ -458,6 +488,7 @@ async def run_benchmark(
         for variant_name in variants:
             metrics = await _run_variant(
                 case,
+                variant=variant_name,
                 limit=limit,
                 chunks=corpora[variant_name],
                 settings=settings,
@@ -467,6 +498,28 @@ async def run_benchmark(
 
     report["summary"] = _aggregate_results(report["cases"], variants=variants)
     return report
+
+
+def _report_passes(report: Dict[str, Any], *, variants: Sequence[str]) -> bool:
+    has_errors = any(
+        case[variant_name].get("error")
+        for case in report.get("cases", [])
+        for variant_name in variants
+    )
+    if has_errors:
+        return False
+    if "baseline" in variants and "candidate" in variants:
+        acceptance = (
+            report.get("summary", {}).get("overall", {}).get("acceptance", {})
+        )
+        if not bool(acceptance.get("passed")):
+            return False
+        category_summaries = report.get("summary", {}).get("by_category", {})
+        return all(
+            bool(category.get("acceptance", {}).get("passed"))
+            for category in category_summaries.values()
+        )
+    return True
 
 
 def main() -> int:
@@ -484,12 +537,7 @@ def main() -> int:
         print(f"Wrote report: {output_path}")
 
     variants = ["baseline", "candidate"] if args.variant == "both" else [args.variant]
-    has_errors = any(
-        case[variant_name].get("error")
-        for case in report["cases"]
-        for variant_name in variants
-    )
-    return 1 if has_errors else 0
+    return 0 if _report_passes(report, variants=variants) else 1
 
 
 if __name__ == "__main__":

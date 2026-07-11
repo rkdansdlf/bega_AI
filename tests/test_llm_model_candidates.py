@@ -29,6 +29,71 @@ def test_openrouter_model_candidates_skip_blocked_auto_and_dedupe() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openrouter_generator_uses_model_override_without_fallback(
+    monkeypatch,
+) -> None:
+    attempted_models: list[str] = []
+
+    class _FakeResponse:
+        status_code = 200
+
+        async def aread(self) -> bytes:
+            return b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": "override response"}}]}
+            )
+            yield "data: [DONE]"
+
+    class _FakeStreamContext:
+        async def __aenter__(self) -> _FakeResponse:
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+    class _FakeClient:
+        def stream(self, method: str, url: str, **kwargs: Any) -> _FakeStreamContext:
+            attempted_models.append(kwargs["json"]["model"])
+            return _FakeStreamContext()
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "get_shared_httpx_client",
+        lambda *args, **kwargs: _FakeClient(),
+    )
+    generator = build_baseball_llm_generator(
+        SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_api_key="test-key",
+            openrouter_base_url="https://openrouter.example/api/v1",
+            openrouter_referer="",
+            openrouter_app_title="",
+            openrouter_model="primary/free",
+            openrouter_fallback_models=["openai/gpt-oss-120b"],
+            max_output_tokens=512,
+            chat_openrouter_empty_chunk_retries=0,
+            chat_openrouter_empty_chunk_backoff_ms=50,
+        )
+    )
+
+    chunks = [
+        chunk
+        async for chunk in generator(
+            [{"role": "user", "content": "hello"}],
+            model_override="openrouter/cheap-planner",
+        )
+    ]
+
+    assert attempted_models == ["openrouter/cheap-planner"]
+    assert chunks == ["override response"]
+
+
+@pytest.mark.asyncio
 async def test_openrouter_429_falls_back_to_gpt_oss(monkeypatch) -> None:
     attempted_models: list[str] = []
     fallback_reasons: list[dict[str, str]] = []

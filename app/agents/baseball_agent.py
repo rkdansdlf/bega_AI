@@ -7,6 +7,7 @@
 
 import re
 import json
+import hashlib
 import logging
 import asyncio
 import time
@@ -229,8 +230,24 @@ class BaseballAgentRuntime:
         self.chat_planner_cache_ttl_seconds = max(
             0, int(getattr(self.settings, "chat_planner_cache_ttl_seconds", 60))
         )
+        self.chat_planner_cache_history_ttl_seconds = max(
+            0,
+            int(
+                getattr(
+                    self.settings,
+                    "chat_planner_cache_history_ttl_seconds",
+                    min(self.chat_planner_cache_ttl_seconds, 60),
+                )
+            ),
+        )
         self.chat_planner_cache_max_entries = max(
             32, int(getattr(self.settings, "chat_planner_cache_max_entries", 512))
+        )
+        self.chat_planner_model_name = self._settings_optional_str(
+            "chat_planner_model_name"
+        )
+        self.chat_answer_model_name = self._settings_optional_str(
+            "chat_answer_model_name"
         )
         self.tool_definitions = tool_definitions or _get_default_tool_definitions()
         self.tool_description_text = (
@@ -290,12 +307,13 @@ class BaseballAgentRuntime:
             self.chat_stream_first_token_retry_max_attempts,
         )
         logger.info(
-            "[ExecutionConfig] tool_parallel_enabled=%s split_batch=%s tool_parallel_max_concurrency=%d serial_tool_count=%d planner_cache_ttl_seconds=%d planner_cache_max_entries=%d",
+            "[ExecutionConfig] tool_parallel_enabled=%s split_batch=%s tool_parallel_max_concurrency=%d serial_tool_count=%d planner_cache_ttl_seconds=%d planner_cache_history_ttl_seconds=%d planner_cache_max_entries=%d",
             self.chat_tool_parallel_enabled,
             self.chat_tool_parallel_split_batch_enabled,
             self.chat_tool_parallel_max_concurrency,
             len(self.chat_tool_parallel_serial_tools),
             self.chat_planner_cache_ttl_seconds,
+            self.chat_planner_cache_history_ttl_seconds,
             self.chat_planner_cache_max_entries,
         )
         logger.info(
@@ -309,6 +327,11 @@ class BaseballAgentRuntime:
             self.chat_planner_timeout_seconds,
             self.chat_compact_planner_timeout_seconds,
         )
+        logger.info(
+            "[ModelRouting] planner_model=%s answer_model=%s",
+            self.chat_planner_model_name or "default",
+            self.chat_answer_model_name or "default",
+        )
 
     def _resolve_perf_model_name(self) -> str:
         if self.settings is None:
@@ -316,6 +339,11 @@ class BaseballAgentRuntime:
         if getattr(self.settings, "llm_provider", None) == "gemini":
             return getattr(self.settings, "gemini_model", "unknown")
         return getattr(self.settings, "openrouter_model", "unknown")
+
+    def _settings_optional_str(self, name: str) -> Optional[str]:
+        value = getattr(self.settings, name, None) if self.settings is not None else None
+        normalized = str(value or "").strip()
+        return normalized or None
 
     def get_team_name_cache(self) -> Dict[str, str] | None:
         with self._lock:
@@ -732,7 +760,12 @@ class BaseballStatisticsAgent:
             runtime.chat_tool_parallel_max_concurrency
         )
         self.chat_planner_cache_ttl_seconds = runtime.chat_planner_cache_ttl_seconds
+        self.chat_planner_cache_history_ttl_seconds = (
+            runtime.chat_planner_cache_history_ttl_seconds
+        )
         self.chat_planner_cache_max_entries = runtime.chat_planner_cache_max_entries
+        self.chat_planner_model_name = runtime.chat_planner_model_name
+        self.chat_answer_model_name = runtime.chat_answer_model_name
         self.tool_definitions = runtime.tool_definitions
         self.tool_description_text = runtime.tool_description_text
         self.tool_caller_factory = runtime.tool_caller_factory
@@ -785,19 +818,64 @@ class BaseballStatisticsAgent:
     def _normalize_planner_query(query: str) -> str:
         return re.sub(r"\s+", " ", str(query or "")).strip().casefold()
 
+    @classmethod
+    def _build_planner_context_signature(
+        cls, context: Optional[Dict[str, Any]]
+    ) -> str:
+        if not isinstance(context, dict):
+            return "none"
+
+        raw_items = context.get("history") or context.get("messages")
+        if not isinstance(raw_items, list) or not raw_items:
+            return "none"
+
+        normalized_items: List[Dict[str, str]] = []
+        for item in raw_items[-4:]:
+            if not isinstance(item, dict):
+                continue
+            role = cls._normalize_planner_query(str(item.get("role", "")))[:24]
+            content = cls._normalize_planner_query(str(item.get("content", "")))[:240]
+            if not role and not content:
+                continue
+            normalized_items.append({"role": role, "content": content})
+
+        if not normalized_items:
+            return "none"
+
+        digest = hashlib.sha256(
+            json.dumps(
+                normalized_items,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return digest[:16]
+
+    def _resolve_planner_cache_ttl_seconds(
+        self, context: Optional[Dict[str, Any]]
+    ) -> int:
+        if self._build_planner_context_signature(context) != "none":
+            return int(
+                getattr(
+                    self,
+                    "chat_planner_cache_history_ttl_seconds",
+                    min(self.chat_planner_cache_ttl_seconds, 60),
+                )
+            )
+        return int(self.chat_planner_cache_ttl_seconds)
+
     def _build_planner_cache_key(
         self, query: str, context: Optional[Dict[str, Any]]
     ) -> str:
         normalized_query = self._normalize_planner_query(query)
-        messages = context.get("messages") if isinstance(context, dict) else None
-        history = context.get("history") if isinstance(context, dict) else None
-        has_history = bool(messages or history)
-        return f"{normalized_query}|history={int(has_history)}"
+        context_signature = self._build_planner_context_signature(context)
+        return f"{normalized_query}|context={context_signature}"
 
     def _get_cached_planner_plan(
         self, query: str, context: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        if self.chat_planner_cache_ttl_seconds <= 0:
+        ttl_seconds = self._resolve_planner_cache_ttl_seconds(context)
+        if ttl_seconds <= 0:
             return None
 
         cache_key = self._build_planner_cache_key(query, context)
@@ -808,7 +886,7 @@ class BaseballStatisticsAgent:
                 return None
             cached_at, cached_plan = cached_entry
             age_seconds = now - cached_at
-            if age_seconds > self.chat_planner_cache_ttl_seconds:
+            if age_seconds > ttl_seconds:
                 _PLANNER_CACHE.pop(cache_key, None)
                 return None
             _PLANNER_CACHE.move_to_end(cache_key)
@@ -826,7 +904,8 @@ class BaseballStatisticsAgent:
         context: Optional[Dict[str, Any]],
         plan: Dict[str, Any],
     ) -> None:
-        if self.chat_planner_cache_ttl_seconds <= 0 or plan.get("error"):
+        ttl_seconds = self._resolve_planner_cache_ttl_seconds(context)
+        if ttl_seconds <= 0 or plan.get("error"):
             return
 
         cache_key = self._build_planner_cache_key(query, context)
@@ -3986,6 +4065,36 @@ class BaseballStatisticsAgent:
         if planner_mode in {"team_llm_planner", "player_llm_planner"}:
             return min(COMPACT_LLM_PLANNER_TOKEN_CAP, analysis_max_tokens)
         return analysis_max_tokens
+
+    def _call_llm_stream(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        max_tokens: Optional[int],
+        model_override: Optional[str] = None,
+    ):
+        if model_override:
+            try:
+                return self.llm_generator(
+                    messages,
+                    max_tokens=max_tokens,
+                    model_override=model_override,
+                )
+            except TypeError:
+                logger.warning(
+                    "[ModelRouting] llm_generator does not support model_override; using default model"
+                )
+        return self.llm_generator(messages, max_tokens=max_tokens)
+
+    def _resolve_planner_model_override(self, planner_mode: str) -> Optional[str]:
+        del planner_mode
+        return getattr(self, "chat_planner_model_name", None) or None
+
+    def _resolve_answer_model_override(
+        self, query: str, tool_results: List[ToolResult]
+    ) -> Optional[str]:
+        del query, tool_results
+        return getattr(self, "chat_answer_model_name", None) or None
 
     def _resolve_llm_planner_timeout_seconds(self, planner_mode: str) -> float:
         default_timeout = max(
@@ -9079,20 +9188,24 @@ class BaseballStatisticsAgent:
             analysis_timeout_seconds = self._resolve_llm_planner_timeout_seconds(
                 planner_mode
             )
+            planner_model_override = self._resolve_planner_model_override(planner_mode)
             logger.info(
-                "[Planner] mode=%s prompt_chars=%d max_tokens=%s timeout=%.1fs",
+                "[Planner] mode=%s prompt_chars=%d max_tokens=%s timeout=%.1fs model=%s",
                 planner_mode,
                 len(analysis_prompt),
                 analysis_max_tokens,
                 analysis_timeout_seconds,
+                planner_model_override or "default",
             )
 
             # 스트리밍 API인 경우 전체 응답을 모아서 처리
             raw_response = ""
             try:
                 async with asyncio.timeout(analysis_timeout_seconds):
-                    async for chunk in self.llm_generator(
-                        analysis_messages, max_tokens=analysis_max_tokens
+                    async for chunk in self._call_llm_stream(
+                        analysis_messages,
+                        max_tokens=analysis_max_tokens,
+                        model_override=planner_model_override,
                     ):
                         if chunk:
                             raw_response += chunk
@@ -11778,7 +11891,16 @@ class BaseballStatisticsAgent:
                 request_mode,
             )
             # 스트리밍을 위해 await 제거하고 제너레이터 반환
-            answer = self.llm_generator(answer_messages, max_tokens=answer_max_tokens)
+            answer_model_override = self._resolve_answer_model_override(
+                query, tool_results
+            )
+            if answer_model_override:
+                logger.info("[ModelRouting] answer_model=%s", answer_model_override)
+            answer = self._call_llm_stream(
+                answer_messages,
+                max_tokens=answer_max_tokens,
+                model_override=answer_model_override,
+            )
 
             # 의미 있는 데이터가 확인된 경우만 verified 처리
             has_verified_data = has_meaningful_data
