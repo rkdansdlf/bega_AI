@@ -1,9 +1,11 @@
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.agents.baseball_agent import BaseballStatisticsAgent, SERIAL_DB_TOOL_NAMES
-from app.agents.chat_intent_router import ChatIntent
+from app.agents.chat_intent_router import ChatIntent, IntentDecision
 from app.agents.tool_caller import ToolCall, ToolResult
 from app.core.entity_extractor import extract_entities_from_query, extract_player_names
 
@@ -25,7 +27,10 @@ def _build_agent() -> BaseballStatisticsAgent:
     agent.chat_tool_parallel_serial_tools = set(SERIAL_DB_TOOL_NAMES)
     agent.chat_tool_parallel_max_concurrency = 2
     agent.chat_planner_cache_ttl_seconds = 60
+    agent.chat_planner_cache_history_ttl_seconds = 60
     agent.chat_planner_cache_max_entries = 512
+    agent.chat_planner_model_name = None
+    agent.chat_answer_model_name = None
     agent._is_team_analysis_query = (
         lambda query, entity_filter: bool(getattr(entity_filter, "team_id", None))
         and "분석" in query
@@ -517,6 +522,69 @@ def test_analyze_query_and_plan_tools_keeps_cache_alive_for_completion_stream_ga
     assert first_plan["planner_mode"] == "player_llm_planner"
     assert second_plan["planner_cache_hit"] is True
     assert second_plan["planner_cache_age_ms"] == 24000.0
+
+
+def test_planner_cache_key_includes_history_signature() -> None:
+    agent = _build_agent()
+
+    first_key = agent._build_planner_cache_key(
+        "그 팀 흐름은 어때?",
+        {"history": [{"role": "user", "content": "LG 팀 분석해줘"}]},
+    )
+    second_key = agent._build_planner_cache_key(
+        "그 팀 흐름은 어때?",
+        {"history": [{"role": "user", "content": "KIA 팀 분석해줘"}]},
+    )
+
+    assert first_key != second_key
+    assert "|context=" in first_key
+
+
+def test_planner_cache_uses_shorter_ttl_for_history_context(monkeypatch) -> None:
+    agent = _build_agent()
+    agent.chat_planner_cache_ttl_seconds = 300
+    agent.chat_planner_cache_history_ttl_seconds = 10
+    agent.chat_planner_cache_max_entries = 16
+    agent._build_fast_path_plan = lambda query, entity_filter, context=None: None
+
+    llm_calls = {"count": 0}
+    monotonic_now = {"value": 100.0}
+
+    async def _fake_llm(query, context):
+        llm_calls["count"] += 1
+        return {
+            "analysis": "llm plan",
+            "tool_calls": [
+                ToolCall(
+                    tool_name="get_player_stats",
+                    parameters={"player_name": "강민호", "year": 2025},
+                )
+            ],
+            "planner_mode": "player_llm_planner",
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "app.agents.baseball_agent.time.monotonic", lambda: monotonic_now["value"]
+    )
+    agent._analyze_query_with_llm = _fake_llm
+    history_context = {"history": [{"role": "user", "content": "강민호 분석해줘"}]}
+
+    async def _run():
+        first = await agent._analyze_query_and_plan_tools(
+            "그 선수 최근 흐름은?", history_context
+        )
+        monotonic_now["value"] = 115.0
+        second = await agent._analyze_query_and_plan_tools(
+            "그 선수 최근 흐름은?", history_context
+        )
+        return first, second
+
+    first_plan, second_plan = asyncio.run(_run())
+
+    assert llm_calls["count"] == 2
+    assert first_plan["planner_mode"] == "player_llm_planner"
+    assert second_plan.get("planner_cache_hit") is not True
 
 
 def test_process_query_stream_preserves_attempted_planner_mode_on_analysis_error(

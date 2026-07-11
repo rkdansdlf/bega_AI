@@ -17,6 +17,7 @@ from scripts.batch_coach_matchup_cache import (
     _postseason_mismatch_error_message,
     _sort_targets,
     _build_terminal_cache_result_if_available,
+    build_prewarm_plan_summary,
     collect_cache_verification_results,
     load_failed_cache_keys,
     MatchupTarget,
@@ -1118,3 +1119,68 @@ def test_force_rebuild_delete_blocks_active_pending_but_deletes_terminal(
     assert stats["unsafe_force_rebuild_blocked_count"] == 1
     assert stats["missing_cache_row_count"] == 1
     assert conn.deleted_keys == ["completed-key"]
+
+
+def test_build_prewarm_plan_summary_estimates_api_calls_and_cache_savings() -> None:
+    plan = build_prewarm_plan_summary(
+        [
+            {
+                "status": "skipped",
+                "reason": "cache_hit",
+                "meta": {"cached": True},
+            },
+            {
+                "status": "failed",
+                "reason": "missing_cache_row",
+                "meta": {"cache_row_missing": True},
+            },
+            {
+                "status": "failed",
+                "reason": "empty_response",
+                "meta": {
+                    "failure_class": "retryable_failed",
+                    "retryable_failure": True,
+                },
+            },
+            {
+                "status": "in_progress",
+                "reason": "pending_wait",
+                "meta": {"in_progress": True},
+            },
+            {
+                "status": "failed",
+                "reason": "failed_cache_row",
+                "meta": {"failure_class": "locked_terminal"},
+            },
+            {
+                "status": "failed",
+                "reason": "db_unavailable",
+                "meta": {"db_unavailable": True},
+            },
+        ]
+    )
+
+    assert plan["target_count"] == 6
+    assert plan["cache_hit_count"] == 1
+    assert plan["cache_hit_rate"] == 0.1667
+    assert plan["estimated_api_call_count"] == 2
+    assert plan["estimated_api_call_rate"] == 0.3333
+    assert plan["estimated_cache_hit_savings_count"] == 1
+    assert plan["missing_cache_row_count"] == 1
+    assert plan["retryable_failure_count"] == 1
+    assert plan["pending_count"] == 1
+    assert plan["locked_terminal_count"] == 1
+    assert plan["db_unavailable_count"] == 1
+    assert plan["blocked_count"] == 3
+
+
+def test_parse_args_accepts_dry_run(monkeypatch) -> None:
+    monkeypatch.setattr(
+        batch_module.sys,
+        "argv",
+        ["batch_coach_matchup_cache.py", "--dry-run", "--years", "2025"],
+    )
+
+    options = batch_module.parse_args()
+
+    assert options.dry_run is True

@@ -176,6 +176,107 @@ def parse_log_lines(
 # ── 리포트 생성 ────────────────────────────────────────────────────────────────
 
 
+def _percentile(values: List[float], percentile: float) -> Optional[float]:
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int(round((len(ordered) - 1) * percentile))))
+    return ordered[index]
+
+
+def _build_tuning_recommendations(
+    data: Dict[str, Any],
+    *,
+    total_queries: int,
+    zero_hit_rate: Optional[float],
+    p95_latency: Optional[float],
+    p99_latency: Optional[float],
+    cache_hit_rate: Optional[float],
+) -> List[Dict[str, Any]]:
+    recommendations: List[Dict[str, Any]] = []
+    fallback_total = sum(data["fallback_levels"].values())
+    fallback_rate = (
+        round(fallback_total / total_queries * 100, 1) if total_queries else None
+    )
+
+    if total_queries < 10:
+        recommendations.append(
+            {
+                "code": "collect_more_samples",
+                "priority": "low",
+                "reason": "추적된 검색 표본이 10건 미만입니다.",
+                "action": "최소 100건 이상 수집한 뒤 DEFAULT_SEARCH_LIMIT/RAG_CONTEXT_LIMIT 조정을 판단하세요.",
+                "expected_impact": "표본 부족 상태의 과조정을 방지합니다.",
+            }
+        )
+
+    if zero_hit_rate is not None and zero_hit_rate >= 20.0:
+        recommendations.append(
+            {
+                "code": "increase_recall",
+                "priority": "high",
+                "reason": f"zero-hit rate {zero_hit_rate}%가 20% 이상입니다.",
+                "action": "DEFAULT_SEARCH_LIMIT를 20~30 범위로 올리고, strict filter fallback 발생 쿼리를 샘플링해 source_table/team/year 필터를 점검하세요.",
+                "expected_impact": "zero-hit 질문군 recall 5~15pp 개선, 저근거 fallback 응답 감소.",
+            }
+        )
+
+    if (
+        p95_latency is not None
+        and p95_latency >= 1000.0
+        and (zero_hit_rate is None or zero_hit_rate < 10.0)
+    ):
+        recommendations.append(
+            {
+                "code": "reduce_search_cost",
+                "priority": "medium",
+                "reason": f"검색 p95 {round(p95_latency, 1)}ms가 1초 이상이고 zero-hit는 높지 않습니다.",
+                "action": "RAG_CONTEXT_LIMIT를 8~10으로 제한하고 HNSW 사용 시 RETRIEVAL_HNSW_EF_SEARCH를 80~100 범위에서 A/B 테스트하세요.",
+                "expected_impact": "검색 p95 15~30% 감소, 답변 품질 영향은 retrieval 이벤트 샘플로 확인.",
+            }
+        )
+
+    if fallback_rate is not None and fallback_rate >= 20.0:
+        recommendations.append(
+            {
+                "code": "audit_filter_relaxation",
+                "priority": "medium",
+                "reason": f"fallback 사용률 {fallback_rate}%가 20% 이상입니다.",
+                "action": "fallback_retried_keys 상위 필터를 기준으로 entity extractor와 metadata 필터 매핑을 점검하세요.",
+                "expected_impact": "불필요한 재검색 latency 10~25% 감소, source mismatch 감소.",
+            }
+        )
+
+    cache_total = data["cache_results"].get("hit", 0) + data["cache_results"].get(
+        "miss", 0
+    )
+    if cache_total >= 10 and (cache_hit_rate is not None and cache_hit_rate < 20.0):
+        recommendations.append(
+            {
+                "code": "enable_semantic_cache",
+                "priority": "medium",
+                "reason": f"response cache hit rate {cache_hit_rate}%가 20% 미만입니다.",
+                "action": "CHAT_SEMANTIC_CACHE_ENABLED=true로 부분 rollout하고 CHAT_SEMANTIC_CACHE_MIN_SIMILARITY=0.93 이상에서 hit 품질을 샘플링하세요.",
+                "expected_impact": "반복/표현변형 질문 LLM 호출 15~35% 감소.",
+            }
+        )
+
+    if p99_latency is not None and p99_latency >= 2500.0:
+        recommendations.append(
+            {
+                "code": "inspect_tail_latency",
+                "priority": "high",
+                "reason": f"검색 p99 {round(p99_latency, 1)}ms가 2.5초 이상입니다.",
+                "action": "slowest_queries TOP 샘플의 hybrid 여부, fallback level, metadata filter를 함께 확인하고 별도 benchmark_retrieval 케이스로 고정하세요.",
+                "expected_impact": "장꼬리 timeout/stream 지연 원인 분리.",
+            }
+        )
+
+    return recommendations
+
+
 def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
     queries = data["queries"]
     queries_sorted = sorted(queries, key=lambda x: x[1], reverse=True)
@@ -197,10 +298,21 @@ def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
     # 평균 검색 레이턴시
     latencies = [q[1] for q in queries]
     avg_latency = round(sum(latencies) / len(latencies), 1) if latencies else None
-    p99_latency = (
-        sorted(latencies)[int(len(latencies) * 0.99) - 1]
-        if len(latencies) >= 2
-        else latencies[0] if latencies else None
+    p95_latency = _percentile(latencies, 0.95)
+    p99_latency = _percentile(latencies, 0.99)
+
+    zero_hit_count = sum(1 for _query, _ms, results in queries if int(results) == 0)
+    zero_hit_rate = (
+        round(zero_hit_count / len(queries) * 100, 1) if queries else None
+    )
+
+    recommendations = _build_tuning_recommendations(
+        data,
+        total_queries=len(queries),
+        zero_hit_rate=zero_hit_rate,
+        p95_latency=p95_latency,
+        p99_latency=p99_latency,
+        cache_hit_rate=cache_hit_rate,
     )
 
     return {
@@ -208,7 +320,14 @@ def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
             "total_log_lines": data["total_lines"],
             "total_queries_tracked": len(queries),
             "avg_search_latency_ms": avg_latency,
-            "p99_search_latency_ms": p99_latency,
+            "p95_search_latency_ms": round(p95_latency, 1)
+            if p95_latency is not None
+            else None,
+            "p99_search_latency_ms": round(p99_latency, 1)
+            if p99_latency is not None
+            else None,
+            "zero_hit_rate_pct": zero_hit_rate,
+            "zero_hit_total": zero_hit_count,
             "cache_hit_rate_pct": cache_hit_rate,
             "cache_hit_total": cache.get("hit", 0),
             "cache_miss_total": cache.get("miss", 0),
@@ -223,6 +342,7 @@ def build_report(data: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "fallback_level_distribution": dict(data["fallback_levels"]),
         "fallback_retried_keys": dict(data["fallback_retries"]),
+        "tuning_recommendations": recommendations,
         "recent_errors": data["errors"][:10],
     }
 
@@ -247,6 +367,10 @@ def _print_report(report: Dict[str, Any]) -> None:
         if s["p99_search_latency_ms"]
         else ""
     )
+    if s["zero_hit_rate_pct"] is not None:
+        print(
+            f"  Zero-hit: {s['zero_hit_rate_pct']}%  ({s['zero_hit_total']} / {s['total_queries_tracked']})"
+        )
 
     print(f"\n[캐시]")
     if s["cache_hit_rate_pct"] is not None:
@@ -289,6 +413,15 @@ def _print_report(report: Dict[str, Any]) -> None:
         print(f"\n[최근 오류 ({len(errors)}건)]")
         for e in errors:
             print(f"  - {e}")
+
+    recommendations = report.get("tuning_recommendations") or []
+    if recommendations:
+        print(f"\n[튜닝 권고]")
+        for item in recommendations:
+            print(
+                f"  - [{item['priority']}] {item['code']}: {item['action']} "
+                f"(예상 효과: {item['expected_impact']})"
+            )
 
     print()
 
