@@ -212,11 +212,41 @@ class Settings(BaseSettings):
     chatbot_model_name: Optional[str] = Field(
         None, validation_alias="CHATBOT_MODEL_NAME"
     )
+    chat_planner_model_name: Optional[str] = Field(
+        None, validation_alias="CHAT_PLANNER_MODEL_NAME"
+    )
+    chat_answer_model_name: Optional[str] = Field(
+        None, validation_alias="CHAT_ANSWER_MODEL_NAME"
+    )
     chat_cache_admin_enabled: bool = Field(
         False, validation_alias="CHAT_CACHE_ADMIN_ENABLED"
     )
     chat_cache_admin_token: Optional[str] = Field(
         None, validation_alias="CHAT_CACHE_ADMIN_TOKEN"
+    )
+    chat_semantic_cache_enabled: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_ENABLED"
+    )
+    chat_semantic_cache_shadow_enabled: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_SHADOW_ENABLED"
+    )
+    chat_semantic_cache_min_similarity: float = Field(
+        0.93, validation_alias="CHAT_SEMANTIC_CACHE_MIN_SIMILARITY"
+    )
+    chat_semantic_cache_candidate_limit: int = Field(
+        3, validation_alias="CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT"
+    )
+    chat_semantic_cache_vector_index_enabled: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED"
+    )
+    chat_semantic_cache_hnsw_ef_search: int = Field(
+        0, validation_alias="CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH"
+    )
+    chat_cost_input_usd_per_1m_tokens: float = Field(
+        0.0, validation_alias="CHAT_COST_INPUT_USD_PER_1M_TOKENS"
+    )
+    chat_cost_output_usd_per_1m_tokens: float = Field(
+        0.0, validation_alias="CHAT_COST_OUTPUT_USD_PER_1M_TOKENS"
     )
 
     # --- Moderation 설정 ---
@@ -398,7 +428,10 @@ class Settings(BaseSettings):
         False, validation_alias="OPERATOR_DATA_FAST_PATH_ENABLED"
     )
     chat_planner_cache_ttl_seconds: int = Field(
-        60, validation_alias="CHAT_PLANNER_CACHE_TTL_SECONDS"
+        300, validation_alias="CHAT_PLANNER_CACHE_TTL_SECONDS"
+    )
+    chat_planner_cache_history_ttl_seconds: int = Field(
+        60, validation_alias="CHAT_PLANNER_CACHE_HISTORY_TTL_SECONDS"
     )
     chat_planner_cache_max_entries: int = Field(
         512, validation_alias="CHAT_PLANNER_CACHE_MAX_ENTRIES"
@@ -536,6 +569,7 @@ class Settings(BaseSettings):
         "chat_answer_max_tokens_long",
         "chat_tool_result_max_chars",
         "chat_tool_result_max_items",
+        "chat_semantic_cache_candidate_limit",
         "chat_tool_parallel_max_concurrency",
         "chat_fast_path_tool_cap",
         "chat_planner_cache_ttl_seconds",
@@ -577,6 +611,35 @@ class Settings(BaseSettings):
     def _validate_chat_positive_threshold(cls, value: int) -> int:
         if value < 1:
             raise ValueError("Chat optimization threshold 값은 1 이상이어야 합니다.")
+        return value
+
+    @field_validator("chat_semantic_cache_min_similarity")
+    def _validate_chat_semantic_cache_min_similarity(cls, value: float) -> float:
+        if value <= 0 or value > 1:
+            raise ValueError("CHAT_SEMANTIC_CACHE_MIN_SIMILARITY must be > 0 and <= 1")
+        return value
+
+    @field_validator("chat_semantic_cache_candidate_limit")
+    def _validate_chat_semantic_cache_candidate_limit(cls, value: int) -> int:
+        if value > 10:
+            raise ValueError("CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT must be <= 10")
+        return value
+
+    @field_validator("chat_semantic_cache_hnsw_ef_search")
+    def _validate_chat_semantic_cache_hnsw_ef_search(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH must be >= 0")
+        if value > 1000:
+            raise ValueError("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH must be <= 1000")
+        return value
+
+    @field_validator(
+        "chat_cost_input_usd_per_1m_tokens",
+        "chat_cost_output_usd_per_1m_tokens",
+    )
+    def _validate_chat_cost_rates(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("Chat cost rate values must be >= 0")
         return value
 
     @field_validator("rag_chunk_overlap_chars")

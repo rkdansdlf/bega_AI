@@ -190,12 +190,88 @@ def test_cors_origins_accepts_csv(monkeypatch):
     ]
 
 
-def test_chat_planner_cache_ttl_defaults_to_60_seconds(monkeypatch):
+def test_chat_planner_cache_ttl_defaults_to_five_minutes(monkeypatch):
     monkeypatch.delenv("CHAT_PLANNER_CACHE_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("CHAT_PLANNER_CACHE_HISTORY_TTL_SECONDS", raising=False)
 
     settings = Settings()
 
-    assert settings.chat_planner_cache_ttl_seconds == 60
+    assert settings.chat_planner_cache_ttl_seconds == 300
+    assert settings.chat_planner_cache_history_ttl_seconds == 60
+
+
+def test_chat_semantic_cache_shadow_defaults_to_disabled(monkeypatch):
+    monkeypatch.delenv("CHAT_SEMANTIC_CACHE_SHADOW_ENABLED", raising=False)
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_shadow_enabled is False
+
+
+def test_chat_semantic_cache_shadow_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_SHADOW_ENABLED", "true")
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_shadow_enabled is True
+
+
+def test_chat_semantic_cache_vector_index_defaults_to_safe_off(monkeypatch):
+    monkeypatch.delenv("CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED", raising=False)
+    monkeypatch.delenv("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH", raising=False)
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_vector_index_enabled is False
+    assert settings.chat_semantic_cache_hnsw_ef_search == 0
+
+
+def test_chat_semantic_cache_vector_index_options_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED", "true")
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH", "64")
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_vector_index_enabled is True
+    assert settings.chat_semantic_cache_hnsw_ef_search == 64
+
+
+def test_chat_semantic_cache_similarity_must_be_probability(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_MIN_SIMILARITY", "1.01")
+
+    with pytest.raises(ValueError, match="CHAT_SEMANTIC_CACHE_MIN_SIMILARITY"):
+        Settings()
+
+
+def test_chat_semantic_cache_candidate_limit_is_bounded(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT", "11")
+
+    with pytest.raises(ValueError, match="CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT"):
+        Settings()
+
+
+def test_chat_semantic_cache_hnsw_search_must_be_non_negative(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH", "-1")
+
+    with pytest.raises(ValueError, match="CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH"):
+        Settings()
+
+
+def test_chat_cost_rates_must_be_non_negative(monkeypatch):
+    monkeypatch.setenv("CHAT_COST_INPUT_USD_PER_1M_TOKENS", "-0.1")
+
+    with pytest.raises(ValueError, match="Chat cost rate values"):
+        Settings()
+
+
+def test_chat_model_routing_settings_can_be_split(monkeypatch):
+    monkeypatch.setenv("CHAT_PLANNER_MODEL_NAME", "openrouter/cheap-planner")
+    monkeypatch.setenv("CHAT_ANSWER_MODEL_NAME", "openrouter/quality-answer")
+
+    settings = Settings()
+
+    assert settings.chat_planner_model_name == "openrouter/cheap-planner"
+    assert settings.chat_answer_model_name == "openrouter/quality-answer"
 
 
 def test_source_db_url_prefers_oci_over_postgres(monkeypatch):

@@ -163,11 +163,13 @@ def build_baseball_llm_generator(settings: Any):
             async for line in response.aiter_lines():
                 yield line
 
-    async def openrouter_generator(messages, max_tokens=None):
+    async def openrouter_generator(messages, max_tokens=None, model_override=None):
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required.")
 
         effective_max_tokens = max_tokens or settings.max_output_tokens
+        primary_model = str(model_override or settings.openrouter_model or "").strip()
+        fallback_models = [] if model_override else settings.openrouter_fallback_models
         headers = {
             "Authorization": f"Bearer {settings.openrouter_api_key}",
             "Content-Type": "application/json",
@@ -175,13 +177,14 @@ def build_baseball_llm_generator(settings: Any):
             "X-Title": settings.openrouter_app_title or "",
         }
         models_to_try = resolve_openrouter_model_candidates(
-            settings.openrouter_model,
-            settings.openrouter_fallback_models,
+            primary_model,
+            fallback_models,
         )
         llm_logger.info(
-            "[LLM] Models to try (filtered): %s, max_tokens=%s",
+            "[LLM] Models to try (filtered): %s, max_tokens=%s override=%s",
             models_to_try,
             effective_max_tokens,
+            bool(model_override),
         )
 
         last_exception = None
@@ -206,7 +209,7 @@ def build_baseball_llm_generator(settings: Any):
                 llm_logger.info(
                     "[LLM] Primary: %s, Fallbacks available: %s",
                     model,
-                    settings.openrouter_fallback_models,
+                    fallback_models,
                 )
 
             for retry_index in range(empty_chunk_retries + 1):
@@ -285,7 +288,7 @@ def build_baseball_llm_generator(settings: Any):
         )
         raise last_exception or RuntimeError("All models failed")
 
-    async def gemini_generator(messages, max_tokens=None):
+    async def gemini_generator(messages, max_tokens=None, model_override=None):
         import google.generativeai as genai
         from google.generativeai.types import GenerationConfig
 
@@ -294,7 +297,8 @@ def build_baseball_llm_generator(settings: Any):
 
         effective_max_tokens = max_tokens or settings.max_output_tokens
         _ensure_gemini_configured(settings)
-        model = genai.GenerativeModel(settings.gemini_model)
+        model_name = str(model_override or settings.gemini_model)
+        model = genai.GenerativeModel(model_name)
 
         gemini_messages = []
         system_instruction = ""
@@ -309,7 +313,7 @@ def build_baseball_llm_generator(settings: Any):
 
         if system_instruction:
             model = genai.GenerativeModel(
-                model_name=settings.gemini_model,
+                model_name=model_name,
                 system_instruction=system_instruction,
             )
 
