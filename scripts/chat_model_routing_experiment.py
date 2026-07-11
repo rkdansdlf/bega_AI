@@ -28,7 +28,9 @@ def _load_questions(path: Path) -> List[str]:
         records: Iterable[Any]
         if path.suffix.lower() == ".json":
             parsed = json.loads(raw)
-            records = parsed.get("samples", parsed) if isinstance(parsed, dict) else parsed
+            records = (
+                parsed.get("samples", parsed) if isinstance(parsed, dict) else parsed
+            )
         else:
             records = [json.loads(line) for line in raw.splitlines() if line.strip()]
         for item in records:
@@ -37,7 +39,11 @@ def _load_questions(path: Path) -> List[str]:
             elif isinstance(item, dict) and item.get("question"):
                 questions.append(str(item["question"]))
         return questions
-    return [line.strip() for line in raw.splitlines() if line.strip() and not line.startswith("#")]
+    return [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
 
 
 def _percentile(values: List[float], percentile: float) -> float:
@@ -109,7 +115,9 @@ async def async_main(args: argparse.Namespace) -> int:
             "sample_count": len(results),
             "success_count": len(results) - len(failures),
             "failure_count": len(failures),
-            "latency_avg_ms": round(statistics.mean(latencies), 2) if latencies else 0.0,
+            "latency_avg_ms": (
+                round(statistics.mean(latencies), 2) if latencies else 0.0
+            ),
             "latency_p50_ms": _percentile(latencies, 0.50),
             "latency_p95_ms": _percentile(latencies, 0.95),
             "planner_model_label": args.planner_model_label,
@@ -130,14 +138,23 @@ async def async_main(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run chat model-routing experiment samples.")
+    parser = argparse.ArgumentParser(
+        description="Run chat model-routing experiment samples."
+    )
     parser.add_argument("--samples", default=os.getenv("AI_MODEL_ROUTING_SAMPLES", ""))
-    parser.add_argument("--base-url", default=os.getenv("AI_MODEL_ROUTING_BASE_URL", "http://localhost:8001"))
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("AI_MODEL_ROUTING_BASE_URL", "http://localhost:8001"),
+    )
     parser.add_argument("--output", default=os.getenv("AI_MODEL_ROUTING_OUTPUT", ""))
     parser.add_argument("--internal-api-key", default=None)
     parser.add_argument("--internal-api-key-env", default="AI_INTERNAL_TOKEN")
-    parser.add_argument("--planner-model-label", default=os.getenv("CHAT_PLANNER_MODEL_NAME", "default"))
-    parser.add_argument("--answer-model-label", default=os.getenv("CHAT_ANSWER_MODEL_NAME", "default"))
+    parser.add_argument(
+        "--planner-model-label", default=os.getenv("CHAT_PLANNER_MODEL_NAME", "default")
+    )
+    parser.add_argument(
+        "--answer-model-label", default=os.getenv("CHAT_ANSWER_MODEL_NAME", "default")
+    )
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--cache-bypass", action="store_true")

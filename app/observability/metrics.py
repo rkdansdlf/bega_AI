@@ -106,7 +106,10 @@ AI_SEMANTIC_RESPONSE_CACHE_TOTAL = Counter(
 AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL = Counter(
     "ai_semantic_response_cache_shadow_total",
     "Semantic cache shadow-mode decisions without serving cached responses.",
-    ["route", "result"],  # route: completion|stream ; result: hit|miss|stale|quality_reject
+    [
+        "route",
+        "result",
+    ],  # route: completion|stream ; result: hit|miss|stale|quality_reject
 )
 
 AI_CHAT_TOKEN_ESTIMATE_TOTAL = Counter(

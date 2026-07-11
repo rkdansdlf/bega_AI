@@ -1815,9 +1815,7 @@ def _context_source_priority(
     query: str, *, is_regulation: Optional[bool] = None
 ) -> Dict[str, int]:
     regulation_query = (
-        _is_regulation_query_text(query)
-        if is_regulation is None
-        else is_regulation
+        _is_regulation_query_text(query) if is_regulation is None else is_regulation
     )
     if regulation_query:
         return {
@@ -1847,6 +1845,7 @@ def _sort_docs_for_context(
         docs,
         key=lambda doc: source_priority.get(str(doc.get("source_table") or ""), 3),
     )
+
 
 _REGULATION_KEYWORDS = frozenset(
     {

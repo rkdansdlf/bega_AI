@@ -100,8 +100,15 @@ async def cleanup_chat_semantic_cache(scope: CleanupScope) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Clean up chat semantic response cache.")
-    parser.add_argument("--days", type=int, default=0, help="Delete entries expired more than N days ago.")
+    parser = argparse.ArgumentParser(
+        description="Clean up chat semantic response cache."
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=0,
+        help="Delete entries expired more than N days ago.",
+    )
     parser.add_argument("--source-tier", default=None)
     parser.add_argument("--embedding-signature", default=None)
     parser.add_argument("--max-hit-count", type=int, default=None)
