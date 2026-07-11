@@ -1443,6 +1443,60 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def build_prewarm_plan_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(results)
+    cache_hit_count = 0
+    missing_cache_row_count = 0
+    retryable_failure_count = 0
+    pending_count = 0
+    locked_terminal_count = 0
+    db_unavailable_count = 0
+    cache_key_mismatch_count = 0
+
+    for item in results:
+        meta = item.get("meta") or {}
+        reason = str(item.get("reason") or "")
+        failure_class = str(meta.get("failure_class") or "")
+
+        if item.get("status") == "skipped" and reason == "cache_hit":
+            cache_hit_count += 1
+        if bool(meta.get("cache_row_missing")) or reason.startswith(
+            "missing_cache_row"
+        ):
+            missing_cache_row_count += 1
+        if bool(meta.get("retryable_failure")) or failure_class == "retryable_failed":
+            retryable_failure_count += 1
+        if item.get("status") == "in_progress" or bool(meta.get("in_progress")):
+            pending_count += 1
+        if failure_class == "locked_terminal":
+            locked_terminal_count += 1
+        if bool(meta.get("db_unavailable")) or reason == "db_unavailable":
+            db_unavailable_count += 1
+        if bool(meta.get("cache_key_mismatch")):
+            cache_key_mismatch_count += 1
+
+    estimated_api_call_count = missing_cache_row_count + retryable_failure_count
+    blocked_count = pending_count + locked_terminal_count + db_unavailable_count
+
+    return {
+        "target_count": total,
+        "cache_hit_count": cache_hit_count,
+        "cache_hit_rate": round(cache_hit_count / total, 4) if total else 0.0,
+        "estimated_api_call_count": estimated_api_call_count,
+        "estimated_api_call_rate": (
+            round(estimated_api_call_count / total, 4) if total else 0.0
+        ),
+        "estimated_cache_hit_savings_count": cache_hit_count,
+        "missing_cache_row_count": missing_cache_row_count,
+        "retryable_failure_count": retryable_failure_count,
+        "pending_count": pending_count,
+        "locked_terminal_count": locked_terminal_count,
+        "db_unavailable_count": db_unavailable_count,
+        "blocked_count": blocked_count,
+        "cache_key_mismatch_count": cache_key_mismatch_count,
+    }
+
+
 def collect_matchup_integrity_metrics(
     years: List[int],
     years_alias: List[str] | None = None,
@@ -1792,6 +1846,8 @@ async def async_main(args: argparse.Namespace) -> int:
 
     if args.verify_cache_only and args.force_rebuild:
         raise ValueError("force-rebuild cannot be combined with verify-cache-only")
+    if args.dry_run and args.force_rebuild:
+        raise ValueError("force-rebuild cannot be combined with dry-run")
 
     if args.force_rebuild:
         rebuild_stats = force_rebuild_delete([target.cache_key for target in targets])
@@ -1805,11 +1861,13 @@ async def async_main(args: argparse.Namespace) -> int:
 
     start_time = datetime.now()
     results: List[Dict[str, Any]]
-    if args.verify_cache_only:
+    verification_only = args.verify_cache_only or args.dry_run
+    if verification_only:
         results = collect_cache_verification_results(targets)
+        mode_label = "dry-run" if args.dry_run else "verify"
         for idx, (target, item) in enumerate(zip(targets, results), start=1):
             print(
-                f"[{idx}/{len(targets)}] {target.season_year} {target.home_team_id} vs {target.away_team_id} "
+                f"[{mode_label}:{idx}/{len(targets)}] {target.season_year} {target.home_team_id} vs {target.away_team_id} "
                 f"-> {item['status']} ({item.get('reason')}){_cache_resolution_log_suffix(item)}"
             )
     else:
@@ -1912,6 +1970,8 @@ async def async_main(args: argparse.Namespace) -> int:
     )
     elapsed = datetime.now() - start_time
     summary["runtime_seconds"] = round(elapsed.total_seconds(), 3)
+    if verification_only:
+        summary["prewarm_plan"] = build_prewarm_plan_summary(results)
     report = {
         "summary": summary,
         "options": {
@@ -1931,6 +1991,7 @@ async def async_main(args: argparse.Namespace) -> int:
             "allow_postseason_stage_mismatch": args.allow_postseason_stage_mismatch,
             "retry_failures_from_report": args.retry_failures_from_report,
             "verify_cache_only": args.verify_cache_only,
+            "dry_run": args.dry_run,
             "recovery_pass_count": args.recovery_pass_count,
             "pending_recheck_seconds": args.pending_recheck_seconds,
         },
@@ -1947,6 +2008,14 @@ async def async_main(args: argparse.Namespace) -> int:
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"Quality report written: {report_path}")
+    if args.dry_run:
+        prewarm_plan = summary["prewarm_plan"]
+        return (
+            0
+            if prewarm_plan["db_unavailable_count"] == 0
+            and prewarm_plan["cache_key_mismatch_count"] == 0
+            else 1
+        )
     return (
         0
         if summary["failed"] == 0
@@ -2067,6 +2136,14 @@ def parse_args() -> argparse.Namespace:
         "--verify-cache-only",
         action="store_true",
         help="Skip coach API calls and verify target cache rows directly from the database.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Skip coach API calls, report cache hit savings and estimated API calls, "
+            "and return success unless the cache plan itself is unavailable."
+        ),
     )
     parser.add_argument(
         "--allow-postseason-stage-mismatch",

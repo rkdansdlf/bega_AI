@@ -123,6 +123,10 @@ def client(monkeypatch):
         AsyncMock(return_value=None),
     )
     monkeypatch.setattr(
+        "app.routers.chat_stream._get_semantic_cache_hit",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
         "app.routers.chat_stream.save_to_cache",
         AsyncMock(return_value=None),
     )
@@ -209,6 +213,272 @@ def test_ai_chat_completion_cache_hit_sets_cache_planner_metadata(
     assert body["planner_cache_hit"] is False
     assert body["tool_execution_mode"] == "none"
     assert body["perf"]["planner_mode"] == "cache"
+
+
+def test_ai_chat_completion_cache_bypass_ignores_exact_cache_hit(
+    client: TestClient,
+    ai_internal_headers: dict[str, str],
+    monkeypatch,
+):
+    cache_lookup = AsyncMock(
+        return_value={
+            "response_text": "캐시 응답",
+            "intent": "team_analysis",
+            "hit_count": 3,
+        }
+    )
+    monkeypatch.setattr("app.routers.chat_stream.get_cached_response", cache_lookup)
+
+    response = client.post(
+        "/ai/chat/completion",
+        json={"question": "LG 팀 흐름 정리해줘", "cache_bypass": True},
+        headers=ai_internal_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cached"] is False
+    assert "모의 응답" in body["answer"]
+    cache_lookup.assert_not_awaited()
+
+
+def test_ai_chat_completion_semantic_cache_hit_sets_metadata(
+    client: TestClient,
+    ai_internal_headers: dict[str, str],
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.routers.chat_stream.get_settings",
+        lambda: SimpleNamespace(
+            operator_data_fast_path_enabled=False,
+            chat_completion_timeout_seconds=0,
+            chat_semantic_cache_enabled=True,
+            chat_semantic_cache_shadow_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.routers.chat_stream.get_cached_response",
+        AsyncMock(return_value=None),
+    )
+    semantic_hit = AsyncMock(
+        return_value={
+            "cache_key": "semantic-cache-key",
+            "question_text": "LG 팀 분위기 정리해줘",
+            "filters_json": None,
+            "response_text": "의미 캐시 응답",
+            "intent": "team_analysis",
+            "source_tier": "rag",
+            "hit_count": 2,
+            "similarity": 0.948,
+        }
+    )
+    monkeypatch.setattr("app.routers.chat_stream._get_semantic_cache_hit", semantic_hit)
+
+    response = client.post(
+        "/ai/chat/completion",
+        json={"question": "LG 팀 분위기 정리해줘"},
+        headers=ai_internal_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cached"] is True
+    assert body["semantic_cached"] is True
+    assert body["planner_mode"] == "semantic_cache"
+    assert body["grounding_mode"] == "semantic_cache"
+    assert body["source_tier"] == "semantic_cache"
+    assert body["cache_similarity"] == pytest.approx(0.948, rel=1e-6)
+    semantic_hit.assert_awaited_once()
+
+
+def test_semantic_cache_shadow_mode_does_not_serve_cached_completion(
+    client: TestClient,
+    ai_internal_headers: dict[str, str],
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.routers.chat_stream.get_settings",
+        lambda: SimpleNamespace(
+            operator_data_fast_path_enabled=False,
+            chat_completion_timeout_seconds=0,
+            chat_semantic_cache_enabled=True,
+            chat_semantic_cache_shadow_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.routers.chat_stream.get_cached_response",
+        AsyncMock(return_value=None),
+    )
+    semantic_hit = AsyncMock(
+        return_value={
+            "cache_key": "semantic-cache-key",
+            "question_text": "LG 팀 분위기 정리해줘",
+            "filters_json": None,
+            "response_text": "shadow에서만 관측할 캐시 응답",
+            "intent": "team_analysis",
+            "source_tier": "rag",
+            "hit_count": 2,
+            "similarity": 0.951,
+        }
+    )
+    save_caches = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.chat_stream._get_semantic_cache_hit", semantic_hit)
+    monkeypatch.setattr(
+        "app.routers.chat_stream._save_chat_response_caches", save_caches
+    )
+
+    response = client.post(
+        "/ai/chat/completion",
+        json={"question": "LG 팀 분위기 정리해줘"},
+        headers=ai_internal_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cached"] is False
+    assert body.get("semantic_cached") is not True
+    assert "모의 응답" in body["answer"]
+    semantic_hit.assert_awaited_once()
+    save_caches.assert_awaited_once()
+
+
+def test_semantic_cache_shadow_mode_enables_lookup_but_disables_serving() -> None:
+    settings = SimpleNamespace(
+        chat_semantic_cache_enabled=False,
+        chat_semantic_cache_shadow_enabled=True,
+    )
+
+    assert chat_stream._is_semantic_cache_lookup_enabled(settings) is True
+    assert chat_stream._is_semantic_cache_serving_enabled(settings) is False
+
+
+def test_semantic_cache_quality_gate_rejects_team_mismatch() -> None:
+    ok, reason = chat_stream._semantic_cache_quality_gate(
+        question="LG 팀 분위기 정리해줘",
+        filters=None,
+        cached={
+            "question_text": "KIA 팀 분위기 정리해줘",
+            "filters_json": None,
+            "source_tier": "rag",
+        },
+    )
+
+    assert ok is False
+    assert reason == "teams_mismatch"
+
+
+def test_semantic_cache_quality_gate_rejects_player_mismatch() -> None:
+    ok, reason = chat_stream._semantic_cache_quality_gate(
+        question="김도영의 2026년 기록 알려줘",
+        filters=None,
+        cached={
+            "question_text": "문보경의 2026년 기록 알려줘",
+            "filters_json": None,
+            "source_tier": "db",
+        },
+    )
+
+    assert ok is False
+    assert reason == "players_mismatch"
+
+
+def test_semantic_cache_quality_gate_rejects_question_type_mismatch() -> None:
+    ok, reason = chat_stream._semantic_cache_quality_gate(
+        question="FA 보상선수 규정 핵심이 뭐야?",
+        filters=None,
+        cached={
+            "question_text": "플래툰 전략이 뭐야?",
+            "filters_json": None,
+            "source_tier": "rag",
+        },
+    )
+
+    assert ok is False
+    assert reason == "question_type_mismatch"
+
+
+def test_semantic_cache_quality_gate_accepts_matching_dimensions() -> None:
+    ok, reason = chat_stream._semantic_cache_quality_gate(
+        question="LG 2025 정규시즌 흐름 정리해줘",
+        filters={"team_id": "LG", "season_year": 2025, "league_type": "REGULAR"},
+        cached={
+            "question_text": "LG 트윈스 2025 정규시즌 분위기",
+            "filters_json": {
+                "team_id": "LG",
+                "season_year": 2025,
+                "league_type": "REGULAR",
+            },
+            "source_tier": "rag",
+        },
+    )
+
+    assert ok is True
+    assert reason is None
+
+
+def test_semantic_cache_quality_gate_rejects_source_tier_mismatch() -> None:
+    ok, reason = chat_stream._semantic_cache_quality_gate(
+        question="LG 팀 분위기 정리해줘",
+        filters={"source_tier": "operator_data"},
+        cached={
+            "question_text": "LG 팀 분위기 정리해줘",
+            "filters_json": None,
+            "source_tier": "rag",
+        },
+    )
+
+    assert ok is False
+    assert reason == "source_tier_mismatch"
+
+
+def test_semantic_cache_quality_gate_rejects_route_cache_hit_on_mismatch(
+    client: TestClient,
+    ai_internal_headers: dict[str, str],
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.routers.chat_stream.get_settings",
+        lambda: SimpleNamespace(
+            operator_data_fast_path_enabled=False,
+            chat_completion_timeout_seconds=0,
+            chat_semantic_cache_enabled=True,
+            chat_semantic_cache_shadow_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.routers.chat_stream.get_cached_response",
+        AsyncMock(return_value=None),
+    )
+    semantic_hit = AsyncMock(
+        return_value={
+            "cache_key": "semantic-cache-key",
+            "question_text": "KIA 팀 분위기 정리해줘",
+            "filters_json": None,
+            "response_text": "잘못 재사용되면 안 되는 의미 캐시 응답",
+            "intent": "team_analysis",
+            "source_tier": "rag",
+            "hit_count": 2,
+            "similarity": 0.961,
+        }
+    )
+    save_caches = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.routers.chat_stream._get_semantic_cache_hit", semantic_hit)
+    monkeypatch.setattr(
+        "app.routers.chat_stream._save_chat_response_caches", save_caches
+    )
+
+    response = client.post(
+        "/ai/chat/completion",
+        json={"question": "LG 팀 분위기 정리해줘"},
+        headers=ai_internal_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cached"] is False
+    assert "모의 응답" in body["answer"]
+    semantic_hit.assert_awaited_once()
+    save_caches.assert_awaited_once()
 
 
 def test_chat_endpoint_admission_dependencies_are_explicit() -> None:

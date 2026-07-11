@@ -62,7 +62,21 @@ from ..core.chat_cache import (
     delete_by_intent,
     delete_by_key,
 )
+from ..core.chat_cost_metrics import (
+    classify_chat_question_type,
+    record_chat_token_estimate,
+)
+from ..core.chat_semantic_cache import (
+    delete_semantic_by_key,
+    get_semantic_cached_response,
+    record_semantic_shadow_decision,
+    save_semantic_cache,
+    update_semantic_hit_count,
+)
+from ..core.embeddings import async_embed_query
+from ..core.entity_extractor import extract_player_names
 from ..core.rag import _build_static_kbo_faq_result
+from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 from ..tools.operator_data_query import try_build_operator_fast_path_result
 from ..observability.metrics import AI_RESPONSE_CACHE_BY_INTENT
 
@@ -456,6 +470,204 @@ def _is_non_cacheable_response(response_text: str) -> bool:
     ) or any(marker in normalized for marker in compact_markers)
 
 
+_TEAM_RESOLVER: TeamCodeResolver | None = None
+
+
+def _get_team_resolver() -> TeamCodeResolver:
+    global _TEAM_RESOLVER
+    if _TEAM_RESOLVER is None:
+        _TEAM_RESOLVER = TeamCodeResolver()
+    return _TEAM_RESOLVER
+
+
+def _coerce_filters_dict(filters: Any) -> Dict[str, Any]:
+    if isinstance(filters, dict):
+        return dict(filters)
+    if isinstance(filters, str):
+        try:
+            parsed = json.loads(filters)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _extract_semantic_guard_years(text: str, filters: Dict[str, Any]) -> set[int]:
+    years = {
+        int(match) for match in re.findall(r"(?<!\d)(19[8-9]\d|20[0-5]\d)(?!\d)", text)
+    }
+    for key, value in filters.items():
+        if "year" not in str(key).lower() and "season" not in str(key).lower():
+            continue
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            try:
+                year = int(str(item).strip())
+            except (TypeError, ValueError):
+                continue
+            if 1982 <= year <= 2059:
+                years.add(year)
+    return years
+
+
+def _extract_semantic_guard_game_types(text: str, filters: Dict[str, Any]) -> set[str]:
+    normalized = text.upper()
+    game_types: set[str] = set()
+    if any(token in normalized for token in ("REGULAR", "정규", "페넌트")):
+        game_types.add("REGULAR")
+    if any(token in normalized for token in ("PRE", "시범")):
+        game_types.add("PRE")
+    if any(
+        token in normalized for token in ("POST", "포스트", "가을", "KS", "한국시리즈")
+    ):
+        game_types.add("POST")
+
+    for key, value in filters.items():
+        lowered_key = str(key).lower()
+        if "game_type" not in lowered_key and "league_type" not in lowered_key:
+            continue
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            raw = str(item or "").strip().upper()
+            if raw in {"REGULAR", "PRE", "POST"}:
+                game_types.add(raw)
+            elif raw in {"0", "REG"}:
+                game_types.add("REGULAR")
+            elif raw == "1":
+                game_types.add("PRE")
+            elif raw in {"2", "3", "4", "5"}:
+                game_types.add("POST")
+    return game_types
+
+
+def _extract_semantic_guard_teams(text: str, filters: Dict[str, Any]) -> set[str]:
+    resolver = _get_team_resolver()
+    teams: set[str] = set()
+    text_upper = text.upper()
+
+    for raw_name, canonical in resolver.name_to_canonical.items():
+        if canonical not in CANONICAL_CODES:
+            continue
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if re.search(r"[가-힣\s]", name):
+            if name in text:
+                teams.add(canonical)
+            continue
+        pattern = rf"(?<![A-Z0-9]){re.escape(name.upper())}(?![A-Z0-9])"
+        if re.search(pattern, text_upper):
+            teams.add(canonical)
+
+    for key, value in filters.items():
+        if "team" not in str(key).lower():
+            continue
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            canonical = resolver.resolve_canonical(str(item or ""))
+            if canonical in CANONICAL_CODES:
+                teams.add(canonical)
+    return teams
+
+
+def _extract_semantic_guard_players(
+    text: str, filters: Dict[str, Any], *, question_type: str
+) -> set[str]:
+    players = (
+        set(extract_player_names(text, limit=8))
+        if question_type in {"player_analysis", "multi_player_narrative"}
+        else set()
+    )
+    for key, value in filters.items():
+        if "player" not in str(key).lower():
+            continue
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            normalized = str(item or "").strip()
+            if normalized:
+                players.add(normalized)
+    return players
+
+
+def _extract_semantic_guard_source_tier(
+    filters: Dict[str, Any], source_tier: Any = None
+) -> Optional[str]:
+    raw = source_tier
+    if raw is None:
+        raw = filters.get("source_tier") or filters.get("expected_source_tier")
+    normalized = str(raw or "").strip().lower()
+    return normalized or None
+
+
+def _build_semantic_guard_signature(
+    *,
+    question: str,
+    filters: Any,
+    source_tier: Any = None,
+) -> Dict[str, Any]:
+    filters_dict = _coerce_filters_dict(filters)
+    question_type = classify_chat_question_type(question)
+    return {
+        "teams": sorted(_extract_semantic_guard_teams(question, filters_dict)),
+        "players": sorted(
+            _extract_semantic_guard_players(
+                question,
+                filters_dict,
+                question_type=question_type,
+            )
+        ),
+        "years": sorted(_extract_semantic_guard_years(question, filters_dict)),
+        "game_types": sorted(
+            _extract_semantic_guard_game_types(question, filters_dict)
+        ),
+        "source_tier": _extract_semantic_guard_source_tier(filters_dict, source_tier),
+        "question_type": question_type,
+    }
+
+
+def _semantic_guard_dimension_matches(left: List[Any], right: List[Any]) -> bool:
+    if not left and not right:
+        return True
+    return left == right
+
+
+def _semantic_cache_quality_gate(
+    *,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    cached: Dict[str, Any],
+) -> tuple[bool, Optional[str]]:
+    current = _build_semantic_guard_signature(
+        question=question,
+        filters=filters,
+    )
+    cached_signature = _build_semantic_guard_signature(
+        question=str(cached.get("question_text") or ""),
+        filters=cached.get("filters_json"),
+        source_tier=cached.get("source_tier"),
+    )
+
+    for key in ("teams", "players", "years", "game_types"):
+        if not _semantic_guard_dimension_matches(current[key], cached_signature[key]):
+            return False, f"{key}_mismatch"
+
+    if current["question_type"] != cached_signature["question_type"]:
+        return False, "question_type_mismatch"
+
+    current_source_tier = current.get("source_tier")
+    cached_source_tier = cached_signature.get("source_tier")
+    if cached_source_tier in {"cache", "semantic_cache"}:
+        return False, "source_tier_cache_reuse"
+    if (
+        current_source_tier
+        and cached_source_tier
+        and current_source_tier != cached_source_tier
+    ):
+        return False, "source_tier_mismatch"
+
+    return True, None
+
+
 def _safe_serialize(obj: Any) -> Any:
     """JSON 직렬화 가능한 형태로 객체를 변환합니다."""
     if obj is None:
@@ -475,6 +687,16 @@ def _safe_serialize(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return {key: _safe_serialize(value) for key, value in obj.__dict__.items()}
     return str(obj)
+
+
+def _result_model_name(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+    perf = payload.get("perf")
+    if not isinstance(perf, dict):
+        return None
+    model = str(perf.get("model") or "").strip()
+    return model or None
 
 
 async def _async_update_hit_count(cache_key: str) -> None:
@@ -499,8 +721,266 @@ async def _async_delete_cache_key(cache_key: str) -> None:
         logger.warning("[ChatCache] stale cache delete failed: %s", exc)
 
 
+async def _async_delete_semantic_cache_key(cache_key: str) -> None:
+    """백그라운드에서 stale semantic cache를 삭제합니다."""
+    try:
+        pool = get_connection_pool()
+        async with pool.connection() as conn:
+            deleted = await delete_semantic_by_key(conn, cache_key)
+        if deleted:
+            logger.info("[ChatSemanticCache] Deleted stale key=%s...", cache_key[:8])
+    except Exception as exc:
+        logger.warning("[ChatSemanticCache] stale cache delete failed: %s", exc)
+
+
+async def _async_update_semantic_hit_count(cache_key: str) -> None:
+    """백그라운드에서 semantic cache hit_count를 업데이트합니다."""
+    try:
+        pool = get_connection_pool()
+        async with pool.connection() as conn:
+            await update_semantic_hit_count(conn, cache_key)
+    except Exception as exc:
+        logger.warning(
+            "[ChatSemanticCache] hit_count background update failed: %s", exc
+        )
+
+
+def _is_semantic_cache_shadow_enabled(settings: Any) -> bool:
+    return bool(getattr(settings, "chat_semantic_cache_shadow_enabled", False))
+
+
+def _is_semantic_cache_lookup_enabled(settings: Any) -> bool:
+    return bool(getattr(settings, "chat_semantic_cache_enabled", False)) or (
+        _is_semantic_cache_shadow_enabled(settings)
+    )
+
+
+def _is_semantic_cache_serving_enabled(settings: Any) -> bool:
+    return bool(getattr(settings, "chat_semantic_cache_enabled", False)) and not (
+        _is_semantic_cache_shadow_enabled(settings)
+    )
+
+
+async def _get_semantic_cache_hit(
+    question: str,
+    filters: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    settings = get_settings()
+    if not _is_semantic_cache_lookup_enabled(settings):
+        return None
+
+    try:
+        question_embedding = await async_embed_query(question, settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ChatSemanticCache] embedding lookup failed: %s", exc)
+        return None
+
+    if not question_embedding:
+        return None
+
+    pool = get_connection_pool()
+    async with pool.connection() as conn:
+        return await get_semantic_cached_response(
+            conn,
+            question_embedding=question_embedding,
+            filters_json=filters,
+            settings=settings,
+            threshold=float(
+                getattr(settings, "chat_semantic_cache_min_similarity", 0.93)
+            ),
+            limit=int(getattr(settings, "chat_semantic_cache_candidate_limit", 3)),
+        )
+
+
+async def _prepare_semantic_cache_hit_for_response(
+    *,
+    route: str,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    cache_key: str,
+    history: Optional[List[Dict[str, str]]],
+) -> Optional[tuple[Dict[str, Any], str]]:
+    settings = get_settings()
+    shadow_enabled = _is_semantic_cache_shadow_enabled(settings)
+    serving_enabled = _is_semantic_cache_serving_enabled(settings)
+    semantic_cached = await _get_semantic_cache_hit(question, filters)
+
+    if not semantic_cached:
+        if shadow_enabled:
+            record_semantic_shadow_decision(route=route, result="miss")
+        return None
+
+    semantic_text = semantic_cached.get("response_text", "")
+    semantic_key = str(semantic_cached.get("cache_key") or cache_key)
+    similarity = float(semantic_cached.get("similarity") or 0.0)
+
+    if _is_non_cacheable_response(semantic_text):
+        logger.info(
+            "[ChatSemanticCache] BYPASS stale key=%s... reason=non_cacheable_response",
+            semantic_key[:8],
+        )
+        if shadow_enabled:
+            record_semantic_shadow_decision(route=route, result="stale")
+        asyncio.create_task(_async_delete_semantic_cache_key(semantic_key))
+        return None
+
+    quality_ok, quality_reason = _semantic_cache_quality_gate(
+        question=question,
+        filters=filters,
+        cached=semantic_cached,
+    )
+    if not quality_ok:
+        logger.info(
+            "[ChatSemanticCache] REJECT key=%s... reason=%s similarity=%.3f",
+            semantic_key[:8],
+            quality_reason,
+            similarity,
+        )
+        if shadow_enabled:
+            record_semantic_shadow_decision(route=route, result="quality_reject")
+        return None
+
+    if shadow_enabled:
+        logger.info(
+            "[ChatSemanticCache] SHADOW_HIT key=%s... similarity=%.3f route=%s",
+            semantic_key[:8],
+            similarity,
+            route,
+        )
+        record_semantic_shadow_decision(route=route, result="hit")
+        record_chat_token_estimate(
+            settings,
+            route=route,
+            cache_state="semantic_cache_shadow_hit_potential_saved",
+            question=question,
+            answer=str(semantic_text),
+            history=history,
+            planner_mode=str(semantic_cached.get("planner_mode") or "unknown"),
+        )
+        return None
+
+    if not serving_enabled:
+        return None
+
+    logger.info(
+        "[ChatSemanticCache] HIT key=%s... similarity=%.3f",
+        semantic_key[:8],
+        similarity,
+    )
+    _record_cache_by_intent(semantic_cached.get("intent", "unknown"), "hit")
+    asyncio.create_task(_async_update_semantic_hit_count(semantic_key))
+    record_chat_token_estimate(
+        settings,
+        route=route,
+        cache_state="semantic_cache_hit_saved",
+        question=question,
+        answer=str(semantic_text),
+        history=history,
+        planner_mode=str(semantic_cached.get("planner_mode") or "unknown"),
+    )
+    return semantic_cached, semantic_key
+
+
+async def _save_chat_response_caches(
+    *,
+    cache_key: str,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    intent: Optional[str],
+    source_tier: Optional[str],
+    response_text: str,
+    model_name: Optional[str],
+) -> None:
+    settings = get_settings()
+    pool = get_connection_pool()
+    async with pool.connection() as conn:
+        await save_to_cache(
+            conn,
+            cache_key=cache_key,
+            question_text=question,
+            filters_json=filters,
+            intent=intent,
+            response_text=response_text,
+            model_name=model_name,
+        )
+
+    if not _is_semantic_cache_lookup_enabled(settings):
+        return
+
+    try:
+        question_embedding = await async_embed_query(question, settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ChatSemanticCache] embedding save failed: %s", exc)
+        return
+    if not question_embedding:
+        return
+
+    async with pool.connection() as conn:
+        await save_semantic_cache(
+            conn,
+            cache_key=cache_key,
+            question_text=question,
+            question_embedding=question_embedding,
+            filters_json=filters,
+            intent=intent,
+            source_tier=source_tier,
+            response_text=response_text,
+            model_name=model_name,
+            settings=settings,
+        )
+
+
+def _build_cached_completion_payload(
+    cached: Dict[str, Any],
+    *,
+    cache_key: str,
+    semantic_cached: bool = False,
+) -> Dict[str, Any]:
+    cache_mode = "semantic_cache" if semantic_cached else "cache"
+    cached_text = _ensure_quality_answer_text(cached.get("response_text", ""))
+    payload: Dict[str, Any] = {
+        "answer": cached_text,
+        "tool_calls": [],
+        "tool_results": [],
+        "data_sources": [],
+        "verified": True,
+        "visualizations": [],
+        "intent": cached.get("intent"),
+        "cached": True,
+        "semantic_cached": semantic_cached,
+        "planner_mode": cache_mode,
+        "planner_cache_hit": False,
+        "tool_execution_mode": "none",
+        "grounding_mode": cache_mode,
+        "source_tier": cache_mode,
+        "answer_sources": [],
+        "as_of_date": None,
+        "fallback_reason": None,
+        "cache_key_prefix": cache_key[:8],
+        "perf": {
+            "total_ms": 0.0,
+            "analysis_ms": 0.0,
+            "tool_ms": 0.0,
+            "answer_ms": 0.0,
+            "first_token_ms": 0.0,
+            "tool_count": 0,
+            "tool_execution_mode": "none",
+            "planner_cache_hit": False,
+            "planner_mode": cache_mode,
+            "model": cache_mode,
+        },
+    }
+    if semantic_cached:
+        payload["cache_similarity"] = float(cached.get("similarity") or 0.0)
+    return payload
+
+
 def _make_cached_sse_response(
-    cached: dict, style: str, cache_key: str
+    cached: dict,
+    style: str,
+    cache_key: str,
+    *,
+    semantic_cached: bool = False,
 ) -> EventSourceResponse:
     """캐시된 응답을 SSE 형식으로 재스트리밍합니다.
 
@@ -511,6 +991,7 @@ def _make_cached_sse_response(
     async def cached_generator():
         response_text = _ensure_quality_answer_text(cached["response_text"])
         settings = get_settings()
+        cache_mode = "semantic_cache" if semantic_cached else "cache"
 
         # status 이벤트: 캐시 히트 표시 (번개 이모지로 빠른 응답임을 암시)
         yield {
@@ -539,18 +1020,24 @@ def _make_cached_sse_response(
                     "visualizations": [],
                     "style": style,
                     "cached": True,
+                    "semantic_cached": semantic_cached,
                     "intent": cached.get("intent"),
-                    "planner_mode": "cache",
+                    "planner_mode": cache_mode,
                     "planner_cache_hit": False,
                     "tool_execution_mode": "none",
-                    "grounding_mode": "cache",
-                    "source_tier": "cache",
+                    "grounding_mode": cache_mode,
+                    "source_tier": cache_mode,
                     "answer_sources": [],
                     "as_of_date": None,
                     "fallback_reason": None,
                     "finish_reason": "completed",
                     "cancelled": False,
                     "cache_key_prefix": cache_key[:8],
+                    "cache_similarity": (
+                        float(cached.get("similarity") or 0.0)
+                        if semantic_cached
+                        else None
+                    ),
                     "perf": {
                         "total_ms": 0.0,
                         "analysis_ms": 0.0,
@@ -561,8 +1048,8 @@ def _make_cached_sse_response(
                         "tool_count": 0,
                         "tool_execution_mode": "none",
                         "planner_cache_hit": False,
-                        "planner_mode": "cache",
-                        "model": "cache",
+                        "planner_mode": cache_mode,
+                        "model": cache_mode,
                     },
                 },
                 ensure_ascii=False,
@@ -832,17 +1319,15 @@ async def _chat_event_generator(
             or "unknown"
         )
         try:
-            pool = get_connection_pool()
-            async with pool.connection() as conn:
-                await save_to_cache(
-                    conn,
-                    cache_key=cache_key,
-                    question_text=question,
-                    filters_json=filters,
-                    intent=intent,
-                    response_text=full_response_text,
-                    model_name=model_name,
-                )
+            await _save_chat_response_caches(
+                cache_key=cache_key,
+                question=question,
+                filters=filters,
+                intent=intent,
+                source_tier=result.get("source_tier"),
+                response_text=full_response_text,
+                model_name=model_name,
+            )
             logger.info(
                 "[ChatCache] SAVED key=%s... intent=%s",
                 cache_key[:8],
@@ -851,6 +1336,16 @@ async def _chat_event_generator(
             _record_cache_by_intent(intent, "miss")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatCache] save failed: %s", exc)
+    if full_response_text and not result_error and not public_error:
+        record_chat_token_estimate(
+            get_settings(),
+            route="stream",
+            cache_state="generated",
+            question=question,
+            answer=full_response_text,
+            planner_mode=str(result.get("planner_mode") or "unknown"),
+            model_name=_result_model_name(result),
+        )
     elif cache_key and full_response_text:
         if result_error:
             reason = "result_error"
@@ -1076,17 +1571,15 @@ async def _chat_live_event_generator(
             or "unknown"
         )
         try:
-            pool = get_connection_pool()
-            async with pool.connection() as conn:
-                await save_to_cache(
-                    conn,
-                    cache_key=cache_key,
-                    question_text=question,
-                    filters_json=filters,
-                    intent=intent,
-                    response_text=full_response_text,
-                    model_name=model_name,
-                )
+            await _save_chat_response_caches(
+                cache_key=cache_key,
+                question=question,
+                filters=filters,
+                intent=intent,
+                source_tier=buffered_meta.get("source_tier"),
+                response_text=full_response_text,
+                model_name=model_name,
+            )
             logger.info(
                 "[ChatCache] SAVED key=%s... intent=%s",
                 cache_key[:8],
@@ -1095,6 +1588,16 @@ async def _chat_live_event_generator(
             _record_cache_by_intent(intent, "miss")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatCache] save failed: %s", exc)
+    if full_response_text and not result_error and not public_error:
+        record_chat_token_estimate(
+            settings,
+            route="stream",
+            cache_state="generated",
+            question=question,
+            answer=full_response_text,
+            planner_mode=str(buffered_meta.get("planner_mode") or "unknown"),
+            model_name=_result_model_name(buffered_meta),
+        )
     elif cache_key and full_response_text:
         if result_error:
             reason = "result_error"
@@ -1366,13 +1869,16 @@ async def chat_completion(
 
     filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
+    cache_bypass = bool(payload.get("cache_bypass"))
 
     static_result = await _build_static_chat_result(question)
     if static_result is not None:
         logger.info("[ChatStatic] completion fast-path question=%s", question[:120])
         return JSONResponse(_safe_serialize(static_result))
 
-    cacheable = (history is None) and (not has_temporal_keyword(question))
+    cacheable = (
+        not cache_bypass and (history is None) and (not has_temporal_keyword(question))
+    )
     cache_key: Optional[str] = None
 
     if cacheable:
@@ -1401,39 +1907,38 @@ async def chat_completion(
                 )
                 _record_cache_by_intent(cached.get("intent", "unknown"), "hit")
                 asyncio.create_task(_async_update_hit_count(cache_key))
-                return JSONResponse(
-                    {
-                        "answer": _ensure_quality_answer_text(cached_text),
-                        "tool_calls": [],
-                        "tool_results": [],
-                        "data_sources": [],
-                        "verified": True,
-                        "visualizations": [],
-                        "intent": cached.get("intent"),
-                        "cached": True,
-                        "planner_mode": "cache",
-                        "planner_cache_hit": False,
-                        "tool_execution_mode": "none",
-                        "grounding_mode": "cache",
-                        "source_tier": "cache",
-                        "answer_sources": [],
-                        "as_of_date": None,
-                        "fallback_reason": None,
-                        "cache_key_prefix": cache_key[:8],
-                        "perf": {
-                            "total_ms": 0.0,
-                            "analysis_ms": 0.0,
-                            "tool_ms": 0.0,
-                            "answer_ms": 0.0,
-                            "first_token_ms": 0.0,
-                            "tool_count": 0,
-                            "tool_execution_mode": "none",
-                            "planner_cache_hit": False,
-                            "planner_mode": "cache",
-                            "model": "cache",
-                        },
-                    }
+                record_chat_token_estimate(
+                    get_settings(),
+                    route="completion",
+                    cache_state="exact_cache_hit_saved",
+                    question=question,
+                    answer=cached_text,
+                    history=history,
+                    planner_mode=str(cached.get("planner_mode") or "unknown"),
                 )
+                return JSONResponse(
+                    _build_cached_completion_payload(
+                        cached,
+                        cache_key=cache_key,
+                        semantic_cached=False,
+                    )
+                )
+        semantic_hit = await _prepare_semantic_cache_hit_for_response(
+            route="completion",
+            question=question,
+            filters=filters,
+            cache_key=cache_key,
+            history=history,
+        )
+        if semantic_hit:
+            semantic_cached, semantic_key = semantic_hit
+            return JSONResponse(
+                _build_cached_completion_payload(
+                    semantic_cached,
+                    cache_key=semantic_key,
+                    semantic_cached=True,
+                )
+            )
 
     settings = get_settings()
     completion_timeout_seconds = max(
@@ -1537,17 +2042,15 @@ async def chat_completion(
                 or "unknown"
             )
             try:
-                pool = get_connection_pool()
-                async with pool.connection() as conn:
-                    await save_to_cache(
-                        conn,
-                        cache_key=cache_key,
-                        question_text=question,
-                        filters_json=filters,
-                        intent=intent,
-                        response_text=full_response_text,
-                        model_name=model_name,
-                    )
+                await _save_chat_response_caches(
+                    cache_key=cache_key,
+                    question=question,
+                    filters=filters,
+                    intent=intent,
+                    source_tier=result.get("source_tier"),
+                    response_text=full_response_text,
+                    model_name=model_name,
+                )
                 logger.info(
                     "[ChatCache] SAVED key=%s... intent=%s (completion)",
                     cache_key[:8],
@@ -1556,6 +2059,17 @@ async def chat_completion(
                 _record_cache_by_intent(intent, "miss")
             except Exception as exc:
                 logger.warning("[ChatCache] completion save failed: %s", exc)
+        if full_response_text and not result_error:
+            record_chat_token_estimate(
+                settings,
+                route="completion",
+                cache_state="generated",
+                question=question,
+                answer=full_response_text,
+                history=history,
+                planner_mode=str(result.get("planner_mode") or "unknown"),
+                model_name=_result_model_name(result),
+            )
 
     if isinstance(result, dict):
         payload_serialized = _safe_serialize(result)
@@ -1611,6 +2125,7 @@ async def chat_stream_post(
     question = _validate_chat_question(payload.get("question", ""))
     filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
+    cache_bypass = bool(payload.get("cache_bypass"))
 
     # payload에 style이 지정된 경우, 쿼리 파라미터보다 우선 적용합니다.
     style_override = payload.get("style")
@@ -1625,7 +2140,9 @@ async def chat_stream_post(
     # 캐시 적용 조건: history-free 쿼리이고 실시간 키워드 없음
     # history가 있으면 대화 맥락이 있으므로 캐싱 불가
     # 실시간 키워드("오늘", "지금" 등)가 있으면 최신성이 중요하므로 캐싱 불가
-    cacheable = (history is None) and (not has_temporal_keyword(question))
+    cacheable = (
+        not cache_bypass and (history is None) and (not has_temporal_keyword(question))
+    )
     cache_key: Optional[str] = None
 
     if cacheable:
@@ -1655,7 +2172,31 @@ async def chat_stream_post(
                 _record_cache_by_intent(cached.get("intent", "unknown"), "hit")
                 # hit_count는 background에서 업데이트 (응답 지연 없음)
                 asyncio.create_task(_async_update_hit_count(cache_key))
+                record_chat_token_estimate(
+                    get_settings(),
+                    route="stream",
+                    cache_state="exact_cache_hit_saved",
+                    question=question,
+                    answer=cached_text,
+                    history=history,
+                    planner_mode=str(cached.get("planner_mode") or "unknown"),
+                )
                 return _make_cached_sse_response(cached, style, cache_key)
+        semantic_hit = await _prepare_semantic_cache_hit_for_response(
+            route="stream",
+            question=question,
+            filters=filters,
+            cache_key=cache_key,
+            history=history,
+        )
+        if semantic_hit:
+            semantic_cached, semantic_key = semantic_hit
+            return _make_cached_sse_response(
+                semantic_cached,
+                style,
+                semantic_key,
+                semantic_cached=True,
+            )
 
     settings = get_settings()
     if bool(getattr(settings, "chat_queue_enabled", True)):
