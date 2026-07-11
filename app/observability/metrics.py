@@ -97,6 +97,42 @@ AI_RESPONSE_CACHE_TOTAL = Counter(
     ["operation", "result"],  # operation: lookup|store ; result: hit|miss|skip|ok|error
 )
 
+AI_SEMANTIC_RESPONSE_CACHE_TOTAL = Counter(
+    "ai_semantic_response_cache_total",
+    "Semantic chat response cache lookups and writes.",
+    ["operation", "result"],  # operation: lookup|store ; result: hit|miss|ok|error
+)
+
+AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL = Counter(
+    "ai_semantic_response_cache_shadow_total",
+    "Semantic cache shadow-mode decisions without serving cached responses.",
+    ["route", "result"],  # route: completion|stream ; result: hit|miss|stale|quality_reject
+)
+
+AI_CHAT_TOKEN_ESTIMATE_TOTAL = Counter(
+    "ai_chat_token_estimate_total",
+    "Estimated chat token volume by route, token type, and cache state.",
+    ["route", "token_type", "cache_state"],
+)
+
+AI_CHAT_COST_ESTIMATE_USD_TOTAL = Counter(
+    "ai_chat_cost_estimate_usd_total",
+    "Estimated chat LLM cost in USD, based on configured per-1M token rates.",
+    ["route", "provider", "model"],
+)
+
+AI_CHAT_TOKEN_ESTIMATE_BY_TYPE_TOTAL = Counter(
+    "ai_chat_token_estimate_by_type_total",
+    "Estimated visible chat text tokens by question type, planner mode, and cache state.",
+    ["route", "question_type", "planner_mode", "token_type", "cache_state"],
+)
+
+AI_CHAT_COST_ESTIMATE_BY_TYPE_USD_TOTAL = Counter(
+    "ai_chat_cost_estimate_by_type_usd_total",
+    "Estimated visible-text generated chat cost by question type and planner mode.",
+    ["route", "question_type", "planner_mode", "provider", "model"],
+)
+
 AI_COACH_REQUEST_TOTAL = Counter(
     "ai_coach_request_total",
     "Coach request outcomes by cache state and request mode.",
@@ -225,9 +261,13 @@ __all__ = [
     "AI_COACH_LLM_SKIP_TOTAL",
     "AI_COACH_PAYLOAD_COMPRESSION_TOTAL",
     "AI_COACH_REQUEST_TOTAL",
+    "AI_CHAT_COST_ESTIMATE_USD_TOTAL",
+    "AI_CHAT_COST_ESTIMATE_BY_TYPE_USD_TOTAL",
     "AI_CHAT_QUEUE_DEPTH",
     "AI_CHAT_QUEUE_ESTIMATED_WAIT_SECONDS",
     "AI_CHAT_QUEUE_EVENTS_TOTAL",
+    "AI_CHAT_TOKEN_ESTIMATE_TOTAL",
+    "AI_CHAT_TOKEN_ESTIMATE_BY_TYPE_TOTAL",
     "AI_DB_POOL_SIZE",
     "AI_EMBEDDING_CACHE_TOTAL",
     "AI_LLM_CALL_DURATION_SECONDS",
@@ -237,5 +277,7 @@ __all__ = [
     "AI_RESPONSE_CACHE_BY_INTENT",
     "AI_RESPONSE_CACHE_TOTAL",
     "AI_RETRIEVAL_FALLBACK_LEVEL_TOTAL",
+    "AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL",
+    "AI_SEMANTIC_RESPONSE_CACHE_TOTAL",
     "metrics_asgi_app",
 ]
