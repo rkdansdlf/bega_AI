@@ -29,6 +29,11 @@ from .agents.shared_runtime import (
 from .agents.runtime_factory import create_baseball_agent_runtime
 from .core.chat_cache import CREATE_TABLE_SQL as CHAT_CACHE_DDL
 from .core.chat_cache import cleanup_expired as _cleanup_expired_cache
+from .core.chat_semantic_cache import CREATE_TABLE_SQL as CHAT_SEMANTIC_CACHE_DDL
+from .core.chat_semantic_cache import (
+    CREATE_VECTOR_INDEX_SQL as CHAT_SEMANTIC_CACHE_VECTOR_INDEX_DDL,
+)
+from .core.chat_semantic_cache import cleanup_expired as _cleanup_expired_semantic_cache
 from .core.security_metrics import record_security_event
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성). 전 계층이 async psycopg3로 통일됨.
@@ -285,8 +290,14 @@ async def _chat_cache_cleanup_loop(interval_seconds: int = 3600) -> None:
             pool = get_connection_pool()
             async with pool.connection() as conn:
                 deleted = await _cleanup_expired_cache(conn)
+                semantic_deleted = await _cleanup_expired_semantic_cache(conn)
             if deleted:
                 logger.info("[ChatCache] Cleanup: %d expired entries deleted", deleted)
+            if semantic_deleted:
+                logger.info(
+                    "[ChatSemanticCache] Cleanup: %d expired entries deleted",
+                    semantic_deleted,
+                )
         except Exception as exc:
             logger.warning("[ChatCache] Cleanup loop error: %s", exc)
 
@@ -394,6 +405,7 @@ async def _coach_failed_cache_recovery_loop() -> None:
 async def lifespan(app):
     """앱 시작/종료 시 실행되는 lifespan 이벤트"""
     # 시작 시
+    settings = get_settings()
     load_clf()
     pool = get_connection_pool()  # 커넥션 풀 생성
     # AsyncConnectionPool은 이벤트 루프 내에서 열어야 한다.
@@ -452,6 +464,26 @@ async def lifespan(app):
         logger.info("[Lifespan] chat_response_cache table ensured")
     except Exception as exc:
         logger.warning("[Lifespan] chat_response_cache DDL failed: %s", exc)
+
+    # [Chat Semantic Caching] chat_semantic_response_cache 테이블 자동 생성
+    try:
+        async with pool.connection() as conn:
+            await conn.execute(CHAT_SEMANTIC_CACHE_DDL)
+        logger.info("[Lifespan] chat_semantic_response_cache table ensured")
+    except Exception as exc:
+        logger.warning(
+            "[Lifespan] chat_semantic_response_cache DDL failed: %s", exc
+        )
+    if bool(getattr(settings, "chat_semantic_cache_vector_index_enabled", False)):
+        try:
+            async with pool.connection() as conn:
+                await conn.execute(CHAT_SEMANTIC_CACHE_VECTOR_INDEX_DDL)
+            logger.info("[Lifespan] chat_semantic_response_cache HNSW index ensured")
+        except Exception as exc:
+            logger.warning(
+                "[Lifespan] chat_semantic_response_cache HNSW index DDL failed: %s",
+                exc,
+            )
 
     # [Chat Caching] 만료 항목 주기적 삭제 백그라운드 태스크 시작
     cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
