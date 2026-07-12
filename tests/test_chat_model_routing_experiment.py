@@ -15,6 +15,11 @@ import pytest
 from scripts import chat_model_routing_experiment as experiment
 
 
+APPROVED_GOLDEN_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "chat_quality_golden_60.json"
+)
+
+
 def _case(index: int, *, planner_mode: str = "default_llm_planner") -> dict[str, Any]:
     return {
         "id": f"case-{index:02d}",
@@ -23,6 +28,21 @@ def _case(index: int, *, planner_mode: str = "default_llm_planner") -> dict[str,
         "expected_answerability": "answerable",
         "allowed_planner_modes": [planner_mode],
     }
+
+
+def _approved_cases() -> list[dict[str, Any]]:
+    return experiment.load_golden_cases(APPROVED_GOLDEN_PATH)[1]
+
+
+def _answer_for_case(case: dict[str, Any]) -> str:
+    expected = case["expected_answerability"]
+    if expected == "operator_data_required":
+        return "MANUAL_BASEBALL_DATA_REQUIRED"
+    if expected == "clarification_required":
+        return "팀명을 같이 알려주세요."
+    if expected == "future_event_pending":
+        return "미래의 기록은 공식 기록이 제공된 뒤 확인할 수 있습니다."
+    return "자연스러운 답변입니다."
 
 
 def _usage(
@@ -84,19 +104,34 @@ def _report(
     answer_cost: str = "2.000000000000",
     planner_label: str = "explicit-planner",
     answer_label: str = "explicit-answer",
+    fallback_reason: str | None = None,
 ) -> dict[str, Any]:
-    cases = [_case(index) for index in range(60)]
+    cases = _approved_cases()
+    cost_case_index = next(
+        index
+        for index, case in enumerate(cases)
+        if any(mode in experiment.LLM_PLANNER_MODES for mode in case["allowed_planner_modes"])
+    )
     results = []
     for index, case in enumerate(cases):
+        planner_mode = next(
+            (mode for mode in case["allowed_planner_modes"] if mode in experiment.LLM_PLANNER_MODES),
+            case["allowed_planner_modes"][0],
+        )
         evidence = _success_evidence(
-            planner_cost=planner_cost if index == 0 else "0.000000000000",
-            answer_cost=answer_cost if index == 0 else "0.000000000000",
+            planner_cost=planner_cost if index == cost_case_index else "0.000000000000",
+            answer_cost=answer_cost if index == cost_case_index else "0.000000000000",
             planner_model=planner_label,
             answer_model=answer_label,
+            answer=_answer_for_case(case),
+            planner_mode=planner_mode,
         )
+        evidence["payload"]["fallback_reason"] = fallback_reason if index == 0 else None
+        if planner_mode in experiment.DETERMINISTIC_PLANNER_MODES:
+            evidence["payload"]["model_usage"] = []
         results.append(experiment.evaluate_case(case, evidence))
     return experiment.build_run_report(
-        dataset_sha256="a" * 64,
+        dataset_sha256=experiment.APPROVED_GOLDEN_SHA256,
         cases=cases,
         results=results,
         planner_model_label=planner_label,
@@ -105,22 +140,24 @@ def _report(
     )
 
 
-def test_load_golden_cases_returns_exact_hash_and_validated_cases(tmp_path: Path) -> None:
+def test_load_golden_cases_accepts_only_the_operator_approved_asset() -> None:
+    digest, cases = experiment.load_golden_cases(APPROVED_GOLDEN_PATH)
+
+    assert digest == experiment.APPROVED_GOLDEN_SHA256
+    assert len(cases) == 60
+    assert cases[0]["id"] == "narrative-01"
+
+
+def test_load_golden_cases_rejects_a_valid_schema_with_an_unapproved_hash(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "golden.json"
-    payload = {
-        "schema_version": 1,
-        "baseball_data_policy": "internal_only",
-        "cases": [_case(0)],
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-    path.write_bytes(raw)
+    payload = json.loads(APPROVED_GOLDEN_PATH.read_text(encoding="utf-8"))
+    payload["description"] = "different operator asset"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    digest, cases = experiment.load_golden_cases(path)
-
-    import hashlib
-
-    assert digest == hashlib.sha256(raw).hexdigest()
-    assert cases == payload["cases"]
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.load_golden_cases(path)
 
 
 @pytest.mark.parametrize(
@@ -214,6 +251,24 @@ def test_evaluate_case_rejects_unpriced_successful_usage() -> None:
         experiment.evaluate_case(_case(0), evidence)
 
 
+def test_evaluate_case_accepts_independently_rounded_usage_costs() -> None:
+    evidence = _success_evidence()
+    usage = evidence["payload"]["model_usage"][0]
+    usage.update(
+        {
+            "input_cost_usd": "0.000000000001",
+            "output_cost_usd": "0.000000000001",
+            "total_cost_usd": "0.000000000001",
+        }
+    )
+
+    result = experiment.evaluate_case(_case(0), evidence)
+
+    assert result["model_usage"][0]["input_cost_usd"] == "0.000000000001"
+    assert result["model_usage"][0]["output_cost_usd"] == "0.000000000001"
+    assert result["model_usage"][0]["total_cost_usd"] == "0.000000000001"
+
+
 @pytest.mark.parametrize(
     "mutation,reason",
     [
@@ -230,6 +285,32 @@ def test_unexpected_mode_or_fallback_is_a_measured_failure(mutation, reason: str
 
     assert result["passed"] is False
     assert reason in result["failure_reasons"]
+
+
+def test_fallback_reason_marker_is_a_sanitized_measured_failure() -> None:
+    evidence = _success_evidence()
+    evidence["payload"]["fallback_reason"] = "sensitive provider failure"
+
+    result = experiment.evaluate_case(_case(0), evidence)
+
+    assert result["passed"] is False
+    assert "fallback_reason" in result["failure_reasons"]
+    assert result["fallback_reason_present"] is True
+    assert "sensitive provider failure" not in json.dumps(result)
+
+
+def test_fallback_reason_marker_is_a_new_failure_in_comparison() -> None:
+    comparison = experiment.compare_reports(
+        _report(planner_cost="1.000000000000"),
+        _report(
+            planner_cost="0.800000000000",
+            fallback_reason="sensitive provider failure",
+        ),
+    )
+
+    assert comparison["candidate_quality_passed"] is False
+    assert comparison["no_new_failures"] is False
+    assert "candidate_introduced_new_failure" in comparison["failure_reasons"]
 
 
 def test_exact_twenty_percent_planner_reduction_passes() -> None:
@@ -303,6 +384,20 @@ def test_hash_or_order_mismatch_is_invalid(field: str) -> None:
         experiment.compare_reports(baseline, candidate)
 
 
+def test_build_run_report_rejects_a_constructed_report_with_the_wrong_hash() -> None:
+    report = _report(planner_cost="1.000000000000")
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.build_run_report(
+            dataset_sha256="a" * 64,
+            cases=_approved_cases(),
+            results=report["details"],
+            planner_model_label="explicit-planner",
+            answer_model_label="explicit-answer",
+            cache_bypass=True,
+        )
+
+
 @pytest.mark.parametrize("mutation", ["duplicate", "missing"])
 def test_duplicate_or_missing_report_case_is_invalid(mutation: str) -> None:
     candidate = _report(planner_cost="0.800000000000")
@@ -318,7 +413,7 @@ def test_duplicate_or_missing_report_case_is_invalid(mutation: str) -> None:
 
 
 def test_all_http_failures_form_a_complete_measured_failure_report() -> None:
-    cases = [_case(index) for index in range(60)]
+    cases = _approved_cases()
     results = [
         experiment.evaluate_case(
             case,
@@ -334,7 +429,7 @@ def test_all_http_failures_form_a_complete_measured_failure_report() -> None:
     ]
 
     report = experiment.build_run_report(
-        dataset_sha256="a" * 64,
+        dataset_sha256=experiment.APPROVED_GOLDEN_SHA256,
         cases=cases,
         results=results,
         planner_model_label="explicit-planner",
@@ -348,10 +443,8 @@ def test_all_http_failures_form_a_complete_measured_failure_report() -> None:
 
 
 def test_build_report_whitelists_case_detail_fields() -> None:
-    cases = [_case(index) for index in range(60)]
-    results = [
-        experiment.evaluate_case(case, _success_evidence()) for case in cases
-    ]
+    cases = _approved_cases()
+    results = deepcopy(_report(planner_cost="1.000000000000")["details"])
     results[0].update(
         {
             "answer": "must-not-leak",
@@ -362,7 +455,7 @@ def test_build_report_whitelists_case_detail_fields() -> None:
     )
 
     report = experiment.build_run_report(
-        dataset_sha256="a" * 64,
+        dataset_sha256=experiment.APPROVED_GOLDEN_SHA256,
         cases=cases,
         results=results,
         planner_model_label="explicit-planner",
@@ -471,17 +564,24 @@ def test_report_rejects_false_cache_bypass_and_observed_answer_model_mismatch() 
     with pytest.raises(experiment.InvalidEvidenceError):
         experiment.compare_reports(report, bad_cache)
 
-    cases = [_case(index) for index in range(60)]
-    results = [
-        experiment.evaluate_case(
-            case,
-            _success_evidence(answer_model="wrong-answer-model"),
+    cases = _approved_cases()
+    results = []
+    for case in cases:
+        planner_mode = next(
+            (mode for mode in case["allowed_planner_modes"] if mode in experiment.LLM_PLANNER_MODES),
+            case["allowed_planner_modes"][0],
         )
-        for case in cases
-    ]
+        evidence = _success_evidence(
+            planner_mode=planner_mode,
+            answer=_answer_for_case(case),
+            answer_model="wrong-answer-model",
+        )
+        if planner_mode in experiment.DETERMINISTIC_PLANNER_MODES:
+            evidence["payload"]["model_usage"] = []
+        results.append(experiment.evaluate_case(case, evidence))
     with pytest.raises(experiment.InvalidEvidenceError):
         experiment.build_run_report(
-            dataset_sha256="a" * 64,
+            dataset_sha256=experiment.APPROVED_GOLDEN_SHA256,
             cases=cases,
             results=results,
             planner_model_label="explicit-planner",
@@ -497,3 +597,36 @@ def test_compare_rejects_non_boolean_case_routing_flag() -> None:
 
     with pytest.raises(experiment.InvalidEvidenceError):
         experiment.compare_reports(baseline, candidate)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda report: report["details"][0]["quality"].update(natural_chat=False),
+        lambda report: report["details"][0].update(passed=False),
+        lambda report: report["details"][0].update(failure_reasons=["quality"]),
+    ],
+)
+def test_loaded_report_rejects_forged_case_quality_or_outcome(mutate) -> None:
+    candidate = _report(planner_cost="0.800000000000")
+    mutate(candidate)
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.compare_reports(_report(planner_cost="1.000000000000"), candidate)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda report: report["summary"].update(latency_avg_ms=999.99),
+        lambda report: report["summary"].update(total_cost_usd="9.000000000000"),
+        lambda report: report["summary"].update(failure_count=False),
+        lambda report: report["cost_totals_usd"].update(total="9.000000000000"),
+    ],
+)
+def test_loaded_report_rejects_forged_summary_or_cost_totals(mutate) -> None:
+    candidate = _report(planner_cost="0.800000000000")
+    mutate(candidate)
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.compare_reports(_report(planner_cost="1.000000000000"), candidate)
