@@ -129,7 +129,7 @@ def test_v2_rejects_unknown_top_level_field() -> None:
         })
 ```
 
-The test helper contains one valid complete payload for every approved event type, including a `coach.meta` example with `manual_data_request` using the existing `scope`, `missingItems`, `operatorMessage`, `blocking`, and optional `code` fields.
+The test helper contains one valid complete payload for every approved event type, including a `coach.meta` example with canonical v2 `manual_data_request` fields `scope`, `missing_items`, `operator_message`, `blocking`, and optional `code`. The v1 adapter leaves the existing camel-case nested fields unchanged for legacy consumers.
 
 - [ ] **Step 2: Run tests and observe RED**
 
