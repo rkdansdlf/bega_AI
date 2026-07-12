@@ -93,6 +93,108 @@ def _build_model_usage_runtime(monkeypatch) -> BaseballAgentRuntime:
     )
 
 
+def _build_legacy_model_usage_runtime(
+    monkeypatch, llm_generator
+) -> BaseballAgentRuntime:
+    from app.agents import baseball_agent as agent_module
+
+    monkeypatch.setattr(agent_module, "DatabaseQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "RegulationQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "GameQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "DocumentQueryTool", _RequestContextTool)
+
+    return BaseballAgentRuntime(
+        llm_generator=llm_generator,
+        settings=SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_model="default/model",
+            chat_model_pricing_json=(
+                '{"openrouter":{"default/model":'
+                '{"input_usd_per_1m_tokens":"1.00",'
+                '"output_usd_per_1m_tokens":"2.00"},'
+                '"override/model":'
+                '{"input_usd_per_1m_tokens":"3.00",'
+                '"output_usd_per_1m_tokens":"4.00"}}}'
+            ),
+        ),
+    )
+
+
+def test_legacy_llm_with_model_override_records_accepted_override(monkeypatch) -> None:
+    received_model_overrides: list[str | None] = []
+
+    async def _legacy_llm(messages, max_tokens=None, model_override=None):
+        del messages, max_tokens
+        received_model_overrides.append(model_override)
+        yield "legacy "
+        yield "output"
+
+    runtime = _build_legacy_model_usage_runtime(monkeypatch, _legacy_llm)
+
+    async def _run():
+        with runtime.request_context(SimpleNamespace(label="legacy")) as request_context:
+            output = [
+                chunk
+                async for chunk in runtime.shared_agent._call_llm_stream(
+                    [{"role": "user", "content": "hello"}],
+                    max_tokens=32,
+                    model_override="override/model",
+                    usage_role="planner",
+                )
+            ]
+            return output, request_context.model_usage_records
+
+    output, records = asyncio.run(_run())
+
+    assert output == ["legacy ", "output"]
+    assert received_model_overrides == ["override/model"]
+    assert len(records) == 1
+    assert (records[0].role, records[0].provider, records[0].model) == (
+        "planner",
+        "openrouter",
+        "override/model",
+    )
+    assert records[0].pricing_source == "model_catalog"
+    assert records[0].output_chars == len("legacy output")
+
+
+def test_legacy_llm_without_model_override_records_default_model(monkeypatch) -> None:
+    calls: list[int | None] = []
+
+    async def _legacy_llm(messages, max_tokens=None):
+        del messages
+        calls.append(max_tokens)
+        yield "default output"
+
+    runtime = _build_legacy_model_usage_runtime(monkeypatch, _legacy_llm)
+
+    async def _run():
+        with runtime.request_context(SimpleNamespace(label="legacy")) as request_context:
+            output = [
+                chunk
+                async for chunk in runtime.shared_agent._call_llm_stream(
+                    [{"role": "user", "content": "hello"}],
+                    max_tokens=32,
+                    model_override="override/model",
+                    usage_role="answer",
+                )
+            ]
+            return output, request_context.model_usage_records
+
+    output, records = asyncio.run(_run())
+
+    assert output == ["default output"]
+    assert calls == [32]
+    assert len(records) == 1
+    assert (records[0].role, records[0].provider, records[0].model) == (
+        "answer",
+        "openrouter",
+        "default/model",
+    )
+    assert records[0].pricing_source == "model_catalog"
+    assert records[0].output_chars == len("default output")
+
+
 def test_model_usage_collects_planner_and_answer_attempts(monkeypatch) -> None:
     runtime = _build_model_usage_runtime(monkeypatch)
 
