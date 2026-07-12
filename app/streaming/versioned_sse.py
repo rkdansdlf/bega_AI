@@ -8,6 +8,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from typing import Any, Literal, cast
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sse_starlette.sse import EventSourceResponse
 
 from app.contracts.stream_events_v2 import (
@@ -39,7 +40,7 @@ def negotiate_event_version(
 ) -> EventVersion:
     """Resolve an optional version header without silently downgrading."""
 
-    normalized = raw_value.strip() if raw_value is not None else "1"
+    normalized = raw_value.strip() if isinstance(raw_value, str) else "1"
     if not normalized:
         normalized = "1"
     if normalized == "1":
@@ -130,8 +131,9 @@ def _canonical_structured_response(value: object) -> object:
     if not isinstance(value, Mapping):
         return value
     canonical = dict(value)
-    if "analysis_type" not in canonical and "analysisType" in canonical:
-        canonical["analysis_type"] = canonical.pop("analysisType")
+    legacy_analysis_type = canonical.pop("analysisType", None)
+    if "analysis_type" not in canonical and legacy_analysis_type is not None:
+        canonical["analysis_type"] = legacy_analysis_type
     return canonical
 
 
@@ -330,13 +332,22 @@ async def versioned_events(
                 endpoint=resolved_endpoint,
                 version=str(resolved_version),
             ).inc()
+            validation_fields = (
+                [
+                    {"location": error["loc"], "type": error["type"]}
+                    for error in exc.errors(include_url=False, include_input=False)
+                ]
+                if isinstance(exc, ValidationError)
+                else []
+            )
             logger.warning(
                 "AI stream contract validation failed endpoint=%s version=%s "
-                "event_type=%s category=%s",
+                "event_type=%s category=%s fields=%s",
                 resolved_endpoint,
                 resolved_version,
                 raw_event.get("event", "message"),
                 exc.__class__.__name__,
+                validation_fields,
             )
             for safe_event in _safe_terminal_events(resolved_version):
                 AI_STREAM_EVENT_TOTAL.labels(

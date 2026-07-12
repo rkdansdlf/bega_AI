@@ -456,6 +456,127 @@ async def test_endpoint_stream_meta_completed_review_cache_hit(monkeypatch):
     assert meta_events[-1]["structured_response"]["analysis_type"] == "game_review"
 
 
+@pytest.mark.asyncio
+async def test_endpoint_stream_v2_wraps_cached_coach_events(monkeypatch):
+    from app.routers import coach
+
+    evidence = _build_game_evidence(
+        game_row_found=True,
+        season_year=2026,
+        season_id=266,
+        game_id="20260405LGKT0",
+        game_date="2026-04-05",
+        game_status="COMPLETED",
+        game_status_bucket="COMPLETED",
+        league_type_code=0,
+        home_score=3,
+        away_score=2,
+        winning_team_code="LG",
+        winning_team_name="LG 트윈스",
+        summary_items=["9회말 끝내기 안타"],
+    )
+    agent = _install_coach_endpoint_cache_hit(monkeypatch, evidence)
+
+    response = await coach.analyze_team(
+        coach.AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20260405LGKT0",
+            request_mode=coach.COACH_REQUEST_MODE_MANUAL,
+            analysis_type=coach.COACH_ANALYSIS_TYPE_REVIEW,
+            league_context={
+                "season": 266,
+                "season_year": 2026,
+                "game_date": "2026-04-05",
+                "league_type": "REGULAR",
+                "league_type_code": 0,
+            },
+        ),
+        agent,
+        None,
+        None,
+        event_version_header="2",
+    )
+
+    sse_text = await _collect_sse_text(response)
+    assert response.headers["X-AI-Event-Version"] == "2"
+    assert "event: coach.status" in sse_text
+    assert "event: coach.message.delta" in sse_text
+    assert "event: coach.meta" in sse_text
+    assert "event: stream.done" in sse_text
+    assert '"version":2' in sse_text
+    assert "data: [DONE]" not in sse_text
+    assert '"analysis_type":"game_review"' in sse_text
+    v2_payloads = [
+        json.loads(line.split(":", 1)[1].strip())
+        for line in sse_text.splitlines()
+        if line.startswith("data: {")
+    ]
+    coach_meta = next(
+        event for event in v2_payloads if event.get("type") == "coach.meta"
+    )
+    assert "analysisType" not in coach_meta["data"]
+    assert "analysisType" not in coach_meta["data"]["structured_response"]
+
+
+@pytest.mark.asyncio
+async def test_endpoint_stream_missing_version_header_preserves_v1(monkeypatch):
+    from app.routers import coach
+
+    evidence = _build_game_evidence(
+        game_row_found=True,
+        season_year=2026,
+        season_id=266,
+        game_id="20260405LGKT0",
+        game_date="2026-04-05",
+        game_status="SCHEDULED",
+        game_status_bucket="SCHEDULED",
+        league_type_code=0,
+        home_score=None,
+        away_score=None,
+        summary_items=[],
+    )
+    agent = _install_coach_endpoint_cache_hit(monkeypatch, evidence)
+
+    response = await coach.analyze_team(
+        coach.AnalyzeRequest(
+            home_team_id="LG",
+            away_team_id="KT",
+            game_id="20260405LGKT0",
+            request_mode=coach.COACH_REQUEST_MODE_MANUAL,
+            analysis_type=coach.COACH_ANALYSIS_TYPE_PREVIEW,
+            league_context={"season_year": 2026, "game_date": "2026-04-05"},
+        ),
+        agent,
+        None,
+        None,
+    )
+
+    sse_text = await _collect_sse_text(response)
+    assert response.headers["X-AI-Event-Version"] == "1"
+    assert "event: meta" in sse_text
+    assert "data: [DONE]" in sse_text
+    assert '"version":2' not in sse_text
+
+
+@pytest.mark.asyncio
+async def test_endpoint_stream_rejects_unsupported_version_before_work() -> None:
+    from fastapi import HTTPException
+    from app.routers import coach
+
+    with pytest.raises(HTTPException) as raised:
+        await coach.analyze_team(
+            coach.AnalyzeRequest(home_team_id="LG"),
+            object(),
+            None,
+            None,
+            event_version_header="3",
+        )
+
+    assert raised.value.status_code == 406
+    assert raised.value.detail["code"] == "AI_EVENT_VERSION_UNSUPPORTED"
+
+
 # ============================================================
 # Coach Validator Tests
 # ============================================================
