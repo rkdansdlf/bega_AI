@@ -23,6 +23,22 @@ def test_settings_default_vision_fallback_models_uses_mistral_vision(monkeypatch
     assert settings.vision_fallback_models == [MISTRAL_VISION_FALLBACK_MODEL]
 
 
+def test_chat_model_pricing_json_is_validated(monkeypatch):
+    monkeypatch.setenv(
+        "CHAT_MODEL_PRICING_JSON",
+        '{"openrouter":{"vendor/planner":{"input_usd_per_1m_tokens":"1.00","output_usd_per_1m_tokens":"2.00"}}}',
+    )
+
+    settings = Settings(_env_file=None)
+
+    assert settings.chat_model_pricing_json is not None
+
+    monkeypatch.setenv("CHAT_MODEL_PRICING_JSON", "not-json")
+
+    with pytest.raises(ValueError, match="CHAT_MODEL_PRICING_JSON"):
+        Settings(_env_file=None)
+
+
 def test_resolved_ai_internal_token_prefers_explicit_value(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "explicit-token")
     monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
