@@ -67,6 +67,8 @@ MAX_FIXED_USD_STRING_LENGTH = 64
 MAX_FIXED_USD_INTEGER_DIGITS = MAX_FIXED_USD_STRING_LENGTH - len(".000000000000")
 COST_ARITHMETIC_PRECISION = MAX_FIXED_USD_STRING_LENGTH * 2 + 32
 MAX_PLANNER_MODE_LENGTH = 128
+MAX_EVIDENCE_LABEL_LENGTH = 128
+MAX_MODEL_USAGE_RECORDS_PER_CASE = 32
 HTTP_STATUS_MIN = 100
 HTTP_STATUS_MAX = 599
 QUALITY_KEYS = {
@@ -84,6 +86,19 @@ NATURAL_CHAT_KEYS = {
     "no_source_line",
     "no_raw_chunk_marker",
     "no_briefing_intro",
+}
+REPORT_ROOT_KEYS = {
+    "schema_version",
+    "dataset_sha256",
+    "ordered_case_ids",
+    "case_count",
+    "complete",
+    "planner_model_label",
+    "answer_model_label",
+    "cache_bypass",
+    "cost_totals_usd",
+    "summary",
+    "details",
 }
 
 
@@ -131,7 +146,14 @@ def _require_nonblank_string(value: object, field: str) -> str:
 
 
 def _explicit_model_label(value: object, field: str) -> str:
-    label = _require_nonblank_string(value, field)
+    if not isinstance(value, str) or not value:
+        raise InvalidEvidenceError(f"{field} must be a non-blank string")
+    label = value
+    if len(label) > MAX_EVIDENCE_LABEL_LENGTH or any(
+        not (char.isascii() and (char.isalnum() or char in "_./:-"))
+        for char in label
+    ):
+        raise InvalidEvidenceError(f"{field} must be a bounded safe identifier")
     if label.lower() in FORBIDDEN_MODEL_LABELS:
         raise InvalidEvidenceError(f"{field} must be explicit")
     return label
@@ -306,7 +328,13 @@ def _sanitize_usage(raw: object) -> dict[str, Any]:
     input_cost = _fixed_usd_evidence(raw.get("input_cost_usd"), "input cost")
     output_cost = _fixed_usd_evidence(raw.get("output_cost_usd"), "output cost")
     total_cost = _fixed_usd_evidence(raw.get("total_cost_usd"), "total cost")
-    if abs(input_cost + output_cost - total_cost) > USD_QUANTUM:
+    try:
+        with localcontext() as context:
+            context.prec = COST_ARITHMETIC_PRECISION
+            cost_difference = abs(input_cost + output_cost - total_cost)
+    except DecimalException as exc:
+        raise InvalidEvidenceError("usage cost arithmetic is invalid") from exc
+    if cost_difference > USD_QUANTUM:
         raise InvalidEvidenceError("usage cost components do not equal total cost")
 
     return {
@@ -397,19 +425,21 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
     raw_usage = payload.get("model_usage")
     if not isinstance(raw_usage, list):
         raise InvalidEvidenceError("successful response model usage must be a list")
+    if len(raw_usage) > MAX_MODEL_USAGE_RECORDS_PER_CASE:
+        raise InvalidEvidenceError("successful response has too many model usage records")
     usage = [_sanitize_usage(record) for record in raw_usage]
 
     planner_mode = _planner_mode(
         payload.get("planner_mode"), "successful response planner mode"
     )
-    if planner_mode in LLM_PLANNER_MODES and not any(
-        record["role"] == "planner" for record in usage
-    ):
-        raise InvalidEvidenceError("LLM planner mode requires planner usage")
-    if planner_mode in LLM_PLANNER_MODES and not any(
-        record["role"] == "answer" for record in usage
-    ):
-        raise InvalidEvidenceError("LLM planner mode requires answer usage")
+    if planner_mode in DETERMINISTIC_PLANNER_MODES:
+        if any(record["role"] == "planner" for record in usage):
+            raise InvalidEvidenceError("deterministic planner mode cannot have planner usage")
+    elif planner_mode in LLM_PLANNER_MODES:
+        if not any(record["role"] == "planner" for record in usage):
+            raise InvalidEvidenceError("LLM planner mode requires planner usage")
+        if not any(record["role"] == "answer" for record in usage):
+            raise InvalidEvidenceError("LLM planner mode requires answer usage")
 
     planner_fallback = payload.get("fallback_triggered", False)
     answer_fallback = payload.get("fallback_answer_used", False)
@@ -591,6 +621,8 @@ def _sanitize_case_detail(
     model_usage = raw.get("model_usage")
     if not isinstance(model_usage, list):
         raise InvalidEvidenceError("case model usage must be a list")
+    if len(model_usage) > MAX_MODEL_USAGE_RECORDS_PER_CASE:
+        raise InvalidEvidenceError("case has too many model usage records")
     sanitized_usage = [_sanitize_usage(record) for record in model_usage]
     failed_model_attempts = _nonnegative_int(
         raw.get("failed_model_attempts"), "failed model attempts"
@@ -625,14 +657,16 @@ def _sanitize_case_detail(
             raise InvalidEvidenceError("successful case planner-mode evidence is inconsistent")
         if raw["unexpected_non_answer"] is not unexpected_non_answer:
             raise InvalidEvidenceError("successful case answerability evidence is inconsistent")
-        if planner_mode in LLM_PLANNER_MODES and not any(
-            usage["role"] == "planner" for usage in sanitized_usage
-        ):
-            raise InvalidEvidenceError("successful case LLM planner usage is missing")
-        if planner_mode in LLM_PLANNER_MODES and not any(
-            usage["role"] == "answer" for usage in sanitized_usage
-        ):
-            raise InvalidEvidenceError("successful case LLM answer usage is missing")
+        if planner_mode in DETERMINISTIC_PLANNER_MODES:
+            if any(usage["role"] == "planner" for usage in sanitized_usage):
+                raise InvalidEvidenceError(
+                    "successful case deterministic planner usage is invalid"
+                )
+        elif planner_mode in LLM_PLANNER_MODES:
+            if not any(usage["role"] == "planner" for usage in sanitized_usage):
+                raise InvalidEvidenceError("successful case LLM planner usage is missing")
+            if not any(usage["role"] == "answer" for usage in sanitized_usage):
+                raise InvalidEvidenceError("successful case LLM answer usage is missing")
         expected_failure_reasons: list[str] = []
         if not _quality_pass(quality):
             expected_failure_reasons.append("quality")
@@ -777,12 +811,28 @@ def build_run_report(
 
 
 def _validate_report(report: object, name: str) -> dict[str, Any]:
-    if not isinstance(report, dict) or report.get("schema_version") != REPORT_SCHEMA_VERSION:
+    if not isinstance(report, dict) or set(report) != REPORT_ROOT_KEYS:
         raise InvalidEvidenceError(f"{name} report schema is invalid")
-    if report.get("cache_bypass") is not True or report.get("complete") is not True:
+    if (
+        type(report.get("schema_version")) is not int
+        or report["schema_version"] != REPORT_SCHEMA_VERSION
+        or type(report.get("case_count")) is not int
+        or report["case_count"] != EXPECTED_CASE_COUNT
+    ):
+        raise InvalidEvidenceError(f"{name} report schema is invalid")
+    if (
+        type(report.get("cache_bypass")) is not bool
+        or report["cache_bypass"] is not True
+        or type(report.get("complete")) is not bool
+        or report["complete"] is not True
+    ):
         raise InvalidEvidenceError(f"{name} report is not complete cache-bypassed evidence")
-    _explicit_model_label(report.get("planner_model_label"), f"{name} planner label")
-    _explicit_model_label(report.get("answer_model_label"), f"{name} answer label")
+    planner_label = _explicit_model_label(
+        report.get("planner_model_label"), f"{name} planner label"
+    )
+    answer_label = _explicit_model_label(
+        report.get("answer_model_label"), f"{name} answer label"
+    )
     dataset_hash = _require_nonblank_string(
         report.get("dataset_sha256"), f"{name} dataset hash"
     )
@@ -805,11 +855,6 @@ def _validate_report(report: object, name: str) -> dict[str, Any]:
         raise InvalidEvidenceError(f"{name} report details are incomplete")
     if [detail["id"] for detail in sanitized_details] != ordered_ids:
         raise InvalidEvidenceError(f"{name} detail order does not match case ids")
-    if report.get("case_count") != EXPECTED_CASE_COUNT:
-        raise InvalidEvidenceError(f"{name} case count is invalid")
-
-    planner_label = str(report["planner_model_label"]).strip()
-    answer_label = str(report["answer_model_label"]).strip()
     with localcontext() as context:
         context.prec = COST_ARITHMETIC_PRECISION
         recomputed = {"planner": Decimal("0"), "answer": Decimal("0")}

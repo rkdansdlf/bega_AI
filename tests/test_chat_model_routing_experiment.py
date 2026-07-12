@@ -362,6 +362,155 @@ def test_evaluate_case_accepts_independently_rounded_usage_costs() -> None:
     assert result["model_usage"][0]["total_cost_usd"] == "0.000000000001"
 
 
+def test_usage_cost_arithmetic_rejects_a_50_digit_omitted_cost_component() -> None:
+    large_cost = "9" * 50
+    usage = _usage("answer", "0.000000000000")
+    usage.update(
+        {
+            "input_cost_usd": f"{large_cost}.000000000000",
+            "output_cost_usd": "0.000000000002",
+            "total_cost_usd": f"{large_cost}.000000000000",
+        }
+    )
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._sanitize_usage(usage)
+
+
+def test_usage_cost_arithmetic_accepts_a_representable_50_digit_total() -> None:
+    large_cost = "9" * 50
+    usage = _usage("answer", "0.000000000000")
+    usage.update(
+        {
+            "input_cost_usd": f"{large_cost}.000000000000",
+            "output_cost_usd": "0.000000000002",
+            "total_cost_usd": f"{large_cost}.000000000002",
+        }
+    )
+
+    sanitized = experiment._sanitize_usage(usage)
+
+    assert sanitized["total_cost_usd"] == f"{large_cost}.000000000002"
+
+
+def test_evaluate_case_allows_answer_only_usage_for_deterministic_planner_mode() -> None:
+    case = _case(0, planner_mode="fast_path")
+    evidence = _success_evidence(planner_mode="fast_path")
+    evidence["payload"]["model_usage"] = [_usage("answer", "0.000000000000")]
+
+    result = experiment.evaluate_case(case, evidence)
+
+    assert result["passed"] is True
+    assert [usage["role"] for usage in result["model_usage"]] == ["answer"]
+
+
+def test_evaluate_case_rejects_planner_usage_for_deterministic_planner_mode() -> None:
+    case = _case(0, planner_mode="fast_path")
+    evidence = _success_evidence(planner_mode="fast_path")
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.evaluate_case(case, evidence)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schema_version", True),
+        ("schema_version", 1.0),
+        ("case_count", True),
+        ("case_count", 60.0),
+        ("complete", 1),
+        ("cache_bypass", 1),
+    ],
+)
+def test_loaded_report_requires_exact_root_metadata_types(
+    field: str, value: object
+) -> None:
+    report = _report(planner_cost="0.800000000000")
+    report[field] = value
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._validate_report(report, "candidate")
+
+
+def test_loaded_report_rejects_unknown_root_fields() -> None:
+    report = _report(planner_cost="0.800000000000")
+    report["comparison"] = {}
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._validate_report(report, "candidate")
+
+
+@pytest.mark.parametrize("field", ["provider", "model"])
+@pytest.mark.parametrize("label", ["x" * 129, "unsafe label", "unsafe\nlabel"])
+def test_evaluate_case_rejects_unbounded_or_unsafe_usage_labels(
+    field: str, label: str
+) -> None:
+    evidence = _success_evidence()
+    evidence["payload"]["model_usage"][0][field] = label
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.evaluate_case(_case(0), evidence)
+
+
+@pytest.mark.parametrize("field", ["planner", "answer"])
+@pytest.mark.parametrize("label", ["x" * 129, "unsafe label", "unsafe\nlabel"])
+def test_build_report_rejects_unbounded_or_unsafe_explicit_model_labels(
+    field: str, label: str
+) -> None:
+    report = _report(planner_cost="1.000000000000")
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.build_run_report(
+            dataset_sha256=experiment.APPROVED_GOLDEN_SHA256,
+            cases=_approved_cases(),
+            results=report["details"],
+            planner_model_label=label if field == "planner" else "explicit-planner",
+            answer_model_label=label if field == "answer" else "explicit-answer",
+            cache_bypass=True,
+        )
+
+
+def test_usage_labels_preserve_supported_provider_and_model_format() -> None:
+    usage = _usage("answer", "0.000000000000")
+    usage.update(
+        provider="openrouter",
+        model="google/gemini-2.5-flash:free",
+    )
+
+    sanitized = experiment._sanitize_usage(usage)
+
+    assert sanitized["provider"] == "openrouter"
+    assert sanitized["model"] == "google/gemini-2.5-flash:free"
+
+
+def test_evaluate_case_rejects_more_than_32_model_usage_records() -> None:
+    case = _case(0, planner_mode="fast_path")
+    evidence = _success_evidence(planner_mode="fast_path")
+    evidence["payload"]["model_usage"] = [
+        _usage("answer", "0.000000000000") for _ in range(33)
+    ]
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.evaluate_case(case, evidence)
+
+
+def test_loaded_report_rejects_more_than_32_model_usage_records() -> None:
+    baseline = _report(planner_cost="1.000000000000")
+    candidate = _report(planner_cost="0.800000000000")
+    case_index = next(
+        index
+        for index, case in enumerate(_approved_cases())
+        if not any(mode in experiment.LLM_PLANNER_MODES for mode in case["allowed_planner_modes"])
+    )
+    candidate["details"][case_index]["model_usage"] = [
+        _usage("answer", "0.000000000000") for _ in range(33)
+    ]
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.compare_reports(baseline, candidate)
+
+
 @pytest.mark.parametrize(
     "value", [True, -1, float("nan"), float("inf"), float("-inf")]
 )
@@ -427,6 +576,11 @@ def test_overlong_fixed_cost_is_invalid_evidence() -> None:
 def test_increased_failed_model_attempts_are_a_new_failure() -> None:
     baseline_details = deepcopy(_report(planner_cost="1.000000000000")["details"])
     candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+    case_index = next(
+        index
+        for index, case in enumerate(_approved_cases())
+        if any(mode in experiment.LLM_PLANNER_MODES for mode in case["allowed_planner_modes"])
+    )
 
     for details, attempt_count in (
         (baseline_details, 1),
@@ -438,7 +592,7 @@ def test_increased_failed_model_attempts_are_a_new_failure() -> None:
         ]
         if attempt_count == 2:
             usage.insert(1, _usage("planner", "0.000000000001", outcome="failed"))
-        details[0].update(
+        details[case_index].update(
             model_usage=usage,
             failed_model_attempts=attempt_count,
             failure_reasons=["failed_model_attempt"],
@@ -457,12 +611,17 @@ def test_increased_failed_model_attempts_are_a_new_failure() -> None:
 def test_equal_failed_model_attempts_are_not_a_new_failure() -> None:
     baseline_details = deepcopy(_report(planner_cost="1.000000000000")["details"])
     candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+    case_index = next(
+        index
+        for index, case in enumerate(_approved_cases())
+        if any(mode in experiment.LLM_PLANNER_MODES for mode in case["allowed_planner_modes"])
+    )
     failed_usage = [
         _usage("planner", "0.000000000001", outcome="failed"),
         _usage("answer", "0.000000000001"),
     ]
     for details in (baseline_details, candidate_details):
-        details[0].update(
+        details[case_index].update(
             model_usage=failed_usage,
             failed_model_attempts=1,
             failure_reasons=["failed_model_attempt"],
