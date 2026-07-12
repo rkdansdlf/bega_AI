@@ -4082,6 +4082,7 @@ class BaseballStatisticsAgent:
     def _observe_model_attempt(
         self,
         *,
+        model_usage_records: list[ModelUsageEstimate] | None,
         usage_role: str,
         provider: str,
         model: str,
@@ -4089,11 +4090,10 @@ class BaseballStatisticsAgent:
         output_text: str,
         outcome: str,
     ) -> None:
-        request_context = self._maybe_current_request_context()
-        if request_context is None:
+        if model_usage_records is None:
             return
 
-        request_context.model_usage_records.append(
+        model_usage_records.append(
             estimate_model_usage(
                 self.model_pricing_catalog,
                 role=usage_role,
@@ -4137,6 +4137,7 @@ class BaseballStatisticsAgent:
         messages: List[Dict[str, str]],
         model_override: Optional[str],
         usage_role: str,
+        model_usage_records: list[ModelUsageEstimate] | None,
     ) -> AsyncGenerator[str, None]:
         provider, model = self._configured_model_usage_identity(model_override)
 
@@ -4151,6 +4152,7 @@ class BaseballStatisticsAgent:
                 outcome = "success"
             finally:
                 self._observe_model_attempt(
+                    model_usage_records=model_usage_records,
                     usage_role=usage_role,
                     provider=provider,
                     model=model,
@@ -4169,12 +4171,17 @@ class BaseballStatisticsAgent:
         model_override: Optional[str] = None,
         usage_role: str,
     ):
+        request_context = self._maybe_current_request_context()
+        model_usage_records = (
+            request_context.model_usage_records if request_context is not None else None
+        )
         supports_usage_observer = self._generator_supports_keyword(
             self.llm_generator, "usage_observer"
         )
         usage_observer = None
         if supports_usage_observer:
             usage_observer = lambda **payload: self._observe_model_attempt(
+                model_usage_records=model_usage_records,
                 usage_role=usage_role,
                 **payload,
             )
@@ -4205,6 +4212,7 @@ class BaseballStatisticsAgent:
             messages=messages,
             model_override=accepted_model_override,
             usage_role=usage_role,
+            model_usage_records=model_usage_records,
         )
 
     def _resolve_planner_model_override(self, planner_mode: str) -> Optional[str]:

@@ -249,6 +249,39 @@ def test_model_usage_keeps_answer_retry_costs(monkeypatch) -> None:
     )
 
 
+def test_deferred_answer_usage_survives_request_context_exit(monkeypatch) -> None:
+    runtime = _build_model_usage_runtime(monkeypatch)
+    agent = runtime.shared_agent
+    agent._build_structured_deterministic_answer = lambda query, results: None
+    tool_results = [
+        ToolResult(
+            success=True,
+            data={"found": True, "source": "database", "value": "verified"},
+            message="verified",
+        )
+    ]
+
+    async def _create_deferred_answer():
+        with runtime.request_context(SimpleNamespace(label="origin")) as request_context:
+            result = await agent._generate_verified_answer(
+                "일반 질문", tool_results, {}
+            )
+            return result["answer"], request_context.model_usage_records
+
+    answer, origin_records = asyncio.run(_create_deferred_answer())
+
+    async def _consume_deferred_answer():
+        with runtime.request_context(SimpleNamespace(label="other")) as request_context:
+            output = [chunk async for chunk in answer]
+            return output, request_context.model_usage_records
+
+    output, other_records = asyncio.run(_consume_deferred_answer())
+
+    assert output == ["검증된 답변"]
+    assert [record.role for record in origin_records] == ["answer"]
+    assert other_records == []
+
+
 def test_select_llm_planner_prompt_uses_team_mode_for_team_analysis() -> None:
     agent = _build_agent()
     query = "LG 팀 분석해줘"
