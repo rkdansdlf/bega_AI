@@ -124,7 +124,7 @@ start_controlled_ai() {
 
   for attempt in $(seq 1 30); do
     if ! kill -0 "$CONTROLLED_AI_PID" 2>/dev/null; then
-      cat "$CONTROLLED_AI_LOG" >&2
+      printf '%s\n' 'controlled AI failed to start; inspect outputs/model-routing/controlled-ai.log locally under access controls' >&2
       return 1
     fi
     listener_pid="$(lsof -t -a -p "$CONTROLLED_AI_PID" -iTCP:"$CONTROLLED_AI_PORT" -sTCP:LISTEN 2>/dev/null || true)"
@@ -135,7 +135,7 @@ start_controlled_ai() {
     sleep 1
   done
 
-  cat "$CONTROLLED_AI_LOG" >&2
+  printf '%s\n' 'controlled AI failed to start; inspect outputs/model-routing/controlled-ai.log locally under access controls' >&2
   return 1
 }
 
@@ -190,7 +190,8 @@ edit it after generation. Before every start, the procedure refuses a port with
 an existing listener and never reads or kills a stale PID file. The startup loop
 requires both a live child PID and an `lsof` listener match for that child on
 the dedicated port before calling the health endpoint. A child exit or bind
-failure prints the controlled log and fails the procedure. The cleanup trap
+failure prints only the fixed diagnostic path and instruction to inspect locally
+under access controls, then fails the procedure. The cleanup trap
 stops only the child spawned by the current shell, with bounded TERM polling,
 KILL fallback, and `wait`; do not substitute a broad process kill.
 

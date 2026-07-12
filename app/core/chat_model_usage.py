@@ -73,13 +73,27 @@ class ModelPricingCatalog:
 
 def _parse_price_entries(parsed: dict[object, object]) -> dict[tuple[str, str], ModelPrice]:
     prices: dict[tuple[str, str], ModelPrice] = {}
+    normalized_providers: set[str] = set()
     for provider, provider_entries in parsed.items():
         if not isinstance(provider, str) or not isinstance(provider_entries, dict):
             raise ValueError("pricing providers must map to objects")
+        normalized_provider = provider.strip()
+        if not normalized_provider:
+            raise ValueError("pricing provider cannot be blank")
+        if normalized_provider in normalized_providers:
+            raise ValueError("pricing provider normalization collision")
+        normalized_providers.add(normalized_provider)
 
+        normalized_models: set[str] = set()
         for model, raw_price in provider_entries.items():
             if not isinstance(model, str) or not isinstance(raw_price, dict):
                 raise ValueError("pricing models must map to objects")
+            normalized_model = model.strip()
+            if not normalized_model:
+                raise ValueError("pricing model cannot be blank")
+            if normalized_model in normalized_models:
+                raise ValueError("pricing model normalization collision")
+            normalized_models.add(normalized_model)
             if set(raw_price) != {
                 "input_usd_per_1m_tokens",
                 "output_usd_per_1m_tokens",
@@ -96,7 +110,7 @@ def _parse_price_entries(parsed: dict[object, object]) -> dict[tuple[str, str], 
                 raw_price["output_usd_per_1m_tokens"],
                 "output_usd_per_1m_tokens",
             )
-            prices[(provider, model)] = ModelPrice(
+            prices[(normalized_provider, normalized_model)] = ModelPrice(
                 input_usd_per_1m_tokens=input_rate,
                 output_usd_per_1m_tokens=output_rate,
             )

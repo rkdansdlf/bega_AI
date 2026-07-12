@@ -41,6 +41,7 @@ class Settings(BaseSettings):
         extra="ignore",
         env_file=".env",
         env_file_encoding="utf-8",
+        hide_input_in_errors=True,
         populate_by_name=True,
     )
 

@@ -406,7 +406,7 @@ def test_ai_chat_completion_semantic_cache_hit_sets_metadata(
     semantic_hit.assert_awaited_once()
 
 
-def test_static_result_marks_empty_model_usage_complete(monkeypatch) -> None:
+def test_static_faq_result_has_complete_evidence_metadata(monkeypatch) -> None:
     monkeypatch.setattr(
         chat_stream,
         "get_settings",
@@ -423,6 +423,43 @@ def test_static_result_marks_empty_model_usage_complete(monkeypatch) -> None:
     assert result is not None
     assert result["model_usage"] == []
     assert result["model_usage_complete"] is True
+    assert result["fallback_triggered"] is False
+    assert result["fallback_answer_used"] is False
+
+
+def test_static_operator_result_has_complete_evidence_metadata(monkeypatch) -> None:
+    class ConnectionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class Pool:
+        def connection(self) -> ConnectionContext:
+            return ConnectionContext()
+
+    monkeypatch.setattr(
+        chat_stream,
+        "get_settings",
+        lambda: SimpleNamespace(operator_data_fast_path_enabled=True),
+    )
+    monkeypatch.setattr(chat_stream, "get_connection_pool", lambda: Pool())
+    monkeypatch.setattr(
+        chat_stream,
+        "try_build_operator_fast_path_result",
+        AsyncMock(
+            return_value={"answer": "operator answer", "planner_mode": "fast_path"}
+        ),
+    )
+
+    result = asyncio.run(chat_stream._build_static_chat_result("operator question"))
+
+    assert result is not None
+    assert result["model_usage"] == []
+    assert result["model_usage_complete"] is True
+    assert result["fallback_triggered"] is False
+    assert result["fallback_answer_used"] is False
 
 
 def test_semantic_cache_shadow_mode_does_not_serve_cached_completion(

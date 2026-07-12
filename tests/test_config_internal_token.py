@@ -39,6 +39,20 @@ def test_chat_model_pricing_json_is_validated(monkeypatch):
         Settings(_env_file=None)
 
 
+def test_invalid_pricing_catalog_is_hidden_in_validation_errors(monkeypatch):
+    marker = "SENSITIVE_PRICING_MARKER"
+    raw = f'{{"{marker}":{{"model":{{"input_usd_per_1m_tokens":"invalid"}}}}}}'
+    monkeypatch.setenv("CHAT_MODEL_PRICING_JSON", raw)
+
+    with pytest.raises(ValueError) as caught:
+        Settings(_env_file=None)
+
+    rendered = " ".join((str(caught.value), repr(caught.value)))
+    assert Settings.model_config["hide_input_in_errors"] is True
+    assert marker not in rendered
+    assert raw not in rendered
+
+
 def test_resolved_ai_internal_token_prefers_explicit_value(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "explicit-token")
     monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")

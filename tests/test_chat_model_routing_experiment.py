@@ -8,6 +8,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -307,6 +308,15 @@ def test_evaluate_case_rejects_success_with_incomplete_usage() -> None:
         experiment.evaluate_case(_case(0), evidence)
 
 
+@pytest.mark.parametrize("field", ["fallback_triggered", "fallback_answer_used"])
+def test_evaluate_case_requires_explicit_fallback_flags(field: str) -> None:
+    evidence = _success_evidence()
+    del evidence["payload"][field]
+
+    with pytest.raises(experiment.InvalidEvidenceError, match="fallback flags"):
+        experiment.evaluate_case(_case(0), evidence)
+
+
 def test_evaluate_case_rejects_llm_planner_without_planner_usage() -> None:
     evidence = _success_evidence()
     evidence["payload"]["model_usage"] = [_usage("answer", "1.0")]
@@ -435,7 +445,40 @@ def test_loaded_report_requires_exact_root_metadata_types(
 
 def test_loaded_report_rejects_unknown_root_fields() -> None:
     report = _report(planner_cost="0.800000000000")
-    report["comparison"] = {}
+    report["unexpected"] = True
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._validate_report(report, "candidate")
+
+
+def test_candidate_report_with_comparison_revalidates_and_can_be_reused() -> None:
+    baseline = _report(planner_cost="1.000000000000")
+    candidate = _report(planner_cost="0.800000000000")
+    candidate["comparison"] = experiment.compare_reports(baseline, candidate)
+
+    normalized = experiment._validate_report(candidate, "candidate")
+    reused_comparison = experiment.compare_reports(baseline, candidate)
+
+    assert set(normalized) == experiment.REPORT_ROOT_KEYS
+    assert "comparison" not in normalized
+    assert reused_comparison == candidate["comparison"]
+
+
+@pytest.mark.parametrize("mutation", ["missing_key", "extra_key", "unsafe_list"])
+def test_loaded_report_rejects_invalid_comparison_schema(
+    mutation: str,
+) -> None:
+    report = _report(planner_cost="0.800000000000")
+    comparison = experiment.compare_reports(
+        _report(planner_cost="1.000000000000"), report
+    )
+    if mutation == "missing_key":
+        del comparison["gate_passed"]
+    elif mutation == "extra_key":
+        comparison["unexpected"] = True
+    else:
+        comparison["failure_reasons"] = [object()]
+    report["comparison"] = comparison
 
     with pytest.raises(experiment.InvalidEvidenceError):
         experiment._validate_report(report, "candidate")
@@ -970,6 +1013,52 @@ def test_build_report_whitelists_case_detail_fields() -> None:
     )
 
     assert "must-not-leak" not in json.dumps(report)
+
+
+@pytest.mark.asyncio
+async def test_async_main_writes_a_revalidatable_candidate_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline = _report(planner_cost="1.000000000000")
+    candidate = _report(planner_cost="0.800000000000")
+    baseline_path = tmp_path / "baseline.json"
+    output_path = tmp_path / "candidate.json"
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+
+    class FakeClient:
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        experiment.httpx, "AsyncClient", lambda **_kwargs: FakeClient()
+    )
+    monkeypatch.setattr(experiment, "run_golden_cases", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        experiment, "build_run_report", lambda **_kwargs: deepcopy(candidate)
+    )
+
+    args = argparse.Namespace(
+        samples=str(APPROVED_GOLDEN_PATH),
+        limit=60,
+        planner_model_label="explicit-planner",
+        answer_model_label="explicit-answer",
+        cache_bypass=True,
+        timeout=1.0,
+        base_url="http://local-test",
+        internal_api_key="test-key",
+        internal_api_key_env="AI_INTERNAL_TOKEN",
+        baseline_report=str(baseline_path),
+        output=str(output_path),
+    )
+
+    assert await experiment.async_main(args) == 0
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    normalized = experiment._validate_report(written, "candidate")
+    assert "comparison" in written
+    assert "comparison" not in normalized
 
 
 @pytest.mark.asyncio

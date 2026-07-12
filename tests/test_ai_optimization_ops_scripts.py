@@ -97,6 +97,8 @@ def test_model_routing_runbook_and_ci_contract() -> None:
         in normalized_runbook
     )
     assert "Actual deployment remains separately approved" in runbook
+    assert 'cat "$CONTROLLED_AI_LOG"' not in runbook
+    assert "inspect locally under access controls" in normalized_runbook
 
     dotenv_export = "set -a; source ../.env.prod; set +a"
     baseline_exports = "\n".join(
