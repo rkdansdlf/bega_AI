@@ -27,6 +27,10 @@ Each configuration must supply explicit model names through
 remain fixed between baseline and candidate. Only the planner model may be
 evaluated as the candidate variable.
 
+CLI planner/answer labels are evidence assertions only and do not configure the
+server. They must match the active controlled AI service configuration for the
+corresponding run.
+
 ## Golden path
 
 The approved input is the immutable operator-provided
@@ -45,6 +49,12 @@ credentials, headers, or user identifiers.
 
 ### Baseline
 
+Before the baseline, configure the controlled AI service with
+`CHAT_PLANNER_MODEL_NAME`, `CHAT_ANSWER_MODEL_NAME`, and the matching
+`CHAT_MODEL_PRICING_JSON` catalog. Restart or redeploy the controlled AI
+service, then verify its health and active configuration as appropriate before
+running the experiment.
+
 After separate live-call approval, execute exactly one cache-bypassed baseline
 run:
 
@@ -61,8 +71,13 @@ edit it after generation.
 
 ### Candidate
 
-Keep `CHAT_ANSWER_MODEL_NAME` identical to the baseline, configure the explicit
-candidate planner label and matching pricing catalog entry, then execute:
+Before the candidate, change only `CHAT_PLANNER_MODEL_NAME` and its catalog
+entry as needed; keep `CHAT_ANSWER_MODEL_NAME` fixed. Restart or redeploy the
+controlled AI service, then verify its health and active configuration as
+appropriate before running the experiment. The CLI planner/answer labels remain
+evidence assertions; they do not apply this configuration.
+
+Then execute:
 
 ```bash
 AI_MODEL_ROUTING_SAMPLES=scripts/chat_quality_golden_60.json \
@@ -91,17 +106,21 @@ The command exit codes are stable:
 - `1: valid evidence but a quality or cost criterion fails`
 - `2: invalid or incomplete evidence, configuration, input, or report`
 
-Exit `2` includes absent or unpriced model usage, implicit labels, disabled
-cache bypass, missing/duplicate cases, a dataset/hash mismatch, or an
-answer-model mismatch that prevents comparison. Exit `1` is measured evidence
-that fails the quality or cost rules. A zero exit code is not a deployment
-authorization.
+Exit `2` includes absent or unpriced model usage where an LLM planner or answer
+call is required, implicit labels, disabled cache bypass, missing/duplicate
+cases, a dataset/hash mismatch, or an answer-model mismatch that prevents
+comparison. Absent usage is invalid only when the selected planner or answer
+path requires an LLM call. A deterministic mode may validly make no model call
+and therefore have empty usage. Exit `1` is measured evidence that fails the
+quality or cost rules. A zero exit code is not a deployment authorization.
 
 ## Approval And CI Boundaries
 
 The live baseline/candidate procedure requires separate live-call approval.
 CI runs only deterministic unit and contract tests; it does not execute this
 golden runner against a service, invoke a provider, or use model credentials.
+Actual deployment remains separately approved; this controlled experiment does
+not authorize a production deployment.
 
 Do not use this gate to repair baseball data, search for baseball data, scrape
 external sites, or call external baseball APIs. Obtain operator-provided manual

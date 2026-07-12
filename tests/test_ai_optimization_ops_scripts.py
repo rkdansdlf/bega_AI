@@ -20,9 +20,32 @@ def test_model_routing_runbook_and_ci_contract() -> None:
         repository_root / ".github" / "workflows" / "ai-pr-gate.yml"
     ).read_text(encoding="utf-8")
     normalized_runbook = " ".join(runbook.lower().split())
+    pricing_line = next(
+        line
+        for line in env_example.splitlines()
+        if line.startswith("CHAT_MODEL_PRICING_JSON=")
+    )
+    pricing_catalog = json.loads(pricing_line.split("=", 1)[1])
 
     assert "CHAT_MODEL_PRICING_JSON" in env_example
     assert "CHAT_MODEL_PRICING_JSON" in runbook
+    assert pricing_catalog == {
+        "example-provider": {
+            "example/planner-model": {
+                "input_usd_per_1m_tokens": "0.10",
+                "output_usd_per_1m_tokens": "0.20",
+            },
+            "example/answer-model": {
+                "input_usd_per_1m_tokens": "1.00",
+                "output_usd_per_1m_tokens": "2.00",
+            },
+        },
+    }
+    serialized_pricing_catalog = json.dumps(pricing_catalog).lower()
+    assert "default" not in serialized_pricing_catalog
+    assert "unknown" not in serialized_pricing_catalog
+    assert "credential" not in serialized_pricing_catalog
+    assert "api_key" not in serialized_pricing_catalog
     assert "Golden path" in runbook
     assert "scripts/chat_quality_golden_60.json" in runbook
     assert "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/baseline.json" in runbook
@@ -43,6 +66,35 @@ def test_model_routing_runbook_and_ci_contract() -> None:
     assert "separate live-call approval" in runbook
     assert "does not authorize deployment" in runbook
     assert "must not contain answers" in runbook
+    assert (
+        "cli planner/answer labels are evidence assertions only and do not configure "
+        "the server."
+        in normalized_runbook
+    )
+    assert (
+        "before the baseline, configure the controlled ai service with "
+        "`chat_planner_model_name`, `chat_answer_model_name`, and the matching "
+        "`chat_model_pricing_json` catalog."
+        in normalized_runbook
+    )
+    assert "restart or redeploy the controlled ai service" in normalized_runbook
+    assert "verify its health and active configuration" in normalized_runbook
+    assert (
+        "before the candidate, change only `chat_planner_model_name` and its "
+        "catalog entry as needed; keep `chat_answer_model_name` fixed."
+        in normalized_runbook
+    )
+    assert (
+        "absent usage is invalid only when the selected planner or answer path requires "
+        "an llm call."
+        in normalized_runbook
+    )
+    assert (
+        "a deterministic mode may validly make no model call and therefore have empty "
+        "usage."
+        in normalized_runbook
+    )
+    assert "Actual deployment remains separately approved" in runbook
 
     for test_path in (
         "tests/test_chat_model_usage.py",
