@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.chat_model_usage import ModelPricingCatalog
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CORS_ORIGINS = [
@@ -217,6 +219,9 @@ class Settings(BaseSettings):
     )
     chat_answer_model_name: Optional[str] = Field(
         None, validation_alias="CHAT_ANSWER_MODEL_NAME"
+    )
+    chat_model_pricing_json: Optional[str] = Field(
+        None, validation_alias="CHAT_MODEL_PRICING_JSON"
     )
     chat_cache_admin_enabled: bool = Field(
         False, validation_alias="CHAT_CACHE_ADMIN_ENABLED"
@@ -640,6 +645,16 @@ class Settings(BaseSettings):
     def _validate_chat_cost_rates(cls, value: float) -> float:
         if value < 0:
             raise ValueError("Chat cost rate values must be >= 0")
+        return value
+
+    @field_validator("chat_model_pricing_json")
+    def _validate_chat_model_pricing_json(
+        cls, value: Optional[str]
+    ) -> Optional[str]:
+        try:
+            ModelPricingCatalog.from_json(value)
+        except ValueError as exc:
+            raise ValueError(f"CHAT_MODEL_PRICING_JSON is invalid: {exc}") from exc
         return value
 
     @field_validator("rag_chunk_overlap_chars")
