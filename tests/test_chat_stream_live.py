@@ -306,6 +306,13 @@ async def test_live_event_generator_emits_fallback_meta_on_partial_stream_error(
     )
 
 
+def test_temporary_generation_error_event_is_retryable() -> None:
+    event = chat_stream._temporary_generation_error_event()
+
+    assert event["event"] == "error"
+    assert json.loads(event["data"])["retryable"] is True
+
+
 @pytest.mark.asyncio
 async def test_live_event_generator_emits_cancelled_meta_and_done_on_abort() -> None:
     async def _cancelled_stream():
