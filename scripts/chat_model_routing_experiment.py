@@ -65,6 +65,19 @@ USD_QUANTUM = Decimal("0.000000000001")
 PERCENT_QUANTUM = Decimal("0.01")
 MAX_FIXED_USD_STRING_LENGTH = 64
 MAX_FIXED_USD_INTEGER_DIGITS = MAX_FIXED_USD_STRING_LENGTH - len(".000000000000")
+# A valid positive fixed-USD baseline is at least 1e-12. With a candidate at
+# the largest bounded USD magnitude and the comparison's x100 multiplier, the
+# reduction can need this many characters: optional minus, integer digits,
+# decimal point, and two fractional digits.
+MIN_POSITIVE_FIXED_USD = USD_QUANTUM
+MAX_PLANNER_REDUCTION_PERCENT_INTEGER_DIGITS = (
+    MAX_FIXED_USD_INTEGER_DIGITS
+    + (-MIN_POSITIVE_FIXED_USD.as_tuple().exponent)
+    + (len("100") - 1)
+)
+MAX_PLANNER_REDUCTION_PERCENT_LENGTH = (
+    1 + MAX_PLANNER_REDUCTION_PERCENT_INTEGER_DIGITS + len(".00")
+)
 COST_ARITHMETIC_PRECISION = MAX_FIXED_USD_STRING_LENGTH * 2 + 32
 MAX_PLANNER_MODE_LENGTH = 128
 MAX_EVIDENCE_LABEL_LENGTH = 128
@@ -846,16 +859,20 @@ def _validate_comparison(comparison: object, name: str) -> None:
     ):
         raise InvalidEvidenceError(f"{name} report comparison schema is invalid")
     reduction = comparison.get("planner_reduction_percent")
-    if not isinstance(reduction, str) or len(reduction) > MAX_FIXED_USD_STRING_LENGTH:
+    if not isinstance(reduction, str) or len(reduction) > MAX_PLANNER_REDUCTION_PERCENT_LENGTH:
         raise InvalidEvidenceError(f"{name} report comparison schema is invalid")
     try:
         parsed_reduction = Decimal(reduction)
-        if (
-            not parsed_reduction.is_finite()
-            or reduction
-            != format(parsed_reduction.quantize(PERCENT_QUANTUM), ".2f")
-        ):
-            raise InvalidEvidenceError(f"{name} report comparison schema is invalid")
+        with localcontext() as context:
+            context.prec = COST_ARITHMETIC_PRECISION
+            if (
+                not parsed_reduction.is_finite()
+                or reduction
+                != format(parsed_reduction.quantize(PERCENT_QUANTUM), ".2f")
+            ):
+                raise InvalidEvidenceError(
+                    f"{name} report comparison schema is invalid"
+                )
     except (DecimalException, ValueError) as exc:
         raise InvalidEvidenceError(f"{name} report comparison schema is invalid") from exc
     _fixed_usd_evidence(
@@ -936,11 +953,13 @@ def _validate_report(report: object, name: str) -> dict[str, Any]:
         raise InvalidEvidenceError(f"{name} cost totals are missing")
     if set(totals) != {"planner", "answer", "total"}:
         raise InvalidEvidenceError(f"{name} cost totals are invalid")
-    expected_totals = {
-        "planner": _fixed_usd(recomputed["planner"]),
-        "answer": _fixed_usd(recomputed["answer"]),
-        "total": _fixed_usd(recomputed["planner"] + recomputed["answer"]),
-    }
+    with localcontext() as context:
+        context.prec = COST_ARITHMETIC_PRECISION
+        expected_totals = {
+            "planner": _fixed_usd(recomputed["planner"]),
+            "answer": _fixed_usd(recomputed["answer"]),
+            "total": _fixed_usd(recomputed["planner"] + recomputed["answer"]),
+        }
     if totals != expected_totals:
         raise InvalidEvidenceError(f"{name} cost totals do not match usage evidence")
 
