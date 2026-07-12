@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from ..config import get_settings
+from ..contracts.stream_requests import ChatStreamRequest
 from ..deps import (
     get_agent,
     get_connection_pool,
@@ -65,6 +66,10 @@ from ..core.chat_cache import (
 from ..core.rag import _build_static_kbo_faq_result
 from ..tools.operator_data_query import try_build_operator_fast_path_result
 from ..observability.metrics import AI_RESPONSE_CACHE_BY_INTENT
+from ..streaming.versioned_sse import (
+    negotiate_event_version,
+    versioned_event_source,
+)
 
 
 def _record_cache_by_intent(intent: str, result: str) -> None:
@@ -389,7 +394,7 @@ async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
 
 
 async def _make_static_sse_response(
-    result: Dict[str, Any], style: str
+    result: Dict[str, Any], style: str, event_version: int = 1
 ) -> EventSourceResponse:
     async def static_generator():
         answer = await _render_answer(result, style)
@@ -433,8 +438,10 @@ async def _make_static_sse_response(
         }
         yield {"event": "done", "data": "[DONE]"}
 
-    return EventSourceResponse(
+    return versioned_event_source(
         static_generator(),
+        endpoint="chat",
+        version=event_version,
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -500,7 +507,7 @@ async def _async_delete_cache_key(cache_key: str) -> None:
 
 
 def _make_cached_sse_response(
-    cached: dict, style: str, cache_key: str
+    cached: dict, style: str, cache_key: str, *, event_version: int = 1
 ) -> EventSourceResponse:
     """캐시된 응답을 SSE 형식으로 재스트리밍합니다.
 
@@ -570,8 +577,10 @@ def _make_cached_sse_response(
         }
         yield {"event": "done", "data": "[DONE]"}
 
-    return EventSourceResponse(
+    return versioned_event_source(
         cached_generator(),
+        endpoint="chat",
+        version=event_version,
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -1121,6 +1130,7 @@ async def _stream_response(
     agent: BaseballStatisticsAgent,
     pipeline: Any = None,
     cache_key: Optional[str] = None,
+    event_version: int = 1,
 ):
     """질문에 대한 답변을 생성하고 SSE 스트림으로 반환하는 핵심 로직입니다.
 
@@ -1133,7 +1143,7 @@ async def _stream_response(
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
     settings = get_settings()
-    return EventSourceResponse(
+    return versioned_event_source(
         _chat_stream_event_generator(
             request=request,
             question=question,
@@ -1143,6 +1153,8 @@ async def _stream_response(
             agent=agent,
             cache_key=cache_key,
         ),
+        endpoint="chat",
+        version=event_version,
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",  # Nginx 등 프록시에서 버퍼링 방지
@@ -1273,9 +1285,10 @@ def _make_queued_stream_response(
     agent: BaseballStatisticsAgent,
     cache_key: Optional[str],
     reservation: ChatQueueReservation,
+    event_version: int = 1,
 ) -> EventSourceResponse:
     settings = get_settings()
-    return EventSourceResponse(
+    return versioned_event_source(
         _queued_chat_stream_event_generator(
             request=request,
             question=question,
@@ -1286,6 +1299,8 @@ def _make_queued_stream_response(
             cache_key=cache_key,
             reservation=reservation,
         ),
+        endpoint="chat",
+        version=event_version,
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -1602,12 +1617,20 @@ async def chat_completion(
 async def chat_stream_post(
     payload: Dict[str, Any] = Body(...),
     style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
+    event_version_header: str | None = Header(
+        default=None,
+        alias="X-AI-Event-Version",
+    ),
     agent: BaseballStatisticsAgent = Depends(get_agent),
     _: None = Depends(require_ai_internal_token),
     request: Request = None,
 ):
     """POST 요청을 통해 질문을 받고, 답변을 SSE 스트림으로 반환합니다."""
     _validate_chat_payload(payload)
+    event_version = negotiate_event_version(
+        event_version_header,
+        endpoint="chat",
+    )
     question = _validate_chat_question(payload.get("question", ""))
     filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
@@ -1617,10 +1640,25 @@ async def chat_stream_post(
     if style_override in {"markdown", "json", "compact"}:
         style = style_override
 
+    typed_payload = ChatStreamRequest.model_validate(
+        {
+            "question": question,
+            "filters": filters if isinstance(filters, dict) else None,
+            "history": history,
+            "cache_bypass": bool(payload.get("cache_bypass")),
+            "style": style,
+        }
+    )
+    filters = typed_payload.filters
+
     static_result = await _build_static_chat_result(question)
     if static_result is not None:
         logger.info("[ChatStatic] stream fast-path question=%s", question[:120])
-        return await _make_static_sse_response(static_result, style)
+        return await _make_static_sse_response(
+            static_result,
+            style,
+            event_version,
+        )
 
     # 캐시 적용 조건: history-free 쿼리이고 실시간 키워드 없음
     # history가 있으면 대화 맥락이 있으므로 캐싱 불가
@@ -1655,7 +1693,12 @@ async def chat_stream_post(
                 _record_cache_by_intent(cached.get("intent", "unknown"), "hit")
                 # hit_count는 background에서 업데이트 (응답 지연 없음)
                 asyncio.create_task(_async_update_hit_count(cache_key))
-                return _make_cached_sse_response(cached, style, cache_key)
+                return _make_cached_sse_response(
+                    cached,
+                    style,
+                    cache_key,
+                    event_version=event_version,
+                )
 
     settings = get_settings()
     if bool(getattr(settings, "chat_queue_enabled", True)):
@@ -1678,6 +1721,7 @@ async def chat_stream_post(
             agent=agent,
             cache_key=cache_key,
             reservation=reservation,
+            event_version=event_version,
         )
 
     return await _stream_response(
@@ -1688,6 +1732,7 @@ async def chat_stream_post(
         history=history,
         agent=agent,
         cache_key=cache_key,  # None이면 _stream_response 내에서 캐시 저장 건너뜀
+        event_version=event_version,
     )
 
 
@@ -1720,6 +1765,7 @@ async def chat_stream_get(
         agent=agent,
         pipeline=pipeline,
         cache_key=None,
+        event_version=1,
     )
 
 
