@@ -35,6 +35,9 @@ jobs:
             tests/test_benchmark_retrieval.py \
             tests/test_chat_api_smoke.py \
             tests/test_chat_cost_metrics.py \
+            tests/test_chat_model_routing_experiment.py \
+            tests/test_chat_model_usage.py \
+            tests/test_chat_quality_golden_dataset.py \
             tests/test_coach.py \
             tests/test_coach_dual.py \
             tests/test_coach_router_year_resolution.py \
