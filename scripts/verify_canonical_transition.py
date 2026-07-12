@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
@@ -34,7 +35,20 @@ from app.tools.database_query import DatabaseQueryTool, clear_coach_cache
 from app.tools.game_query import GameQueryTool
 
 CANONICAL_TEAMS = ["SS", "LT", "LG", "DB", "KIA", "KH", "HH", "SSG", "NC", "KT"]
-LEGACY_CODES = ["SK", "OB", "HT", "WO", "DO", "KI", "KW"]
+LEGACY_CODES = [
+    "SK",
+    "OB",
+    "HT",
+    "WO",
+    "DO",
+    "KI",
+    "KW",
+    "NX",
+    "SL",
+    "BE",
+    "MBC",
+    "LOT",
+]
 
 
 def parse_year_ranges(spec: str) -> List[int]:
@@ -345,8 +359,8 @@ def _resolve_database_url() -> str:
     return get_settings().database_url
 
 
-def _run_matrix(
-    conn: psycopg.Connection,
+async def _run_matrix(
+    conn: psycopg.AsyncConnection,
     *,
     teams: Iterable[str],
     years: Iterable[int],
@@ -358,9 +372,11 @@ def _run_matrix(
     out: Dict[Tuple[int, str, str], Dict[str, object]] = {}
     for year in years:
         for team in teams:
-            summary = db_tool.get_team_summary(team, year)
-            advanced = db_tool.get_team_advanced_metrics(team, year)
-            last_game = game_tool.get_team_last_game_date(team, year, "regular_season")
+            summary = await db_tool.get_team_summary(team, year)
+            advanced = await db_tool.get_team_advanced_metrics(team, year)
+            last_game = await game_tool.get_team_last_game_date(
+                team, year, "regular_season"
+            )
 
             out[(year, team, "summary")] = {
                 "found": bool(summary.get("found")),
@@ -377,8 +393,8 @@ def _run_matrix(
     return out
 
 
-def run_canonical_window_smoke(
-    conn: psycopg.Connection,
+async def run_canonical_window_smoke(
+    conn: psycopg.AsyncConnection,
     *,
     teams: List[str],
     years: List[int],
@@ -416,9 +432,9 @@ def run_canonical_window_smoke(
             for team in teams:
                 result["totals"]["cases"] += 1
 
-                summary = db_tool.get_team_summary(team, year)
-                advanced = db_tool.get_team_advanced_metrics(team, year)
-                last_game = game_tool.get_team_last_game_date(
+                summary = await db_tool.get_team_summary(team, year)
+                advanced = await db_tool.get_team_advanced_metrics(team, year)
+                last_game = await game_tool.get_team_last_game_date(
                     team, year, "regular_season"
                 )
 
@@ -510,10 +526,10 @@ def run_canonical_window_smoke(
             """,
         }
 
-        with conn.cursor() as cur:
+        async with conn.cursor() as cur:
             for table, query in queries.items():
                 if table == "game":
-                    cur.execute(
+                    await cur.execute(
                         query,
                         (
                             window_start,
@@ -524,15 +540,16 @@ def run_canonical_window_smoke(
                         ),
                     )
                 else:
-                    cur.execute(query, (window_start, window_end, LEGACY_CODES))
-                result["legacy_residuals"][table] = int(cur.fetchone()[0])
+                    await cur.execute(query, (window_start, window_end, LEGACY_CODES))
+                row = await cur.fetchone()
+                result["legacy_residuals"][table] = int(row[0])
 
     result["runtime_seconds"] = round(time.time() - started, 2)
     return result
 
 
-def run_outside_window_regression(
-    conn: psycopg.Connection,
+async def run_outside_window_regression(
+    conn: psycopg.AsyncConnection,
     *,
     teams: List[str],
     years: List[int],
@@ -562,7 +579,7 @@ def run_outside_window_regression(
         window_end=window_end,
         outside_mode=outside_mode,
     ):
-        dual = _run_matrix(conn, teams=teams, years=years)
+        dual = await _run_matrix(conn, teams=teams, years=years)
 
     with temporary_team_code_env(
         read_mode="canonical_only",
@@ -570,7 +587,7 @@ def run_outside_window_regression(
         window_end=window_end,
         outside_mode=outside_mode,
     ):
-        canonical = _run_matrix(conn, teams=teams, years=years)
+        canonical = await _run_matrix(conn, teams=teams, years=years)
 
     additional_miss = []
     additional_hit = []
@@ -680,10 +697,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
-
+async def _async_main(args: argparse.Namespace) -> int:
     teams = [token.strip() for token in args.teams.split(",") if token.strip()]
     window_years = list(
         range(
@@ -713,9 +727,12 @@ def main() -> int:
     exit_code = 0
 
     try:
-        with psycopg.connect(database_url, autocommit=True) as conn:
+        async with await psycopg.AsyncConnection.connect(
+            database_url,
+            autocommit=True,
+        ) as conn:
             if args.mode in {"all", "canonical_window"}:
-                output["canonical_window"] = run_canonical_window_smoke(
+                output["canonical_window"] = await run_canonical_window_smoke(
                     conn,
                     teams=teams,
                     years=window_years,
@@ -725,7 +742,7 @@ def main() -> int:
                 )
 
             if args.mode in {"all", "outside_regression"}:
-                output["outside_regression"] = run_outside_window_regression(
+                output["outside_regression"] = await run_outside_window_regression(
                     conn,
                     teams=teams,
                     years=outside_years,
@@ -770,6 +787,12 @@ def main() -> int:
 
     _append_github_step_summary(_build_step_summary(output))
     return exit_code
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return asyncio.run(_async_main(args))
 
 
 if __name__ == "__main__":
