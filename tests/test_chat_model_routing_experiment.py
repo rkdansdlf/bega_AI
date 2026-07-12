@@ -140,6 +140,35 @@ def _report(
     )
 
 
+def _report_from_details(details: list[dict[str, Any]]) -> dict[str, Any]:
+    return experiment.build_run_report(
+        dataset_sha256=experiment.APPROVED_GOLDEN_SHA256,
+        cases=_approved_cases(),
+        results=details,
+        planner_model_label="explicit-planner",
+        answer_model_label="explicit-answer",
+        cache_bypass=True,
+    )
+
+
+def _passing_evidence_for_approved_case(case: dict[str, Any]) -> dict[str, Any]:
+    planner_mode = next(
+        (
+            mode
+            for mode in case["allowed_planner_modes"]
+            if mode in experiment.LLM_PLANNER_MODES
+        ),
+        case["allowed_planner_modes"][0],
+    )
+    evidence = _success_evidence(
+        planner_mode=planner_mode,
+        answer=_answer_for_case(case),
+    )
+    if planner_mode in experiment.DETERMINISTIC_PLANNER_MODES:
+        evidence["payload"]["model_usage"] = []
+    return evidence
+
+
 def test_load_golden_cases_accepts_only_the_operator_approved_asset() -> None:
     digest, cases = experiment.load_golden_cases(APPROVED_GOLDEN_PATH)
 
@@ -206,6 +235,70 @@ def test_evaluate_case_uses_top_level_metadata_and_discards_sensitive_text() -> 
     assert "must-not-leak" not in serialized
 
 
+def test_evaluate_case_retains_answerability_failure_with_expected_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        experiment,
+        "_evaluate_answerability",
+        lambda _answer, _question: {
+            "status": "answerable",
+            "answerability_pass": False,
+        },
+    )
+
+    result = experiment.evaluate_case(_case(0), _success_evidence())
+
+    assert result["answerability_status"] == "answerable"
+    assert result["answerability_pass"] is False
+    assert result["unexpected_non_answer"] is False
+    assert result["failure_reasons"] == ["answerability"]
+
+
+def test_answerability_failure_report_is_measured_and_exits_one() -> None:
+    details = deepcopy(_report(planner_cost="1.000000000000")["details"])
+    case_index = next(
+        index
+        for index, case in enumerate(_approved_cases())
+        if case["expected_answerability"] == "answerable"
+    )
+    details[case_index].update(
+        answerability_pass=False,
+        failure_reasons=["answerability"],
+        passed=False,
+    )
+
+    report = _report_from_details(details)
+
+    assert report["details"][case_index]["answerability_pass"] is False
+    assert report["summary"]["quality_passed"] is False
+    assert experiment.report_exit_code(report) == 1
+
+
+def test_unknown_planner_mode_report_is_measured_and_exits_one() -> None:
+    details = deepcopy(_report(planner_cost="1.000000000000")["details"])
+    details[0].update(
+        planner_mode="unrecognized_mode",
+        planner_mode_allowed=False,
+        failure_reasons=["planner_mode"],
+        passed=False,
+    )
+
+    report = _report_from_details(details)
+
+    assert report["details"][0]["planner_mode"] == "unrecognized_mode"
+    assert report["summary"]["quality_passed"] is False
+    assert experiment.report_exit_code(report) == 1
+
+
+@pytest.mark.parametrize("planner_mode", ["has whitespace", "line\nbreak", "x" * 129])
+def test_evaluate_case_rejects_unsafe_planner_mode_evidence(planner_mode: str) -> None:
+    evidence = _success_evidence(planner_mode=planner_mode)
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.evaluate_case(_case(0), evidence)
+
+
 def test_evaluate_case_rejects_success_with_incomplete_usage() -> None:
     evidence = _success_evidence()
     evidence["payload"]["model_usage_complete"] = False
@@ -270,6 +363,45 @@ def test_evaluate_case_accepts_independently_rounded_usage_costs() -> None:
 
 
 @pytest.mark.parametrize(
+    "value", [True, -1, float("nan"), float("inf"), float("-inf")]
+)
+def test_latency_rejects_non_finite_or_negative_values(value: object) -> None:
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._latency_ms(value)
+
+
+@pytest.mark.parametrize(
+    "ok,status_code,failure_type",
+    [
+        (True, 199, None),
+        (True, 300, None),
+        (False, 200, "http_error"),
+        (False, 99, "http_error"),
+        (False, 600, "http_error"),
+        (False, 503, "transport_error"),
+    ],
+)
+def test_evaluate_case_rejects_invalid_http_status_contract(
+    ok: bool, status_code: int, failure_type: str | None
+) -> None:
+    evidence = _success_evidence()
+    evidence.update(ok=ok, status_code=status_code)
+    if not ok:
+        evidence["failure_type"] = failure_type
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment.evaluate_case(_case(0), evidence)
+
+
+@pytest.mark.parametrize("value", ["1e999999", "1e999999999999999999"])
+def test_fixed_costs_fail_closed_for_huge_magnitudes(value: str) -> None:
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._fixed_usd_evidence(value, "cost")
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._fixed_usd(experiment.Decimal(value))
+
+
+@pytest.mark.parametrize(
     "mutation,reason",
     [
         (lambda payload: payload.update(planner_mode="other_mode"), "planner_mode"),
@@ -311,6 +443,85 @@ def test_fallback_reason_marker_is_a_new_failure_in_comparison() -> None:
     assert comparison["candidate_quality_passed"] is False
     assert comparison["no_new_failures"] is False
     assert "candidate_introduced_new_failure" in comparison["failure_reasons"]
+
+
+def test_candidate_http_failure_is_a_new_failure_in_comparison() -> None:
+    cases = _approved_cases()
+    case_index = next(
+        index
+        for index, case in enumerate(cases)
+        if not any(mode in experiment.LLM_PLANNER_MODES for mode in case["allowed_planner_modes"])
+    )
+    candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+    candidate_details[case_index] = experiment.evaluate_case(
+        cases[case_index],
+        {
+            "ok": False,
+            "status_code": 503,
+            "latency_ms": 10.0,
+            "failure_type": "http_error",
+        },
+    )
+
+    comparison = experiment.compare_reports(
+        _report(planner_cost="1.000000000000"),
+        _report_from_details(candidate_details),
+    )
+
+    assert comparison["gate_passed"] is False
+    assert comparison["no_new_failures"] is False
+
+
+def test_candidate_quality_failure_is_a_new_failure_in_comparison() -> None:
+    cases = _approved_cases()
+    case_index = next(
+        index
+        for index, case in enumerate(cases)
+        if case["expected_answerability"] == "answerable"
+        and not any(mode in experiment.LLM_PLANNER_MODES for mode in case["allowed_planner_modes"])
+    )
+    candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+    evidence = _passing_evidence_for_approved_case(cases[case_index])
+    evidence["payload"]["answer"] = "| 항목 | 값 |\n| --- | --- |\n| A | B |"
+    candidate_details[case_index] = experiment.evaluate_case(cases[case_index], evidence)
+
+    comparison = experiment.compare_reports(
+        _report(planner_cost="1.000000000000"),
+        _report_from_details(candidate_details),
+    )
+
+    assert comparison["gate_passed"] is False
+    assert comparison["no_new_failures"] is False
+
+
+def test_existing_case_failure_reason_is_not_new_in_comparison() -> None:
+    cases = _approved_cases()
+    case_index = next(
+        index
+        for index, case in enumerate(cases)
+        if not any(mode in experiment.LLM_PLANNER_MODES for mode in case["allowed_planner_modes"])
+    )
+    failed_case = experiment.evaluate_case(
+        cases[case_index],
+        {
+            "ok": False,
+            "status_code": 503,
+            "latency_ms": 10.0,
+            "failure_type": "http_error",
+        },
+    )
+    baseline_details = deepcopy(_report(planner_cost="1.000000000000")["details"])
+    candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+    baseline_details[case_index] = failed_case
+    candidate_details[case_index] = failed_case
+
+    comparison = experiment.compare_reports(
+        _report_from_details(baseline_details),
+        _report_from_details(candidate_details),
+    )
+
+    assert comparison["gate_passed"] is False
+    assert comparison["no_new_failures"] is True
 
 
 def test_exact_twenty_percent_planner_reduction_passes() -> None:
