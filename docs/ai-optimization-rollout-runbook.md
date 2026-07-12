@@ -53,8 +53,10 @@ Before the baseline, configure the controlled AI service with
 `CHAT_PLANNER_MODEL_NAME`, `CHAT_ANSWER_MODEL_NAME`, and the matching
 `CHAT_MODEL_PRICING_JSON` catalog. Do not restart or redeploy the controlled AI
 service on a target host for this experiment. The local procedure below starts
-a fresh process; then verify its health and active configuration through its
-recorded PID and health endpoint before running the experiment.
+a fresh process on a dedicated local port. Its health check alone does not
+prove active model configuration. Instead, lsof binds the current-shell child
+PID to the dedicated port; the CLI labels are evidence matched later by the
+reports.
 
 ## Controlled Local Procedure
 
@@ -65,7 +67,7 @@ shell from `bega_AI`. The operator must provide the shell variables before
 starting it. Do not echo their values, commit them, or include them in reports.
 
 ```bash
-set -e
+set -u
 set -a; source ../.env.prod; set +a
 
 : "${BASELINE_PLANNER_MODEL:?operator-provided baseline planner model is required}"
@@ -75,39 +77,59 @@ set -a; source ../.env.prod; set +a
 : "${CANDIDATE_PRICING_JSON:?operator-provided candidate pricing JSON is required}"
 
 mkdir -p outputs/model-routing
-CONTROLLED_AI_PID_FILE=outputs/model-routing/controlled-ai.pid
 CONTROLLED_AI_LOG=outputs/model-routing/controlled-ai.log
 CONTROLLED_AI_PID=""
+CONTROLLED_AI_PORT="${CONTROLLED_AI_PORT:-18001}"
+export AI_MODEL_ROUTING_BASE_URL=http://127.0.0.1:$CONTROLLED_AI_PORT
 
 stop_controlled_ai() {
-  if [ -n "$CONTROLLED_AI_PID" ] && kill -0 "$CONTROLLED_AI_PID" 2>/dev/null; then
-    kill "$CONTROLLED_AI_PID"
-    while kill -0 "$CONTROLLED_AI_PID" 2>/dev/null; do sleep 1; done
+  if [ -z "$CONTROLLED_AI_PID" ]; then
+    return
   fi
-  rm -f "$CONTROLLED_AI_PID_FILE"
+
+  if kill -0 "$CONTROLLED_AI_PID" 2>/dev/null; then
+    kill -TERM "$CONTROLLED_AI_PID" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      if ! kill -0 "$CONTROLLED_AI_PID" 2>/dev/null; then
+        break
+      fi
+      sleep 1
+    done
+    if kill -0 "$CONTROLLED_AI_PID" 2>/dev/null; then
+      kill -KILL "$CONTROLLED_AI_PID" 2>/dev/null || true
+    fi
+  fi
+
+  wait "$CONTROLLED_AI_PID" 2>/dev/null || true
   CONTROLLED_AI_PID=""
 }
 
 start_controlled_ai() {
-  if [ -f "$CONTROLLED_AI_PID_FILE" ]; then
-    recorded_pid="$(cat "$CONTROLLED_AI_PID_FILE")"
-    if kill -0 "$recorded_pid" 2>/dev/null; then
-      kill "$recorded_pid"
-      while kill -0 "$recorded_pid" 2>/dev/null; do sleep 1; done
-    fi
-    rm -f "$CONTROLLED_AI_PID_FILE"
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf '%s\n' 'lsof is required for controlled AI port ownership checks' >&2
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    printf '%s\n' 'curl is required for controlled AI health checks' >&2
+    return 1
+  fi
+  if lsof -nP -iTCP:"$CONTROLLED_AI_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    printf 'controlled AI port %s already has a listener\n' "$CONTROLLED_AI_PORT" >&2
+    lsof -nP -iTCP:"$CONTROLLED_AI_PORT" -sTCP:LISTEN >&2
+    return 1
   fi
 
-  ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 >"$CONTROLLED_AI_LOG" 2>&1 &
+  ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port "$CONTROLLED_AI_PORT" >"$CONTROLLED_AI_LOG" 2>&1 &
   CONTROLLED_AI_PID=$!
-  printf '%s\n' "$CONTROLLED_AI_PID" > "$CONTROLLED_AI_PID_FILE"
 
   for attempt in $(seq 1 30); do
     if ! kill -0 "$CONTROLLED_AI_PID" 2>/dev/null; then
       cat "$CONTROLLED_AI_LOG" >&2
       return 1
     fi
-    if curl -fsS http://127.0.0.1:8001/health >/dev/null; then
+    listener_pid="$(lsof -t -a -p "$CONTROLLED_AI_PID" -iTCP:"$CONTROLLED_AI_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+    if [ "$listener_pid" = "$CONTROLLED_AI_PID" ] && \
+      curl -fsS "$AI_MODEL_ROUTING_BASE_URL/health" >/dev/null; then
       return 0
     fi
     sleep 1
@@ -122,55 +144,75 @@ trap stop_controlled_ai EXIT
 export CHAT_PLANNER_MODEL_NAME="$BASELINE_PLANNER_MODEL"
 export CHAT_ANSWER_MODEL_NAME="$FIXED_ANSWER_MODEL"
 export CHAT_MODEL_PRICING_JSON="$BASELINE_PRICING_JSON"
-start_controlled_ai
+if ! start_controlled_ai; then
+  exit 1
+fi
 
+set +e
 AI_MODEL_ROUTING_SAMPLES=scripts/chat_quality_golden_60.json \
 AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/baseline.json \
 ./.venv/bin/python scripts/chat_model_routing_experiment.py \
   --planner-model-label "$CHAT_PLANNER_MODEL_NAME" \
   --answer-model-label "$CHAT_ANSWER_MODEL_NAME"
+BASELINE_EXIT_CODE=$?
 
 stop_controlled_ai
+printf 'BASELINE_EXIT_CODE=%s\n' "$BASELINE_EXIT_CODE"
+if [ "$BASELINE_EXIT_CODE" -eq 2 ]; then
+  exit "$BASELINE_EXIT_CODE"
+fi
 
 # Change only the planner and matching pricing catalog; keep the answer fixed.
 export CHAT_PLANNER_MODEL_NAME="$CANDIDATE_PLANNER_MODEL"
 export CHAT_ANSWER_MODEL_NAME="$FIXED_ANSWER_MODEL"
 export CHAT_MODEL_PRICING_JSON="$CANDIDATE_PRICING_JSON"
-start_controlled_ai
+if ! start_controlled_ai; then
+  exit 1
+fi
 
+set +e
 AI_MODEL_ROUTING_SAMPLES=scripts/chat_quality_golden_60.json \
 AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/candidate.json \
 ./.venv/bin/python scripts/chat_model_routing_experiment.py \
   --baseline-report outputs/model-routing/baseline.json \
   --planner-model-label "$CHAT_PLANNER_MODEL_NAME" \
   --answer-model-label "$CHAT_ANSWER_MODEL_NAME"
+CANDIDATE_EXIT_CODE=$?
 
 stop_controlled_ai
+printf 'CANDIDATE_EXIT_CODE=%s\n' "$CANDIDATE_EXIT_CODE"
 trap - EXIT
+exit "$CANDIDATE_EXIT_CODE"
 ```
 
 Preserve `outputs/model-routing/baseline.json` as the comparison input. Do not
-edit it after generation. The startup loop first checks `kill -0` against the
-recorded PID and then calls the local health endpoint, so it cannot mistake a
-stale server for the service started by this procedure. It stops only the
-recorded controlled-process PID; do not substitute a broad process kill.
+edit it after generation. Before every start, the procedure refuses a port with
+an existing listener and never reads or kills a stale PID file. The startup loop
+requires both a live child PID and an `lsof` listener match for that child on
+the dedicated port before calling the health endpoint. A child exit or bind
+failure prints the controlled log and fails the procedure. The cleanup trap
+stops only the child spawned by the current shell, with bounded TERM polling,
+KILL fallback, and `wait`; do not substitute a broad process kill.
 
 ### Candidate
 
 Before the candidate, change only `CHAT_PLANNER_MODEL_NAME` and its catalog
 entry as needed; keep `CHAT_ANSWER_MODEL_NAME` fixed. The candidate portion of
 the controlled local procedure exports that same fixed answer value, starts a
-fresh local process, checks it, runs the exact candidate command, and stops its
-recorded PID. The CLI planner/answer labels remain evidence assertions; they do
-not apply this configuration.
+fresh local process, verifies its PID-to-port listener binding, runs the exact
+candidate command, and stops its current-shell child. The CLI planner/answer
+labels remain evidence assertions; they do not apply this configuration.
 
 ### Run Report
 
-After both commands stop their recorded PIDs, append a sanitized operational
-report with the live-call approval reference, golden input hash, baseline and
-candidate report paths, and runner exit codes. Do not include `.env.prod`
-contents, shell-variable values, credentials, headers, prompts, answers, or
-service logs in that report.
+After cleanup, append a sanitized operational report with the live-call approval
+reference, golden input hash, baseline and candidate report paths, and the
+numeric `BASELINE_EXIT_CODE` and `CANDIDATE_EXIT_CODE` values for every runner
+that was attempted. A baseline exit code of `2` is invalid evidence and aborts
+before the candidate; a baseline exit code of `1` may continue to the candidate.
+The candidate status is the procedure exit code after cleanup. Do not include
+`.env.prod` contents, shell-variable values, credentials, headers, prompts,
+answers, or service logs in that report.
 
 Do not execute the baseline or candidate commands without separate live-call
 approval. They issue model requests even though the input data is internal and

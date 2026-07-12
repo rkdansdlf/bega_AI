@@ -78,7 +78,9 @@ def test_model_routing_runbook_and_ci_contract() -> None:
         in normalized_runbook
     )
     assert "restart or redeploy the controlled ai service" in normalized_runbook
-    assert "verify its health and active configuration" in normalized_runbook
+    assert "health check alone does not prove active model configuration" in normalized_runbook
+    assert "lsof binds the current-shell child pid to the dedicated port" in normalized_runbook
+    assert "labels are evidence matched later by the reports" in normalized_runbook
     assert (
         "before the candidate, change only `chat_planner_model_name` and its "
         "catalog entry as needed; keep `chat_answer_model_name` fixed."
@@ -135,20 +137,58 @@ def test_model_routing_runbook_and_ci_contract() -> None:
         "CANDIDATE_PRICING_JSON",
     ):
         assert f'${{{required_variable}:?' in runbook
-    assert "./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001" in runbook
-    assert "CONTROLLED_AI_PID_FILE=outputs/model-routing/controlled-ai.pid" in runbook
-    assert "printf '%s\\n' \"$CONTROLLED_AI_PID\" > \"$CONTROLLED_AI_PID_FILE\"" in runbook
+    preflight_listener = 'lsof -nP -iTCP:"$CONTROLLED_AI_PORT" -sTCP:LISTEN'
+    child_listener = (
+        'lsof -t -a -p "$CONTROLLED_AI_PID" '
+        '-iTCP:"$CONTROLLED_AI_PORT" -sTCP:LISTEN'
+    )
+
+    assert "set -u" in runbook
+    assert "\nset -e\n" not in runbook
+    assert 'CONTROLLED_AI_PORT="${CONTROLLED_AI_PORT:-18001}"' in runbook
+    assert "export AI_MODEL_ROUTING_BASE_URL=http://127.0.0.1:$CONTROLLED_AI_PORT" in runbook
+    assert "command -v lsof >/dev/null 2>&1" in runbook
+    assert "command -v curl >/dev/null 2>&1" in runbook
+    assert preflight_listener in runbook
+    assert child_listener in runbook
+    assert 'listener_pid="$(lsof -t -a -p "$CONTROLLED_AI_PID"' in runbook
+    assert 'if [ "$listener_pid" = "$CONTROLLED_AI_PID" ]' in runbook
+    assert "./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port \"$CONTROLLED_AI_PORT\"" in runbook
+    assert "CONTROLLED_AI_PID=$!" in runbook
+    assert "CONTROLLED_AI_PID_FILE" not in runbook
+    assert "recorded_pid" not in runbook
     assert 'kill -0 "$CONTROLLED_AI_PID"' in runbook
-    assert "curl -fsS http://127.0.0.1:8001/health" in runbook
+    assert 'curl -fsS "$AI_MODEL_ROUTING_BASE_URL/health"' in runbook
+    assert 'kill -TERM "$CONTROLLED_AI_PID"' in runbook
+    assert "for _ in $(seq 1 10); do" in runbook
+    assert 'kill -KILL "$CONTROLLED_AI_PID"' in runbook
+    assert 'wait "$CONTROLLED_AI_PID" 2>/dev/null || true' in runbook
+    assert "while kill -0" not in runbook
     assert "pkill" not in runbook
+    assert runbook.count("set +e") == 2
+    assert "BASELINE_EXIT_CODE=$?" in runbook
+    assert "CANDIDATE_EXIT_CODE=$?" in runbook
+    assert 'printf \'BASELINE_EXIT_CODE=%s\\n\' "$BASELINE_EXIT_CODE"' in runbook
+    assert 'printf \'CANDIDATE_EXIT_CODE=%s\\n\' "$CANDIDATE_EXIT_CODE"' in runbook
+    assert 'if [ "$BASELINE_EXIT_CODE" -eq 2 ]; then\n  exit "$BASELINE_EXIT_CODE"\nfi' in runbook
+    assert 'trap - EXIT\nexit "$CANDIDATE_EXIT_CODE"' in runbook
     assert baseline_exports in runbook
     assert candidate_exports in runbook
     assert runbook.index(dotenv_export) < runbook.index(baseline_command)
-    assert runbook.index("curl -fsS http://127.0.0.1:8001/health") < runbook.index(
-        baseline_command
-    )
+    assert runbook.index(preflight_listener) < runbook.index(baseline_command)
+    assert runbook.index(child_listener) < runbook.index(
+        'curl -fsS "$AI_MODEL_ROUTING_BASE_URL/health"'
+    ) < runbook.index(baseline_command)
     assert runbook.index(baseline_exports) < runbook.index(baseline_command)
+    assert runbook.index(baseline_command) < runbook.index("BASELINE_EXIT_CODE=$?")
+    assert runbook.index("BASELINE_EXIT_CODE=$?") < runbook.index(
+        'printf \'BASELINE_EXIT_CODE=%s\\n\' "$BASELINE_EXIT_CODE"'
+    ) < runbook.index(candidate_command)
     assert runbook.index(candidate_exports) < runbook.index(candidate_command)
+    assert runbook.index(candidate_command) < runbook.index("CANDIDATE_EXIT_CODE=$?")
+    assert runbook.index("CANDIDATE_EXIT_CODE=$?") < runbook.index(
+        'printf \'CANDIDATE_EXIT_CODE=%s\\n\' "$CANDIDATE_EXIT_CODE"'
+    ) < runbook.index('exit "$CANDIDATE_EXIT_CODE"')
 
     for test_path in (
         "tests/test_chat_model_usage.py",
