@@ -389,6 +389,8 @@ async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
                     str(payload.get("answer") or "")
                 )
                 payload["cached"] = False
+                payload["model_usage"] = []
+                payload["model_usage_complete"] = True
                 return payload
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatStatic] operator data fast-path skipped: %s", exc)
@@ -399,6 +401,8 @@ async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
     payload = dict(result)
     payload["answer"] = _ensure_quality_answer_text(str(payload.get("answer") or ""))
     payload["cached"] = False
+    payload["model_usage"] = []
+    payload["model_usage_complete"] = True
     return payload
 
 
@@ -440,6 +444,10 @@ async def _make_static_sse_response(
                     "answer_sources": result.get("answer_sources", []),
                     "as_of_date": result.get("as_of_date"),
                     "fallback_reason": result.get("fallback_reason"),
+                    "model_usage": result.get("model_usage", []),
+                    "model_usage_complete": bool(
+                        result.get("model_usage_complete", True)
+                    ),
                     "perf": result.get("perf", {}),
                 },
                 ensure_ascii=False,
@@ -956,6 +964,8 @@ def _build_cached_completion_payload(
         "answer_sources": [],
         "as_of_date": None,
         "fallback_reason": None,
+        "model_usage": [],
+        "model_usage_complete": True,
         "cache_key_prefix": cache_key[:8],
         "perf": {
             "total_ms": 0.0,
@@ -1030,6 +1040,8 @@ def _make_cached_sse_response(
                     "answer_sources": [],
                     "as_of_date": None,
                     "fallback_reason": None,
+                    "model_usage": [],
+                    "model_usage_complete": True,
                     "finish_reason": "completed",
                     "cancelled": False,
                     "cache_key_prefix": cache_key[:8],
@@ -1270,6 +1282,8 @@ async def _chat_event_generator(
         "fallback_reason": result.get("fallback_reason"),
         "fallback_answer_used": bool(result.get("fallback_answer_used", False))
         or bool(answer_stream_error),
+        "model_usage": result.get("model_usage", []),
+        "model_usage_complete": not stream_cancelled and answer_stream_error is None,
         "perf": _finalize_stream_perf_payload(
             result.get("perf"),
             first_message_ms=first_message_ms,
@@ -1524,6 +1538,8 @@ async def _chat_live_event_generator(
         "fallback_reason": buffered_meta.get("fallback_reason"),
         "fallback_answer_used": bool(buffered_meta.get("fallback_answer_used", False))
         or bool(answer_stream_error),
+        "model_usage": buffered_meta.get("model_usage", []),
+        "model_usage_complete": not stream_cancelled and answer_stream_error is None,
         "perf": _finalize_stream_perf_payload(
             buffered_meta.get("perf"),
             first_message_ms=first_message_ms,
@@ -1983,7 +1999,9 @@ async def chat_completion(
     import inspect
 
     answer_obj = result.get("answer")
+    model_usage_complete = True
     if inspect.isasyncgen(answer_obj) or hasattr(answer_obj, "__aiter__"):
+        model_usage_complete = False
         full_answer_chunks: List[str] = []
         public_error: Optional[str] = None
         try:
@@ -2000,6 +2018,7 @@ async def chat_completion(
                     if chunk:
                         full_answer_chunks.append(chunk)
             result["answer"] = "".join(full_answer_chunks)
+            model_usage_complete = True
         except TimeoutError as exc:
             logger.warning(
                 "chat_completion timeout while consuming stream: question=%s timeout=%.1fs",
@@ -2072,6 +2091,8 @@ async def chat_completion(
             )
 
     if isinstance(result, dict):
+        result.setdefault("model_usage", [])
+        result["model_usage_complete"] = model_usage_complete
         payload_serialized = _safe_serialize(result)
         if isinstance(payload_serialized, dict):
             answer_text = payload_serialized.get("answer")

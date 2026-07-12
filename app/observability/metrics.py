@@ -136,6 +136,24 @@ AI_CHAT_COST_ESTIMATE_BY_TYPE_USD_TOTAL = Counter(
     ["route", "question_type", "planner_mode", "provider", "model"],
 )
 
+AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL = Counter(
+    "ai_model_usage_token_estimate_total",
+    "Estimated model-call tokens by role and routed model.",
+    ["role", "provider", "model", "token_type", "outcome"],
+)
+
+AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL = Counter(
+    "ai_model_usage_cost_estimate_usd_total",
+    "Catalog-priced estimated model-call cost in USD.",
+    ["role", "provider", "model"],
+)
+
+AI_MODEL_USAGE_OUTCOME_TOTAL = Counter(
+    "ai_model_usage_outcome_total",
+    "Model usage pricing and call outcomes.",
+    ["role", "provider", "model", "result"],
+)
+
 AI_COACH_REQUEST_TOTAL = Counter(
     "ai_coach_request_total",
     "Coach request outcomes by cache state and request mode.",
@@ -276,6 +294,9 @@ __all__ = [
     "AI_LLM_CALL_DURATION_SECONDS",
     "AI_LLM_FALLBACK_TOTAL",
     "AI_LLM_RETRY_ATTEMPTS_TOTAL",
+    "AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL",
+    "AI_MODEL_USAGE_OUTCOME_TOTAL",
+    "AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL",
     "AI_RAG_STAGE_DURATION_SECONDS",
     "AI_RESPONSE_CACHE_BY_INTENT",
     "AI_RESPONSE_CACHE_TOTAL",

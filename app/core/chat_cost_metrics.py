@@ -12,11 +12,15 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Optional, Sequence
 
+from app.core.chat_model_usage import ModelUsageEstimate
 from app.observability.metrics import (
     AI_CHAT_COST_ESTIMATE_BY_TYPE_USD_TOTAL,
     AI_CHAT_COST_ESTIMATE_USD_TOTAL,
     AI_CHAT_TOKEN_ESTIMATE_BY_TYPE_TOTAL,
     AI_CHAT_TOKEN_ESTIMATE_TOTAL,
+    AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL,
+    AI_MODEL_USAGE_OUTCOME_TOTAL,
+    AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL,
 )
 
 _CHARS_PER_TOKEN = 3.5
@@ -58,6 +62,93 @@ _PLAYER_ANALYSIS_MARKERS = (
     "기록",
     "같은 포지션",
 )
+_MODEL_USAGE_ROLES = frozenset({"planner", "answer"})
+_MODEL_USAGE_PROVIDERS = frozenset({"openrouter", "gemini"})
+_MAX_MODEL_USAGE_LABEL_LENGTH = 128
+
+
+def _bounded_model_usage_label(value: object, *, max_length: int) -> str:
+    label = str(value or "").strip()
+    if (
+        not label
+        or len(label) > max_length
+        or any(character.isspace() or ord(character) < 32 for character in label)
+    ):
+        return "unknown"
+    return label
+
+
+def _model_usage_labels(record: ModelUsageEstimate) -> tuple[str, str, str]:
+    role = _bounded_model_usage_label(record.role, max_length=16)
+    if role not in _MODEL_USAGE_ROLES:
+        role = "unknown"
+
+    provider = _bounded_model_usage_label(record.provider, max_length=32).lower()
+    if provider not in _MODEL_USAGE_PROVIDERS:
+        provider = "unknown"
+
+    model = _bounded_model_usage_label(
+        record.model,
+        max_length=_MAX_MODEL_USAGE_LABEL_LENGTH,
+    )
+    return role, provider, model
+
+
+def record_model_usage_estimate(record: ModelUsageEstimate) -> None:
+    """Record bounded request-scoped model usage without affecting serving."""
+    try:
+        role, provider, model = _model_usage_labels(record)
+        outcome = "failed" if record.outcome == "failed" else "success"
+        input_tokens = max(0, int(record.input_tokens))
+        output_tokens = max(0, int(record.output_tokens))
+        pricing_source = (
+            "model_catalog" if record.pricing_source == "model_catalog" else "unpriced"
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+    try:
+        AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL.labels(
+            role=role,
+            provider=provider,
+            model=model,
+            token_type="input",
+            outcome=outcome,
+        ).inc(input_tokens)
+        AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL.labels(
+            role=role,
+            provider=provider,
+            model=model,
+            token_type="output",
+            outcome=outcome,
+        ).inc(output_tokens)
+    except Exception:  # noqa: BLE001
+        pass
+
+    result = "failed" if outcome == "failed" else (
+        "priced" if pricing_source == "model_catalog" else "unpriced"
+    )
+    try:
+        AI_MODEL_USAGE_OUTCOME_TOTAL.labels(
+            role=role,
+            provider=provider,
+            model=model,
+            result=result,
+        ).inc()
+    except Exception:  # noqa: BLE001
+        pass
+
+    if pricing_source != "model_catalog" or record.total_cost_usd is None:
+        return
+
+    try:
+        AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL.labels(
+            role=role,
+            provider=provider,
+            model=model,
+        ).inc(float(record.total_cost_usd))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def classify_chat_question_type(question: str) -> str:
