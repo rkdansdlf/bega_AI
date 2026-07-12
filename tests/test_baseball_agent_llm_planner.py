@@ -1,9 +1,17 @@
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from app.agents.baseball_agent import BaseballStatisticsAgent, SERIAL_DB_TOOL_NAMES
-from app.agents.chat_intent_router import ChatIntent
+import pytest
+
+from app.agents.baseball_agent import (
+    BaseballAgentRuntime,
+    BaseballStatisticsAgent,
+    SERIAL_DB_TOOL_NAMES,
+)
+from app.agents.chat_intent_router import ChatIntent, IntentDecision
 from app.agents.tool_caller import ToolCall, ToolResult
 from app.core.entity_extractor import extract_entities_from_query, extract_player_names
 
@@ -25,12 +33,255 @@ def _build_agent() -> BaseballStatisticsAgent:
     agent.chat_tool_parallel_serial_tools = set(SERIAL_DB_TOOL_NAMES)
     agent.chat_tool_parallel_max_concurrency = 2
     agent.chat_planner_cache_ttl_seconds = 60
+    agent.chat_planner_cache_history_ttl_seconds = 60
     agent.chat_planner_cache_max_entries = 512
+    agent.chat_planner_model_name = None
+    agent.chat_answer_model_name = None
     agent._is_team_analysis_query = (
         lambda query, entity_filter: bool(getattr(entity_filter, "team_id", None))
         and "분석" in query
     )
     return agent
+
+
+class _RequestContextTool:
+    def __init__(self, connection, settings=None):
+        self.connection = connection
+        self.settings = settings
+
+
+def _build_model_usage_runtime(monkeypatch) -> BaseballAgentRuntime:
+    from app.agents import baseball_agent as agent_module
+
+    monkeypatch.setattr(agent_module, "DatabaseQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "RegulationQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "GameQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "DocumentQueryTool", _RequestContextTool)
+
+    async def _fake_llm(
+        messages,
+        max_tokens=None,
+        model_override=None,
+        usage_observer=None,
+    ):
+        del max_tokens, model_override
+        assert usage_observer is not None
+        is_planner = "tool_calls" in messages[0]["content"]
+        output_text = (
+            '{"analysis":"계획","tool_calls":[],"expected_result":"답변"}'
+            if is_planner
+            else "검증된 답변"
+        )
+        usage_observer(
+            provider="openrouter",
+            model="vendor/model",
+            messages=messages,
+            output_text=output_text,
+            outcome="success",
+        )
+        yield output_text
+
+    return BaseballAgentRuntime(
+        llm_generator=_fake_llm,
+        settings=SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_model="vendor/model",
+            chat_model_pricing_json=(
+                '{"openrouter":{"vendor/model":'
+                '{"input_usd_per_1m_tokens":"1.00",'
+                '"output_usd_per_1m_tokens":"2.00"}}}'
+            ),
+        ),
+    )
+
+
+def _build_legacy_model_usage_runtime(
+    monkeypatch, llm_generator
+) -> BaseballAgentRuntime:
+    from app.agents import baseball_agent as agent_module
+
+    monkeypatch.setattr(agent_module, "DatabaseQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "RegulationQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "GameQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "DocumentQueryTool", _RequestContextTool)
+
+    return BaseballAgentRuntime(
+        llm_generator=llm_generator,
+        settings=SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_model="default/model",
+            chat_model_pricing_json=(
+                '{"openrouter":{"default/model":'
+                '{"input_usd_per_1m_tokens":"1.00",'
+                '"output_usd_per_1m_tokens":"2.00"},'
+                '"override/model":'
+                '{"input_usd_per_1m_tokens":"3.00",'
+                '"output_usd_per_1m_tokens":"4.00"}}}'
+            ),
+        ),
+    )
+
+
+def test_legacy_llm_with_model_override_records_accepted_override(monkeypatch) -> None:
+    received_model_overrides: list[str | None] = []
+
+    async def _legacy_llm(messages, max_tokens=None, model_override=None):
+        del messages, max_tokens
+        received_model_overrides.append(model_override)
+        yield "legacy "
+        yield "output"
+
+    runtime = _build_legacy_model_usage_runtime(monkeypatch, _legacy_llm)
+
+    async def _run():
+        with runtime.request_context(SimpleNamespace(label="legacy")) as request_context:
+            output = [
+                chunk
+                async for chunk in runtime.shared_agent._call_llm_stream(
+                    [{"role": "user", "content": "hello"}],
+                    max_tokens=32,
+                    model_override="override/model",
+                    usage_role="planner",
+                )
+            ]
+            return output, request_context.model_usage_records
+
+    output, records = asyncio.run(_run())
+
+    assert output == ["legacy ", "output"]
+    assert received_model_overrides == ["override/model"]
+    assert len(records) == 1
+    assert (records[0].role, records[0].provider, records[0].model) == (
+        "planner",
+        "openrouter",
+        "override/model",
+    )
+    assert records[0].pricing_source == "model_catalog"
+    assert records[0].output_chars == len("legacy output")
+
+
+def test_legacy_llm_without_model_override_records_default_model(monkeypatch) -> None:
+    calls: list[int | None] = []
+
+    async def _legacy_llm(messages, max_tokens=None):
+        del messages
+        calls.append(max_tokens)
+        yield "default output"
+
+    runtime = _build_legacy_model_usage_runtime(monkeypatch, _legacy_llm)
+
+    async def _run():
+        with runtime.request_context(SimpleNamespace(label="legacy")) as request_context:
+            output = [
+                chunk
+                async for chunk in runtime.shared_agent._call_llm_stream(
+                    [{"role": "user", "content": "hello"}],
+                    max_tokens=32,
+                    model_override="override/model",
+                    usage_role="answer",
+                )
+            ]
+            return output, request_context.model_usage_records
+
+    output, records = asyncio.run(_run())
+
+    assert output == ["default output"]
+    assert calls == [32]
+    assert len(records) == 1
+    assert (records[0].role, records[0].provider, records[0].model) == (
+        "answer",
+        "openrouter",
+        "default/model",
+    )
+    assert records[0].pricing_source == "model_catalog"
+    assert records[0].output_chars == len("default output")
+
+
+def test_model_usage_collects_planner_and_answer_attempts(monkeypatch) -> None:
+    runtime = _build_model_usage_runtime(monkeypatch)
+
+    async def _run():
+        with runtime.request_context(SimpleNamespace(label="usage")) as request_context:
+            await runtime.shared_agent._analyze_query_with_llm("일반 질문", {})
+            return request_context
+
+    request_context = asyncio.run(_run())
+
+    assert [record.role for record in request_context.model_usage_records] == [
+        "planner"
+    ]
+    assert all(
+        record.pricing_source == "model_catalog"
+        for record in request_context.model_usage_records
+    )
+
+
+def test_model_usage_keeps_answer_retry_costs(monkeypatch) -> None:
+    runtime = _build_model_usage_runtime(monkeypatch)
+    agent = runtime.shared_agent
+    agent._build_structured_deterministic_answer = lambda query, results: None
+    tool_results = [
+        ToolResult(
+            success=True,
+            data={"found": True, "source": "database", "value": "verified"},
+            message="verified",
+        )
+    ]
+
+    async def _run():
+        with runtime.request_context(SimpleNamespace(label="usage")) as request_context:
+            await agent._analyze_query_with_llm("일반 질문", {})
+            for _ in range(2):
+                result = await agent._generate_verified_answer(
+                    "일반 질문", tool_results, {}
+                )
+                _ = [chunk async for chunk in result["answer"]]
+            return request_context
+
+    request_context = asyncio.run(_run())
+
+    assert [record.role for record in request_context.model_usage_records] == [
+        "planner",
+        "answer",
+        "answer",
+    ]
+    assert all(
+        record.pricing_source == "model_catalog"
+        for record in request_context.model_usage_records
+    )
+
+
+def test_deferred_answer_usage_survives_request_context_exit(monkeypatch) -> None:
+    runtime = _build_model_usage_runtime(monkeypatch)
+    agent = runtime.shared_agent
+    agent._build_structured_deterministic_answer = lambda query, results: None
+    tool_results = [
+        ToolResult(
+            success=True,
+            data={"found": True, "source": "database", "value": "verified"},
+            message="verified",
+        )
+    ]
+
+    async def _create_deferred_answer():
+        with runtime.request_context(SimpleNamespace(label="origin")) as request_context:
+            result = await agent._generate_verified_answer(
+                "일반 질문", tool_results, {}
+            )
+            return result["answer"], request_context.model_usage_records
+
+    answer, origin_records = asyncio.run(_create_deferred_answer())
+
+    async def _consume_deferred_answer():
+        with runtime.request_context(SimpleNamespace(label="other")) as request_context:
+            output = [chunk async for chunk in answer]
+            return output, request_context.model_usage_records
+
+    output, other_records = asyncio.run(_consume_deferred_answer())
+
+    assert output == ["검증된 답변"]
+    assert [record.role for record in origin_records] == ["answer"]
+    assert other_records == []
 
 
 def test_select_llm_planner_prompt_uses_team_mode_for_team_analysis() -> None:
@@ -517,6 +768,69 @@ def test_analyze_query_and_plan_tools_keeps_cache_alive_for_completion_stream_ga
     assert first_plan["planner_mode"] == "player_llm_planner"
     assert second_plan["planner_cache_hit"] is True
     assert second_plan["planner_cache_age_ms"] == 24000.0
+
+
+def test_planner_cache_key_includes_history_signature() -> None:
+    agent = _build_agent()
+
+    first_key = agent._build_planner_cache_key(
+        "그 팀 흐름은 어때?",
+        {"history": [{"role": "user", "content": "LG 팀 분석해줘"}]},
+    )
+    second_key = agent._build_planner_cache_key(
+        "그 팀 흐름은 어때?",
+        {"history": [{"role": "user", "content": "KIA 팀 분석해줘"}]},
+    )
+
+    assert first_key != second_key
+    assert "|context=" in first_key
+
+
+def test_planner_cache_uses_shorter_ttl_for_history_context(monkeypatch) -> None:
+    agent = _build_agent()
+    agent.chat_planner_cache_ttl_seconds = 300
+    agent.chat_planner_cache_history_ttl_seconds = 10
+    agent.chat_planner_cache_max_entries = 16
+    agent._build_fast_path_plan = lambda query, entity_filter, context=None: None
+
+    llm_calls = {"count": 0}
+    monotonic_now = {"value": 100.0}
+
+    async def _fake_llm(query, context):
+        llm_calls["count"] += 1
+        return {
+            "analysis": "llm plan",
+            "tool_calls": [
+                ToolCall(
+                    tool_name="get_player_stats",
+                    parameters={"player_name": "강민호", "year": 2025},
+                )
+            ],
+            "planner_mode": "player_llm_planner",
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "app.agents.baseball_agent.time.monotonic", lambda: monotonic_now["value"]
+    )
+    agent._analyze_query_with_llm = _fake_llm
+    history_context = {"history": [{"role": "user", "content": "강민호 분석해줘"}]}
+
+    async def _run():
+        first = await agent._analyze_query_and_plan_tools(
+            "그 선수 최근 흐름은?", history_context
+        )
+        monotonic_now["value"] = 115.0
+        second = await agent._analyze_query_and_plan_tools(
+            "그 선수 최근 흐름은?", history_context
+        )
+        return first, second
+
+    first_plan, second_plan = asyncio.run(_run())
+
+    assert llm_calls["count"] == 2
+    assert first_plan["planner_mode"] == "player_llm_planner"
+    assert second_plan.get("planner_cache_hit") is not True
 
 
 def test_process_query_stream_preserves_attempted_planner_mode_on_analysis_error(
@@ -1422,3 +1736,60 @@ def test_process_query_stream_recovers_with_deterministic_answer_on_prefetch_err
     assert metadata["fallback_reason"] == "answer_generation_recovery"
     assert metadata["verified"] is True
     assert "김현수" in "".join(answer_chunks)
+
+
+def test_process_query_stream_propagates_terminal_answer_iterator_error(
+    monkeypatch,
+) -> None:
+    agent = _build_agent()
+    agent._is_chitchat = lambda query: False
+    agent._generate_visualizations = lambda tool_results: []
+    agent._execute_tool_batch_async = lambda tool_calls: _empty_results()
+    agent._resolve_tool_execution_mode = lambda tool_calls: "none"
+    agent._analyze_query_and_plan_tools = lambda query, context: _basic_plan()
+
+    async def _terminally_broken_answer():
+        yield "partial"
+        raise RuntimeError("terminal answer failure")
+
+    async def _fake_generate_verified_answer(query, tool_results, context):
+        del query, tool_results, context
+        return {
+            "answer": _terminally_broken_answer(),
+            "verified": True,
+            "data_sources": [],
+            "error": None,
+        }
+
+    async def _basic_plan():
+        return {
+            "analysis": "ok",
+            "tool_calls": [],
+            "expected_result": "",
+            "error": None,
+            "planner_mode": "default_llm_planner",
+        }
+
+    async def _empty_results():
+        return []
+
+    agent._generate_verified_answer = _fake_generate_verified_answer
+    monkeypatch.setattr("app.ml.intent_router.predict_intent", lambda query: "freeform")
+
+    async def _run():
+        events = []
+        with pytest.raises(RuntimeError, match="terminal answer failure"):
+            async for event in agent.process_query_stream(
+                "김현수 분석해줘", {"request_mode": "completion"}
+            ):
+                events.append(event)
+        return events
+
+    import asyncio
+
+    events = asyncio.run(_run())
+
+    assert any(event["type"] == "metadata" for event in events)
+    assert [
+        event["content"] for event in events if event["type"] == "answer_chunk"
+    ] == ["partial"]
