@@ -37,6 +37,7 @@ from ..core.chat_model_usage import (
     ModelUsageEstimate,
     estimate_model_usage,
 )
+from ..core.chat_cost_metrics import record_model_usage_estimate
 from .chat_intent_router import ChatIntent, ChatIntentRouter, IntentDecision
 from .chat_renderers import ChatRendererRegistry
 from .tool_caller import ToolCaller, ToolCall, ToolDefinition, ToolResult
@@ -4093,17 +4094,20 @@ class BaseballStatisticsAgent:
         if model_usage_records is None:
             return
 
-        model_usage_records.append(
-            estimate_model_usage(
-                self.model_pricing_catalog,
-                role=usage_role,
-                provider=provider,
-                model=model,
-                messages=messages,
-                output_text=output_text,
-                outcome=outcome,
-            )
+        record = estimate_model_usage(
+            self.model_pricing_catalog,
+            role=usage_role,
+            provider=provider,
+            model=model,
+            messages=messages,
+            output_text=output_text,
+            outcome=outcome,
         )
+        model_usage_records.append(record)
+        try:
+            record_model_usage_estimate(record)
+        except Exception:  # noqa: BLE001
+            logger.debug("[ModelRouting] usage metric recording failed", exc_info=True)
 
     @staticmethod
     def _generator_supports_keyword(generator: Any, keyword: str) -> bool:

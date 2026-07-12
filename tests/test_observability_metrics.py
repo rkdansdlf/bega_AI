@@ -40,6 +40,9 @@ def test_metric_objects_accept_labels_and_observations() -> None:
         AI_EMBEDDING_CACHE_TOTAL,
         AI_LLM_CALL_DURATION_SECONDS,
         AI_LLM_RETRY_ATTEMPTS_TOTAL,
+        AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL,
+        AI_MODEL_USAGE_OUTCOME_TOTAL,
+        AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL,
         AI_RAG_STAGE_DURATION_SECONDS,
         AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL,
         AI_SEMANTIC_RESPONSE_CACHE_TOTAL,
@@ -57,6 +60,22 @@ def test_metric_objects_accept_labels_and_observations() -> None:
     AI_CHAT_COST_ESTIMATE_USD_TOTAL.labels(
         route="completion", provider="test", model="unit-test"
     ).inc(0.001)
+    AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL.labels(
+        role="planner",
+        provider="openrouter",
+        model="vendor/planner",
+        token_type="input",
+        outcome="success",
+    ).inc(10)
+    AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL.labels(
+        role="planner", provider="openrouter", model="vendor/planner"
+    ).inc(0.001)
+    AI_MODEL_USAGE_OUTCOME_TOTAL.labels(
+        role="planner",
+        provider="openrouter",
+        model="vendor/planner",
+        result="priced",
+    ).inc()
     AI_RAG_STAGE_DURATION_SECONDS.labels(stage="embed").observe(0.05)
     AI_LLM_CALL_DURATION_SECONDS.labels(provider="test", route="rag").observe(1.2)
     AI_DB_POOL_SIZE.labels(state="available").set(7)
