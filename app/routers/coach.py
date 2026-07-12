@@ -30,7 +30,7 @@ from typing import (
     Sequence,
 )
 from zoneinfo import ZoneInfo
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, model_validator
 
 import psycopg
@@ -81,6 +81,10 @@ from ..observability.metrics import (
     AI_COACH_REQUEST_TOTAL,
 )
 from ..schemas.coach_tool_payload import CoachTeamPayload
+from ..streaming.versioned_sse import (
+    negotiate_event_version,
+    versioned_event_source,
+)
 from ..tools.database_query import DatabaseQueryTool
 from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
@@ -11406,11 +11410,18 @@ async def analyze_team(
     agent: BaseballStatisticsAgent = Depends(get_agent),
     __: None = Depends(rate_limit_coach_dependency),
     _: None = Depends(require_ai_internal_token),
+    event_version_header: str | None = Header(
+        default=None,
+        alias="X-AI-Event-Version",
+    ),
 ):
     """
     특정 팀(들)에 대한 심층 분석을 요청합니다. 'The Coach' 페르소나가 적용됩니다.
     """
-    from sse_starlette.sse import EventSourceResponse
+    event_version = negotiate_event_version(
+        event_version_header,
+        endpoint="coach",
+    )
 
     route_prepare_started = perf_counter()
 
@@ -13665,8 +13676,10 @@ async def analyze_team(
             finally:
                 await _cancel_heartbeat_task(heartbeat_task)
 
-        return EventSourceResponse(
+        return versioned_event_source(
             event_generator(),
+            endpoint="coach",
+            version=event_version,
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
