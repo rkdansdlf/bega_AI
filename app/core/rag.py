@@ -1795,6 +1795,57 @@ _REGULATION_SOURCES: frozenset[str] = frozenset(
         "kbo_definitions",
     }
 )
+_DEFINITION_CONTEXT_MARKERS: frozenset[str] = frozenset(
+    {"컬럼", "테이블", "스키마", "extra_stats"}
+)
+
+
+def _is_regulation_query_text(query: str) -> bool:
+    query_lower = str(query or "").lower()
+    if any(marker in query_lower for marker in _DEFINITION_CONTEXT_MARKERS):
+        return False
+    query_nospace = query_lower.replace(" ", "")
+    return any(
+        keyword in query_lower or keyword in query_nospace
+        for keyword in _REGULATION_KEYWORDS
+    )
+
+
+def _context_source_priority(
+    query: str, *, is_regulation: Optional[bool] = None
+) -> Dict[str, int]:
+    regulation_query = (
+        _is_regulation_query_text(query) if is_regulation is None else is_regulation
+    )
+    if regulation_query:
+        return {
+            "kbo_regulations": 0,
+            "kbo_definitions": 1,
+            "markdown_docs": 2,
+        }
+    query_lower = str(query or "").lower()
+    if any(marker in query_lower for marker in _DEFINITION_CONTEXT_MARKERS):
+        return {
+            "kbo_definitions": 0,
+            "markdown_docs": 1,
+            "kbo_regulations": 2,
+        }
+    return {"markdown_docs": 0, "kbo_definitions": 1, "kbo_regulations": 2}
+
+
+def _sort_docs_for_context(
+    docs: List[Dict[str, Any]], *, is_regulation: bool, query: str = ""
+) -> List[Dict[str, Any]]:
+    """Order retrieved context without overriding semantic relevance within a source."""
+    source_priority = _context_source_priority(
+        query,
+        is_regulation=is_regulation,
+    )
+    return sorted(
+        docs,
+        key=lambda doc: source_priority.get(str(doc.get("source_table") or ""), 3),
+    )
+
 
 _REGULATION_KEYWORDS = frozenset(
     {
@@ -1836,6 +1887,7 @@ _REGULATION_KEYWORDS = frozenset(
         "플레이오프",
         "포스트시즌",
         "와일드카드",
+        "웨이버",
         "한국시리즈",
         "몇팀",
         "보크",
@@ -3252,13 +3304,7 @@ class RAGPipeline:
         """
         질문이 KBO 규정 관련인지 판단합니다.
         """
-        query_lower = query.lower()
-        # 공백 제거 버전도 확인: "비디오 판독" → "비디오판독" 등 복합어 매칭
-        query_nospace = query_lower.replace(" ", "")
-        return any(
-            keyword in query_lower or keyword in query_nospace
-            for keyword in _REGULATION_KEYWORDS
-        )
+        return _is_regulation_query_text(query)
 
     def _is_game_query(self, query: str) -> bool:
         """
@@ -3663,8 +3709,11 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     retrieval_state=retrieval_state,
                 )
 
-        # 문서 정렬: markdown_docs를 우선적으로 배치 (규정/지식 답변 품질 향상)
-        docs.sort(key=lambda d: 0 if d.get("source_table") == "markdown_docs" else 1)
+        docs = _sort_docs_for_context(
+            docs,
+            is_regulation=is_regulation,
+            query=query,
+        )
 
         # 규정 쿼리: LLM에 전달 전 비규정 청크 제거로 환각 억제
         if is_regulation and docs:
@@ -4221,8 +4270,11 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             )
         )
 
-        # 문서 정렬: markdown_docs를 우선적으로 배치 (규정/지식 답변 품질 향상)
-        docs.sort(key=lambda d: 0 if d.get("source_table") == "markdown_docs" else 1)
+        docs = _sort_docs_for_context(
+            docs,
+            is_regulation=is_regulation,
+            query=query,
+        )
 
         # 규정 쿼리: LLM에 전달 전 비규정 청크 제거로 환각 억제
         if is_regulation and docs:

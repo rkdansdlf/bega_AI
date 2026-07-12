@@ -23,6 +23,36 @@ def test_settings_default_vision_fallback_models_uses_mistral_vision(monkeypatch
     assert settings.vision_fallback_models == [MISTRAL_VISION_FALLBACK_MODEL]
 
 
+def test_chat_model_pricing_json_is_validated(monkeypatch):
+    monkeypatch.setenv(
+        "CHAT_MODEL_PRICING_JSON",
+        '{"openrouter":{"vendor/planner":{"input_usd_per_1m_tokens":"1.00","output_usd_per_1m_tokens":"2.00"}}}',
+    )
+
+    settings = Settings(_env_file=None)
+
+    assert settings.chat_model_pricing_json is not None
+
+    monkeypatch.setenv("CHAT_MODEL_PRICING_JSON", "not-json")
+
+    with pytest.raises(ValueError, match="CHAT_MODEL_PRICING_JSON"):
+        Settings(_env_file=None)
+
+
+def test_invalid_pricing_catalog_is_hidden_in_validation_errors(monkeypatch):
+    marker = "SENSITIVE_PRICING_MARKER"
+    raw = f'{{"{marker}":{{"model":{{"input_usd_per_1m_tokens":"invalid"}}}}}}'
+    monkeypatch.setenv("CHAT_MODEL_PRICING_JSON", raw)
+
+    with pytest.raises(ValueError) as caught:
+        Settings(_env_file=None)
+
+    rendered = " ".join((str(caught.value), repr(caught.value)))
+    assert Settings.model_config["hide_input_in_errors"] is True
+    assert marker not in rendered
+    assert raw not in rendered
+
+
 def test_resolved_ai_internal_token_prefers_explicit_value(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "explicit-token")
     monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
@@ -190,12 +220,88 @@ def test_cors_origins_accepts_csv(monkeypatch):
     ]
 
 
-def test_chat_planner_cache_ttl_defaults_to_60_seconds(monkeypatch):
+def test_chat_planner_cache_ttl_defaults_to_five_minutes(monkeypatch):
     monkeypatch.delenv("CHAT_PLANNER_CACHE_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("CHAT_PLANNER_CACHE_HISTORY_TTL_SECONDS", raising=False)
 
     settings = Settings()
 
-    assert settings.chat_planner_cache_ttl_seconds == 60
+    assert settings.chat_planner_cache_ttl_seconds == 300
+    assert settings.chat_planner_cache_history_ttl_seconds == 60
+
+
+def test_chat_semantic_cache_shadow_defaults_to_disabled(monkeypatch):
+    monkeypatch.delenv("CHAT_SEMANTIC_CACHE_SHADOW_ENABLED", raising=False)
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_shadow_enabled is False
+
+
+def test_chat_semantic_cache_shadow_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_SHADOW_ENABLED", "true")
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_shadow_enabled is True
+
+
+def test_chat_semantic_cache_vector_index_defaults_to_safe_off(monkeypatch):
+    monkeypatch.delenv("CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED", raising=False)
+    monkeypatch.delenv("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH", raising=False)
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_vector_index_enabled is False
+    assert settings.chat_semantic_cache_hnsw_ef_search == 0
+
+
+def test_chat_semantic_cache_vector_index_options_can_be_enabled(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED", "true")
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH", "64")
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_vector_index_enabled is True
+    assert settings.chat_semantic_cache_hnsw_ef_search == 64
+
+
+def test_chat_semantic_cache_similarity_must_be_probability(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_MIN_SIMILARITY", "1.01")
+
+    with pytest.raises(ValueError, match="CHAT_SEMANTIC_CACHE_MIN_SIMILARITY"):
+        Settings()
+
+
+def test_chat_semantic_cache_candidate_limit_is_bounded(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT", "11")
+
+    with pytest.raises(ValueError, match="CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT"):
+        Settings()
+
+
+def test_chat_semantic_cache_hnsw_search_must_be_non_negative(monkeypatch):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH", "-1")
+
+    with pytest.raises(ValueError, match="CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH"):
+        Settings()
+
+
+def test_chat_cost_rates_must_be_non_negative(monkeypatch):
+    monkeypatch.setenv("CHAT_COST_INPUT_USD_PER_1M_TOKENS", "-0.1")
+
+    with pytest.raises(ValueError, match="Chat cost rate values"):
+        Settings()
+
+
+def test_chat_model_routing_settings_can_be_split(monkeypatch):
+    monkeypatch.setenv("CHAT_PLANNER_MODEL_NAME", "openrouter/cheap-planner")
+    monkeypatch.setenv("CHAT_ANSWER_MODEL_NAME", "openrouter/quality-answer")
+
+    settings = Settings()
+
+    assert settings.chat_planner_model_name == "openrouter/cheap-planner"
+    assert settings.chat_answer_model_name == "openrouter/quality-answer"
 
 
 def test_source_db_url_prefers_oci_over_postgres(monkeypatch):
