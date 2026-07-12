@@ -4182,9 +4182,10 @@ class BaseballStatisticsAgent:
         call_kwargs: Dict[str, Any] = {"max_tokens": max_tokens}
         if usage_observer is not None:
             call_kwargs["usage_observer"] = usage_observer
+        accepted_model_override = model_override
         if model_override:
             try:
-                return self.llm_generator(
+                stream = self.llm_generator(
                     messages,
                     model_override=model_override,
                     **call_kwargs,
@@ -4193,13 +4194,16 @@ class BaseballStatisticsAgent:
                 logger.warning(
                     "[ModelRouting] llm_generator does not support model_override; using default model"
                 )
-        stream = self.llm_generator(messages, **call_kwargs)
+                accepted_model_override = None
+                stream = self.llm_generator(messages, **call_kwargs)
+        else:
+            stream = self.llm_generator(messages, **call_kwargs)
         if supports_usage_observer:
             return stream
         return self._observe_legacy_llm_stream(
             stream,
             messages=messages,
-            model_override=model_override,
+            model_override=accepted_model_override,
             usage_role=usage_role,
         )
 
