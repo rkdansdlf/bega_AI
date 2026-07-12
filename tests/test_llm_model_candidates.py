@@ -22,8 +22,34 @@ def _install_fake_gemini_sdk(monkeypatch, model_class: type[Any]) -> None:
     fake_genai.GenerativeModel = model_class
     fake_genai_types = ModuleType("google.generativeai.types")
     fake_genai_types.GenerationConfig = lambda **kwargs: kwargs
+    google_module = sys.modules.get("google")
+    if google_module is None:
+        google_module = ModuleType("google")
+        monkeypatch.setitem(sys.modules, "google", google_module)
+
     monkeypatch.setitem(sys.modules, "google.generativeai", fake_genai)
     monkeypatch.setitem(sys.modules, "google.generativeai.types", fake_genai_types)
+    monkeypatch.setattr(google_module, "generativeai", fake_genai, raising=False)
+    monkeypatch.setattr(fake_genai, "types", fake_genai_types, raising=False)
+
+
+def test_install_fake_gemini_sdk_replaces_existing_parent_attribute(monkeypatch) -> None:
+    class _FakeModel:
+        pass
+
+    fake_google = ModuleType("google")
+    stale_genai = ModuleType("google.generativeai")
+    fake_google.generativeai = stale_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.generativeai", stale_genai)
+
+    _install_fake_gemini_sdk(monkeypatch, _FakeModel)
+
+    import google.generativeai as genai
+
+    assert fake_google.generativeai is genai
+    assert genai is sys.modules["google.generativeai"]
+    assert genai.types is sys.modules["google.generativeai.types"]
 
 
 def test_openrouter_model_candidates_include_gpt_oss_fallback() -> None:
