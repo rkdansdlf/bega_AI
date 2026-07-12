@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
 import httpx
@@ -16,6 +17,7 @@ from tenacity import (
 
 from ..config import get_settings
 from ..core.http_clients import get_shared_httpx_client
+from ..core.chat_model_usage import ModelCallOutcome
 from ..observability.metrics import AI_LLM_FALLBACK_TOTAL
 from .baseball_agent import BaseballAgentRuntime
 
@@ -125,6 +127,26 @@ def _classify_openrouter_fallback_reason(exception: Exception | None) -> str:
     return exception.__class__.__name__
 
 
+def _notify_usage_observer(
+    observer: Any,
+    *,
+    provider: str,
+    model: str,
+    messages: Sequence[Mapping[str, Any]],
+    output_text: str,
+    outcome: ModelCallOutcome,
+) -> None:
+    if observer is None:
+        return
+    observer(
+        provider=provider,
+        model=model,
+        messages=messages,
+        output_text=output_text,
+        outcome=outcome,
+    )
+
+
 def build_baseball_llm_generator(settings: Any):
     llm_logger = logging.getLogger("BaseballAgent")
 
@@ -163,7 +185,12 @@ def build_baseball_llm_generator(settings: Any):
             async for line in response.aiter_lines():
                 yield line
 
-    async def openrouter_generator(messages, max_tokens=None, model_override=None):
+    async def openrouter_generator(
+        messages,
+        max_tokens=None,
+        model_override=None,
+        usage_observer=None,
+    ):
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required.")
 
@@ -222,6 +249,7 @@ def build_baseball_llm_generator(settings: Any):
                 }
 
                 try:
+                    attempt_chunks: list[str] = []
                     chunk_count = 0
                     empty_choice_count = 0
                     malformed_chunk_count = 0
@@ -248,6 +276,7 @@ def build_baseball_llm_generator(settings: Any):
                                     malformed_chunk_count += 1
                                 if delta:
                                     chunk_count += 1
+                                    attempt_chunks.append(delta)
                                     yield delta
                             except json.JSONDecodeError:
                                 llm_logger.warning("[LLM] JSON decode failed for chunk")
@@ -259,6 +288,14 @@ def build_baseball_llm_generator(settings: Any):
                         and empty_choice_count > 0
                     )
                     if should_retry_empty:
+                        _notify_usage_observer(
+                            usage_observer,
+                            provider="openrouter",
+                            model=model,
+                            messages=messages,
+                            output_text="".join(attempt_chunks),
+                            outcome="failed",
+                        )
                         llm_logger.warning(
                             "[LLM] Empty completion chunk set detected for %s "
                             "(attempt %d/%d, empty_choice_count=%d malformed=%d)",
@@ -271,12 +308,28 @@ def build_baseball_llm_generator(settings: Any):
                         await asyncio.sleep(empty_chunk_backoff_ms / 1000.0)
                         continue
 
+                    _notify_usage_observer(
+                        usage_observer,
+                        provider="openrouter",
+                        model=model,
+                        messages=messages,
+                        output_text="".join(attempt_chunks),
+                        outcome="success",
+                    )
                     llm_logger.info(
                         "[LLM] Success: %d chunks from %s", chunk_count, model
                     )
                     return
 
                 except Exception as exc:  # noqa: BLE001
+                    _notify_usage_observer(
+                        usage_observer,
+                        provider="openrouter",
+                        model=model,
+                        messages=messages,
+                        output_text="".join(attempt_chunks),
+                        outcome="failed",
+                    )
                     llm_logger.error("[LLM] Model %s failed: %s", model, exc)
                     last_exception = exc
                     break
@@ -288,7 +341,12 @@ def build_baseball_llm_generator(settings: Any):
         )
         raise last_exception or RuntimeError("All models failed")
 
-    async def gemini_generator(messages, max_tokens=None, model_override=None):
+    async def gemini_generator(
+        messages,
+        max_tokens=None,
+        model_override=None,
+        usage_observer=None,
+    ):
         import google.generativeai as genai
         from google.generativeai.types import GenerationConfig
 
@@ -317,6 +375,7 @@ def build_baseball_llm_generator(settings: Any):
                 system_instruction=system_instruction,
             )
 
+        attempt_chunks: list[str] = []
         try:
             response = await model.generate_content_async(
                 gemini_messages,
@@ -328,10 +387,28 @@ def build_baseball_llm_generator(settings: Any):
             )
             async for chunk in response:
                 if chunk.text:
+                    attempt_chunks.append(chunk.text)
                     yield chunk.text
         except Exception as exc:  # noqa: BLE001
+            _notify_usage_observer(
+                usage_observer,
+                provider="gemini",
+                model=model_name,
+                messages=messages,
+                output_text="".join(attempt_chunks),
+                outcome="failed",
+            )
             llm_logger.error("Gemini generation failed: %s", exc)
             raise
+        else:
+            _notify_usage_observer(
+                usage_observer,
+                provider="gemini",
+                model=model_name,
+                messages=messages,
+                output_text="".join(attempt_chunks),
+                outcome="success",
+            )
 
     if settings.llm_provider == "gemini":
         return gemini_generator
