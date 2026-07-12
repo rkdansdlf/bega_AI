@@ -391,6 +391,12 @@ async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
                 payload["cached"] = False
                 payload["model_usage"] = []
                 payload["model_usage_complete"] = True
+                payload["fallback_triggered"] = bool(
+                    payload.get("fallback_triggered", False)
+                )
+                payload["fallback_answer_used"] = bool(
+                    payload.get("fallback_answer_used", False)
+                )
                 return payload
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatStatic] operator data fast-path skipped: %s", exc)
@@ -403,6 +409,10 @@ async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
     payload["cached"] = False
     payload["model_usage"] = []
     payload["model_usage_complete"] = True
+    payload["fallback_triggered"] = bool(payload.get("fallback_triggered", False))
+    payload["fallback_answer_used"] = bool(
+        payload.get("fallback_answer_used", False)
+    )
     return payload
 
 

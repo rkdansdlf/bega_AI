@@ -24,6 +24,50 @@ def test_catalog_uses_exact_provider_and_model_lookup() -> None:
     assert catalog.lookup("openrouter", "vendor/other") is None
 
 
+def test_catalog_normalizes_padded_provider_and_model_keys() -> None:
+    catalog = ModelPricingCatalog.from_json(
+        PRICING_JSON.replace('"openrouter"', '" openrouter "').replace(
+            '"vendor/planner"', '" vendor/planner "'
+        )
+    )
+
+    assert catalog.lookup("openrouter", "vendor/planner") is not None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"   ":{"model":{"input_usd_per_1m_tokens":"1","output_usd_per_1m_tokens":"2"}}}',
+        '{"provider":{"   ":{"input_usd_per_1m_tokens":"1","output_usd_per_1m_tokens":"2"}}}',
+    ],
+)
+def test_catalog_rejects_blank_normalized_keys(raw: str) -> None:
+    with pytest.raises(ValueError, match="blank"):
+        ModelPricingCatalog.from_json(raw)
+
+
+def test_catalog_rejects_provider_normalization_collisions() -> None:
+    raw = """{
+      "provider": {"one": {"input_usd_per_1m_tokens": "1", "output_usd_per_1m_tokens": "2"}},
+      " provider ": {"two": {"input_usd_per_1m_tokens": "1", "output_usd_per_1m_tokens": "2"}}
+    }"""
+
+    with pytest.raises(ValueError, match="provider.*collision"):
+        ModelPricingCatalog.from_json(raw)
+
+
+def test_catalog_rejects_model_normalization_collisions() -> None:
+    raw = """{
+      "provider": {
+        "model": {"input_usd_per_1m_tokens": "1", "output_usd_per_1m_tokens": "2"},
+        " model ": {"input_usd_per_1m_tokens": "1", "output_usd_per_1m_tokens": "2"}
+      }
+    }"""
+
+    with pytest.raises(ValueError, match="model.*collision"):
+        ModelPricingCatalog.from_json(raw)
+
+
 @pytest.mark.parametrize(
     "raw",
     [

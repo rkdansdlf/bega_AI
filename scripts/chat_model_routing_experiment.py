@@ -100,6 +100,18 @@ REPORT_ROOT_KEYS = {
     "summary",
     "details",
 }
+COMPARISON_ROOT_KEYS = {
+    "gate_passed",
+    "failure_reasons",
+    "baseline_planner_cost_positive",
+    "planner_reduction_percent",
+    "planner_reduction_passed",
+    "candidate_total_cost_non_increasing",
+    "candidate_quality_passed",
+    "no_new_failures",
+    "baseline_total_cost_usd",
+    "candidate_total_cost_usd",
+}
 
 
 class InvalidEvidenceError(ValueError):
@@ -441,9 +453,9 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
         if not any(record["role"] == "answer" for record in usage):
             raise InvalidEvidenceError("LLM planner mode requires answer usage")
 
-    planner_fallback = payload.get("fallback_triggered", False)
-    answer_fallback = payload.get("fallback_answer_used", False)
-    if not isinstance(planner_fallback, bool) or not isinstance(answer_fallback, bool):
+    planner_fallback = payload.get("fallback_triggered")
+    answer_fallback = payload.get("fallback_answer_used")
+    if type(planner_fallback) is not bool or type(answer_fallback) is not bool:
         raise InvalidEvidenceError("fallback flags must be booleans")
     answer = payload.get("answer")
     if not isinstance(answer, str):
@@ -810,9 +822,61 @@ def build_run_report(
     }
 
 
+def _validate_comparison(comparison: object, name: str) -> None:
+    if not isinstance(comparison, dict) or set(comparison) != COMPARISON_ROOT_KEYS:
+        raise InvalidEvidenceError(f"{name} report comparison schema is invalid")
+    boolean_fields = COMPARISON_ROOT_KEYS - {
+        "failure_reasons",
+        "planner_reduction_percent",
+        "baseline_total_cost_usd",
+        "candidate_total_cost_usd",
+    }
+    if any(type(comparison.get(field)) is not bool for field in boolean_fields):
+        raise InvalidEvidenceError(f"{name} report comparison schema is invalid")
+    failure_reasons = comparison.get("failure_reasons")
+    if not isinstance(failure_reasons, list) or any(
+        not isinstance(reason, str)
+        or not reason
+        or len(reason) > MAX_EVIDENCE_LABEL_LENGTH
+        or any(
+            not (char.isascii() and (char.isalnum() or char == "_"))
+            for char in reason
+        )
+        for reason in failure_reasons
+    ):
+        raise InvalidEvidenceError(f"{name} report comparison schema is invalid")
+    reduction = comparison.get("planner_reduction_percent")
+    if not isinstance(reduction, str) or len(reduction) > MAX_FIXED_USD_STRING_LENGTH:
+        raise InvalidEvidenceError(f"{name} report comparison schema is invalid")
+    try:
+        parsed_reduction = Decimal(reduction)
+        if (
+            not parsed_reduction.is_finite()
+            or reduction
+            != format(parsed_reduction.quantize(PERCENT_QUANTUM), ".2f")
+        ):
+            raise InvalidEvidenceError(f"{name} report comparison schema is invalid")
+    except (DecimalException, ValueError) as exc:
+        raise InvalidEvidenceError(f"{name} report comparison schema is invalid") from exc
+    _fixed_usd_evidence(
+        comparison.get("baseline_total_cost_usd"),
+        f"{name} comparison baseline total",
+    )
+    _fixed_usd_evidence(
+        comparison.get("candidate_total_cost_usd"),
+        f"{name} comparison candidate total",
+    )
+
+
 def _validate_report(report: object, name: str) -> dict[str, Any]:
-    if not isinstance(report, dict) or set(report) != REPORT_ROOT_KEYS:
+    if not isinstance(report, dict):
         raise InvalidEvidenceError(f"{name} report schema is invalid")
+    root_keys = set(report)
+    if root_keys not in (REPORT_ROOT_KEYS, REPORT_ROOT_KEYS | {"comparison"}):
+        raise InvalidEvidenceError(f"{name} report schema is invalid")
+    if "comparison" in report:
+        _validate_comparison(report["comparison"], name)
+    report = {key: report[key] for key in REPORT_ROOT_KEYS}
     if (
         type(report.get("schema_version")) is not int
         or report["schema_version"] != REPORT_SCHEMA_VERSION
