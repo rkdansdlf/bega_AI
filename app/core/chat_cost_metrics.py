@@ -87,10 +87,12 @@ def _model_usage_labels(record: ModelUsageEstimate) -> tuple[str, str, str]:
     if provider not in _MODEL_USAGE_PROVIDERS:
         provider = "unknown"
 
-    model = _bounded_model_usage_label(
-        record.model,
-        max_length=_MAX_MODEL_USAGE_LABEL_LENGTH,
-    )
+    model = "unknown"
+    if record.pricing_source == "model_catalog":
+        model = _bounded_model_usage_label(
+            record.model,
+            max_length=_MAX_MODEL_USAGE_LABEL_LENGTH,
+        )
     return role, provider, model
 
 

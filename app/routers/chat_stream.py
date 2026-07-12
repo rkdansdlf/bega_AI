@@ -2038,6 +2038,7 @@ async def chat_completion(
                 result["answer"] = _build_completion_fallback_answer(str(e))
         if public_error:
             result["error"] = public_error
+            result["verified"] = False
 
     if isinstance(result.get("answer"), str):
         result["answer"] = _ensure_quality_answer_text(result["answer"])

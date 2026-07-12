@@ -248,6 +248,53 @@ def test_ai_chat_completion_serializes_usage_after_answer_generator_consumes(
     assert body["model_usage_complete"] is True
 
 
+def test_ai_chat_completion_marks_terminal_answer_failure_incomplete_and_skips_cache(
+    client: TestClient,
+    ai_internal_headers: dict[str, str],
+    monkeypatch,
+):
+    async def fake_process_query(
+        self,
+        question: str,
+        context: dict[str, Any] | None = None,
+    ):
+        del self, question, context
+
+        async def answer_stream():
+            yield "partial"
+            raise RuntimeError("terminal answer failure")
+
+        return {
+            "answer": answer_stream(),
+            "tool_calls": [],
+            "tool_results": [],
+            "model_usage": [_FakeUsage()],
+            "verified": True,
+            "error": None,
+        }
+
+    save_caches = AsyncMock(return_value=None)
+    token_estimate = MagicMock()
+    monkeypatch.setattr(_FakeAgent, "process_query", fake_process_query)
+    monkeypatch.setattr(chat_stream, "_save_chat_response_caches", save_caches)
+    monkeypatch.setattr(chat_stream, "record_chat_token_estimate", token_estimate)
+
+    response = client.post(
+        "/ai/chat/completion",
+        json={"question": "현재 경기 관련 모의 질의"},
+        headers=ai_internal_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "partial"
+    assert body["error"] == "temporary_generation_issue"
+    assert body["verified"] is False
+    assert body["model_usage_complete"] is False
+    save_caches.assert_not_awaited()
+    token_estimate.assert_not_called()
+
+
 def test_ai_chat_completion_cache_hit_sets_cache_planner_metadata(
     client: TestClient,
     ai_internal_headers: dict[str, str],
@@ -670,6 +717,107 @@ async def test_chat_live_event_generator_emits_pipeline_answer_chunks():
     message_events = [event for event in events if event["event"] == "message"]
     assert len(message_events) == 1
     assert json.loads(message_events[0]["data"]) == {"delta": "HELLO"}
+
+
+@pytest.mark.asyncio
+async def test_chat_live_event_generator_finalizes_usage_after_answer_exhaustion():
+    usage: list[_FakeUsage] = []
+
+    async def stream():
+        yield {
+            "type": "metadata",
+            "data": {"intent": "freeform", "verified": True, "model_usage": usage},
+        }
+        yield {"type": "answer_chunk", "content": "HELLO"}
+        usage.append(_FakeUsage())
+
+    events = [
+        event
+        async for event in chat_stream._chat_live_event_generator(
+            request=None,
+            question="test",
+            filters=None,
+            style="markdown",
+            cache_key=None,
+            stream=stream(),
+        )
+    ]
+
+    meta = json.loads(next(event["data"] for event in events if event["event"] == "meta"))
+    assert meta["model_usage"] == [_FakeUsage().to_dict()]
+    assert meta["model_usage_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_chat_live_event_generator_marks_usage_incomplete_on_early_close():
+    disconnects = iter([False, False, True, False])
+
+    class _Request:
+        async def is_disconnected(self) -> bool:
+            return next(disconnects, False)
+
+    async def stream():
+        yield {"type": "answer_chunk", "content": "first"}
+        yield {"type": "answer_chunk", "content": " second"}
+
+    events = [
+        event
+        async for event in chat_stream._chat_live_event_generator(
+            request=_Request(),
+            question="test",
+            filters=None,
+            style="markdown",
+            cache_key=None,
+            stream=stream(),
+        )
+    ]
+
+    meta = json.loads(next(event["data"] for event in events if event["event"] == "meta"))
+    assert meta["model_usage_complete"] is False
+    assert meta["finish_reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_chat_live_event_generator_marks_terminal_answer_failure_incomplete(
+    monkeypatch,
+):
+    async def stream():
+        yield {
+            "type": "metadata",
+            "data": {"intent": "freeform", "verified": True, "model_usage": [_FakeUsage()]},
+        }
+        yield {"type": "answer_chunk", "content": "partial"}
+        raise RuntimeError("terminal answer failure")
+
+    save_caches = AsyncMock(return_value=None)
+    token_estimate = MagicMock()
+    monkeypatch.setattr(chat_stream, "_save_chat_response_caches", save_caches)
+    monkeypatch.setattr(chat_stream, "record_chat_token_estimate", token_estimate)
+
+    events = [
+        event
+        async for event in chat_stream._chat_live_event_generator(
+            request=None,
+            question="test",
+            filters=None,
+            style="markdown",
+            cache_key="cache-key",
+            stream=stream(),
+        )
+    ]
+
+    message_events = [event for event in events if event["event"] == "message"]
+    error_events = [event for event in events if event["event"] == "error"]
+    meta = json.loads(next(event["data"] for event in events if event["event"] == "meta"))
+    assert len(message_events) == 2
+    assert json.loads(message_events[0]["data"]) == {"delta": "partial"}
+    assert json.loads(message_events[1]["data"])["delta"].startswith("지금 답변이")
+    assert len(error_events) == 1
+    assert meta["model_usage_complete"] is False
+    assert meta["finish_reason"] == "error"
+    assert meta["error"] == "temporary_generation_issue"
+    save_caches.assert_not_awaited()
+    token_estimate.assert_not_called()
 
 
 @pytest.mark.asyncio
