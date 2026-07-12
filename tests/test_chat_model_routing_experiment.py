@@ -401,6 +401,82 @@ def test_fixed_costs_fail_closed_for_huge_magnitudes(value: str) -> None:
         experiment._fixed_usd(experiment.Decimal(value))
 
 
+def test_extreme_fixed_cost_comparison_is_a_controlled_gate_failure() -> None:
+    comparison = experiment.compare_reports(
+        _report(planner_cost="0.000000000001"),
+        _report(planner_cost="999999999999999.000000000000"),
+    )
+
+    assert comparison["gate_passed"] is False
+    assert comparison["planner_reduction_percent"] == (
+        "-99999999999999899999999999900.00"
+    )
+    assert comparison["candidate_total_cost_non_increasing"] is False
+    assert experiment.report_exit_code({}, comparison) == 1
+
+
+def test_overlong_fixed_cost_is_invalid_evidence() -> None:
+    overlong = "9" * 200 + ".000000000000"
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._fixed_usd_evidence(overlong, "cost")
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._fixed_usd(experiment.Decimal(overlong))
+
+
+def test_increased_failed_model_attempts_are_a_new_failure() -> None:
+    baseline_details = deepcopy(_report(planner_cost="1.000000000000")["details"])
+    candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+
+    for details, attempt_count in (
+        (baseline_details, 1),
+        (candidate_details, 2),
+    ):
+        usage = [
+            _usage("planner", "0.000000000001", outcome="failed"),
+            _usage("answer", "0.000000000001"),
+        ]
+        if attempt_count == 2:
+            usage.insert(1, _usage("planner", "0.000000000001", outcome="failed"))
+        details[0].update(
+            model_usage=usage,
+            failed_model_attempts=attempt_count,
+            failure_reasons=["failed_model_attempt"],
+            passed=False,
+        )
+
+    comparison = experiment.compare_reports(
+        _report_from_details(baseline_details),
+        _report_from_details(candidate_details),
+    )
+
+    assert comparison["no_new_failures"] is False
+    assert "candidate_introduced_new_failure" in comparison["failure_reasons"]
+
+
+def test_equal_failed_model_attempts_are_not_a_new_failure() -> None:
+    baseline_details = deepcopy(_report(planner_cost="1.000000000000")["details"])
+    candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+    failed_usage = [
+        _usage("planner", "0.000000000001", outcome="failed"),
+        _usage("answer", "0.000000000001"),
+    ]
+    for details in (baseline_details, candidate_details):
+        details[0].update(
+            model_usage=failed_usage,
+            failed_model_attempts=1,
+            failure_reasons=["failed_model_attempt"],
+            passed=False,
+        )
+
+    comparison = experiment.compare_reports(
+        _report_from_details(baseline_details),
+        _report_from_details(candidate_details),
+    )
+
+    assert comparison["no_new_failures"] is True
+
+
 @pytest.mark.parametrize(
     "mutation,reason",
     [

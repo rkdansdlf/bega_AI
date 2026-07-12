@@ -6,7 +6,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
-from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
+from decimal import (
+    Decimal,
+    DecimalException,
+    ROUND_HALF_UP,
+    localcontext,
+)
 import hashlib
 import json
 import math
@@ -58,6 +63,9 @@ USAGE_ROLES = {"planner", "answer"}
 FORBIDDEN_MODEL_LABELS = {"default", "unknown"}
 USD_QUANTUM = Decimal("0.000000000001")
 PERCENT_QUANTUM = Decimal("0.01")
+MAX_FIXED_USD_STRING_LENGTH = 64
+MAX_FIXED_USD_INTEGER_DIGITS = MAX_FIXED_USD_STRING_LENGTH - len(".000000000000")
+COST_ARITHMETIC_PRECISION = MAX_FIXED_USD_STRING_LENGTH * 2 + 32
 MAX_PLANNER_MODE_LENGTH = 128
 HTTP_STATUS_MIN = 100
 HTTP_STATUS_MAX = 599
@@ -232,7 +240,7 @@ def _decimal(value: object, field: str) -> Decimal:
         raise InvalidEvidenceError(f"{field} must be a decimal")
     try:
         parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
+    except (DecimalException, ValueError) as exc:
         raise InvalidEvidenceError(f"{field} must be a decimal") from exc
     if not parsed.is_finite() or parsed < 0:
         raise InvalidEvidenceError(f"{field} must be finite and non-negative")
@@ -240,15 +248,35 @@ def _decimal(value: object, field: str) -> Decimal:
 
 
 def _fixed_usd(value: Decimal) -> str:
+    if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
+        raise InvalidEvidenceError("USD amount cannot be represented safely")
     try:
-        return format(value.quantize(USD_QUANTUM), ".12f")
+        integer_digits = 1 if value.is_zero() else max(value.adjusted() + 1, 1)
+        if integer_digits > MAX_FIXED_USD_INTEGER_DIGITS:
+            raise InvalidEvidenceError("USD amount cannot be represented safely")
+        precision = max(
+            COST_ARITHMETIC_PRECISION,
+            len(value.as_tuple().digits) + 16,
+            integer_digits + len(".000000000000") + 16,
+        )
     except (DecimalException, OverflowError, ValueError) as exc:
         raise InvalidEvidenceError("USD amount cannot be represented safely") from exc
+    try:
+        with localcontext() as context:
+            context.prec = precision
+            rendered = format(value.quantize(USD_QUANTUM), ".12f")
+    except (DecimalException, OverflowError, ValueError) as exc:
+        raise InvalidEvidenceError("USD amount cannot be represented safely") from exc
+    if len(rendered) > MAX_FIXED_USD_STRING_LENGTH:
+        raise InvalidEvidenceError("USD amount cannot be represented safely")
+    return rendered
 
 
 def _fixed_usd_evidence(value: object, field: str) -> Decimal:
     if not isinstance(value, str):
         raise InvalidEvidenceError(f"{field} must be a fixed decimal string")
+    if len(value) > MAX_FIXED_USD_STRING_LENGTH:
+        raise InvalidEvidenceError(f"{field} must be a bounded fixed decimal string")
     parsed = _decimal(value, field)
     if value != _fixed_usd(parsed):
         raise InvalidEvidenceError(f"{field} must use 12 decimal places")
@@ -702,13 +730,15 @@ def build_run_report(
         raise InvalidEvidenceError("result case ids do not match the golden order")
 
     _validate_observed_models(sanitized_results, planner_label, answer_label)
-    role_totals = {"planner": Decimal("0"), "answer": Decimal("0")}
-    for detail in sanitized_results:
-        for usage in detail.get("model_usage", []):
-            role_totals[usage["role"]] += _decimal(
-                usage["total_cost_usd"], "usage total cost"
-            )
-    total = role_totals["planner"] + role_totals["answer"]
+    with localcontext() as context:
+        context.prec = COST_ARITHMETIC_PRECISION
+        role_totals = {"planner": Decimal("0"), "answer": Decimal("0")}
+        for detail in sanitized_results:
+            for usage in detail.get("model_usage", []):
+                role_totals[usage["role"]] += _decimal(
+                    usage["total_cost_usd"], "usage total cost"
+                )
+        total = role_totals["planner"] + role_totals["answer"]
     latencies = [float(detail["latency_ms"]) for detail in sanitized_results]
     success_count = sum(bool(detail.get("http_ok")) for detail in sanitized_results)
     quality_passed = all(bool(detail.get("passed")) for detail in sanitized_results)
@@ -780,15 +810,17 @@ def _validate_report(report: object, name: str) -> dict[str, Any]:
 
     planner_label = str(report["planner_model_label"]).strip()
     answer_label = str(report["answer_model_label"]).strip()
-    recomputed = {"planner": Decimal("0"), "answer": Decimal("0")}
-    for detail in sanitized_details:
-        for usage in detail["model_usage"]:
-            expected_model = planner_label if usage["role"] == "planner" else answer_label
-            if usage["model"] != expected_model:
-                raise InvalidEvidenceError(f"{name} observed model does not match label")
-            recomputed[usage["role"]] += _decimal(
-                usage["total_cost_usd"], f"{name} usage total"
-            )
+    with localcontext() as context:
+        context.prec = COST_ARITHMETIC_PRECISION
+        recomputed = {"planner": Decimal("0"), "answer": Decimal("0")}
+        for detail in sanitized_details:
+            for usage in detail["model_usage"]:
+                expected_model = planner_label if usage["role"] == "planner" else answer_label
+                if usage["model"] != expected_model:
+                    raise InvalidEvidenceError(f"{name} observed model does not match label")
+                recomputed[usage["role"]] += _decimal(
+                    usage["total_cost_usd"], f"{name} usage total"
+                )
 
     totals = report.get("cost_totals_usd")
     if not isinstance(totals, dict):
@@ -862,36 +894,51 @@ def compare_reports(
     if baseline["answer_model_label"] != candidate["answer_model_label"]:
         raise InvalidEvidenceError("answer model label changed")
 
-    baseline_planner = _decimal(
-        baseline["cost_totals_usd"]["planner"], "baseline planner total"
-    )
-    candidate_planner = _decimal(
-        candidate["cost_totals_usd"]["planner"], "candidate planner total"
-    )
-    baseline_total = _decimal(
-        baseline["cost_totals_usd"]["total"], "baseline total"
-    )
-    candidate_total = _decimal(
-        candidate["cost_totals_usd"]["total"], "candidate total"
-    )
+    try:
+        with localcontext() as context:
+            context.prec = COST_ARITHMETIC_PRECISION
+            baseline_planner = _decimal(
+                baseline["cost_totals_usd"]["planner"], "baseline planner total"
+            )
+            candidate_planner = _decimal(
+                candidate["cost_totals_usd"]["planner"], "candidate planner total"
+            )
+            baseline_total = _decimal(
+                baseline["cost_totals_usd"]["total"], "baseline total"
+            )
+            candidate_total = _decimal(
+                candidate["cost_totals_usd"]["total"], "candidate total"
+            )
 
-    baseline_planner_positive = baseline_planner > 0
-    if baseline_planner_positive:
-        planner_reduction = (
-            (baseline_planner - candidate_planner) / baseline_planner * Decimal("100")
-        )
-    else:
-        planner_reduction = Decimal("0")
-    planner_reduction_passed = (
-        baseline_planner_positive and planner_reduction >= Decimal("20.00")
-    )
-    total_non_increasing = candidate_total <= baseline_total
+            baseline_planner_positive = baseline_planner > 0
+            if baseline_planner_positive:
+                planner_reduction = (
+                    (baseline_planner - candidate_planner)
+                    / baseline_planner
+                    * Decimal("100")
+                )
+            else:
+                planner_reduction = Decimal("0")
+            planner_reduction_passed = (
+                baseline_planner_positive and planner_reduction >= Decimal("20.00")
+            )
+            total_non_increasing = candidate_total <= baseline_total
+            planner_reduction_string = format(
+                planner_reduction.quantize(PERCENT_QUANTUM, rounding=ROUND_HALF_UP),
+                ".2f",
+            )
+            baseline_total_string = _fixed_usd(baseline_total)
+            candidate_total_string = _fixed_usd(candidate_total)
+    except (DecimalException, OverflowError, ValueError) as exc:
+        raise InvalidEvidenceError("report costs cannot be compared safely") from exc
 
     no_new_failures = all(
         not (
             set(candidate_case["failure_reasons"])
             - set(baseline_case["failure_reasons"])
         )
+        and candidate_case["failed_model_attempts"]
+        <= baseline_case["failed_model_attempts"]
         for baseline_case, candidate_case in zip(
             baseline["details"], candidate["details"], strict=True
         )
@@ -924,16 +971,13 @@ def compare_reports(
         "gate_passed": gate_passed,
         "failure_reasons": failure_reasons,
         "baseline_planner_cost_positive": baseline_planner_positive,
-        "planner_reduction_percent": format(
-            planner_reduction.quantize(PERCENT_QUANTUM, rounding=ROUND_HALF_UP),
-            ".2f",
-        ),
+        "planner_reduction_percent": planner_reduction_string,
         "planner_reduction_passed": planner_reduction_passed,
         "candidate_total_cost_non_increasing": total_non_increasing,
         "candidate_quality_passed": candidate_quality_passed,
         "no_new_failures": no_new_failures,
-        "baseline_total_cost_usd": _fixed_usd(baseline_total),
-        "candidate_total_cost_usd": _fixed_usd(candidate_total),
+        "baseline_total_cost_usd": baseline_total_string,
+        "candidate_total_cost_usd": candidate_total_string,
     }
 
 
