@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
@@ -27,6 +28,14 @@ from scripts.smoke_chatbot_quality import (
 
 EXPECTED_CASE_COUNT = 60
 REPORT_SCHEMA_VERSION = 1
+APPROVED_GOLDEN_SHA256 = "8899b468d65a87a505083a5f229808a0b9b405819287f00ff707741715bb124d"
+APPROVED_GOLDEN_PATH = Path(__file__).with_name("chat_quality_golden_60.json")
+APPROVED_CATEGORY_COUNTS = {
+    "multi_player_narrative": 20,
+    "regulation": 20,
+    "team_db": 14,
+    "recovered_regression": 6,
+}
 DETERMINISTIC_PLANNER_MODES = {
     "fast_path",
     "fast_path_bundle",
@@ -49,6 +58,22 @@ USAGE_ROLES = {"planner", "answer"}
 FORBIDDEN_MODEL_LABELS = {"default", "unknown"}
 USD_QUANTUM = Decimal("0.000000000001")
 PERCENT_QUANTUM = Decimal("0.01")
+QUALITY_KEYS = {
+    "natural_chat",
+    "no_table_markup",
+    "no_briefing_headers",
+    "no_source_line",
+    "no_raw_chunk_marker",
+    "no_briefing_intro",
+    "no_low_data_fallback",
+}
+NATURAL_CHAT_KEYS = {
+    "no_table_markup",
+    "no_briefing_headers",
+    "no_source_line",
+    "no_raw_chunk_marker",
+    "no_briefing_intro",
+}
 
 
 class InvalidEvidenceError(ValueError):
@@ -107,6 +132,8 @@ def _case_contract(case: object) -> dict[str, Any]:
     case_id = _require_nonblank_string(case.get("id"), "case id")
     question = _require_nonblank_string(case.get("question"), "case question")
     category = _require_nonblank_string(case.get("category"), "case category")
+    if category not in APPROVED_CATEGORY_COUNTS:
+        raise InvalidEvidenceError("golden case category is unsupported")
     expected = _require_nonblank_string(
         case.get("expected_answerability"), "expected answerability"
     )
@@ -131,6 +158,21 @@ def _case_contract(case: object) -> dict[str, Any]:
     }
 
 
+def _validated_golden_cases(cases: object) -> list[dict[str, Any]]:
+    if not isinstance(cases, list) or len(cases) != EXPECTED_CASE_COUNT:
+        raise InvalidEvidenceError("release evidence requires exactly 60 cases")
+    validated = [_case_contract(case) for case in cases]
+    case_ids = [case["id"] for case in validated]
+    questions = [case["question"] for case in validated]
+    if len(case_ids) != len(set(case_ids)):
+        raise InvalidEvidenceError("golden case ids must be unique")
+    if len(questions) != len(set(questions)):
+        raise InvalidEvidenceError("golden case questions must be unique")
+    if Counter(case["category"] for case in validated) != APPROVED_CATEGORY_COUNTS:
+        raise InvalidEvidenceError("golden case category counts are invalid")
+    return validated
+
+
 def load_golden_cases(path: Path) -> tuple[str, list[dict[str, Any]]]:
     """Load schema-1 golden cases and return the hash of the exact input bytes."""
 
@@ -142,16 +184,26 @@ def load_golden_cases(path: Path) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(payload, dict):
         raise InvalidEvidenceError("golden dataset root must be an object")
     cases = payload.get("cases")
+    if set(payload) != {
+        "schema_version",
+        "name",
+        "description",
+        "baseball_data_policy",
+        "cases",
+    }:
+        raise InvalidEvidenceError("unsupported golden dataset")
     if payload.get("schema_version") != 1 or not isinstance(cases, list):
         raise InvalidEvidenceError("unsupported golden dataset")
+    _require_nonblank_string(payload.get("name"), "golden dataset name")
+    _require_nonblank_string(payload.get("description"), "golden dataset description")
     if payload.get("baseball_data_policy") != "internal_only":
         raise InvalidEvidenceError("golden dataset must use internal baseball data")
 
-    validated = [_case_contract(case) for case in cases]
-    case_ids = [case["id"] for case in validated]
-    if len(case_ids) != len(set(case_ids)):
-        raise InvalidEvidenceError("golden case ids must be unique")
-    return hashlib.sha256(raw).hexdigest(), validated
+    validated = _validated_golden_cases(cases)
+    dataset_sha256 = hashlib.sha256(raw).hexdigest()
+    if dataset_sha256 != APPROVED_GOLDEN_SHA256:
+        raise InvalidEvidenceError("golden dataset hash is not approved")
+    return dataset_sha256, validated
 
 
 def _decimal(value: object, field: str) -> Decimal:
@@ -168,6 +220,15 @@ def _decimal(value: object, field: str) -> Decimal:
 
 def _fixed_usd(value: Decimal) -> str:
     return format(value.quantize(USD_QUANTUM), ".12f")
+
+
+def _fixed_usd_evidence(value: object, field: str) -> Decimal:
+    if not isinstance(value, str):
+        raise InvalidEvidenceError(f"{field} must be a fixed decimal string")
+    parsed = _decimal(value, field)
+    if value != _fixed_usd(parsed):
+        raise InvalidEvidenceError(f"{field} must use 12 decimal places")
+    return parsed
 
 
 def _nonnegative_int(value: object, field: str) -> int:
@@ -190,10 +251,10 @@ def _sanitize_usage(raw: object) -> dict[str, Any]:
     if raw.get("pricing_source") != "model_catalog":
         raise InvalidEvidenceError("all observed model usage must be catalog priced")
 
-    input_cost = _decimal(raw.get("input_cost_usd"), "input cost")
-    output_cost = _decimal(raw.get("output_cost_usd"), "output cost")
-    total_cost = _decimal(raw.get("total_cost_usd"), "total cost")
-    if input_cost + output_cost != total_cost:
+    input_cost = _fixed_usd_evidence(raw.get("input_cost_usd"), "input cost")
+    output_cost = _fixed_usd_evidence(raw.get("output_cost_usd"), "output cost")
+    total_cost = _fixed_usd_evidence(raw.get("total_cost_usd"), "total cost")
+    if abs(input_cost + output_cost - total_cost) > USD_QUANTUM:
         raise InvalidEvidenceError("usage cost components do not equal total cost")
 
     return {
@@ -256,6 +317,7 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
             "planner_mode_allowed": False,
             "planner_fallback": False,
             "answer_fallback": False,
+            "fallback_reason_present": False,
             "unexpected_non_answer": False,
             "answerability_status": None,
             "quality": {},
@@ -300,6 +362,7 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
     planner_mode_allowed = planner_mode in golden["allowed_planner_modes"]
     unexpected_non_answer = actual_answerability != expected_answerability
     failed_attempts = sum(record["outcome"] == "failed" for record in usage)
+    fallback_reason_present = bool(payload.get("fallback_reason"))
 
     failure_reasons: list[str] = []
     if not _quality_pass(quality):
@@ -312,6 +375,8 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
         failure_reasons.append("planner_fallback")
     if answer_fallback:
         failure_reasons.append("answer_fallback")
+    if fallback_reason_present:
+        failure_reasons.append("fallback_reason")
     if failed_attempts:
         failure_reasons.append("failed_model_attempt")
 
@@ -323,7 +388,7 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
         "planner_mode_allowed": planner_mode_allowed,
         "planner_fallback": planner_fallback,
         "answer_fallback": answer_fallback,
-        "fallback_reason_present": bool(payload.get("fallback_reason")),
+        "fallback_reason_present": fallback_reason_present,
         "unexpected_non_answer": unexpected_non_answer,
         "answerability_status": actual_answerability,
         "quality": quality,
@@ -402,12 +467,7 @@ async def run_golden_cases(
 
 
 def _validated_case_ids(cases: list[dict[str, Any]]) -> list[str]:
-    if len(cases) != EXPECTED_CASE_COUNT:
-        raise InvalidEvidenceError("release evidence requires exactly 60 cases")
-    ids = [_case_contract(case)["id"] for case in cases]
-    if len(ids) != len(set(ids)):
-        raise InvalidEvidenceError("release evidence contains duplicate cases")
-    return ids
+    return [case["id"] for case in _validated_golden_cases(cases)]
 
 
 def _validate_observed_models(
@@ -423,7 +483,9 @@ def _validate_observed_models(
                 raise InvalidEvidenceError(f"observed {role} model does not match label")
 
 
-def _sanitize_case_detail(raw: object) -> dict[str, Any]:
+def _sanitize_case_detail(
+    raw: object, golden_case: dict[str, Any]
+) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise InvalidEvidenceError("case details must be objects")
     failure_reasons = raw.get("failure_reasons")
@@ -431,12 +493,6 @@ def _sanitize_case_detail(raw: object) -> dict[str, Any]:
         isinstance(reason, str) for reason in failure_reasons
     ):
         raise InvalidEvidenceError("case failure reasons must be a list of strings")
-    quality = raw.get("quality")
-    if not isinstance(quality, dict) or not all(
-        isinstance(key, str) and isinstance(value, bool)
-        for key, value in quality.items()
-    ):
-        raise InvalidEvidenceError("case quality evidence is invalid")
     http_ok = raw.get("http_ok")
     passed = raw.get("passed")
     if not isinstance(http_ok, bool) or not isinstance(passed, bool):
@@ -454,12 +510,10 @@ def _sanitize_case_detail(raw: object) -> dict[str, Any]:
         "planner_fallback",
         "answer_fallback",
         "unexpected_non_answer",
+        "fallback_reason_present",
     )
     if any(not isinstance(raw.get(field), bool) for field in boolean_fields):
         raise InvalidEvidenceError("case routing flags must be booleans")
-    fallback_reason_present = raw.get("fallback_reason_present", False)
-    if not isinstance(fallback_reason_present, bool):
-        raise InvalidEvidenceError("case fallback reason marker must be boolean")
     answerability_status = raw.get("answerability_status")
     if answerability_status is not None:
         answerability_status = _require_nonblank_string(
@@ -476,11 +530,86 @@ def _sanitize_case_detail(raw: object) -> dict[str, Any]:
         record["outcome"] == "failed" for record in sanitized_usage
     ):
         raise InvalidEvidenceError("failed model attempt count is inconsistent")
+    detail_id = _require_nonblank_string(raw.get("id"), "case detail id")
+    category = _require_nonblank_string(raw.get("category"), "case detail category")
+    if detail_id != golden_case["id"] or category != golden_case["category"]:
+        raise InvalidEvidenceError("case detail does not match the approved dataset")
+
+    quality = raw.get("quality")
+    if http_ok:
+        if not isinstance(status_code, int) or not 200 <= status_code < 300:
+            raise InvalidEvidenceError("successful case HTTP status is invalid")
+        if planner_mode not in APPROVED_PLANNER_MODES:
+            raise InvalidEvidenceError("successful case planner mode is unsupported")
+        if answerability_status not in APPROVED_ANSWERABILITY:
+            raise InvalidEvidenceError("successful case answerability status is unsupported")
+        if not isinstance(quality, dict) or set(quality) != QUALITY_KEYS or not all(
+            isinstance(value, bool) for value in quality.values()
+        ):
+            raise InvalidEvidenceError("successful case quality evidence is invalid")
+        natural_chat = all(quality[key] for key in NATURAL_CHAT_KEYS)
+        if quality["natural_chat"] is not natural_chat:
+            raise InvalidEvidenceError("successful case natural-chat evidence is inconsistent")
+        planner_mode_allowed = planner_mode in golden_case["allowed_planner_modes"]
+        unexpected_non_answer = (
+            answerability_status != golden_case["expected_answerability"]
+        )
+        if raw["planner_mode_allowed"] is not planner_mode_allowed:
+            raise InvalidEvidenceError("successful case planner-mode evidence is inconsistent")
+        if raw["unexpected_non_answer"] is not unexpected_non_answer:
+            raise InvalidEvidenceError("successful case answerability evidence is inconsistent")
+        if planner_mode in LLM_PLANNER_MODES and not any(
+            usage["role"] == "planner" for usage in sanitized_usage
+        ):
+            raise InvalidEvidenceError("successful case LLM planner usage is missing")
+        if planner_mode in LLM_PLANNER_MODES and not any(
+            usage["role"] == "answer" for usage in sanitized_usage
+        ):
+            raise InvalidEvidenceError("successful case LLM answer usage is missing")
+        expected_failure_reasons: list[str] = []
+        if not _quality_pass(quality):
+            expected_failure_reasons.append("quality")
+        if unexpected_non_answer:
+            expected_failure_reasons.append("answerability")
+        if not planner_mode_allowed:
+            expected_failure_reasons.append("planner_mode")
+        if raw["planner_fallback"]:
+            expected_failure_reasons.append("planner_fallback")
+        if raw["answer_fallback"]:
+            expected_failure_reasons.append("answer_fallback")
+        if raw["fallback_reason_present"]:
+            expected_failure_reasons.append("fallback_reason")
+        if failed_model_attempts:
+            expected_failure_reasons.append("failed_model_attempt")
+        expected_passed = not expected_failure_reasons
+        if failure_reasons != expected_failure_reasons or passed is not expected_passed:
+            raise InvalidEvidenceError("successful case outcome evidence is inconsistent")
+    else:
+        if failure_reasons not in (["http_error"], ["transport_error"]):
+            raise InvalidEvidenceError("failed case reason is invalid")
+        if passed is not False or sanitized_usage or failed_model_attempts != 0:
+            raise InvalidEvidenceError("failed case usage evidence is invalid")
+        if (
+            planner_mode is not None
+            or raw["planner_mode_allowed"] is not False
+            or raw["planner_fallback"] is not False
+            or raw["answer_fallback"] is not False
+            or raw["fallback_reason_present"] is not False
+            or raw["unexpected_non_answer"] is not False
+            or answerability_status is not None
+            or quality != {}
+        ):
+            raise InvalidEvidenceError("failed case routing evidence is invalid")
+        if failure_reasons == ["transport_error"] and status_code is not None:
+            raise InvalidEvidenceError("transport failure status is invalid")
+        if failure_reasons == ["http_error"] and (
+            not isinstance(status_code, int) or 200 <= status_code < 300
+        ):
+            raise InvalidEvidenceError("HTTP failure status is invalid")
+
     return {
-        "id": _require_nonblank_string(raw.get("id"), "case detail id"),
-        "category": _require_nonblank_string(
-            raw.get("category"), "case detail category"
-        ),
+        "id": detail_id,
+        "category": category,
         "http_ok": http_ok,
         "status_code": status_code,
         "latency_ms": _latency_ms(raw.get("latency_ms")),
@@ -490,7 +619,7 @@ def _sanitize_case_detail(raw: object) -> dict[str, Any]:
         "planner_mode_allowed": raw["planner_mode_allowed"],
         "planner_fallback": raw["planner_fallback"],
         "answer_fallback": raw["answer_fallback"],
-        "fallback_reason_present": fallback_reason_present,
+        "fallback_reason_present": raw["fallback_reason_present"],
         "unexpected_non_answer": raw["unexpected_non_answer"],
         "answerability_status": answerability_status,
         "quality": dict(quality),
@@ -511,17 +640,22 @@ def build_run_report(
     """Build a complete, sanitized 60-case report with exact Decimal totals."""
 
     dataset_hash = _require_nonblank_string(dataset_sha256, "dataset SHA-256")
-    if len(dataset_hash) != 64 or any(char not in "0123456789abcdef" for char in dataset_hash):
-        raise InvalidEvidenceError("dataset SHA-256 is invalid")
+    if dataset_hash != APPROVED_GOLDEN_SHA256:
+        raise InvalidEvidenceError("dataset SHA-256 is not approved")
     planner_label = _explicit_model_label(planner_model_label, "planner model label")
     answer_label = _explicit_model_label(answer_model_label, "answer model label")
     if cache_bypass is not True:
         raise InvalidEvidenceError("release evidence requires cache bypass")
 
+    approved_hash, approved_cases = load_golden_cases(APPROVED_GOLDEN_PATH)
+    if approved_hash != dataset_hash or cases != approved_cases:
+        raise InvalidEvidenceError("release cases do not match the approved dataset")
     ordered_ids = _validated_case_ids(cases)
     if len(results) != EXPECTED_CASE_COUNT:
         raise InvalidEvidenceError("release evidence is incomplete")
-    sanitized_results = [_sanitize_case_detail(result) for result in results]
+    sanitized_results = [
+        _sanitize_case_detail(result, case) for result, case in zip(results, cases)
+    ]
     result_ids = [result["id"] for result in sanitized_results]
     if result_ids != ordered_ids or len(set(result_ids)) != EXPECTED_CASE_COUNT:
         raise InvalidEvidenceError("result case ids do not match the golden order")
@@ -581,21 +715,24 @@ def _validate_report(report: object, name: str) -> dict[str, Any]:
     dataset_hash = _require_nonblank_string(
         report.get("dataset_sha256"), f"{name} dataset hash"
     )
-    if len(dataset_hash) != 64 or any(char not in "0123456789abcdef" for char in dataset_hash):
-        raise InvalidEvidenceError(f"{name} dataset hash is invalid")
+    if dataset_hash != APPROVED_GOLDEN_SHA256:
+        raise InvalidEvidenceError(f"{name} dataset hash is not approved")
 
     ordered_ids = report.get("ordered_case_ids")
     details = report.get("details")
     if not isinstance(ordered_ids, list) or not isinstance(details, list):
         raise InvalidEvidenceError(f"{name} case evidence is invalid")
-    sanitized_details = [_sanitize_case_detail(detail) for detail in details]
-    report = {**report, "details": sanitized_details}
-    details = sanitized_details
-    if len(ordered_ids) != EXPECTED_CASE_COUNT or len(set(ordered_ids)) != EXPECTED_CASE_COUNT:
-        raise InvalidEvidenceError(f"{name} report must contain 60 unique cases")
-    if len(details) != EXPECTED_CASE_COUNT:
+    _, approved_cases = load_golden_cases(APPROVED_GOLDEN_PATH)
+    approved_ids = [case["id"] for case in approved_cases]
+    if ordered_ids != approved_ids or len(details) != EXPECTED_CASE_COUNT:
+        raise InvalidEvidenceError(f"{name} report cases do not match the approved dataset")
+    sanitized_details = [
+        _sanitize_case_detail(detail, case)
+        for detail, case in zip(details, approved_cases)
+    ]
+    if len(sanitized_details) != EXPECTED_CASE_COUNT:
         raise InvalidEvidenceError(f"{name} report details are incomplete")
-    if [detail.get("id") if isinstance(detail, dict) else None for detail in details] != ordered_ids:
+    if [detail["id"] for detail in sanitized_details] != ordered_ids:
         raise InvalidEvidenceError(f"{name} detail order does not match case ids")
     if report.get("case_count") != EXPECTED_CASE_COUNT:
         raise InvalidEvidenceError(f"{name} case count is invalid")
@@ -603,28 +740,8 @@ def _validate_report(report: object, name: str) -> dict[str, Any]:
     planner_label = str(report["planner_model_label"]).strip()
     answer_label = str(report["answer_model_label"]).strip()
     recomputed = {"planner": Decimal("0"), "answer": Decimal("0")}
-    for detail in details:
-        if not isinstance(detail.get("http_ok"), bool) or not isinstance(
-            detail.get("passed"), bool
-        ):
-            raise InvalidEvidenceError(f"{name} detail outcome is invalid")
-        usage_list = detail.get("model_usage")
-        if not isinstance(usage_list, list):
-            raise InvalidEvidenceError(f"{name} detail usage is invalid")
-        sanitized_usage = [_sanitize_usage(usage) for usage in usage_list]
-        if detail.get("http_ok"):
-            mode = _require_nonblank_string(
-                detail.get("planner_mode"), f"{name} planner mode"
-            )
-            if mode in LLM_PLANNER_MODES and not any(
-                usage["role"] == "planner" for usage in sanitized_usage
-            ):
-                raise InvalidEvidenceError(f"{name} LLM planner usage is missing")
-            if mode in LLM_PLANNER_MODES and not any(
-                usage["role"] == "answer" for usage in sanitized_usage
-            ):
-                raise InvalidEvidenceError(f"{name} LLM answer usage is missing")
-        for usage in sanitized_usage:
+    for detail in sanitized_details:
+        for usage in detail["model_usage"]:
             expected_model = planner_label if usage["role"] == "planner" else answer_label
             if usage["model"] != expected_model:
                 raise InvalidEvidenceError(f"{name} observed model does not match label")
@@ -635,16 +752,59 @@ def _validate_report(report: object, name: str) -> dict[str, Any]:
     totals = report.get("cost_totals_usd")
     if not isinstance(totals, dict):
         raise InvalidEvidenceError(f"{name} cost totals are missing")
-    reported_planner = _decimal(totals.get("planner"), f"{name} planner total")
-    reported_answer = _decimal(totals.get("answer"), f"{name} answer total")
-    reported_total = _decimal(totals.get("total"), f"{name} total cost")
-    if (
-        reported_planner != recomputed["planner"]
-        or reported_answer != recomputed["answer"]
-        or reported_total != reported_planner + reported_answer
-    ):
+    if set(totals) != {"planner", "answer", "total"}:
+        raise InvalidEvidenceError(f"{name} cost totals are invalid")
+    expected_totals = {
+        "planner": _fixed_usd(recomputed["planner"]),
+        "answer": _fixed_usd(recomputed["answer"]),
+        "total": _fixed_usd(recomputed["planner"] + recomputed["answer"]),
+    }
+    if totals != expected_totals:
         raise InvalidEvidenceError(f"{name} cost totals do not match usage evidence")
-    return report
+
+    latencies = [float(detail["latency_ms"]) for detail in sanitized_details]
+    expected_summary = {
+        "sample_count": EXPECTED_CASE_COUNT,
+        "success_count": sum(detail["http_ok"] for detail in sanitized_details),
+        "failure_count": sum(not detail["http_ok"] for detail in sanitized_details),
+        "passed_count": sum(detail["passed"] for detail in sanitized_details),
+        "quality_passed": all(detail["passed"] for detail in sanitized_details),
+        "latency_avg_ms": round(statistics.mean(latencies), 2),
+        "latency_p50_ms": _percentile(latencies, 0.50),
+        "latency_p95_ms": _percentile(latencies, 0.95),
+        "planner_cost_usd": expected_totals["planner"],
+        "answer_cost_usd": expected_totals["answer"],
+        "total_cost_usd": expected_totals["total"],
+    }
+    summary = report.get("summary")
+    integer_summary_fields = {
+        "sample_count",
+        "success_count",
+        "failure_count",
+        "passed_count",
+    }
+    latency_summary_fields = {
+        "latency_avg_ms",
+        "latency_p50_ms",
+        "latency_p95_ms",
+    }
+    if (
+        not isinstance(summary, dict)
+        or any(
+            isinstance(summary.get(field), bool)
+            or not isinstance(summary.get(field), int)
+            for field in integer_summary_fields
+        )
+        or not isinstance(summary.get("quality_passed"), bool)
+        or any(
+            isinstance(summary.get(field), bool)
+            or not isinstance(summary.get(field), (int, float))
+            for field in latency_summary_fields
+        )
+        or summary != expected_summary
+    ):
+        raise InvalidEvidenceError(f"{name} summary does not match case evidence")
+    return {**report, "details": sanitized_details}
 
 
 def compare_reports(
@@ -696,6 +856,10 @@ def compare_reports(
             no_new_failures = False
         if candidate_case.get("answer_fallback") and not baseline_case.get(
             "answer_fallback"
+        ):
+            no_new_failures = False
+        if candidate_case.get("fallback_reason_present") and not baseline_case.get(
+            "fallback_reason_present"
         ):
             no_new_failures = False
         if int(candidate_case.get("failed_model_attempts", 0)) > int(
