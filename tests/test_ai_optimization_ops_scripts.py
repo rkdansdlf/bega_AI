@@ -10,6 +10,49 @@ from scripts import chat_model_routing_experiment
 from scripts.cleanup_chat_semantic_cache import CleanupScope, build_where_clause
 
 
+def test_model_routing_runbook_and_ci_contract() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    runbook = (
+        repository_root / "docs" / "ai-optimization-rollout-runbook.md"
+    ).read_text(encoding="utf-8")
+    env_example = (repository_root / ".env.example").read_text(encoding="utf-8")
+    workflow = (
+        repository_root / ".github" / "workflows" / "ai-pr-gate.yml"
+    ).read_text(encoding="utf-8")
+    normalized_runbook = " ".join(runbook.lower().split())
+
+    assert "CHAT_MODEL_PRICING_JSON" in env_example
+    assert "CHAT_MODEL_PRICING_JSON" in runbook
+    assert "Golden path" in runbook
+    assert "scripts/chat_quality_golden_60.json" in runbook
+    assert "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/baseline.json" in runbook
+    assert "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/candidate.json" in runbook
+    assert "--baseline-report outputs/model-routing/baseline.json" in runbook
+    assert "--planner-model-label \"$CHAT_PLANNER_MODEL_NAME\"" in runbook
+    assert "--answer-model-label \"$CHAT_ANSWER_MODEL_NAME\"" in runbook
+    assert "planner reduction of at least 20%" in runbook
+    assert "candidate total model cost must not increase" in runbook
+    assert "answer model must remain fixed" in normalized_runbook
+    assert "Cache bypass is required and defaults to enabled" in runbook
+    assert "defaults to 60 cases" in runbook
+    assert "SHA-256" in runbook
+    assert "exact provider/model catalog entries" in runbook
+    assert "0: valid evidence and all gates pass" in runbook
+    assert "1: valid evidence but a quality or cost criterion fails" in runbook
+    assert "2: invalid or incomplete evidence, configuration, input, or report" in runbook
+    assert "separate live-call approval" in runbook
+    assert "does not authorize deployment" in runbook
+    assert "must not contain answers" in runbook
+
+    for test_path in (
+        "tests/test_chat_model_usage.py",
+        "tests/test_chat_model_routing_experiment.py",
+        "tests/test_chat_quality_golden_dataset.py",
+    ):
+        assert test_path in workflow
+    assert "scripts/chat_model_routing_experiment.py" not in workflow
+
+
 def test_chat_model_routing_loads_plain_text_questions(tmp_path: Path) -> None:
     samples = tmp_path / "samples.txt"
     samples.write_text("# comment\nKIA 전력 알려줘\n\nLG 불펜 분석\n", encoding="utf-8")
