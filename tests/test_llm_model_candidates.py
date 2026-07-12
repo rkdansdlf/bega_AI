@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import warnings
@@ -715,3 +716,141 @@ async def test_gemini_early_close_reports_one_failed_attempt_without_warning(
             "outcome": "failed",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_cancelled_error_observer_does_not_change_output(
+    monkeypatch,
+) -> None:
+    observer_calls = 0
+
+    class _FakeResponse:
+        status_code = 200
+
+        async def aread(self) -> bytes:
+            return b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": "response"}}]}
+            )
+            yield "data: [DONE]"
+
+    class _FakeStreamContext:
+        async def __aenter__(self) -> _FakeResponse:
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+    class _FakeClient:
+        def stream(self, method: str, url: str, **kwargs: Any) -> _FakeStreamContext:
+            return _FakeStreamContext()
+
+    def cancelled_observer(**payload: object) -> None:
+        nonlocal observer_calls
+        observer_calls += 1
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "get_shared_httpx_client",
+        lambda *args, **kwargs: _FakeClient(),
+    )
+    generator = build_baseball_llm_generator(
+        SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_api_key="test-key",
+            openrouter_base_url="https://openrouter.example/api/v1",
+            openrouter_referer="",
+            openrouter_app_title="",
+            openrouter_model="primary/free",
+            openrouter_fallback_models=[],
+            max_output_tokens=512,
+            chat_openrouter_empty_chunk_retries=0,
+            chat_openrouter_empty_chunk_backoff_ms=50,
+        )
+    )
+
+    chunks = [
+        chunk
+        async for chunk in generator(
+            [{"role": "user", "content": "hello"}],
+            usage_observer=cancelled_observer,
+        )
+    ]
+
+    assert chunks == ["response"]
+    assert observer_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_openrouter_snapshot_failure_still_observes_once(monkeypatch) -> None:
+    observations: list[dict[str, object]] = []
+
+    class _DeepcopyFailingMessages(list[dict[str, str]]):
+        def __deepcopy__(self, memo: dict[int, object]) -> object:
+            raise RuntimeError("snapshot failure")
+
+    class _FakeResponse:
+        status_code = 200
+
+        async def aread(self) -> bytes:
+            return b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": "response"}}]}
+            )
+            yield "data: [DONE]"
+
+    class _FakeStreamContext:
+        async def __aenter__(self) -> _FakeResponse:
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+    class _FakeClient:
+        def stream(self, method: str, url: str, **kwargs: Any) -> _FakeStreamContext:
+            return _FakeStreamContext()
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "get_shared_httpx_client",
+        lambda *args, **kwargs: _FakeClient(),
+    )
+    generator = build_baseball_llm_generator(
+        SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_api_key="test-key",
+            openrouter_base_url="https://openrouter.example/api/v1",
+            openrouter_referer="",
+            openrouter_app_title="",
+            openrouter_model="primary/free",
+            openrouter_fallback_models=[],
+            max_output_tokens=512,
+            chat_openrouter_empty_chunk_retries=0,
+            chat_openrouter_empty_chunk_backoff_ms=50,
+        )
+    )
+    messages = _DeepcopyFailingMessages([{"role": "user", "content": "hello"}])
+
+    chunks = [
+        chunk
+        async for chunk in generator(
+            messages,
+            usage_observer=lambda **payload: observations.append(dict(payload)),
+        )
+    ]
+
+    assert chunks == ["response"]
+    assert len(observations) == 1
+    assert observations[0]["messages"] == []
+    assert observations[0]["messages"] is not messages

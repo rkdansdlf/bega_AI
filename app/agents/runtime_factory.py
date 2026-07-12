@@ -141,9 +141,9 @@ def _notify_usage_observer(
         return
     try:
         messages_snapshot = deepcopy(messages)
-    except Exception:  # noqa: BLE001
+    except BaseException:  # noqa: BLE001
         logger.exception("[LLM] Usage observer message snapshot failed")
-        return
+        messages_snapshot = []
 
     try:
         observer(
@@ -153,7 +153,7 @@ def _notify_usage_observer(
             output_text=output_text,
             outcome=outcome,
         )
-    except Exception:  # noqa: BLE001
+    except BaseException:  # noqa: BLE001
         logger.exception("[LLM] Usage observer failed")
 
 
