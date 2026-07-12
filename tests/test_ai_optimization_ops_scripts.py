@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 from scripts import chat_model_routing_experiment
 from scripts.cleanup_chat_semantic_cache import CleanupScope, build_where_clause
@@ -40,6 +41,36 @@ def test_chat_model_routing_loads_jsonl_questions(tmp_path: Path) -> None:
 def test_chat_model_routing_percentile_bounds() -> None:
     assert chat_model_routing_experiment._percentile([], 0.95) == 0.0
     assert chat_model_routing_experiment._percentile([10, 20, 30], 0.95) == 30
+
+
+def test_chat_model_routing_cli_keeps_operator_contract(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chat_model_routing_experiment.py",
+            "--samples",
+            "golden.json",
+            "--baseline-report",
+            "baseline.json",
+            "--planner-model-label",
+            "planner-v2",
+            "--answer-model-label",
+            "answer-v1",
+        ],
+    )
+
+    args = chat_model_routing_experiment.parse_args()
+
+    assert args.samples == "golden.json"
+    assert args.baseline_report == "baseline.json"
+    assert args.planner_model_label == "planner-v2"
+    assert args.answer_model_label == "answer-v1"
+    assert args.internal_api_key_env == "AI_INTERNAL_TOKEN"
+    assert args.limit == 60
+    assert args.cache_bypass is True
 
 
 def test_semantic_cache_cleanup_where_clause_uses_filters() -> None:
