@@ -4,7 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from app.agents.baseball_agent import BaseballStatisticsAgent, SERIAL_DB_TOOL_NAMES
+from app.agents.baseball_agent import (
+    BaseballAgentRuntime,
+    BaseballStatisticsAgent,
+    SERIAL_DB_TOOL_NAMES,
+)
 from app.agents.chat_intent_router import ChatIntent, IntentDecision
 from app.agents.tool_caller import ToolCall, ToolResult
 from app.core.entity_extractor import extract_entities_from_query, extract_player_names
@@ -36,6 +40,111 @@ def _build_agent() -> BaseballStatisticsAgent:
         and "분석" in query
     )
     return agent
+
+
+class _RequestContextTool:
+    def __init__(self, connection, settings=None):
+        self.connection = connection
+        self.settings = settings
+
+
+def _build_model_usage_runtime(monkeypatch) -> BaseballAgentRuntime:
+    from app.agents import baseball_agent as agent_module
+
+    monkeypatch.setattr(agent_module, "DatabaseQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "RegulationQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "GameQueryTool", _RequestContextTool)
+    monkeypatch.setattr(agent_module, "DocumentQueryTool", _RequestContextTool)
+
+    async def _fake_llm(
+        messages,
+        max_tokens=None,
+        model_override=None,
+        usage_observer=None,
+    ):
+        del max_tokens, model_override
+        assert usage_observer is not None
+        is_planner = "tool_calls" in messages[0]["content"]
+        output_text = (
+            '{"analysis":"계획","tool_calls":[],"expected_result":"답변"}'
+            if is_planner
+            else "검증된 답변"
+        )
+        usage_observer(
+            provider="openrouter",
+            model="vendor/model",
+            messages=messages,
+            output_text=output_text,
+            outcome="success",
+        )
+        yield output_text
+
+    return BaseballAgentRuntime(
+        llm_generator=_fake_llm,
+        settings=SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_model="vendor/model",
+            chat_model_pricing_json=(
+                '{"openrouter":{"vendor/model":'
+                '{"input_usd_per_1m_tokens":"1.00",'
+                '"output_usd_per_1m_tokens":"2.00"}}}'
+            ),
+        ),
+    )
+
+
+def test_model_usage_collects_planner_and_answer_attempts(monkeypatch) -> None:
+    runtime = _build_model_usage_runtime(monkeypatch)
+
+    async def _run():
+        with runtime.request_context(SimpleNamespace(label="usage")) as request_context:
+            await runtime.shared_agent._analyze_query_with_llm("일반 질문", {})
+            return request_context
+
+    request_context = asyncio.run(_run())
+
+    assert [record.role for record in request_context.model_usage_records] == [
+        "planner"
+    ]
+    assert all(
+        record.pricing_source == "model_catalog"
+        for record in request_context.model_usage_records
+    )
+
+
+def test_model_usage_keeps_answer_retry_costs(monkeypatch) -> None:
+    runtime = _build_model_usage_runtime(monkeypatch)
+    agent = runtime.shared_agent
+    agent._build_structured_deterministic_answer = lambda query, results: None
+    tool_results = [
+        ToolResult(
+            success=True,
+            data={"found": True, "source": "database", "value": "verified"},
+            message="verified",
+        )
+    ]
+
+    async def _run():
+        with runtime.request_context(SimpleNamespace(label="usage")) as request_context:
+            await agent._analyze_query_with_llm("일반 질문", {})
+            for _ in range(2):
+                result = await agent._generate_verified_answer(
+                    "일반 질문", tool_results, {}
+                )
+                _ = [chunk async for chunk in result["answer"]]
+            return request_context
+
+    request_context = asyncio.run(_run())
+
+    assert [record.role for record in request_context.model_usage_records] == [
+        "planner",
+        "answer",
+        "answer",
+    ]
+    assert all(
+        record.pricing_source == "model_catalog"
+        for record in request_context.model_usage_records
+    )
 
 
 def test_select_llm_planner_prompt_uses_team_mode_for_team_analysis() -> None:
