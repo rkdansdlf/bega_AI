@@ -464,6 +464,45 @@ def test_candidate_report_with_comparison_revalidates_and_can_be_reused() -> Non
     assert reused_comparison == candidate["comparison"]
 
 
+def test_comparison_accepts_maximum_generated_reduction_and_revalidates() -> None:
+    baseline = _report(planner_cost="0.000000000001")
+    maximum_candidate_cost = (
+        "9" * experiment.MAX_FIXED_USD_INTEGER_DIGITS + ".999999999999"
+    )
+    candidate = _report(
+        planner_cost=maximum_candidate_cost, answer_cost="0.000000000000"
+    )
+
+    comparison = experiment.compare_reports(baseline, candidate)
+    candidate["comparison"] = comparison
+
+    assert len(comparison["planner_reduction_percent"]) == (
+        experiment.MAX_PLANNER_REDUCTION_PERCENT_LENGTH
+    )
+    normalized = experiment._validate_report(candidate, "candidate")
+
+    assert set(normalized) == experiment.REPORT_ROOT_KEYS
+    assert experiment.compare_reports(baseline, candidate) == comparison
+
+
+def test_comparison_rejects_a_percentage_over_the_derived_length_bound() -> None:
+    baseline = _report(planner_cost="1.000000000000")
+    candidate = _report(planner_cost="0.800000000000")
+    comparison = experiment.compare_reports(baseline, candidate)
+    comparison["planner_reduction_percent"] = (
+        "9"
+        * (experiment.MAX_PLANNER_REDUCTION_PERCENT_LENGTH - len(".00") + 1)
+        + ".00"
+    )
+    assert len(comparison["planner_reduction_percent"]) == (
+        experiment.MAX_PLANNER_REDUCTION_PERCENT_LENGTH + 1
+    )
+    candidate["comparison"] = comparison
+
+    with pytest.raises(experiment.InvalidEvidenceError):
+        experiment._validate_report(candidate, "candidate")
+
+
 @pytest.mark.parametrize("mutation", ["missing_key", "extra_key", "unsafe_list"])
 def test_loaded_report_rejects_invalid_comparison_schema(
     mutation: str,
