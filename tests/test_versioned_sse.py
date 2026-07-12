@@ -189,6 +189,42 @@ async def test_v2_replaces_done_sentinel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v2_marks_done_as_error_after_legacy_error() -> None:
+    emitted = await _collect(
+        {
+            "event": "error",
+            "data": json.dumps(
+                {
+                    "code": "COACH_INTERNAL_ERROR",
+                    "message": "분석에 실패했습니다.",
+                }
+            ),
+        },
+        {"event": "done", "data": "[DONE]"},
+        endpoint="coach",
+        version=2,
+    )
+
+    error = json.loads(emitted[0]["data"])
+    done = json.loads(emitted[1]["data"])
+    assert error["data"]["retryable"] is False
+    assert done["data"]["reason"] == "error"
+
+
+def test_coach_public_error_payload_exposes_retryability() -> None:
+    from app.routers.coach import _coach_public_error_payload
+
+    assert _coach_public_error_payload(
+        "COACH_INTERNAL_ERROR",
+        retryable=False,
+    )["retryable"] is False
+    assert _coach_public_error_payload(
+        "COACH_INTERNAL_ERROR",
+        retryable=True,
+    )["retryable"] is True
+
+
+@pytest.mark.asyncio
 async def test_invalid_event_emits_safe_error_and_terminal_pair() -> None:
     emitted = await _collect(
         {"event": "message", "data": '{"delta":""}'},
