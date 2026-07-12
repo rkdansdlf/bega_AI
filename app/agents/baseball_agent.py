@@ -6852,10 +6852,7 @@ class BaseballStatisticsAgent:
                 raise
             except Exception as exc:
                 logger.error("[BaseballAgent] Answer stream iteration failed: %s", exc)
-                yield {
-                    "type": "answer_chunk",
-                    "content": _build_safe_stream_error_answer(str(exc)),
-                }
+                raise
 
     async def process_query(
         self, query: str, context: Dict[str, Any] = None

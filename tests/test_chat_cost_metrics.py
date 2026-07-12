@@ -25,6 +25,7 @@ class _CounterRecorder:
 
 def _usage_record(
     *,
+    model: str = " vendor/planner ",
     outcome: str = "success",
     pricing_source: str = "model_catalog",
     total_cost_usd: Decimal | None = Decimal("0.000012"),
@@ -32,7 +33,7 @@ def _usage_record(
     return ModelUsageEstimate(
         role="planner",
         provider=" openrouter ",
-        model=" vendor/planner ",
+        model=model,
         outcome=outcome,
         pricing_source=pricing_source,
         input_chars=28,
@@ -215,6 +216,45 @@ def test_record_model_usage_estimate_records_unpriced_attempt_without_cost(
     assert len(token_counter.calls) == 2
     assert cost_counter.calls == []
     assert outcome_counter.calls[0][0]["result"] == "unpriced"
+
+
+def test_record_model_usage_estimate_collapses_arbitrary_unpriced_models(
+    monkeypatch,
+) -> None:
+    token_counter = _CounterRecorder()
+    cost_counter = _CounterRecorder()
+    outcome_counter = _CounterRecorder()
+    monkeypatch.setattr(
+        chat_cost_metrics,
+        "AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL",
+        token_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_cost_metrics,
+        "AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL",
+        cost_counter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_cost_metrics,
+        "AI_MODEL_USAGE_OUTCOME_TOTAL",
+        outcome_counter,
+        raising=False,
+    )
+
+    for index in range(200):
+        chat_cost_metrics.record_model_usage_estimate(
+            _usage_record(
+                model=f"unpriced/provider-model-{index}",
+                pricing_source="unpriced",
+                total_cost_usd=None,
+            )
+        )
+
+    assert {labels["model"] for labels, _ in token_counter.calls} == {"unknown"}
+    assert {labels["model"] for labels, _ in outcome_counter.calls} == {"unknown"}
+    assert cost_counter.calls == []
 
 
 def test_record_model_usage_estimate_keeps_failed_partial_priced_attempt(

@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from app.agents.baseball_agent import (
     BaseballAgentRuntime,
     BaseballStatisticsAgent,
@@ -1734,3 +1736,60 @@ def test_process_query_stream_recovers_with_deterministic_answer_on_prefetch_err
     assert metadata["fallback_reason"] == "answer_generation_recovery"
     assert metadata["verified"] is True
     assert "김현수" in "".join(answer_chunks)
+
+
+def test_process_query_stream_propagates_terminal_answer_iterator_error(
+    monkeypatch,
+) -> None:
+    agent = _build_agent()
+    agent._is_chitchat = lambda query: False
+    agent._generate_visualizations = lambda tool_results: []
+    agent._execute_tool_batch_async = lambda tool_calls: _empty_results()
+    agent._resolve_tool_execution_mode = lambda tool_calls: "none"
+    agent._analyze_query_and_plan_tools = lambda query, context: _basic_plan()
+
+    async def _terminally_broken_answer():
+        yield "partial"
+        raise RuntimeError("terminal answer failure")
+
+    async def _fake_generate_verified_answer(query, tool_results, context):
+        del query, tool_results, context
+        return {
+            "answer": _terminally_broken_answer(),
+            "verified": True,
+            "data_sources": [],
+            "error": None,
+        }
+
+    async def _basic_plan():
+        return {
+            "analysis": "ok",
+            "tool_calls": [],
+            "expected_result": "",
+            "error": None,
+            "planner_mode": "default_llm_planner",
+        }
+
+    async def _empty_results():
+        return []
+
+    agent._generate_verified_answer = _fake_generate_verified_answer
+    monkeypatch.setattr("app.ml.intent_router.predict_intent", lambda query: "freeform")
+
+    async def _run():
+        events = []
+        with pytest.raises(RuntimeError, match="terminal answer failure"):
+            async for event in agent.process_query_stream(
+                "김현수 분석해줘", {"request_mode": "completion"}
+            ):
+                events.append(event)
+        return events
+
+    import asyncio
+
+    events = asyncio.run(_run())
+
+    assert any(event["type"] == "metadata" for event in events)
+    assert [
+        event["content"] for event in events if event["type"] == "answer_chunk"
+    ] == ["partial"]
