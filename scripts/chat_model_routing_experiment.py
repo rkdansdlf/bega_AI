@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import math
@@ -58,6 +58,9 @@ USAGE_ROLES = {"planner", "answer"}
 FORBIDDEN_MODEL_LABELS = {"default", "unknown"}
 USD_QUANTUM = Decimal("0.000000000001")
 PERCENT_QUANTUM = Decimal("0.01")
+MAX_PLANNER_MODE_LENGTH = 128
+HTTP_STATUS_MIN = 100
+HTTP_STATUS_MAX = 599
 QUALITY_KEYS = {
     "natural_chat",
     "no_table_markup",
@@ -124,6 +127,24 @@ def _explicit_model_label(value: object, field: str) -> str:
     if label.lower() in FORBIDDEN_MODEL_LABELS:
         raise InvalidEvidenceError(f"{field} must be explicit")
     return label
+
+
+def _planner_mode(value: object, field: str) -> str:
+    mode = _require_nonblank_string(value, field)
+    if len(mode) > MAX_PLANNER_MODE_LENGTH or any(
+        not (char.isascii() and (char.isalnum() or char in "_.:-"))
+        for char in mode
+    ):
+        raise InvalidEvidenceError(f"{field} must be a bounded safe identifier")
+    return mode
+
+
+def _valid_http_status(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and HTTP_STATUS_MIN <= value <= HTTP_STATUS_MAX
+    )
 
 
 def _case_contract(case: object) -> dict[str, Any]:
@@ -219,7 +240,10 @@ def _decimal(value: object, field: str) -> Decimal:
 
 
 def _fixed_usd(value: Decimal) -> str:
-    return format(value.quantize(USD_QUANTUM), ".12f")
+    try:
+        return format(value.quantize(USD_QUANTUM), ".12f")
+    except (DecimalException, OverflowError, ValueError) as exc:
+        raise InvalidEvidenceError("USD amount cannot be represented safely") from exc
 
 
 def _fixed_usd_evidence(value: object, field: str) -> Decimal:
@@ -274,9 +298,15 @@ def _sanitize_usage(raw: object) -> dict[str, Any]:
 
 
 def _latency_ms(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidEvidenceError("latency must be a non-negative number")
-    return round(float(value), 2)
+    try:
+        latency = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise InvalidEvidenceError("latency must be a non-negative number") from exc
+    if not math.isfinite(latency) or latency < 0:
+        raise InvalidEvidenceError("latency must be a non-negative number")
+    return round(latency, 2)
 
 
 def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
@@ -290,9 +320,7 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
         raise InvalidEvidenceError("HTTP outcome must be explicit")
     latency_ms = _latency_ms(evidence.get("latency_ms"))
     status_code = evidence.get("status_code")
-    if status_code is not None and (
-        isinstance(status_code, bool) or not isinstance(status_code, int)
-    ):
+    if status_code is not None and not _valid_http_status(status_code):
         raise InvalidEvidenceError("HTTP status must be an integer or null")
 
     base = {
@@ -302,13 +330,20 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
         "status_code": status_code,
         "latency_ms": latency_ms,
     }
+    if ok and (not _valid_http_status(status_code) or not 200 <= status_code < 300):
+        raise InvalidEvidenceError("successful HTTP status is invalid")
     if not ok:
         failure_type = evidence.get("failure_type")
-        safe_failure = (
-            failure_type
-            if failure_type in {"http_error", "transport_error"}
-            else "http_error"
-        )
+        if failure_type == "transport_error":
+            if status_code is not None:
+                raise InvalidEvidenceError("transport failure status must be null")
+            safe_failure = "transport_error"
+        elif failure_type == "http_error":
+            if status_code is None or 200 <= status_code < 300:
+                raise InvalidEvidenceError("HTTP failure status is invalid")
+            safe_failure = "http_error"
+        else:
+            raise InvalidEvidenceError("failure type is invalid")
         return {
             **base,
             "passed": False,
@@ -319,6 +354,7 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
             "answer_fallback": False,
             "fallback_reason_present": False,
             "unexpected_non_answer": False,
+            "answerability_pass": False,
             "answerability_status": None,
             "quality": {},
             "model_usage": [],
@@ -335,7 +371,7 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
         raise InvalidEvidenceError("successful response model usage must be a list")
     usage = [_sanitize_usage(record) for record in raw_usage]
 
-    planner_mode = _require_nonblank_string(
+    planner_mode = _planner_mode(
         payload.get("planner_mode"), "successful response planner mode"
     )
     if planner_mode in LLM_PLANNER_MODES and not any(
@@ -358,6 +394,11 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
     quality = _evaluate_quality(answer)
     answerability = _evaluate_answerability(answer, golden["question"])
     actual_answerability = answerability.get("status")
+    answerability_pass = answerability.get("answerability_pass")
+    if actual_answerability not in APPROVED_ANSWERABILITY:
+        raise InvalidEvidenceError("successful response answerability status is unsupported")
+    if not isinstance(answerability_pass, bool):
+        raise InvalidEvidenceError("successful response answerability pass is invalid")
     expected_answerability = golden["expected_answerability"]
     planner_mode_allowed = planner_mode in golden["allowed_planner_modes"]
     unexpected_non_answer = actual_answerability != expected_answerability
@@ -367,7 +408,7 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
     failure_reasons: list[str] = []
     if not _quality_pass(quality):
         failure_reasons.append("quality")
-    if not answerability.get("answerability_pass") or unexpected_non_answer:
+    if not answerability_pass or unexpected_non_answer:
         failure_reasons.append("answerability")
     if not planner_mode_allowed:
         failure_reasons.append("planner_mode")
@@ -390,6 +431,7 @@ def evaluate_case(case: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
         "answer_fallback": answer_fallback,
         "fallback_reason_present": fallback_reason_present,
         "unexpected_non_answer": unexpected_non_answer,
+        "answerability_pass": answerability_pass,
         "answerability_status": actual_answerability,
         "quality": quality,
         "model_usage": usage,
@@ -498,18 +540,17 @@ def _sanitize_case_detail(
     if not isinstance(http_ok, bool) or not isinstance(passed, bool):
         raise InvalidEvidenceError("case outcomes must be booleans")
     status_code = raw.get("status_code")
-    if status_code is not None and (
-        isinstance(status_code, bool) or not isinstance(status_code, int)
-    ):
+    if status_code is not None and not _valid_http_status(status_code):
         raise InvalidEvidenceError("case HTTP status is invalid")
     planner_mode = raw.get("planner_mode")
     if planner_mode is not None:
-        planner_mode = _require_nonblank_string(planner_mode, "case planner mode")
+        planner_mode = _planner_mode(planner_mode, "case planner mode")
     boolean_fields = (
         "planner_mode_allowed",
         "planner_fallback",
         "answer_fallback",
         "unexpected_non_answer",
+        "answerability_pass",
         "fallback_reason_present",
     )
     if any(not isinstance(raw.get(field), bool) for field in boolean_fields):
@@ -539,8 +580,6 @@ def _sanitize_case_detail(
     if http_ok:
         if not isinstance(status_code, int) or not 200 <= status_code < 300:
             raise InvalidEvidenceError("successful case HTTP status is invalid")
-        if planner_mode not in APPROVED_PLANNER_MODES:
-            raise InvalidEvidenceError("successful case planner mode is unsupported")
         if answerability_status not in APPROVED_ANSWERABILITY:
             raise InvalidEvidenceError("successful case answerability status is unsupported")
         if not isinstance(quality, dict) or set(quality) != QUALITY_KEYS or not all(
@@ -569,7 +608,7 @@ def _sanitize_case_detail(
         expected_failure_reasons: list[str] = []
         if not _quality_pass(quality):
             expected_failure_reasons.append("quality")
-        if unexpected_non_answer:
+        if not raw["answerability_pass"] or unexpected_non_answer:
             expected_failure_reasons.append("answerability")
         if not planner_mode_allowed:
             expected_failure_reasons.append("planner_mode")
@@ -596,6 +635,7 @@ def _sanitize_case_detail(
             or raw["answer_fallback"] is not False
             or raw["fallback_reason_present"] is not False
             or raw["unexpected_non_answer"] is not False
+            or raw["answerability_pass"] is not False
             or answerability_status is not None
             or quality != {}
         ):
@@ -603,7 +643,7 @@ def _sanitize_case_detail(
         if failure_reasons == ["transport_error"] and status_code is not None:
             raise InvalidEvidenceError("transport failure status is invalid")
         if failure_reasons == ["http_error"] and (
-            not isinstance(status_code, int) or 200 <= status_code < 300
+            not _valid_http_status(status_code) or 200 <= status_code < 300
         ):
             raise InvalidEvidenceError("HTTP failure status is invalid")
 
@@ -621,6 +661,7 @@ def _sanitize_case_detail(
         "answer_fallback": raw["answer_fallback"],
         "fallback_reason_present": raw["fallback_reason_present"],
         "unexpected_non_answer": raw["unexpected_non_answer"],
+        "answerability_pass": raw["answerability_pass"],
         "answerability_status": answerability_status,
         "quality": dict(quality),
         "model_usage": sanitized_usage,
@@ -846,32 +887,15 @@ def compare_reports(
     )
     total_non_increasing = candidate_total <= baseline_total
 
-    no_new_failures = True
-    for baseline_case, candidate_case in zip(
-        baseline["details"], candidate["details"], strict=True
-    ):
-        if candidate_case.get("planner_fallback") and not baseline_case.get(
-            "planner_fallback"
-        ):
-            no_new_failures = False
-        if candidate_case.get("answer_fallback") and not baseline_case.get(
-            "answer_fallback"
-        ):
-            no_new_failures = False
-        if candidate_case.get("fallback_reason_present") and not baseline_case.get(
-            "fallback_reason_present"
-        ):
-            no_new_failures = False
-        if int(candidate_case.get("failed_model_attempts", 0)) > int(
-            baseline_case.get("failed_model_attempts", 0)
-        ):
-            no_new_failures = False
-        if candidate_case.get("unexpected_non_answer") and not baseline_case.get(
-            "unexpected_non_answer"
-        ):
-            no_new_failures = False
-        if not candidate_case.get("planner_mode_allowed", False):
-            no_new_failures = False
+    no_new_failures = all(
+        not (
+            set(candidate_case["failure_reasons"])
+            - set(baseline_case["failure_reasons"])
+        )
+        for baseline_case, candidate_case in zip(
+            baseline["details"], candidate["details"], strict=True
+        )
+    )
 
     candidate_quality_passed = all(
         bool(detail.get("passed")) for detail in candidate["details"]
