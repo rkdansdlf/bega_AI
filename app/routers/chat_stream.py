@@ -623,6 +623,20 @@ def _finalize_stream_perf_payload(
     return perf_payload
 
 
+def _temporary_generation_error_event() -> Dict[str, str]:
+    return {
+        "event": "error",
+        "data": json.dumps(
+            {
+                "message": "temporary_generation_issue",
+                "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
+                "retryable": True,
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+
 async def _chat_event_generator(
     *,
     request: Optional[Request],
@@ -716,16 +730,7 @@ async def _chat_event_generator(
                 "event": "message",
                 "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
             }
-            yield {
-                "event": "error",
-                "data": json.dumps(
-                    {
-                        "message": "temporary_generation_issue",
-                        "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
+            yield _temporary_generation_error_event()
     else:
         if await _request_is_disconnected(request):
             stream_cancelled = True
@@ -975,16 +980,7 @@ async def _chat_live_event_generator(
             "event": "message",
             "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
         }
-        yield {
-            "event": "error",
-            "data": json.dumps(
-                {
-                    "message": "temporary_generation_issue",
-                    "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
-                },
-                ensure_ascii=False,
-            ),
-        }
+        yield _temporary_generation_error_event()
 
     full_response_text = "".join(full_response_chunks)
     if not stream_cancelled and await _request_is_disconnected(request):
