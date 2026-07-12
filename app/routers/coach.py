@@ -3226,7 +3226,9 @@ def _cache_error_message_for_user(code: str) -> str:
 
 def _coach_public_error_payload(
     code: str = COACH_INTERNAL_ERROR_CODE,
-) -> Dict[str, str]:
+    *,
+    retryable: bool = False,
+) -> Dict[str, Any]:
     normalized = _sanitize_cache_error_code(code)
     message = (
         COACH_INTERNAL_ERROR_MESSAGE
@@ -3236,6 +3238,7 @@ def _coach_public_error_payload(
     return {
         "code": normalized,
         "message": message,
+        "retryable": retryable,
     }
 
 
@@ -13668,7 +13671,10 @@ async def analyze_team(
                 yield {
                     "event": "error",
                     "data": json.dumps(
-                        _coach_public_error_payload(masked_error_code),
+                        _coach_public_error_payload(
+                            masked_error_code,
+                            retryable=retryable_failure,
+                        ),
                         ensure_ascii=False,
                     ),
                 }

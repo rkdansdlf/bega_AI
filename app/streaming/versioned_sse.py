@@ -201,7 +201,7 @@ def _event_object(
                 "code": str(raw_code or "AI_STREAM_ERROR"),
                 "message": str(public_message),
                 "detail": str(raw_detail) if raw_detail is not None else None,
-                "retryable": bool(payload.get("retryable", True)),
+                "retryable": bool(payload.get("retryable", False)),
             },
         }
 
@@ -323,9 +323,13 @@ async def versioned_events(
     if resolved_version not in {1, 2}:
         raise ValueError(f"Unsupported stream version: {version}")
 
+    saw_error = False
     async for raw_event in events:
         try:
             event_value = _event_object(raw_event, endpoint=resolved_endpoint)
+            legacy_type = raw_event.get("event", "message")
+            if legacy_type == "done" and saw_error:
+                event_value["data"]["reason"] = "error"
             validated = _serialize_v2(event_value)
         except Exception as exc:  # noqa: BLE001
             AI_STREAM_CONTRACT_FAILURE_TOTAL.labels(
@@ -358,6 +362,8 @@ async def versioned_events(
                 yield safe_event
             return
 
+        if raw_event.get("event", "message") == "error":
+            saw_error = True
         emitted = raw_event if resolved_version == 1 else validated
         AI_STREAM_EVENT_TOTAL.labels(
             endpoint=resolved_endpoint,
