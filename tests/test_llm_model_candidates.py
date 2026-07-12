@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
+import sys
+import warnings
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import httpx
@@ -12,6 +14,15 @@ from app.agents.runtime_factory import (
     build_baseball_llm_generator,
     resolve_openrouter_model_candidates,
 )
+
+
+def _install_fake_gemini_sdk(monkeypatch, model_class: type[Any]) -> None:
+    fake_genai = ModuleType("google.generativeai")
+    fake_genai.GenerativeModel = model_class
+    fake_genai_types = ModuleType("google.generativeai.types")
+    fake_genai_types.GenerationConfig = lambda **kwargs: kwargs
+    monkeypatch.setitem(sys.modules, "google.generativeai", fake_genai)
+    monkeypatch.setitem(sys.modules, "google.generativeai.types", fake_genai_types)
 
 
 def test_openrouter_model_candidates_include_gpt_oss_fallback() -> None:
@@ -195,9 +206,6 @@ async def test_openrouter_empty_choices_retry_reports_each_attempt(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_gemini_generator_reports_generation_attempt(monkeypatch) -> None:
-    import google.generativeai as genai
-    from google.generativeai import types as genai_types
-
     observations: list[dict[str, object]] = []
 
     class _FakeChunk:
@@ -215,9 +223,12 @@ async def test_gemini_generator_reports_generation_attempt(monkeypatch) -> None:
 
             return _response()
 
-    monkeypatch.setattr(runtime_factory, "_ensure_gemini_configured", lambda settings: None)
-    monkeypatch.setattr(genai, "GenerativeModel", _FakeModel)
-    monkeypatch.setattr(genai_types, "GenerationConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        runtime_factory,
+        "_ensure_gemini_configured",
+        lambda settings: None,
+    )
+    _install_fake_gemini_sdk(monkeypatch, _FakeModel)
     generator = build_baseball_llm_generator(
         SimpleNamespace(
             llm_provider="gemini",
@@ -357,11 +368,15 @@ async def test_openrouter_429_falls_back_to_gpt_oss(monkeypatch) -> None:
         )
     )
 
+    def failing_observer(**payload: object) -> None:
+        observations.append(dict(payload))
+        raise RuntimeError("observer failure")
+
     chunks = [
         chunk
         async for chunk in generator(
             [{"role": "user", "content": "hello"}],
-            usage_observer=lambda **payload: observations.append(dict(payload)),
+            usage_observer=failing_observer,
         )
     ]
 
@@ -484,9 +499,219 @@ async def test_openrouter_429_fallback_failure_raises_last_model_error(
         )
     )
 
+    def failing_observer(**payload: object) -> None:
+        raise RuntimeError("observer failure")
+
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
-        _ = [chunk async for chunk in generator([{"role": "user", "content": "hello"}])]
+        _ = [
+            chunk
+            async for chunk in generator(
+                [{"role": "user", "content": "hello"}],
+                usage_observer=failing_observer,
+            )
+        ]
 
     assert attempted_models == ["primary/free", "openai/gpt-oss-120b"]
     assert fallback_reasons == [{"provider": "openrouter", "reason": "http_status_429"}]
     assert exc_info.value.response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_openrouter_observer_snapshot_cannot_mutate_later_attempts(
+    monkeypatch,
+) -> None:
+    request_messages: list[list[dict[str, str]]] = []
+
+    class _FakeResponse:
+        status_code = 200
+
+        async def aread(self) -> bytes:
+            return b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            if len(request_messages) == 1:
+                yield "data: " + json.dumps({"choices": []})
+            else:
+                yield "data: " + json.dumps(
+                    {"choices": [{"delta": {"content": "retry success"}}]}
+                )
+            yield "data: [DONE]"
+
+    class _FakeStreamContext:
+        async def __aenter__(self) -> _FakeResponse:
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+    class _FakeClient:
+        def stream(self, method: str, url: str, **kwargs: Any) -> _FakeStreamContext:
+            request_messages.append(kwargs["json"]["messages"])
+            return _FakeStreamContext()
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    def mutating_observer(**payload: Any) -> None:
+        payload["messages"][0]["content"] = "observer mutation"
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "get_shared_httpx_client",
+        lambda *args, **kwargs: _FakeClient(),
+    )
+    monkeypatch.setattr(runtime_factory.asyncio, "sleep", no_sleep)
+    generator = build_baseball_llm_generator(
+        SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_api_key="test-key",
+            openrouter_base_url="https://openrouter.example/api/v1",
+            openrouter_referer="",
+            openrouter_app_title="",
+            openrouter_model="primary/free",
+            openrouter_fallback_models=[],
+            max_output_tokens=512,
+            chat_openrouter_empty_chunk_retries=1,
+            chat_openrouter_empty_chunk_backoff_ms=50,
+        )
+    )
+    messages = [{"role": "user", "content": "hello"}]
+
+    chunks = [
+        chunk
+        async for chunk in generator(messages, usage_observer=mutating_observer)
+    ]
+
+    assert chunks == ["retry success"]
+    assert request_messages == [
+        [{"role": "user", "content": "hello"}],
+        [{"role": "user", "content": "hello"}],
+    ]
+    assert messages == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_early_close_reports_one_failed_attempt(monkeypatch) -> None:
+    observations: list[dict[str, object]] = []
+
+    class _FakeResponse:
+        status_code = 200
+
+        async def aread(self) -> bytes:
+            return b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": "first"}}]}
+            )
+            yield "data: [DONE]"
+
+    class _FakeStreamContext:
+        async def __aenter__(self) -> _FakeResponse:
+            return _FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+    class _FakeClient:
+        def stream(self, method: str, url: str, **kwargs: Any) -> _FakeStreamContext:
+            return _FakeStreamContext()
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "get_shared_httpx_client",
+        lambda *args, **kwargs: _FakeClient(),
+    )
+    generator = build_baseball_llm_generator(
+        SimpleNamespace(
+            llm_provider="openrouter",
+            openrouter_api_key="test-key",
+            openrouter_base_url="https://openrouter.example/api/v1",
+            openrouter_referer="",
+            openrouter_app_title="",
+            openrouter_model="primary/free",
+            openrouter_fallback_models=[],
+            max_output_tokens=512,
+            chat_openrouter_empty_chunk_retries=0,
+            chat_openrouter_empty_chunk_backoff_ms=50,
+        )
+    )
+
+    stream = generator(
+        [{"role": "user", "content": "hello"}],
+        usage_observer=lambda **payload: observations.append(dict(payload)),
+    )
+    assert await anext(stream) == "first"
+    await stream.aclose()
+
+    assert observations == [
+        {
+            "provider": "openrouter",
+            "model": "primary/free",
+            "messages": [{"role": "user", "content": "hello"}],
+            "output_text": "first",
+            "outcome": "failed",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_early_close_reports_one_failed_attempt_without_warning(
+    monkeypatch,
+) -> None:
+    observations: list[dict[str, object]] = []
+
+    class _FakeChunk:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class _FakeModel:
+        def __init__(self, model_name: str, **kwargs: Any) -> None:
+            self.model_name = model_name
+
+        async def generate_content_async(self, *args: Any, **kwargs: Any):
+            async def _response():
+                yield _FakeChunk("first")
+
+            return _response()
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_ensure_gemini_configured",
+        lambda settings: None,
+    )
+    _install_fake_gemini_sdk(monkeypatch, _FakeModel)
+    generator = build_baseball_llm_generator(
+        SimpleNamespace(
+            llm_provider="gemini",
+            gemini_api_key="test-key",
+            gemini_model="gemini-2.0-flash",
+            max_output_tokens=512,
+        )
+    )
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        stream = generator(
+            [{"role": "user", "content": "hello"}],
+            usage_observer=lambda **payload: observations.append(dict(payload)),
+        )
+        assert await anext(stream) == "first"
+        await stream.aclose()
+
+    assert not caught_warnings
+    assert observations == [
+        {
+            "provider": "gemini",
+            "model": "gemini-2.0-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "output_text": "first",
+            "outcome": "failed",
+        }
+    ]

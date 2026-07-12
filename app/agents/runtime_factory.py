@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Optional
 
 import httpx
@@ -138,13 +139,22 @@ def _notify_usage_observer(
 ) -> None:
     if observer is None:
         return
-    observer(
-        provider=provider,
-        model=model,
-        messages=messages,
-        output_text=output_text,
-        outcome=outcome,
-    )
+    try:
+        messages_snapshot = deepcopy(messages)
+    except Exception:  # noqa: BLE001
+        logger.exception("[LLM] Usage observer message snapshot failed")
+        return
+
+    try:
+        observer(
+            provider=provider,
+            model=model,
+            messages=messages_snapshot,
+            output_text=output_text,
+            outcome=outcome,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[LLM] Usage observer failed")
 
 
 def build_baseball_llm_generator(settings: Any):
@@ -248,8 +258,9 @@ def build_baseball_llm_generator(settings: Any):
                     "max_tokens": effective_max_tokens,
                 }
 
+                attempt_chunks: list[str] = []
+                attempt_observed = False
                 try:
-                    attempt_chunks: list[str] = []
                     chunk_count = 0
                     empty_choice_count = 0
                     malformed_chunk_count = 0
@@ -296,6 +307,7 @@ def build_baseball_llm_generator(settings: Any):
                             output_text="".join(attempt_chunks),
                             outcome="failed",
                         )
+                        attempt_observed = True
                         llm_logger.warning(
                             "[LLM] Empty completion chunk set detected for %s "
                             "(attempt %d/%d, empty_choice_count=%d malformed=%d)",
@@ -316,6 +328,7 @@ def build_baseball_llm_generator(settings: Any):
                         output_text="".join(attempt_chunks),
                         outcome="success",
                     )
+                    attempt_observed = True
                     llm_logger.info(
                         "[LLM] Success: %d chunks from %s", chunk_count, model
                     )
@@ -330,9 +343,20 @@ def build_baseball_llm_generator(settings: Any):
                         output_text="".join(attempt_chunks),
                         outcome="failed",
                     )
+                    attempt_observed = True
                     llm_logger.error("[LLM] Model %s failed: %s", model, exc)
                     last_exception = exc
                     break
+                finally:
+                    if not attempt_observed:
+                        _notify_usage_observer(
+                            usage_observer,
+                            provider="openrouter",
+                            model=model,
+                            messages=messages,
+                            output_text="".join(attempt_chunks),
+                            outcome="failed",
+                        )
 
         llm_logger.error(
             "[LLM] All %d models failed. Last error: %s",
@@ -376,6 +400,7 @@ def build_baseball_llm_generator(settings: Any):
             )
 
         attempt_chunks: list[str] = []
+        attempt_observed = False
         try:
             response = await model.generate_content_async(
                 gemini_messages,
@@ -398,6 +423,7 @@ def build_baseball_llm_generator(settings: Any):
                 output_text="".join(attempt_chunks),
                 outcome="failed",
             )
+            attempt_observed = True
             llm_logger.error("Gemini generation failed: %s", exc)
             raise
         else:
@@ -409,6 +435,17 @@ def build_baseball_llm_generator(settings: Any):
                 output_text="".join(attempt_chunks),
                 outcome="success",
             )
+            attempt_observed = True
+        finally:
+            if not attempt_observed:
+                _notify_usage_observer(
+                    usage_observer,
+                    provider="gemini",
+                    model=model_name,
+                    messages=messages,
+                    output_text="".join(attempt_chunks),
+                    outcome="failed",
+                )
 
     if settings.llm_provider == "gemini":
         return gemini_generator
