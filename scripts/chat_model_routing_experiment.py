@@ -984,6 +984,14 @@ def compare_reports(
         )
         and candidate_case["failed_model_attempts"]
         <= baseline_case["failed_model_attempts"]
+        and not (
+            candidate_case["unexpected_non_answer"]
+            and not baseline_case["unexpected_non_answer"]
+        )
+        and not (
+            not candidate_case["answerability_pass"]
+            and baseline_case["answerability_pass"]
+        )
         for baseline_case, candidate_case in zip(
             baseline["details"], candidate["details"], strict=True
         )

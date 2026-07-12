@@ -636,6 +636,66 @@ def test_equal_failed_model_attempts_are_not_a_new_failure() -> None:
     assert comparison["no_new_failures"] is True
 
 
+def test_answerability_dimension_regressions_are_new_failures_in_full_reports() -> None:
+    baseline_details = deepcopy(_report(planner_cost="1.000000000000")["details"])
+    candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+    case_index = next(
+        index
+        for index, case in enumerate(_approved_cases())
+        if case["expected_answerability"] == "answerable"
+    )
+
+    baseline_details[case_index].update(
+        answerability_pass=False,
+        unexpected_non_answer=False,
+        failure_reasons=["answerability"],
+        passed=False,
+    )
+    candidate_details[case_index].update(
+        answerability_status="clarification_required",
+        answerability_pass=True,
+        unexpected_non_answer=True,
+        failure_reasons=["answerability"],
+        passed=False,
+    )
+
+    baseline = _report_from_details(baseline_details)
+    candidate = _report_from_details(candidate_details)
+    comparison = experiment.compare_reports(baseline, candidate)
+
+    assert len(baseline["details"]) == 60
+    assert len(candidate["details"]) == 60
+    assert comparison["no_new_failures"] is False
+
+
+def test_answerability_pass_regression_is_a_new_failure_with_same_reason() -> None:
+    baseline_details = deepcopy(_report(planner_cost="1.000000000000")["details"])
+    candidate_details = deepcopy(_report(planner_cost="0.800000000000")["details"])
+    case_index = next(
+        index
+        for index, case in enumerate(_approved_cases())
+        if case["expected_answerability"] == "answerable"
+    )
+
+    baseline_details[case_index].update(
+        answerability_pass=True,
+        unexpected_non_answer=False,
+    )
+    candidate_details[case_index].update(
+        answerability_pass=False,
+        unexpected_non_answer=False,
+        failure_reasons=["answerability"],
+        passed=False,
+    )
+
+    comparison = experiment.compare_reports(
+        _report_from_details(baseline_details),
+        _report_from_details(candidate_details),
+    )
+
+    assert comparison["no_new_failures"] is False
+
+
 @pytest.mark.parametrize(
     "mutation,reason",
     [
