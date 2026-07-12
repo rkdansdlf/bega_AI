@@ -96,6 +96,60 @@ def test_model_routing_runbook_and_ci_contract() -> None:
     )
     assert "Actual deployment remains separately approved" in runbook
 
+    dotenv_export = "set -a; source ../.env.prod; set +a"
+    baseline_exports = "\n".join(
+        (
+            'export CHAT_PLANNER_MODEL_NAME="$BASELINE_PLANNER_MODEL"',
+            'export CHAT_ANSWER_MODEL_NAME="$FIXED_ANSWER_MODEL"',
+            'export CHAT_MODEL_PRICING_JSON="$BASELINE_PRICING_JSON"',
+        )
+    )
+    candidate_exports = "\n".join(
+        (
+            'export CHAT_PLANNER_MODEL_NAME="$CANDIDATE_PLANNER_MODEL"',
+            'export CHAT_ANSWER_MODEL_NAME="$FIXED_ANSWER_MODEL"',
+            'export CHAT_MODEL_PRICING_JSON="$CANDIDATE_PRICING_JSON"',
+        )
+    )
+    baseline_command = "\n".join(
+        (
+            "AI_MODEL_ROUTING_SAMPLES=scripts/chat_quality_golden_60.json \\",
+            "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/baseline.json \\",
+            "./.venv/bin/python scripts/chat_model_routing_experiment.py \\",
+        )
+    )
+    candidate_command = "\n".join(
+        (
+            "AI_MODEL_ROUTING_SAMPLES=scripts/chat_quality_golden_60.json \\",
+            "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/candidate.json \\",
+            "./.venv/bin/python scripts/chat_model_routing_experiment.py \\",
+        )
+    )
+
+    assert dotenv_export in runbook
+    for required_variable in (
+        "BASELINE_PLANNER_MODEL",
+        "FIXED_ANSWER_MODEL",
+        "BASELINE_PRICING_JSON",
+        "CANDIDATE_PLANNER_MODEL",
+        "CANDIDATE_PRICING_JSON",
+    ):
+        assert f'${{{required_variable}:?' in runbook
+    assert "./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001" in runbook
+    assert "CONTROLLED_AI_PID_FILE=outputs/model-routing/controlled-ai.pid" in runbook
+    assert "printf '%s\\n' \"$CONTROLLED_AI_PID\" > \"$CONTROLLED_AI_PID_FILE\"" in runbook
+    assert 'kill -0 "$CONTROLLED_AI_PID"' in runbook
+    assert "curl -fsS http://127.0.0.1:8001/health" in runbook
+    assert "pkill" not in runbook
+    assert baseline_exports in runbook
+    assert candidate_exports in runbook
+    assert runbook.index(dotenv_export) < runbook.index(baseline_command)
+    assert runbook.index("curl -fsS http://127.0.0.1:8001/health") < runbook.index(
+        baseline_command
+    )
+    assert runbook.index(baseline_exports) < runbook.index(baseline_command)
+    assert runbook.index(candidate_exports) < runbook.index(candidate_command)
+
     for test_path in (
         "tests/test_chat_model_usage.py",
         "tests/test_chat_model_routing_experiment.py",
