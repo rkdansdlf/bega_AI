@@ -31,10 +31,12 @@ from .core.chat_cache import CREATE_TABLE_SQL as CHAT_CACHE_DDL
 from .core.chat_cache import cleanup_expired as _cleanup_expired_cache
 from .core.chat_semantic_cache import CREATE_TABLE_SQL as CHAT_SEMANTIC_CACHE_DDL
 from .core.chat_semantic_cache import (
+    CREATE_SHADOW_OBSERVATION_TABLE_SQL as CHAT_SEMANTIC_SHADOW_OBSERVATION_DDL,
     CREATE_VECTOR_INDEX_SQL as CHAT_SEMANTIC_CACHE_VECTOR_INDEX_DDL,
 )
 from .core.chat_semantic_cache import cleanup_expired as _cleanup_expired_semantic_cache
 from .core.security_metrics import record_security_event
+from .db.schema_contract import validate_schema_contract
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성). 전 계층이 async psycopg3로 통일됨.
 _connection_pool: Optional[AsyncConnectionPool] = None
@@ -401,20 +403,8 @@ async def _coach_failed_cache_recovery_loop() -> None:
             logger.warning("[CoachRecovery] recovery loop error: %s", exc)
 
 
-@asynccontextmanager
-async def lifespan(app):
-    """앱 시작/종료 시 실행되는 lifespan 이벤트"""
-    # 시작 시
-    settings = get_settings()
-    load_clf()
-    pool = get_connection_pool()  # 커넥션 풀 생성
-    # AsyncConnectionPool은 이벤트 루프 내에서 열어야 한다.
-    try:
-        await pool.open(wait=True, timeout=10.0)
-        logger.info("[Lifespan] connection pool opened")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[Lifespan] connection pool open failed: %s", exc)
-    _initialize_shared_baseball_agent_runtime()
+async def _ensure_startup_schema(pool, settings) -> None:
+    """Keep the compatibility startup DDL path for local/dev environments."""
 
     # [Coach Caching] 캐시 테이블 자동 생성 (편의성)
     try:
@@ -454,34 +444,84 @@ async def lifespan(app):
             """)
             # psycopg3 in pool context might need explicit commit if autocommit is not set?
             # connection pool is created with autocommit=True in get_connection_pool
-    except Exception as e:
-        logger.warning("Failed to ensure coach_analysis_cache table: %s", e)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to ensure coach_analysis_cache table: %s", exc)
 
     # [Chat Caching] chat_response_cache 테이블 자동 생성
     try:
         async with pool.connection() as conn:
             await conn.execute(CHAT_CACHE_DDL)
         logger.info("[Lifespan] chat_response_cache table ensured")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("[Lifespan] chat_response_cache DDL failed: %s", exc)
+
+    # Shadow observations do not depend on pgvector and must remain available
+    # even when semantic serving is disabled on a local or degraded database.
+    try:
+        async with pool.connection() as conn:
+            await conn.execute(CHAT_SEMANTIC_SHADOW_OBSERVATION_DDL)
+        logger.info("[Lifespan] chat semantic shadow observation table ensured")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[Lifespan] chat semantic shadow observation DDL failed: %s", exc
+        )
 
     # [Chat Semantic Caching] chat_semantic_response_cache 테이블 자동 생성
     try:
         async with pool.connection() as conn:
             await conn.execute(CHAT_SEMANTIC_CACHE_DDL)
         logger.info("[Lifespan] chat_semantic_response_cache table ensured")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("[Lifespan] chat_semantic_response_cache DDL failed: %s", exc)
     if bool(getattr(settings, "chat_semantic_cache_vector_index_enabled", False)):
         try:
             async with pool.connection() as conn:
                 await conn.execute(CHAT_SEMANTIC_CACHE_VECTOR_INDEX_DDL)
             logger.info("[Lifespan] chat_semantic_response_cache HNSW index ensured")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[Lifespan] chat_semantic_response_cache HNSW index DDL failed: %s",
                 exc,
             )
+
+
+async def _prepare_schema(pool, settings) -> None:
+    """Prepare or validate the AI schema according to the runtime mode."""
+
+    if settings.ai_db_schema_mode == "managed":
+        try:
+            async with pool.connection() as conn:
+                await validate_schema_contract(
+                    conn,
+                    require_vector_index=settings.chat_semantic_cache_vector_index_enabled,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[Lifespan] managed AI DB schema contract validation failed"
+            )
+            raise
+        logger.info("[Lifespan] managed AI DB schema contract validated")
+        return
+
+    await _ensure_startup_schema(pool, settings)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """앱 시작/종료 시 실행되는 lifespan 이벤트"""
+    # 시작 시
+    settings = get_settings()
+    load_clf()
+    pool = get_connection_pool()  # 커넥션 풀 생성
+    # AsyncConnectionPool은 이벤트 루프 내에서 열어야 한다.
+    try:
+        await pool.open(wait=True, timeout=10.0)
+        logger.info("[Lifespan] connection pool opened")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Lifespan] connection pool open failed: %s", exc)
+    _initialize_shared_baseball_agent_runtime()
+
+    await _prepare_schema(pool, settings)
 
     # [Chat Caching] 만료 항목 주기적 삭제 백그라운드 태스크 시작
     cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())

@@ -32,7 +32,7 @@ CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS chat_semantic_response_cache (
     cache_key           VARCHAR(64)  PRIMARY KEY,
     question_text       TEXT         NOT NULL,
-    question_embedding  VECTOR(256)  NOT NULL,
+    question_embedding  extensions.VECTOR(256)  NOT NULL,
     filters_hash        VARCHAR(64)  NOT NULL,
     filters_json        JSONB,
     intent              VARCHAR(50),
@@ -54,10 +54,30 @@ ALTER TABLE chat_semantic_response_cache
     ADD COLUMN IF NOT EXISTS source_tier VARCHAR(50);
 """
 
+CREATE_SHADOW_OBSERVATION_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS chat_semantic_cache_shadow_observation (
+    id                  BIGSERIAL    PRIMARY KEY,
+    request_cache_key   VARCHAR(64)  NOT NULL,
+    candidate_cache_key VARCHAR(64)  NOT NULL,
+    route               VARCHAR(20)  NOT NULL,
+    question_text       TEXT         NOT NULL,
+    filters_json        JSONB,
+    cached_answer       TEXT         NOT NULL,
+    fresh_answer        TEXT,
+    similarity          DOUBLE PRECISION NOT NULL,
+    observed_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    completed_at        TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_chat_semantic_shadow_observed_at
+    ON chat_semantic_cache_shadow_observation(observed_at);
+CREATE INDEX IF NOT EXISTS idx_chat_semantic_shadow_request_key
+    ON chat_semantic_cache_shadow_observation(request_cache_key);
+"""
+
 CREATE_VECTOR_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_chat_semantic_cache_embedding_hnsw
     ON chat_semantic_response_cache
-    USING hnsw (question_embedding vector_cosine_ops)
+    USING hnsw (question_embedding extensions.vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 """
 
@@ -277,6 +297,56 @@ async def _update_semantic_hit_count_sync(conn, cache_key: str) -> None:
     )
 
 
+async def _record_shadow_observation_sync(
+    conn,
+    *,
+    request_cache_key: str,
+    candidate_cache_key: str,
+    route: str,
+    question_text: str,
+    filters_json: Optional[Dict[str, Any]],
+    cached_answer: str,
+    similarity: float,
+) -> None:
+    filters_serialized = _filters_json_payload(filters_json)
+    await conn.execute(
+        """
+        INSERT INTO chat_semantic_cache_shadow_observation
+            (request_cache_key, candidate_cache_key, route, question_text,
+             filters_json, cached_answer, similarity)
+        VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+        """,
+        (
+            request_cache_key,
+            candidate_cache_key,
+            route,
+            question_text,
+            filters_serialized,
+            cached_answer,
+            max(0.0, min(float(similarity), 1.0)),
+        ),
+    )
+
+
+async def _complete_shadow_observation_sync(
+    conn,
+    *,
+    request_cache_key: str,
+    fresh_answer: str,
+) -> int:
+    result = await conn.execute(
+        """
+        UPDATE chat_semantic_cache_shadow_observation
+        SET fresh_answer = %s,
+            completed_at = now()
+        WHERE request_cache_key = %s
+          AND fresh_answer IS NULL
+        """,
+        (fresh_answer, request_cache_key),
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+
 async def _cleanup_semantic_sync(conn) -> int:
     result = await conn.execute(
         "DELETE FROM chat_semantic_response_cache WHERE expires_at <= now()"
@@ -284,6 +354,18 @@ async def _cleanup_semantic_sync(conn) -> int:
     deleted: int = getattr(result, "rowcount", 0) or 0
     if deleted:
         logger.info("[ChatSemanticCache] Cleaned up %d expired entries", deleted)
+    shadow_result = await conn.execute(
+        """
+        DELETE FROM chat_semantic_cache_shadow_observation
+        WHERE observed_at < now() - interval '30 days'
+        """
+    )
+    shadow_deleted: int = getattr(shadow_result, "rowcount", 0) or 0
+    if shadow_deleted:
+        logger.info(
+            "[ChatSemanticCache] Cleaned up %d shadow observations",
+            shadow_deleted,
+        )
     return deleted
 
 
@@ -361,6 +443,51 @@ async def update_semantic_hit_count(conn, cache_key: str) -> None:
         await _update_semantic_hit_count_sync(conn, cache_key)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ChatSemanticCache] hit_count update failed: %s", exc)
+
+
+async def record_semantic_shadow_observation(
+    conn,
+    *,
+    request_cache_key: str,
+    candidate_cache_key: str,
+    route: str,
+    question_text: str,
+    filters_json: Optional[Dict[str, Any]],
+    cached_answer: str,
+    similarity: float,
+) -> bool:
+    try:
+        await _record_shadow_observation_sync(
+            conn,
+            request_cache_key=request_cache_key,
+            candidate_cache_key=candidate_cache_key,
+            route=route,
+            question_text=question_text,
+            filters_json=filters_json,
+            cached_answer=cached_answer,
+            similarity=similarity,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ChatSemanticCache] shadow observation save failed: %s", exc)
+        return False
+    return True
+
+
+async def complete_semantic_shadow_observation(
+    conn,
+    *,
+    request_cache_key: str,
+    fresh_answer: str,
+) -> int:
+    try:
+        return await _complete_shadow_observation_sync(
+            conn,
+            request_cache_key=request_cache_key,
+            fresh_answer=fresh_answer,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ChatSemanticCache] shadow observation update failed: %s", exc)
+        return 0
 
 
 async def cleanup_expired(conn) -> int:
