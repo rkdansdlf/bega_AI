@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     legacy_source_db_url: Optional[str] = Field(
         None, validation_alias="SUPABASE_DB_URL"
     )
+    # `auto` keeps local/dev startup compatibility. `managed` requires the
+    # migration role to provision the schema before the AI process starts.
+    ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
     _legacy_source_db_warned: bool = PrivateAttr(default=False)
 
     def model_post_init(self, __context) -> None:
@@ -490,6 +493,15 @@ class Settings(BaseSettings):
         if value not in allowed:
             raise ValueError(
                 f"지원되지 않는 EMBED_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
+            )
+        return value
+
+    @field_validator("ai_db_schema_mode")
+    def _validate_ai_db_schema_mode(cls, value: str) -> str:
+        allowed = {"auto", "managed"}
+        if value not in allowed:
+            raise ValueError(
+                f"AI_DB_SCHEMA_MODE must be one of {sorted(allowed)}"
             )
         return value
 
