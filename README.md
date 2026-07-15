@@ -698,6 +698,10 @@ AI_SCHEMA_DB_URL='postgresql://...' \
 export AI_DB_SCHEMA_MODE=managed
 ```
 
+내부 KBO 데이터 동기화의 단일 JobRunr 스케줄러, 내구성 실행 상태,
+수동 복구, 관측 지표 및 롤백 절차는
+[`docs/data-sync-orchestration-runbook.md`](docs/data-sync-orchestration-runbook.md)를 따릅니다.
+
 `vector` extension은 DB/DBA 사전 조건이며 위 migration이 설치하지 않습니다.
 운영 스키마 계약 검증은 `scripts/validate_ai_runtime_schema.py`를 사용합니다.
 
