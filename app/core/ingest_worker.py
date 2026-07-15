@@ -7,16 +7,31 @@ import logging
 import os
 import socket
 from datetime import datetime
+from time import perf_counter
 from typing import Any, Callable
 from uuid import uuid4
 
 from scripts.ingest_from_kbo import (
+    DEFAULT_TABLES,
     IngestExecutionResult,
     ManualBaseballDataRequiredError,
     ingest,
 )
 
-from .ingest_runs import IngestRunMode, IngestRunRecord, IngestTableResult
+from .ingest_runs import (
+    IngestRunMode,
+    IngestRunRecord,
+    IngestRunStatus,
+    IngestTableResult,
+)
+from ..observability.metrics import (
+    AI_INGEST_ACTIVE_RUNS,
+    AI_INGEST_RUN_COMPLETIONS_TOTAL,
+    AI_INGEST_RUN_DURATION_SECONDS,
+    AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL,
+    normalize_ingest_terminal_status,
+    normalize_ingest_trigger_source,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +70,11 @@ class IngestWorker:
         if run is None:
             return False
 
+        trigger_source = normalize_ingest_trigger_source(run.request.trigger_source)
+        started_at = perf_counter()
+        terminal_status = None
+        result = None
+        AI_INGEST_ACTIVE_RUNS.labels(trigger_source=trigger_source).inc()
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(run))
         try:
             result = await self._execute(run)
@@ -64,6 +84,7 @@ class IngestWorker:
                 self.owner,
                 exc.contract,
             )
+            terminal_status = IngestRunStatus.MANUAL_BASEBALL_DATA_REQUIRED
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -79,6 +100,7 @@ class IngestWorker:
                 error_code="INGEST_EXECUTION_FAILED",
                 error_message=error_type,
             )
+            terminal_status = IngestRunStatus.FAILED
         else:
             await self.store.finish_success(
                 run.run_id,
@@ -86,12 +108,33 @@ class IngestWorker:
                 result.tables,
                 result.watermarks,
             )
+            terminal_status = IngestRunStatus.SUCCEEDED
         finally:
             heartbeat_task.cancel()
             try:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+            AI_INGEST_ACTIVE_RUNS.labels(trigger_source=trigger_source).dec()
+            if terminal_status is not None:
+                status_label = normalize_ingest_terminal_status(terminal_status)
+                AI_INGEST_RUN_COMPLETIONS_TOTAL.labels(
+                    status=status_label,
+                    trigger_source=trigger_source,
+                ).inc()
+                AI_INGEST_RUN_DURATION_SECONDS.labels(
+                    status=status_label,
+                    trigger_source=trigger_source,
+                ).observe(max(0.0, perf_counter() - started_at))
+            if result is not None:
+                configured_tables = set(DEFAULT_TABLES)
+                for source_table, table_result in result.tables.items():
+                    table_label = (
+                        source_table if source_table in configured_tables else "other"
+                    )
+                    AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(
+                        source_table=table_label
+                    ).inc(table_result.written_chunks)
         return True
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:

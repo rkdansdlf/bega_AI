@@ -41,6 +41,9 @@ except ImportError:  # pragma: no cover — runtime fallback
         def inc(self, _amount: float = 1.0) -> None:
             return None
 
+        def dec(self, _amount: float = 1.0) -> None:
+            return None
+
         def observe(self, _value: float) -> None:
             return None
 
@@ -202,6 +205,24 @@ AI_LLM_FALLBACK_TOTAL = Counter(
     ["provider", "reason"],  # provider: openrouter ; reason: http_status_429|...
 )
 
+AI_INGEST_SUBMISSIONS_TOTAL = Counter(
+    "ai_ingest_submissions_total",
+    "Durable ingestion run submissions.",
+    ["trigger_source", "result"],
+)
+
+AI_INGEST_RUN_COMPLETIONS_TOTAL = Counter(
+    "ai_ingest_run_completions_total",
+    "Durable ingestion run terminal outcomes.",
+    ["status", "trigger_source"],
+)
+
+AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL = Counter(
+    "ai_ingest_table_written_chunks_total",
+    "RAG chunks written by configured source table.",
+    ["source_table"],
+)
+
 # ---------------------------------------------------------------------------
 # Histograms — 분포 (latency, size)
 # ---------------------------------------------------------------------------
@@ -255,6 +276,14 @@ AI_HTTP_REQUEST_DURATION_SECONDS = Histogram(
     buckets=_HTTP_REQUEST_BUCKETS,
 )
 
+_INGEST_RUN_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200)
+AI_INGEST_RUN_DURATION_SECONDS = Histogram(
+    "ai_ingest_run_duration_seconds",
+    "Duration of durable ingestion runs by terminal status and trigger source.",
+    ["status", "trigger_source"],
+    buckets=_INGEST_RUN_BUCKETS,
+)
+
 # Coach 동적 프롬프트 사이즈 (B 작업 효과 추적). 문자 수 단위.
 _COACH_PROMPT_BUCKETS = (
     500,
@@ -291,6 +320,34 @@ AI_CHAT_QUEUE_DEPTH = Gauge(
     ["state"],  # state: waiting|admitted
 )
 
+AI_INGEST_ACTIVE_RUNS = Gauge(
+    "ai_ingest_active_runs",
+    "Currently claimed durable ingestion runs.",
+    ["trigger_source"],
+)
+
+
+_INGEST_TRIGGER_SOURCES = {
+    "BACKEND_SCHEDULED",
+    "MANUAL_API",
+    "CLI_RECOVERY",
+}
+_INGEST_STATUSES = {
+    "SUCCEEDED",
+    "FAILED",
+    "MANUAL_BASEBALL_DATA_REQUIRED",
+}
+
+
+def normalize_ingest_trigger_source(value: Any) -> str:
+    normalized = str(value or "").strip().upper()
+    return normalized if normalized in _INGEST_TRIGGER_SOURCES else "UNKNOWN"
+
+
+def normalize_ingest_terminal_status(value: Any) -> str:
+    normalized = str(getattr(value, "value", value) or "").strip().upper()
+    return normalized if normalized in _INGEST_STATUSES else "FAILED"
+
 
 # ---------------------------------------------------------------------------
 # ASGI 통합
@@ -322,6 +379,11 @@ __all__ = [
     "AI_EMBEDDING_CACHE_TOTAL",
     "AI_HTTP_REQUEST_DURATION_SECONDS",
     "AI_HTTP_REQUESTS_TOTAL",
+    "AI_INGEST_ACTIVE_RUNS",
+    "AI_INGEST_RUN_COMPLETIONS_TOTAL",
+    "AI_INGEST_RUN_DURATION_SECONDS",
+    "AI_INGEST_SUBMISSIONS_TOTAL",
+    "AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL",
     "AI_LLM_CALL_DURATION_SECONDS",
     "AI_LLM_FALLBACK_TOTAL",
     "AI_LLM_RETRY_ATTEMPTS_TOTAL",
@@ -335,4 +397,6 @@ __all__ = [
     "AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL",
     "AI_SEMANTIC_RESPONSE_CACHE_TOTAL",
     "metrics_asgi_app",
+    "normalize_ingest_terminal_status",
+    "normalize_ingest_trigger_source",
 ]

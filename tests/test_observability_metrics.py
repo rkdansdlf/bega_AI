@@ -85,6 +85,31 @@ def test_metric_objects_accept_labels_and_observations() -> None:
     ) >= 1.0
 
 
+def test_ingest_metrics_use_only_bounded_labels() -> None:
+    from app.observability.metrics import (
+        AI_INGEST_ACTIVE_RUNS,
+        AI_INGEST_RUN_COMPLETIONS_TOTAL,
+        AI_INGEST_RUN_DURATION_SECONDS,
+        AI_INGEST_SUBMISSIONS_TOTAL,
+        AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL,
+    )
+
+    assert AI_INGEST_SUBMISSIONS_TOTAL._labelnames == (
+        "trigger_source",
+        "result",
+    )
+    assert AI_INGEST_RUN_COMPLETIONS_TOTAL._labelnames == (
+        "status",
+        "trigger_source",
+    )
+    assert AI_INGEST_RUN_DURATION_SECONDS._labelnames == (
+        "status",
+        "trigger_source",
+    )
+    assert AI_INGEST_ACTIVE_RUNS._labelnames == ("trigger_source",)
+    assert AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL._labelnames == ("source_table",)
+
+
 def test_rag_total_decorator_observes_total_stage() -> None:
     """_observe_rag_total 데코레이터가 코루틴 실행 후 total 스테이지를 관측한다."""
     from app.core.rag import _observe_rag_total
