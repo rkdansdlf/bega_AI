@@ -286,6 +286,16 @@ def test_run_ingestion_job_persists_queue_request_without_background_task() -> N
     assert store.request.trigger_source == "BACKEND_SCHEDULED"
 
 
+def test_run_ingestion_job_rejects_non_allowlisted_source_table() -> None:
+    payload = ingest.RunIngestPayload(tables=["users"])
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(ingest.run_ingestion_job(payload, _RunStore(), None, None))
+
+    assert raised.value.status_code == 422
+    assert "trusted ingestion source" in str(raised.value.detail)
+
+
 def test_get_ingestion_run_returns_sanitized_manual_contract() -> None:
     contract = {
         "code": "MANUAL_BASEBALL_DATA_REQUIRED",

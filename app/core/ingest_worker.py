@@ -23,6 +23,7 @@ from .ingest_runs import (
     IngestRunRecord,
     IngestRunStatus,
     IngestTableResult,
+    build_watermark_scope_key,
 )
 from ..observability.metrics import (
     AI_INGEST_ACTIVE_RUNS,
@@ -35,6 +36,10 @@ from ..observability.metrics import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class IngestLeaseLostError(RuntimeError):
+    """Raised internally when another worker owns or recovered the run lease."""
 
 
 class IngestWorker:
@@ -58,6 +63,7 @@ class IngestWorker:
         self.lease_seconds = max(
             3, int(getattr(settings, "ingest_worker_lease_seconds", 120))
         )
+        self.recovery_seconds = max(1.0, self.lease_seconds / 3)
 
     @staticmethod
     def _default_owner() -> str:
@@ -75,9 +81,12 @@ class IngestWorker:
         terminal_status = None
         result = None
         AI_INGEST_ACTIVE_RUNS.labels(trigger_source=trigger_source).inc()
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop(run))
+        lease_lost = asyncio.Event()
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(run, lease_lost))
         try:
-            result = await self._execute(run)
+            result = await self._execute(run, lease_lost)
+            if lease_lost.is_set():
+                raise IngestLeaseLostError
         except ManualBaseballDataRequiredError as exc:
             await self.store.finish_manual_data_required(
                 run.run_id,
@@ -87,6 +96,8 @@ class IngestWorker:
             terminal_status = IngestRunStatus.MANUAL_BASEBALL_DATA_REQUIRED
         except asyncio.CancelledError:
             raise
+        except IngestLeaseLostError:
+            logger.error("Ingestion run stopped after lease loss run_id=%s", run.run_id)
         except Exception as exc:  # noqa: BLE001
             error_type = type(exc).__name__
             logger.error(
@@ -107,6 +118,7 @@ class IngestWorker:
                 self.owner,
                 result.tables,
                 result.watermarks,
+                build_watermark_scope_key(run.request),
             )
             terminal_status = IngestRunStatus.SUCCEEDED
         finally:
@@ -158,21 +170,70 @@ class IngestWorker:
             except TimeoutError:
                 pass
 
-    async def _heartbeat_loop(self, run: IngestRunRecord) -> None:
+    async def run_recovery_forever(self, stop_event: asyncio.Event) -> None:
+        """Recover expired leases periodically, including after a warm restart."""
+
+        while not stop_event.is_set():
+            try:
+                recovered, failed = await self.store.recover_expired()
+                if recovered or failed:
+                    logger.warning(
+                        "Expired ingestion leases processed recovered=%d failed=%d",
+                        recovered,
+                        failed,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Ingestion lease recovery failed error_type=%s",
+                    type(exc).__name__,
+                )
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(),
+                    timeout=self.recovery_seconds,
+                )
+            except TimeoutError:
+                pass
+
+    async def _heartbeat_loop(
+        self,
+        run: IngestRunRecord,
+        lease_lost: asyncio.Event,
+    ) -> None:
         interval = max(1.0, self.lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
-            if not await self.store.heartbeat(run.run_id, self.owner):
+            try:
+                owned = await self.store.heartbeat(run.run_id, self.owner)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Ingestion run heartbeat failed run_id=%s error_type=%s",
+                    run.run_id,
+                    type(exc).__name__,
+                )
+                lease_lost.set()
+                return
+            if not owned:
                 logger.error("Ingestion run lease lost run_id=%s", run.run_id)
+                lease_lost.set()
                 return
 
-    async def _execute(self, run: IngestRunRecord) -> IngestExecutionResult:
+    async def _execute(
+        self,
+        run: IngestRunRecord,
+        lease_lost: asyncio.Event | None = None,
+    ) -> IngestExecutionResult:
         table_results: dict[str, IngestTableResult] = {}
         explicit_since = self._parse_since(run.request.since)
+        scope_key = build_watermark_scope_key(run.request)
         for source_table in run.request.tables:
+            if lease_lost is not None and lease_lost.is_set():
+                raise IngestLeaseLostError
             since = explicit_since
             if since is None and run.request.mode is IngestRunMode.INCREMENTAL:
-                since = await self.store.get_watermark(source_table)
+                since = await self.store.get_watermark(source_table, scope_key)
             partial = await asyncio.to_thread(
                 self.ingest_function,
                 tables=[source_table],
@@ -190,6 +251,8 @@ class IngestWorker:
                 workers=4,
                 row_stale_cleanup="off",
             )
+            if lease_lost is not None and lease_lost.is_set():
+                raise IngestLeaseLostError
             table_results.update(partial.tables)
         return IngestExecutionResult(tables=table_results)
 

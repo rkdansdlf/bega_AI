@@ -34,5 +34,7 @@ def test_ingest_orchestration_migration_defines_durable_run_and_watermark_tables
 
     assert "CREATE TABLE IF NOT EXISTS ai_ingest_runs" in sql
     assert "CREATE TABLE IF NOT EXISTS ai_ingest_watermarks" in sql
+    assert "scope_key varchar(64) NOT NULL" in sql
+    assert "PRIMARY KEY (source_table, scope_key)" in sql
     assert "MANUAL_BASEBALL_DATA_REQUIRED" in sql
     assert "WHERE status IN ('QUEUED', 'RUNNING')" in sql

@@ -9,6 +9,7 @@ from app.core.ingest_runs import (
     IngestRunRequest,
     IngestRunStatus,
     build_request_key,
+    build_watermark_scope_key,
     ensure_transition,
 )
 
@@ -47,10 +48,27 @@ def test_request_normalization_deduplicates_tables_and_preserves_iso_since():
     assert request.to_payload()["since"] == "2026-07-15T04:30:00+00:00"
 
 
-@pytest.mark.parametrize("tables", [(), (" ",), ("rag_chunks",)])
+@pytest.mark.parametrize("tables", [(), (" ",), ("rag_chunks",), ("users",)])
 def test_request_normalization_rejects_empty_or_managed_target(tables):
     with pytest.raises(ValueError):
         IngestRunRequest(tables=tables).normalized()
+
+
+def test_watermark_scope_partitions_season_and_explicit_since():
+    global_scope = IngestRunRequest(tables=("game",))
+    season_scope = IngestRunRequest(tables=("game",), season_year=2026)
+    explicit_scope = IngestRunRequest(
+        tables=("game",),
+        season_year=2026,
+        since="2026-07-01T00:00:00Z",
+    )
+
+    assert build_watermark_scope_key(global_scope) != build_watermark_scope_key(
+        season_scope
+    )
+    assert build_watermark_scope_key(season_scope) != build_watermark_scope_key(
+        explicit_scope
+    )
 
 
 def test_terminal_run_cannot_transition_back_to_running():

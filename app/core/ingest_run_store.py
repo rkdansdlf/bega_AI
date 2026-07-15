@@ -236,6 +236,7 @@ class IngestRunStore:
         owner: str,
         table_results: Mapping[str, IngestTableResult],
         watermarks: Mapping[str, datetime],
+        scope_key: str,
     ) -> None:
         summary = {
             source_table: _table_result_payload(result)
@@ -268,15 +269,24 @@ class IngestRunStore:
                     await conn.execute(
                         """
                         INSERT INTO ai_ingest_watermarks (
-                            source_table, last_successful_updated_at, last_run_id, updated_at
+                            source_table, scope_key, last_successful_updated_at, last_run_id, updated_at
                         )
-                        VALUES (%s, %s, %s, now())
-                        ON CONFLICT (source_table) DO UPDATE
-                        SET last_successful_updated_at = EXCLUDED.last_successful_updated_at,
-                            last_run_id = EXCLUDED.last_run_id,
+                        VALUES (%s, %s, %s, %s, now())
+                        ON CONFLICT (source_table, scope_key) DO UPDATE
+                        SET last_run_id = CASE
+                                WHEN ai_ingest_watermarks.last_successful_updated_at IS NULL
+                                  OR EXCLUDED.last_successful_updated_at
+                                     > ai_ingest_watermarks.last_successful_updated_at
+                                THEN EXCLUDED.last_run_id
+                                ELSE ai_ingest_watermarks.last_run_id
+                            END,
+                            last_successful_updated_at = GREATEST(
+                                ai_ingest_watermarks.last_successful_updated_at,
+                                EXCLUDED.last_successful_updated_at
+                            ),
                             updated_at = now()
                         """,
-                        (source_table, watermark, run_id),
+                        (source_table, scope_key, watermark, run_id),
                     )
 
     async def finish_failed(
@@ -407,7 +417,11 @@ class IngestRunStore:
                 ).fetchall()
         return len(recovered), len(failed)
 
-    async def get_watermark(self, source_table: str) -> datetime | None:
+    async def get_watermark(
+        self,
+        source_table: str,
+        scope_key: str,
+    ) -> datetime | None:
         async with self.pool.connection() as conn:
             row = await (
                 await conn.execute(
@@ -415,8 +429,9 @@ class IngestRunStore:
                     SELECT last_successful_updated_at
                     FROM ai_ingest_watermarks
                     WHERE source_table = %s
+                      AND scope_key = %s
                     """,
-                    (source_table,),
+                    (source_table, scope_key),
                 )
             ).fetchone()
         if row is None:
@@ -426,6 +441,7 @@ class IngestRunStore:
     async def advance_watermark(
         self,
         source_table: str,
+        scope_key: str,
         watermark: datetime,
         run_id: UUID,
     ) -> None:
@@ -433,15 +449,24 @@ class IngestRunStore:
             await conn.execute(
                 """
                 INSERT INTO ai_ingest_watermarks (
-                    source_table, last_successful_updated_at, last_run_id, updated_at
+                    source_table, scope_key, last_successful_updated_at, last_run_id, updated_at
                 )
-                VALUES (%s, %s, %s, now())
-                ON CONFLICT (source_table) DO UPDATE
-                SET last_successful_updated_at = EXCLUDED.last_successful_updated_at,
-                    last_run_id = EXCLUDED.last_run_id,
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (source_table, scope_key) DO UPDATE
+                SET last_run_id = CASE
+                        WHEN ai_ingest_watermarks.last_successful_updated_at IS NULL
+                          OR EXCLUDED.last_successful_updated_at
+                             > ai_ingest_watermarks.last_successful_updated_at
+                        THEN EXCLUDED.last_run_id
+                        ELSE ai_ingest_watermarks.last_run_id
+                    END,
+                    last_successful_updated_at = GREATEST(
+                        ai_ingest_watermarks.last_successful_updated_at,
+                        EXCLUDED.last_successful_updated_at
+                    ),
                     updated_at = now()
                 """,
-                (source_table, watermark, run_id),
+                (source_table, scope_key, watermark, run_id),
             )
 
     @staticmethod
