@@ -176,7 +176,7 @@ One worker task starts with the FastAPI application lifecycle. It:
 5. Stores per-table counts and advances successful table watermarks.
 6. Marks the run terminal.
 
-On startup and during a periodic recovery loop, an expired `RUNNING` lease is returned to `QUEUED` once. A run that exceeds the configured recovery-attempt limit becomes `FAILED`. Only a lease owner may heartbeat or finish a run, and a worker that loses ownership stops before another table or terminal write.
+On startup and during a periodic recovery loop, an expired `RUNNING` lease is returned to `QUEUED` once. A run that exceeds the configured recovery-attempt limit becomes `FAILED`. Only a lease owner may heartbeat or finish a run. The synchronous ingest path rechecks ownership and holds a row lock across each write batch so a recovered run cannot overlap writes with its prior owner.
 
 The existing ingestion functions are refactored to return structured results instead of relying only on printed output. Their current CLI remains supported.
 

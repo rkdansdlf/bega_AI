@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.ingest_runs import IngestTableResult
+from app.core.ingest_runs import IngestLeaseLostError, IngestTableResult
 from scripts import ingest_from_kbo as module
 
 
@@ -25,6 +25,32 @@ class _UndefinedSourceCursor:
         error = RuntimeError("relation users does not exist")
         error.sqlstate = "42P01"
         raise error
+
+
+class _LeaseCursor:
+    def __init__(self, row):
+        self.row = row
+        self.queries = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, query, params=None):
+        self.queries.append((query, params))
+
+    def fetchone(self):
+        return self.row
+
+
+class _LeaseConnection:
+    def __init__(self, row):
+        self.cursor_instance = _LeaseCursor(row)
+
+    def cursor(self):
+        return self.cursor_instance
 
 
 class _Connection:
@@ -137,3 +163,16 @@ def test_missing_trusted_static_source_raises_manual_contract(monkeypatch):
 
     assert raised.value.contract["code"] == "MANUAL_BASEBALL_DATA_REQUIRED"
     assert raised.value.contract["missing_fields"] == ["source_file"]
+
+
+def test_sync_lease_guard_fences_writes_with_database_row_lock():
+    connection = _LeaseConnection(row=None)
+    guard = module.build_ingest_lease_guard(connection, "run-1", "worker-1")
+
+    with pytest.raises(IngestLeaseLostError):
+        guard(True)
+
+    query, params = connection.cursor_instance.queries[0]
+    assert "lease_expires_at > now()" in query
+    assert "FOR SHARE" in query
+    assert params == ("run-1", "worker-1")

@@ -93,7 +93,7 @@ cd /path/to/bega_AI
 
 ## 리스 만료와 재시작 복구
 
-AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lease를 확인합니다. `AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS` 미만이면 `QUEUED`로 되돌리고, 한도에 도달하면 `FAILED` 및 `INGEST_LEASE_EXPIRED`로 종결합니다. heartbeat에서 소유권을 잃은 worker는 다음 테이블 및 terminal write를 중단합니다. watermark는 시즌과 명시적 `since` 범위별로 분리되고 `SUCCEEDED` 트랜잭션에서 단조 증가하므로, 좁은 범위나 늦게 끝난 과거 실행이 다른 범위의 cursor를 건너뛰거나 후퇴시키지 않습니다.
+AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lease를 확인합니다. `AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS` 미만이면 `QUEUED`로 되돌리고, 한도에 도달하면 `FAILED` 및 `INGEST_LEASE_EXPIRED`로 종결합니다. 동기 ingest 경로는 각 쓰기 배치 직전에 DB의 owner·만료 시각을 다시 확인하고 run row를 배치 commit까지 잠급니다. 따라서 heartbeat에서 소유권을 잃은 worker는 이후 배치를 쓰거나 terminal write를 할 수 없습니다. watermark는 시즌과 명시적 `since` 범위별로 분리되고 `SUCCEEDED` 트랜잭션에서 단조 증가하므로, 좁은 범위나 늦게 끝난 과거 실행이 다른 범위의 cursor를 건너뛰거나 후퇴시키지 않습니다.
 
 ## MANUAL_BASEBALL_DATA_REQUIRED 인계
 

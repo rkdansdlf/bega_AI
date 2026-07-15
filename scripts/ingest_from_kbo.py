@@ -44,7 +44,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from pathlib import Path
 import sys
 
@@ -68,7 +68,7 @@ from datetime import datetime, timezone
 
 from app.core.chunking import smart_chunks
 from app.core.embeddings import embed_texts
-from app.core.ingest_runs import IngestTableResult
+from app.core.ingest_runs import IngestLeaseLostError, IngestTableResult
 from app.core.ingest_sources import TRUSTED_INGEST_SOURCE_TABLES
 
 _ingest_logger = _logging.getLogger(__name__)
@@ -253,6 +253,40 @@ def execute_source_select(
                 required if required else ("source_table",),
             )
         raise
+
+
+IngestLeaseGuard = Callable[[bool], None]
+
+
+def build_ingest_lease_guard(
+    connection: Any,
+    run_id: Any,
+    owner: str,
+) -> IngestLeaseGuard:
+    """Build a synchronous DB fence for each leased write batch."""
+
+    if not owner.strip():
+        raise ValueError("ingest lease owner is required")
+
+    def check(lock_for_write: bool = False) -> None:
+        lock_clause = " FOR SHARE" if lock_for_write else ""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM ai_ingest_runs
+                WHERE run_id = %s
+                  AND status = 'RUNNING'
+                  AND lease_owner = %s
+                  AND lease_expires_at > now()
+                """
+                + lock_clause,
+                (run_id, owner),
+            )
+            if cursor.fetchone() is None:
+                raise IngestLeaseLostError("ingest run lease is no longer owned")
+
+    return check
 
 
 def load_static_profile_payloads(
@@ -2194,9 +2228,12 @@ def flush_chunks(
     commit_interval: int,
     stats: Dict[str, Any],
     skip_embedding: bool,
+    lease_guard: Optional[IngestLeaseGuard] = None,
 ) -> int:
     if not buffer:
         return 0
+    if lease_guard is not None:
+        lease_guard(False)
 
     stats["batches"] = stats.get("batches", 0) + 1
     embedding_model = resolve_embedding_model(settings)
@@ -2346,6 +2383,8 @@ def flush_chunks(
         return 0
 
     # Bulk upsert using executemany.
+    if lease_guard is not None:
+        lease_guard(True)
     cur.executemany(
         UPSERT_SQL,
         data,
@@ -2367,7 +2406,10 @@ def flush_chunks(
 
     flushed = len(stored_items)
     stats["since_commit"] = stats.get("since_commit", 0) + flushed
-    if commit_interval and stats["since_commit"] >= commit_interval:
+    if lease_guard is not None:
+        cur.connection.commit()
+        stats["since_commit"] = 0
+    elif commit_interval and stats["since_commit"] >= commit_interval:
         cur.connection.commit()
         stats["since_commit"] = 0
 
@@ -2396,6 +2438,7 @@ def ingest_table(
     row_stale_cleanup: str,
     stats: Dict[str, Any],
     date_to_exclusive: Optional[Any] = None,
+    lease_guard: Optional[IngestLeaseGuard] = None,
 ) -> IngestTableResult:
     if table_name == "rag_chunks":
         print("경고: rag_chunks 테이블은 처리 대상에서 제외됩니다.")
@@ -2422,6 +2465,8 @@ def ingest_table(
         dest_conn.cursor() as write_cur,
     ):
         write_cur.execute("SET statement_timeout TO 0;")
+        if lease_guard is not None:
+            lease_guard(False)
 
         # --- NEW LOGIC FOR STATIC FILE ---
         if "source_file" in profile:
@@ -2442,6 +2487,7 @@ def ingest_table(
                 commit_interval=commit_interval,
                 stats=stats,
                 skip_embedding=skip_embedding,
+                lease_guard=lease_guard,
             )
             total_chunks = flushed
             dest_conn.commit()  # Commit after static file ingestion
@@ -2482,6 +2528,8 @@ def ingest_table(
         )
 
         while True:
+            if lease_guard is not None:
+                lease_guard(False)
             rows = read_cur.fetchmany(read_batch_size)
             if not rows:
                 break
@@ -2540,6 +2588,7 @@ def ingest_table(
                         commit_interval=commit_interval,
                         stats=stats,
                         skip_embedding=skip_embedding,
+                        lease_guard=lease_guard,
                     )
                     total_chunks += flushed
                     processed_chunks += flushed
@@ -2556,6 +2605,7 @@ def ingest_table(
             commit_interval=commit_interval,
             stats=stats,
             skip_embedding=skip_embedding,
+            lease_guard=lease_guard,
         )
         total_chunks += flushed
         processed_chunks += flushed
@@ -2569,6 +2619,8 @@ def ingest_table(
             limit=limit,
             row_stale_cleanup=row_stale_cleanup,
         ):
+            if lease_guard is not None:
+                lease_guard(True)
             dry_run = row_stale_cleanup != "apply"
             stale_count = soft_deactivate_missing_source_rows(
                 write_cur,
@@ -2621,6 +2673,8 @@ def ingest(
     workers: int,
     row_stale_cleanup: str = "off",
     date_to_exclusive: Optional[Any] = None,
+    lease_run_id: Any = None,
+    lease_owner: Optional[str] = None,
 ) -> IngestExecutionResult:
     _require_psycopg()
     settings = get_settings()
@@ -2641,6 +2695,15 @@ def ingest(
         cur.execute("SET statement_timeout TO 0;")
         cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
     dest_conn.autocommit = original_autocommit
+    lease_guard = None
+    if lease_run_id is not None or lease_owner is not None:
+        if lease_run_id is None or not lease_owner:
+            raise ValueError("lease_run_id and lease_owner must be provided together")
+        lease_guard = build_ingest_lease_guard(
+            dest_conn,
+            lease_run_id,
+            lease_owner,
+        )
 
     table_results: Dict[str, IngestTableResult] = {}
     try:
@@ -2672,6 +2735,7 @@ def ingest(
                 workers=workers,
                 row_stale_cleanup=row_stale_cleanup,
                 stats=stats,
+                lease_guard=lease_guard,
             )
             table_results[table] = result
             print(
