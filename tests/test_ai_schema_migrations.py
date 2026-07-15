@@ -25,3 +25,14 @@ def test_ai_runtime_schema_vector_index_is_explicit_operator_step():
     assert "CREATE INDEX IF NOT EXISTS idx_chat_semantic_cache_embedding_hnsw" in sql
     assert "extensions.vector_cosine_ops" in sql
     assert "CREATE INDEX CONCURRENTLY" not in sql
+
+
+def test_ingest_orchestration_migration_defines_durable_run_and_watermark_tables():
+    sql = (MIGRATION_DIR / "003_ai_ingest_orchestration.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE TABLE IF NOT EXISTS ai_ingest_runs" in sql
+    assert "CREATE TABLE IF NOT EXISTS ai_ingest_watermarks" in sql
+    assert "MANUAL_BASEBALL_DATA_REQUIRED" in sql
+    assert "WHERE status IN ('QUEUED', 'RUNNING')" in sql

@@ -64,6 +64,38 @@ def test_complete_contract_includes_rag_chunks_runtime_columns():
     }.issubset(REQUIRED_COLUMNS["rag_chunks"])
 
 
+def test_complete_contract_includes_ingest_orchestration_tables():
+    assert set(REQUIRED_COLUMNS["ai_ingest_runs"]) == {
+        "run_id",
+        "request_key",
+        "trigger_source",
+        "status",
+        "request_payload",
+        "requested_at",
+        "started_at",
+        "heartbeat_at",
+        "finished_at",
+        "lease_owner",
+        "lease_expires_at",
+        "recovery_attempts",
+        "error_code",
+        "error_message",
+        "table_summary",
+        "created_at",
+        "updated_at",
+    }
+    assert set(REQUIRED_COLUMNS["ai_ingest_watermarks"]) == {
+        "source_table",
+        "last_successful_updated_at",
+        "last_run_id",
+        "updated_at",
+    }
+    assert {
+        "ux_ai_ingest_runs_active_request",
+        "idx_ai_ingest_runs_status_requested",
+    }.issubset(REQUIRED_INDEXES)
+
+
 def test_validate_schema_contract_reports_missing_columns_and_indexes():
     connection = _complete_connection()
     connection.columns = [
