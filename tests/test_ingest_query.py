@@ -10,7 +10,11 @@ except ModuleNotFoundError:
     sql = None
 
 # We can import build_select_query directly from the script
-from scripts.ingest_from_kbo import TABLE_PROFILES, build_select_query
+from scripts.ingest_from_kbo import (
+    REQUIRED_SOURCE_COLUMNS,
+    TABLE_PROFILES,
+    build_select_query,
+)
 
 
 @pytest.fixture
@@ -310,3 +314,11 @@ def test_game_profile_uses_game_metadata_updated_at(sample_since) -> None:
 
     assert "WHERE ks.season_year = %s AND gm.updated_at >= %s" in query
     assert params == (2025, sample_since)
+
+
+def test_core_schedule_profiles_declare_required_source_fields() -> None:
+    assert REQUIRED_SOURCE_COLUMNS["game"] == frozenset({"game_id", "game_date"})
+    assert "game_id" in REQUIRED_SOURCE_COLUMNS["game_metadata"]
+    assert {"game_id", "game_date"}.issubset(
+        REQUIRED_SOURCE_COLUMNS["game_summary"]
+    )
