@@ -53,6 +53,17 @@ def test_validate_schema_contract_accepts_complete_contract():
     asyncio.run(validate_schema_contract(_complete_connection()))
 
 
+def test_complete_contract_includes_rag_chunks_runtime_columns():
+    assert "rag_chunks" in REQUIRED_COLUMNS
+    assert {
+        "embedding",
+        "content_tsv",
+        "source_table",
+        "metadata",
+        "is_active",
+    }.issubset(REQUIRED_COLUMNS["rag_chunks"])
+
+
 def test_validate_schema_contract_reports_missing_columns_and_indexes():
     connection = _complete_connection()
     connection.columns = [

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -68,17 +69,25 @@ from ..core.chat_cost_metrics import (
     record_chat_token_estimate,
 )
 from ..core.chat_semantic_cache import (
+    complete_semantic_shadow_observation,
     delete_semantic_by_key,
     get_semantic_cached_response,
     record_semantic_shadow_decision,
+    record_semantic_shadow_observation,
     save_semantic_cache,
     update_semantic_hit_count,
 )
 from ..core.embeddings import async_embed_query
 from ..core.entity_extractor import extract_player_names
-from ..core.rag import _build_static_kbo_faq_result
+from ..core.rag import (
+    _build_manual_baseball_data_required_result,
+    _build_static_kbo_faq_result,
+)
 from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
-from ..tools.operator_data_query import try_build_operator_fast_path_result
+from ..tools.operator_data_query import (
+    is_operator_data_query,
+    try_build_operator_fast_path_result,
+)
 from ..observability.metrics import AI_RESPONSE_CACHE_BY_INTENT
 from ..streaming.versioned_sse import (
     negotiate_event_version,
@@ -405,6 +414,9 @@ async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
                 return payload
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatStatic] operator data fast-path skipped: %s", exc)
+
+        if is_operator_data_query(question):
+            return _build_manual_baseball_data_required_result(question)
 
     result = _build_static_kbo_faq_result(question)
     if result is None:
@@ -774,15 +786,43 @@ def _is_semantic_cache_shadow_enabled(settings: Any) -> bool:
     return bool(getattr(settings, "chat_semantic_cache_shadow_enabled", False))
 
 
+def _semantic_cache_rollout_percent(settings: Any) -> int:
+    try:
+        return max(
+            0,
+            min(100, int(getattr(settings, "chat_semantic_cache_rollout_percent", 100))),
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _semantic_cache_rollout_selected(cache_key: str, rollout_percent: int) -> bool:
+    percent = max(0, min(100, int(rollout_percent)))
+    if percent <= 0:
+        return False
+    if percent >= 100:
+        return True
+    digest = hashlib.sha256(str(cache_key).encode("utf-8")).digest()
+    bucket = int.from_bytes(digest[:4], byteorder="big") % 100
+    return bucket < percent
+
+
 def _is_semantic_cache_lookup_enabled(settings: Any) -> bool:
-    return bool(getattr(settings, "chat_semantic_cache_enabled", False)) or (
-        _is_semantic_cache_shadow_enabled(settings)
+    if bool(getattr(settings, "chat_semantic_cache_kill_switch", False)):
+        return False
+    if _is_semantic_cache_shadow_enabled(settings):
+        return True
+    return bool(getattr(settings, "chat_semantic_cache_enabled", False)) and (
+        _semantic_cache_rollout_percent(settings) > 0
     )
 
 
 def _is_semantic_cache_serving_enabled(settings: Any) -> bool:
-    return bool(getattr(settings, "chat_semantic_cache_enabled", False)) and not (
-        _is_semantic_cache_shadow_enabled(settings)
+    return (
+        bool(getattr(settings, "chat_semantic_cache_enabled", False))
+        and not _is_semantic_cache_shadow_enabled(settings)
+        and not bool(getattr(settings, "chat_semantic_cache_kill_switch", False))
+        and _semantic_cache_rollout_percent(settings) > 0
     )
 
 
@@ -828,6 +868,17 @@ async def _prepare_semantic_cache_hit_for_response(
     settings = get_settings()
     shadow_enabled = _is_semantic_cache_shadow_enabled(settings)
     serving_enabled = _is_semantic_cache_serving_enabled(settings)
+    if serving_enabled and not _semantic_cache_rollout_selected(
+        cache_key,
+        _semantic_cache_rollout_percent(settings),
+    ):
+        logger.info(
+            "[ChatSemanticCache] ROLLOUT_SKIP key=%s... percent=%d route=%s",
+            cache_key[:8],
+            _semantic_cache_rollout_percent(settings),
+            route,
+        )
+        return None
     semantic_cached = await _get_semantic_cache_hit(question, filters)
 
     if not semantic_cached:
@@ -873,6 +924,29 @@ async def _prepare_semantic_cache_hit_for_response(
             route,
         )
         record_semantic_shadow_decision(route=route, result="hit")
+        observation_recorded = False
+        try:
+            pool = get_connection_pool()
+            async with pool.connection() as conn:
+                observation_recorded = await record_semantic_shadow_observation(
+                    conn,
+                    request_cache_key=cache_key,
+                    candidate_cache_key=semantic_key,
+                    route=route,
+                    question_text=question,
+                    filters_json=filters,
+                    cached_answer=str(semantic_text),
+                    similarity=similarity,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ChatSemanticCache] shadow observation connection failed: %s",
+                exc,
+            )
+        record_semantic_shadow_decision(
+            route=route,
+            result="sample_recorded" if observation_recorded else "sample_error",
+        )
         record_chat_token_estimate(
             settings,
             route=route,
@@ -928,6 +1002,12 @@ async def _save_chat_response_caches(
             response_text=response_text,
             model_name=model_name,
         )
+        if _is_semantic_cache_shadow_enabled(settings):
+            await complete_semantic_shadow_observation(
+                conn,
+                request_cache_key=cache_key,
+                fresh_answer=response_text,
+            )
 
     if not _is_semantic_cache_lookup_enabled(settings):
         return

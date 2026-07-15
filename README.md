@@ -160,8 +160,8 @@ AI/
 -   **야구 데이터 정책:** 외부 웹 조회 비활성화, 내부 DB/정적 문서만 사용
 -   **데이터베이스:** PostgreSQL + pgvector
 -   **스트리밍:** sse-starlette
--   **웹 서버:** Nginx (리버스 프록시)
--   **배포:** AWS EC2
+-   **웹 진입:** OCI 운영 인스턴스의 Caddy/Backend BFF 경로
+-   **배포:** OCI 인스턴스 + Docker Compose
 -   **컨테이너화:** Docker
 
 ### 시스템 설계
@@ -169,7 +169,7 @@ AI/
 ```
 클라이언트 요청
     ↓ HTTPS
-Nginx (EC2:443)
+Caddy / Backend BFF (OCI:443)
     ↓
 FastAPI Application (8001)
     ↓
@@ -517,33 +517,39 @@ PYTHONPATH=. .venv/bin/python scripts/batch_coach_matchup_cache.py \
 
 ## API 문서
 
-### 엔드포인트 목록
+### 현재 엔드포인트 계약
 
+프론트엔드는 Backend BFF를 사용합니다. AI 서비스 직접 호출은 내부
+토큰을 가진 backend/운영 경로에서만 허용합니다.
 
-### 챗봇 엔드포인트 
-``` 
-POST /ai/chat/completion - RAG 파이프라인 JSON 응답 
-POST /ai/chat/stream     - SSE 스트림 채팅 응답 
-GET /ai/search           - 상위 K개 검색된 청크 조회 
-POST /ai/ingest          - 단일 문서 업서트 
-GET /ai/health           - 기본 헬스 체크 
-``` 
-**요청:** 
 ```
-json { 
-	"message": "사용자 질문", 
-	"conversation_id": "optional_id", 
-	"context": "optional_context" 
-	} 
-``` 
-**응답:** 
+POST /api/ai/chat/completion  Backend BFF JSON 완료 응답
+POST /api/ai/chat/stream      Backend BFF SSE 채팅
+POST /api/ai/coach/analyze    Backend BFF SSE Coach 분석
+POST /ai/chat/completion      AI 내부 JSON 완료 응답
+POST /ai/chat/stream          AI 내부 SSE 채팅
+POST /ai/coach/analyze        AI 내부 SSE Coach 분석
+GET  /health                  기본 헬스 체크
 ```
-json { 
-	"response": "AI 응답", 
-	"sources": ["출처1", "출처2"], 
-	"conversation_id": "id" 
-	} 
-``` 
+
+채팅 요청의 canonical 필드는 `question`, `history`, `filters`, `style`이며
+`message`/`conversation_id`는 현재 계약의 필드가 아닙니다.
+
+```json
+{
+  "question": "2024년 LG에서 OPS가 가장 높은 선수 5명 알려줘",
+  "history": null,
+  "filters": null,
+  "style": "markdown"
+}
+```
+
+SSE v2가 필요하면 `X-AI-Event-Version: 2`를 전송합니다. 버전 협상과
+이벤트 목록은 통합 저장소의 `docs/ai-service-api-contract.md`와
+`contracts/ai-stream-v2.openapi.json`을 기준으로 합니다.
+
+완료 응답은 `answer`, `data_sources`, `verified`, `strategy`, `cached`,
+`error`, `perf` 필드를 포함합니다.
 ### 데이터 요청 정책
 ``` 
 데이터 부족 시 MANUAL_BASEBALL_DATA_REQUIRED payload 반환
@@ -676,7 +682,29 @@ EMBED_PROVIDER=local
 
 ## 배포
 
-### AWS EC2 배포
+### 현재 운영 배포 기준
+
+운영 AI는 별도 공개 앱 서버가 아니라 OCI 운영 인스턴스의 Docker Compose
+스택에서 실행됩니다. 프론트엔드는 Backend BFF를 호출하고, AI 서비스는
+내부 토큰으로 보호된 내부 경로에서만 호출됩니다.
+
+AI runtime cache 스키마는 애플리케이션 시작 시 DDL을 수행하지 않습니다.
+운영자는 DDL 권한이 있는 migration role로 먼저 다음 migration을 실행하고,
+검증이 끝난 뒤 `AI_DB_SCHEMA_MODE=managed`로 기동해야 합니다.
+
+```bash
+AI_SCHEMA_DB_URL='postgresql://...' \
+  ./scripts/migrate_ai_runtime_schema.sh
+export AI_DB_SCHEMA_MODE=managed
+```
+
+`vector` extension은 DB/DBA 사전 조건이며 위 migration이 설치하지 않습니다.
+운영 스키마 계약 검증은 `scripts/validate_ai_runtime_schema.py`를 사용합니다.
+
+기존 아래 AWS EC2/Nginx 절차는 과거 수동 설치 참고자료이며 현재 OCI
+Compose 운영 경로의 source of truth가 아닙니다.
+
+### AWS EC2 배포 (역사적 참고)
 
 1.  **서버 설정:**
     

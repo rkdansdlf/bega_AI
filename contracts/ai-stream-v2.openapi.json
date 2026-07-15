@@ -327,6 +327,25 @@
             "default": null,
             "title": "Intent"
           },
+          "model_usage": {
+            "items": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Model Usage",
+            "type": "array"
+          },
+          "model_usage_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Usage Complete"
+          },
           "perf": {
             "additionalProperties": {
               "$ref": "#/components/schemas/JsonValue"

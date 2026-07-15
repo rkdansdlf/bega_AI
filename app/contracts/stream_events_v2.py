@@ -126,6 +126,8 @@ class ChatMetaData(_StrictModel):
     answer_sources: list[JsonValue] = Field(default_factory=list)
     visualizations: list[JsonValue] = Field(default_factory=list)
     perf: dict[str, JsonValue] = Field(default_factory=dict)
+    model_usage: list[JsonValue] = Field(default_factory=list)
+    model_usage_complete: bool | None = None
 
 
 class CoachStatusData(_StrictModel):

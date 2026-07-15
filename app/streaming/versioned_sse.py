@@ -324,12 +324,22 @@ async def versioned_events(
         raise ValueError(f"Unsupported stream version: {version}")
 
     saw_error = False
+    saw_cancelled = False
     async for raw_event in events:
         try:
             event_value = _event_object(raw_event, endpoint=resolved_endpoint)
             legacy_type = raw_event.get("event", "message")
-            if legacy_type == "done" and saw_error:
-                event_value["data"]["reason"] = "error"
+            if legacy_type == "meta":
+                payload = _json_payload(raw_event)
+                saw_cancelled = saw_cancelled or (
+                    payload.get("finish_reason") == "cancelled"
+                    or payload.get("cancelled") is True
+                )
+            if legacy_type == "done":
+                if saw_error:
+                    event_value["data"]["reason"] = "error"
+                elif saw_cancelled:
+                    event_value["data"]["reason"] = "cancelled"
             validated = _serialize_v2(event_value)
         except Exception as exc:  # noqa: BLE001
             AI_STREAM_CONTRACT_FAILURE_TOTAL.labels(
