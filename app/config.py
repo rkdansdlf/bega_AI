@@ -75,6 +75,18 @@ class Settings(BaseSettings):
     # `auto` keeps local/dev startup compatibility. `managed` requires the
     # migration role to provision the schema before the AI process starts.
     ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
+    ingest_worker_enabled: bool = Field(
+        True, validation_alias="AI_INGEST_WORKER_ENABLED"
+    )
+    ingest_worker_poll_seconds: float = Field(
+        2.0, validation_alias="AI_INGEST_WORKER_POLL_SECONDS"
+    )
+    ingest_worker_lease_seconds: int = Field(
+        120, validation_alias="AI_INGEST_WORKER_LEASE_SECONDS"
+    )
+    ingest_worker_max_recovery_attempts: int = Field(
+        1, validation_alias="AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS"
+    )
     _legacy_source_db_warned: bool = PrivateAttr(default=False)
 
     def model_post_init(self, __context) -> None:
@@ -509,6 +521,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"AI_DB_SCHEMA_MODE must be one of {sorted(allowed)}"
             )
+        return value
+
+    @field_validator("ingest_worker_poll_seconds")
+    def _validate_ingest_worker_poll_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("AI_INGEST_WORKER_POLL_SECONDS must be > 0")
+        return value
+
+    @field_validator("ingest_worker_lease_seconds")
+    def _validate_ingest_worker_lease_seconds(cls, value: int) -> int:
+        if value < 3:
+            raise ValueError("AI_INGEST_WORKER_LEASE_SECONDS must be >= 3")
+        return value
+
+    @field_validator("ingest_worker_max_recovery_attempts")
+    def _validate_ingest_worker_max_recovery_attempts(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS must be >= 0")
         return value
 
     @field_validator("chat_openrouter_empty_chunk_retries")

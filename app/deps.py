@@ -36,6 +36,8 @@ from .core.chat_semantic_cache import (
 )
 from .core.chat_semantic_cache import cleanup_expired as _cleanup_expired_semantic_cache
 from .core.security_metrics import record_security_event
+from .core.ingest_run_store import IngestRunStore
+from .core.ingest_worker import IngestWorker
 from .db.schema_contract import validate_schema_contract
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성). 전 계층이 async psycopg3로 통일됨.
@@ -506,6 +508,17 @@ async def _prepare_schema(pool, settings) -> None:
     await _ensure_startup_schema(pool, settings)
 
 
+def get_ingest_run_store() -> IngestRunStore:
+    """Build an ingestion store over the shared PostgreSQL pool."""
+
+    settings = get_settings()
+    return IngestRunStore(
+        get_connection_pool(),
+        lease_seconds=settings.ingest_worker_lease_seconds,
+        max_recovery_attempts=settings.ingest_worker_max_recovery_attempts,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app):
     """앱 시작/종료 시 실행되는 lifespan 이벤트"""
@@ -537,6 +550,22 @@ async def lifespan(app):
         coach_recovery_task = asyncio.create_task(_coach_failed_cache_recovery_loop())
         logger.info("[Lifespan] coach FAILED_LOCKED recovery loop started")
 
+    ingest_worker_task: Optional[asyncio.Task] = None
+    ingest_worker_stop_event: Optional[asyncio.Event] = None
+    if settings.ingest_worker_enabled:
+        ingest_store = get_ingest_run_store()
+        recovered, failed = await ingest_store.recover_expired()
+        ingest_worker_stop_event = asyncio.Event()
+        ingest_worker = IngestWorker(store=ingest_store, settings=settings)
+        ingest_worker_task = asyncio.create_task(
+            ingest_worker.run_forever(ingest_worker_stop_event)
+        )
+        logger.info(
+            "[Lifespan] ingest worker started recovered=%d failed=%d",
+            recovered,
+            failed,
+        )
+
     # [Embedding Cache] 백엔드 미리 초기화 (startup 로그 출력)
     try:
         from .core.embedding_cache import get_backend as _get_embed_backend
@@ -552,9 +581,15 @@ async def lifespan(app):
     db_pool_metrics_task.cancel()
     if coach_recovery_task is not None:
         coach_recovery_task.cancel()
+    if ingest_worker_stop_event is not None:
+        ingest_worker_stop_event.set()
+    if ingest_worker_task is not None:
+        ingest_worker_task.cancel()
     background_tasks = [cleanup_task, db_pool_metrics_task]
     if coach_recovery_task is not None:
         background_tasks.append(coach_recovery_task)
+    if ingest_worker_task is not None:
+        background_tasks.append(ingest_worker_task)
     for task in background_tasks:
         try:
             await task
