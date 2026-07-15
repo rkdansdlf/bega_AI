@@ -190,6 +190,12 @@ AI_CHAT_QUEUE_EVENTS_TOTAL = Counter(
     ["event"],  # event: admitted|queued|admitted_from_queue|overflow|cancelled|released
 )
 
+AI_HTTP_REQUESTS_TOTAL = Counter(
+    "ai_http_requests_total",
+    "AI service HTTP requests by method, route template, and status group.",
+    ["method", "route", "status_group"],
+)
+
 AI_LLM_FALLBACK_TOTAL = Counter(
     "ai_llm_fallback_total",
     "LLM fallback attempts after a model failure.",
@@ -224,6 +230,29 @@ AI_CHAT_QUEUE_ESTIMATED_WAIT_SECONDS = Histogram(
     "Estimated chat queue wait time when a request is queued or rejected.",
     [],
     buckets=_CHAT_QUEUE_WAIT_BUCKETS,
+)
+
+_HTTP_REQUEST_BUCKETS = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    120.0,
+)
+AI_HTTP_REQUEST_DURATION_SECONDS = Histogram(
+    "ai_http_request_duration_seconds",
+    "AI service HTTP request duration by method, route template, and status group.",
+    ["method", "route", "status_group"],
+    buckets=_HTTP_REQUEST_BUCKETS,
 )
 
 # Coach 동적 프롬프트 사이즈 (B 작업 효과 추적). 문자 수 단위.
@@ -291,6 +320,8 @@ __all__ = [
     "AI_CHAT_TOKEN_ESTIMATE_BY_TYPE_TOTAL",
     "AI_DB_POOL_SIZE",
     "AI_EMBEDDING_CACHE_TOTAL",
+    "AI_HTTP_REQUEST_DURATION_SECONDS",
+    "AI_HTTP_REQUESTS_TOTAL",
     "AI_LLM_CALL_DURATION_SECONDS",
     "AI_LLM_FALLBACK_TOTAL",
     "AI_LLM_RETRY_ATTEMPTS_TOTAL",

@@ -81,8 +81,10 @@ def create_app() -> FastAPI:
         # Prometheus /metrics 엔드포인트 마운트
         # /ai/metrics와 /metrics 양쪽 모두 노출하여 운영자/스크레이퍼 호환성 확보
         try:
+            from app.observability.http_metrics import install_http_metrics
             from app.observability.metrics import metrics_asgi_app
 
+            install_http_metrics(app)
             app.mount("/metrics", metrics_asgi_app())
             app.mount("/ai/metrics", metrics_asgi_app())
         except Exception as exc:  # noqa: BLE001
