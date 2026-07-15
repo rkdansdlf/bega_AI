@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 import json
 import logging
+from pathlib import Path
 import secrets
 from time import perf_counter
 from typing import Any, Optional
@@ -44,6 +45,12 @@ from .db.schema_contract import validate_schema_contract
 _connection_pool: Optional[AsyncConnectionPool] = None
 DB_POOL_MIN_SIZE = 1
 DB_POOL_MAX_SIZE = 30
+INGEST_ORCHESTRATION_MIGRATION_SQL = (
+    Path(__file__).resolve().parent
+    / "db"
+    / "migrations"
+    / "003_ai_ingest_orchestration.sql"
+).read_text(encoding="utf-8")
 
 # 전역 싱글톤: stateless 컴포넌트 (앱 수명 동안 재사용)
 _shared_context_formatter = None
@@ -486,6 +493,16 @@ async def _ensure_startup_schema(pool, settings) -> None:
                 exc,
             )
 
+    await _ensure_ingest_orchestration_schema(pool)
+
+
+async def _ensure_ingest_orchestration_schema(pool) -> None:
+    """Provision the durable queue in compatibility schema mode."""
+
+    async with pool.connection() as conn:
+        await conn.execute(INGEST_ORCHESTRATION_MIGRATION_SQL)
+    logger.info("[Lifespan] AI ingest orchestration tables ensured")
+
 
 async def _prepare_schema(pool, settings) -> None:
     """Prepare or validate the AI schema according to the runtime mode."""
@@ -551,6 +568,7 @@ async def lifespan(app):
         logger.info("[Lifespan] coach FAILED_LOCKED recovery loop started")
 
     ingest_worker_task: Optional[asyncio.Task] = None
+    ingest_recovery_task: Optional[asyncio.Task] = None
     ingest_worker_stop_event: Optional[asyncio.Event] = None
     if settings.ingest_worker_enabled:
         ingest_store = get_ingest_run_store()
@@ -559,6 +577,9 @@ async def lifespan(app):
         ingest_worker = IngestWorker(store=ingest_store, settings=settings)
         ingest_worker_task = asyncio.create_task(
             ingest_worker.run_forever(ingest_worker_stop_event)
+        )
+        ingest_recovery_task = asyncio.create_task(
+            ingest_worker.run_recovery_forever(ingest_worker_stop_event)
         )
         logger.info(
             "[Lifespan] ingest worker started recovered=%d failed=%d",
@@ -585,11 +606,15 @@ async def lifespan(app):
         ingest_worker_stop_event.set()
     if ingest_worker_task is not None:
         ingest_worker_task.cancel()
+    if ingest_recovery_task is not None:
+        ingest_recovery_task.cancel()
     background_tasks = [cleanup_task, db_pool_metrics_task]
     if coach_recovery_task is not None:
         background_tasks.append(coach_recovery_task)
     if ingest_worker_task is not None:
         background_tasks.append(ingest_worker_task)
+    if ingest_recovery_task is not None:
+        background_tasks.append(ingest_recovery_task)
     for task in background_tasks:
         try:
             await task

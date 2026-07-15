@@ -11,6 +11,12 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
+from .ingest_sources import (
+    MAX_INGEST_TABLE_NAME_LENGTH,
+    MAX_INGEST_TABLES_PER_RUN,
+    TRUSTED_INGEST_SOURCE_SET,
+)
+
 
 class IngestRunMode(str, Enum):
     """Supported ingestion execution modes."""
@@ -57,8 +63,12 @@ class IngestRunRequest:
         )
         if not tables:
             raise ValueError("at least one ingestion table is required")
-        if "rag_chunks" in tables:
-            raise ValueError("rag_chunks cannot be used as an ingestion source")
+        if len(tables) > MAX_INGEST_TABLES_PER_RUN:
+            raise ValueError("too many ingestion tables were requested")
+        if any(len(table) > MAX_INGEST_TABLE_NAME_LENGTH for table in tables):
+            raise ValueError("ingestion table name is too long")
+        if any(table not in TRUSTED_INGEST_SOURCE_SET for table in tables):
+            raise ValueError("unsupported trusted ingestion source table")
 
         mode = (
             self.mode
@@ -128,6 +138,22 @@ def build_request_key(request: IngestRunRequest) -> str:
 
     payload = json.dumps(
         request.normalized().to_payload(),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def build_watermark_scope_key(request: IngestRunRequest) -> str:
+    """Partition cursors so scoped runs cannot advance unrelated ingestion."""
+
+    normalized = request.normalized()
+    payload = json.dumps(
+        {
+            "season_year": normalized.season_year,
+            "since": normalized.since,
+        },
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),

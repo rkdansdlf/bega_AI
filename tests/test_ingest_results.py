@@ -19,6 +19,14 @@ class _Cursor:
         del query, params
 
 
+class _UndefinedSourceCursor:
+    def execute(self, query, params=None):
+        del query, params
+        error = RuntimeError("relation users does not exist")
+        error.sqlstate = "42P01"
+        raise error
+
+
 class _Connection:
     def __init__(self):
         self.autocommit = False
@@ -96,3 +104,36 @@ def test_zero_rows_are_valid_when_required_columns_exist():
         {"game_id", "game_date"},
         {"game_id", "game_date"},
     )
+
+
+def test_undefined_source_schema_raises_manual_contract_before_generic_failure():
+    with pytest.raises(module.ManualBaseballDataRequiredError) as raised:
+        module.execute_source_select(
+            _UndefinedSourceCursor(),
+            "SELECT * FROM game",
+            (),
+            table_name="game",
+            required_columns={"game_id", "game_date"},
+        )
+
+    assert raised.value.contract["code"] == "MANUAL_BASEBALL_DATA_REQUIRED"
+    assert raised.value.contract["entity"] == "game"
+    assert raised.value.contract["missing_fields"] == ["game_date", "game_id"]
+
+
+def test_missing_trusted_static_source_raises_manual_contract(monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "build_static_profile_chunk_payloads",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("missing file")),
+    )
+
+    with pytest.raises(module.ManualBaseballDataRequiredError) as raised:
+        module.load_static_profile_payloads(
+            "kbo_metrics_explained",
+            {"source_file": "docs/missing.md"},
+            settings=SimpleNamespace(),
+        )
+
+    assert raised.value.contract["code"] == "MANUAL_BASEBALL_DATA_REQUIRED"
+    assert raised.value.contract["missing_fields"] == ["source_file"]

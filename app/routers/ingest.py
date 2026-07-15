@@ -213,8 +213,8 @@ class RunIngestPayload(BaseModel):
 async def run_ingestion_job(
     payload: RunIngestPayload,
     store=Depends(get_ingest_run_store),
-    __: None = Depends(require_ai_internal_token),
     _: None = Depends(rate_limit_debug_dependency),
+    __: None = Depends(require_ai_internal_token),
 ):
     """Persist or deduplicate a durable internal-DB ingestion run."""
 
@@ -302,8 +302,8 @@ def _sanitize_error(record) -> dict[str, object] | None:
 async def get_ingestion_run(
     run_id: UUID,
     store=Depends(get_ingest_run_store),
-    __: None = Depends(require_ai_internal_token),
     _: None = Depends(rate_limit_debug_dependency),
+    __: None = Depends(require_ai_internal_token),
 ):
     """Return only sanitized durable run status fields."""
 

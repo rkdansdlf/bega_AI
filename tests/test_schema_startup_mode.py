@@ -20,6 +20,33 @@ class _Pool:
         return _ConnectionContext()
 
 
+class _RecordingConnection:
+    def __init__(self):
+        self.executed = []
+
+    async def execute(self, statement):
+        self.executed.append(statement)
+
+
+class _RecordingConnectionContext:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return False
+
+
+class _RecordingPool:
+    def __init__(self):
+        self.connection_instance = _RecordingConnection()
+
+    def connection(self):
+        return _RecordingConnectionContext(self.connection_instance)
+
+
 def _settings(mode: str):
     return SimpleNamespace(
         ai_db_schema_mode=mode,
@@ -72,3 +99,13 @@ def test_ingest_run_store_uses_worker_lease_and_recovery_settings():
     assert store.pool is pool
     assert store.lease_seconds == 240
     assert store.max_recovery_attempts == 2
+
+
+def test_auto_schema_compatibility_ensures_ingest_orchestration_tables():
+    pool = _RecordingPool()
+
+    asyncio.run(deps._ensure_ingest_orchestration_schema(pool))
+
+    sql = " ".join(pool.connection_instance.executed)
+    assert "CREATE TABLE IF NOT EXISTS ai_ingest_runs" in sql
+    assert "CREATE TABLE IF NOT EXISTS ai_ingest_watermarks" in sql

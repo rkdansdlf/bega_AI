@@ -69,6 +69,7 @@ from datetime import datetime, timezone
 from app.core.chunking import smart_chunks
 from app.core.embeddings import embed_texts
 from app.core.ingest_runs import IngestTableResult
+from app.core.ingest_sources import TRUSTED_INGEST_SOURCE_TABLES
 
 _ingest_logger = _logging.getLogger(__name__)
 
@@ -205,6 +206,16 @@ def validate_required_source_columns(
     missing = sorted(required - actual)
     if not missing:
         return
+    _raise_manual_source_schema(table_name, missing)
+
+
+def _raise_manual_source_schema(
+    table_name: str,
+    missing_fields: Iterable[str],
+) -> None:
+    missing = sorted(
+        {str(field).strip() for field in missing_fields if str(field).strip()}
+    )
     contract = {
         "code": "MANUAL_BASEBALL_DATA_REQUIRED",
         "scope": "ai_ingest_source_schema",
@@ -220,6 +231,49 @@ def validate_required_source_columns(
         ),
     }
     raise ManualBaseballDataRequiredError(contract)
+
+
+def execute_source_select(
+    cursor: Any,
+    query: Any,
+    params: Sequence[Any],
+    *,
+    table_name: str,
+    required_columns: Iterable[str],
+) -> None:
+    """Execute a trusted-source query and map structural gaps to manual repair."""
+
+    try:
+        cursor.execute(query, params)
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "sqlstate", None) in {"42P01", "42703"}:
+            required = tuple(required_columns)
+            _raise_manual_source_schema(
+                table_name,
+                required if required else ("source_table",),
+            )
+        raise
+
+
+def load_static_profile_payloads(
+    table_name: str,
+    profile: Mapping[str, Any],
+    *,
+    settings: Any,
+) -> List[ChunkPayload]:
+    """Load a trusted static source or require operator-provided repair."""
+
+    try:
+        payloads = build_static_profile_chunk_payloads(
+            table_name,
+            profile,
+            settings=settings,
+        )
+    except RuntimeError:
+        _raise_manual_source_schema(table_name, ("source_file",))
+    if not payloads:
+        _raise_manual_source_schema(table_name, ("source_content",))
+    return payloads
 
 
 def _cursor_column_names(cursor: Any) -> Set[str]:
@@ -1195,49 +1249,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
 
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
 # team_daily_roster는 데이터가 많아 스킵
-DEFAULT_TABLES = [
-    # 기본 정보 테이블
-    "teams",
-    "team_franchises",
-    "team_history",
-    "stadiums",
-    "kbo_seasons",
-    "player_basic",
-    # 수상/이적 기록
-    "awards",
-    "player_movements",
-    # 시즌 통계
-    "player_season_batting",
-    "player_season_pitching",
-    # 팀 시즌 통계 + 랭킹
-    "team_season_batting",
-    "team_season_pitching",
-    "stat_rankings",
-    # 경기 정보
-    "game",
-    "game_metadata",
-    "game_flow_summary",
-    "game_lineups",
-    # 경기별 기록 (가장 많은 데이터)
-    "game_batting_stats",
-    "game_pitching_stats",
-    "game_summary",
-    # 정적 문서
-    "kbo_metrics_explained",
-    "markdown_docs_rules_terms",
-    "markdown_docs_strategy_metrics",
-    "markdown_docs_culture_history",
-    "markdown_docs_2025_storylines",
-    "markdown_docs_chatbot_kb_v2",
-    "kbo_regulations_basic",
-    "kbo_regulations_player",
-    "kbo_regulations_game",
-    "kbo_regulations_technical",
-    "kbo_regulations_discipline",
-    "kbo_regulations_postseason",
-    "kbo_regulations_special",
-    "kbo_regulations_terms",
-]
+DEFAULT_TABLES = list(TRUSTED_INGEST_SOURCE_TABLES)
 
 TARGET_RPM = 10
 MIN_DELAY_SECONDS = 60 / TARGET_RPM
@@ -2414,21 +2426,11 @@ def ingest_table(
         # --- NEW LOGIC FOR STATIC FILE ---
         if "source_file" in profile:
             print(f"      정적 파일 '{profile['source_file']}'을(를) 수집 중입니다...")
-            try:
-                payloads = build_static_profile_chunk_payloads(
-                    table_name,
-                    profile,
-                    settings=settings,
-                )
-            except RuntimeError as exc:
-                print(f"오류: {exc}")
-                return IngestTableResult(table_name, 0, 0, 0, 0, None)
-
-            if not payloads:
-                print(
-                    f"오류: '{profile['source_file']}' 파일 내용에서 청크를 생성할 수 없습니다."
-                )
-                return IngestTableResult(table_name, 0, 0, 0, 0, None)
+            payloads = load_static_profile_payloads(
+                table_name,
+                profile,
+                settings=settings,
+            )
 
             static_prefix = build_static_source_row_prefix(table_name, profile)
             buffer.extend(payloads)
@@ -2466,7 +2468,13 @@ def ingest_table(
             date_to_exclusive=date_to_exclusive,
         )
 
-        read_cur.execute(query, params)
+        execute_source_select(
+            read_cur,
+            query,
+            params,
+            table_name=table_name,
+            required_columns=REQUIRED_SOURCE_COLUMNS.get(table_name, ()),
+        )
         validate_required_source_columns(
             table_name,
             _cursor_column_names(read_cur),

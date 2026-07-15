@@ -86,6 +86,7 @@ def test_complete_contract_includes_ingest_orchestration_tables():
     }
     assert set(REQUIRED_COLUMNS["ai_ingest_watermarks"]) == {
         "source_table",
+        "scope_key",
         "last_successful_updated_at",
         "last_run_id",
         "updated_at",

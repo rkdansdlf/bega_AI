@@ -84,6 +84,7 @@ REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     ),
     "ai_ingest_watermarks": (
         "source_table",
+        "scope_key",
         "last_successful_updated_at",
         "last_run_id",
         "updated_at",

@@ -29,8 +29,10 @@ CREATE INDEX IF NOT EXISTS idx_ai_ingest_runs_status_requested
     ON ai_ingest_runs (status, requested_at);
 
 CREATE TABLE IF NOT EXISTS ai_ingest_watermarks (
-    source_table varchar(128) PRIMARY KEY,
+    source_table varchar(128) NOT NULL,
+    scope_key varchar(64) NOT NULL,
     last_successful_updated_at timestamptz,
     last_run_id uuid REFERENCES ai_ingest_runs(run_id),
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_table, scope_key)
 );

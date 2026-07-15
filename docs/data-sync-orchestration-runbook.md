@@ -19,7 +19,7 @@
    AI_SCHEMA_DB_URL='postgresql://...' ./scripts/migrate_ai_runtime_schema.sh
    ```
 
-   이 명령은 `001_ai_runtime_cache.sql`, `003_ai_ingest_orchestration.sql` 순서로 적용합니다. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, `ai_ingest_watermarks`를 생성합니다.
+   이 명령은 `001_ai_runtime_cache.sql`, `003_ai_ingest_orchestration.sql` 순서로 적용합니다. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성합니다.
 
 2. AI 서비스를 `AI_DB_SCHEMA_MODE=managed`로 시작합니다. 작업자는 기본 활성화되며 다음 값으로 조정합니다.
 
@@ -46,7 +46,7 @@
 
 ## 실행 상태와 중복 제거
 
-`POST /ai/ingest/run`은 `202 Accepted`와 `run_id`, `status`, `deduplicated`를 반환합니다. 같은 테이블·시즌·범위·모드의 `QUEUED` 또는 `RUNNING` 요청은 활성 유일 인덱스로 하나의 실행에 합쳐집니다.
+`POST /ai/ingest/run`은 `202 Accepted`와 `run_id`, `status`, `deduplicated`를 반환합니다. 같은 테이블·시즌·범위·모드의 `QUEUED` 또는 `RUNNING` 요청은 활성 유일 인덱스로 하나의 실행에 합쳐집니다. 요청 테이블은 코드에 고정된 내부 야구 DB/정적 문서 허용 목록으로 제한되며 사용자·인증·운영 테이블은 수집할 수 없습니다.
 
 상태 전이는 다음과 같습니다.
 
@@ -93,7 +93,7 @@ cd /path/to/bega_AI
 
 ## 리스 만료와 재시작 복구
 
-AI 서비스 시작 시 만료된 `RUNNING` lease를 확인합니다. `AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS` 미만이면 `QUEUED`로 되돌리고, 한도에 도달하면 `FAILED` 및 `INGEST_LEASE_EXPIRED`로 종결합니다. 실행 중 worker가 유실되었다면 lease 만료 후 AI 서비스를 재시작해 startup recovery를 수행합니다. watermark는 `SUCCEEDED` 트랜잭션에서만 전진하므로 실패한 실행의 범위를 건너뛰지 않습니다.
+AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lease를 확인합니다. `AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS` 미만이면 `QUEUED`로 되돌리고, 한도에 도달하면 `FAILED` 및 `INGEST_LEASE_EXPIRED`로 종결합니다. heartbeat에서 소유권을 잃은 worker는 다음 테이블 및 terminal write를 중단합니다. watermark는 시즌과 명시적 `since` 범위별로 분리되고 `SUCCEEDED` 트랜잭션에서 단조 증가하므로, 좁은 범위나 늦게 끝난 과거 실행이 다른 범위의 cursor를 건너뛰거나 후퇴시키지 않습니다.
 
 ## MANUAL_BASEBALL_DATA_REQUIRED 인계
 

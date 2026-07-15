@@ -10,6 +10,7 @@ from app.core.ingest_runs import (
     IngestRunStatus,
     IngestTableResult,
     build_request_key,
+    build_watermark_scope_key,
 )
 
 
@@ -22,6 +23,7 @@ REQUEST = IngestRunRequest(
     season_year=2026,
     trigger_source="BACKEND_SCHEDULED",
 )
+WATERMARK_SCOPE = build_watermark_scope_key(REQUEST)
 
 
 def _run_row(*, status: str = "QUEUED", run_id: UUID = RUN_ID):
@@ -138,12 +140,15 @@ def test_finish_success_advances_only_committed_table_watermarks():
             "worker-1",
             {"game": result},
             {"game": WATERMARK},
+            WATERMARK_SCOPE,
         )
     )
 
     sql = " ".join(item[0] for item in pool.connection_instance.executed)
     assert "status = 'SUCCEEDED'" in sql
     assert "INSERT INTO ai_ingest_watermarks" in sql
+    assert "ON CONFLICT (source_table, scope_key)" in sql
+    assert "GREATEST" in sql
     assert "lease_owner = %s" in sql
     assert pool.connection_instance.transaction_entries == 1
 
@@ -186,4 +191,16 @@ def test_get_watermark_returns_last_successful_timestamp():
     pool = _Pool([(WATERMARK,)])
     store = IngestRunStore(pool)
 
-    assert asyncio.run(store.get_watermark("game")) == WATERMARK
+    assert asyncio.run(store.get_watermark("game", WATERMARK_SCOPE)) == WATERMARK
+
+
+def test_advance_watermark_is_monotonic_and_scope_partitioned():
+    pool = _Pool([None])
+    store = IngestRunStore(pool)
+
+    asyncio.run(store.advance_watermark("game", WATERMARK_SCOPE, WATERMARK, RUN_ID))
+
+    sql, params = pool.connection_instance.executed[0]
+    assert "ON CONFLICT (source_table, scope_key)" in sql
+    assert "GREATEST" in sql
+    assert params == ("game", WATERMARK_SCOPE, WATERMARK, RUN_ID)

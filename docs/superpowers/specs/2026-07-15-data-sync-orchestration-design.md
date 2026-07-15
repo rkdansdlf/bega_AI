@@ -125,7 +125,7 @@ A partial unique index on `request_key` for `QUEUED` and `RUNNING` runs prevents
 
 `ai_ingest_watermarks`:
 
-- `source_table` primary key
+- composite primary key: `source_table` and a deterministic season/explicit-range scope key
 - `last_successful_updated_at`
 - `last_run_id`
 - updated timestamp
@@ -176,7 +176,7 @@ One worker task starts with the FastAPI application lifecycle. It:
 5. Stores per-table counts and advances successful table watermarks.
 6. Marks the run terminal.
 
-On startup, an expired `RUNNING` lease is returned to `QUEUED` once. A run that exceeds the configured recovery-attempt limit becomes `FAILED`. Only a lease owner may heartbeat or finish a run.
+On startup and during a periodic recovery loop, an expired `RUNNING` lease is returned to `QUEUED` once. A run that exceeds the configured recovery-attempt limit becomes `FAILED`. Only a lease owner may heartbeat or finish a run, and a worker that loses ownership stops before another table or terminal write.
 
 The existing ingestion functions are refactored to return structured results instead of relying only on printed output. Their current CLI remains supported.
 
