@@ -63,6 +63,31 @@ REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = {
         "observed_at",
         "completed_at",
     ),
+    "ai_ingest_runs": (
+        "run_id",
+        "request_key",
+        "trigger_source",
+        "status",
+        "request_payload",
+        "requested_at",
+        "started_at",
+        "heartbeat_at",
+        "finished_at",
+        "lease_owner",
+        "lease_expires_at",
+        "recovery_attempts",
+        "error_code",
+        "error_message",
+        "table_summary",
+        "created_at",
+        "updated_at",
+    ),
+    "ai_ingest_watermarks": (
+        "source_table",
+        "last_successful_updated_at",
+        "last_run_id",
+        "updated_at",
+    ),
     # rag_chunks is owned by the backend/data migration path, but is a hard
     # runtime dependency of managed AI retrieval and must be validated before
     # accepting traffic.
@@ -101,6 +126,8 @@ REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_chat_semantic_cache_expires_at",
     "idx_chat_semantic_shadow_observed_at",
     "idx_chat_semantic_shadow_request_key",
+    "ux_ai_ingest_runs_active_request",
+    "idx_ai_ingest_runs_status_requested",
 )
 
 OPTIONAL_VECTOR_INDEX = "idx_chat_semantic_cache_embedding_hnsw"

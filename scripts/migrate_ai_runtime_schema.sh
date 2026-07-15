@@ -11,6 +11,10 @@ psql --set ON_ERROR_STOP=1 \
   --file "${AI_ROOT}/app/db/migrations/001_ai_runtime_cache.sql" \
   "${DB_URL}"
 
+psql --set ON_ERROR_STOP=1 \
+  --file "${AI_ROOT}/app/db/migrations/003_ai_ingest_orchestration.sql" \
+  "${DB_URL}"
+
 case "${CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED:-false}" in
   1|true|TRUE|yes|YES)
     psql --set ON_ERROR_STOP=1 \
