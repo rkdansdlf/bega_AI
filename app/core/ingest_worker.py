@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import socket
-from datetime import datetime
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Callable
 from uuid import uuid4
@@ -28,9 +28,15 @@ from .ingest_runs import (
 )
 from ..observability.metrics import (
     AI_INGEST_ACTIVE_RUNS,
+    AI_INGEST_LEASE_RECOVERIES_TOTAL,
+    AI_INGEST_QUEUED_RUNS,
     AI_INGEST_RUN_COMPLETIONS_TOTAL,
     AI_INGEST_RUN_DURATION_SECONDS,
+    AI_INGEST_TABLE_DURATION_SECONDS,
+    AI_INGEST_TABLE_SOURCE_ROWS_TOTAL,
     AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL,
+    AI_INGEST_WATERMARK_LAG_SECONDS,
+    INGEST_TRIGGER_SOURCE_LABELS,
     normalize_ingest_terminal_status,
     normalize_ingest_trigger_source,
 )
@@ -69,15 +75,16 @@ class IngestWorker:
     async def run_once(self) -> bool:
         """Process one queued run and return whether work was claimed."""
 
+        await self._refresh_run_gauges()
         run = await self.store.claim_next(self.owner)
         if run is None:
             return False
+        await self._refresh_run_gauges()
 
         trigger_source = normalize_ingest_trigger_source(run.request.trigger_source)
         started_at = perf_counter()
         terminal_status = None
         result = None
-        AI_INGEST_ACTIVE_RUNS.labels(trigger_source=trigger_source).inc()
         lease_lost = asyncio.Event()
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(run, lease_lost))
         try:
@@ -124,7 +131,6 @@ class IngestWorker:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
-            AI_INGEST_ACTIVE_RUNS.labels(trigger_source=trigger_source).dec()
             if terminal_status is not None:
                 status_label = normalize_ingest_terminal_status(terminal_status)
                 AI_INGEST_RUN_COMPLETIONS_TOTAL.labels(
@@ -135,15 +141,7 @@ class IngestWorker:
                     status=status_label,
                     trigger_source=trigger_source,
                 ).observe(max(0.0, perf_counter() - started_at))
-            if result is not None:
-                configured_tables = set(DEFAULT_TABLES)
-                for source_table, table_result in result.tables.items():
-                    table_label = (
-                        source_table if source_table in configured_tables else "other"
-                    )
-                    AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(
-                        source_table=table_label
-                    ).inc(table_result.written_chunks)
+            await self._refresh_run_gauges()
         return True
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
@@ -172,13 +170,7 @@ class IngestWorker:
 
         while not stop_event.is_set():
             try:
-                recovered, failed = await self.store.recover_expired()
-                if recovered or failed:
-                    logger.warning(
-                        "Expired ingestion leases processed recovered=%d failed=%d",
-                        recovered,
-                        failed,
-                    )
+                await self.recover_expired_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -193,6 +185,70 @@ class IngestWorker:
                 )
             except TimeoutError:
                 pass
+
+    async def recover_expired_once(self) -> tuple[int, int]:
+        """Recover expired leases and record startup or periodic outcomes once."""
+
+        recovered, failed = await self.store.recover_expired()
+        if recovered:
+            AI_INGEST_LEASE_RECOVERIES_TOTAL.labels(result="requeued").inc(recovered)
+        if failed:
+            AI_INGEST_LEASE_RECOVERIES_TOTAL.labels(result="failed").inc(failed)
+        if recovered or failed:
+            logger.warning(
+                "Expired ingestion leases processed recovered=%d failed=%d",
+                recovered,
+                failed,
+            )
+        await self._refresh_run_gauges()
+        return recovered, failed
+
+    async def _refresh_run_gauges(self) -> None:
+        """Reconcile queue and watermark gauges from durable state."""
+
+        try:
+            counts = await self.store.count_active_by_status()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Ingestion run gauge reconciliation failed error_type=%s",
+                type(exc).__name__,
+            )
+        else:
+            queued_counts = {label: 0 for label in INGEST_TRIGGER_SOURCE_LABELS}
+            active_counts = {label: 0 for label in INGEST_TRIGGER_SOURCE_LABELS}
+            for (status, raw_trigger_source), count in counts.items():
+                trigger_source = normalize_ingest_trigger_source(raw_trigger_source)
+                if str(status).upper() == IngestRunStatus.QUEUED.value:
+                    queued_counts[trigger_source] += max(0, int(count))
+                elif str(status).upper() == IngestRunStatus.RUNNING.value:
+                    active_counts[trigger_source] += max(0, int(count))
+
+            for trigger_source in INGEST_TRIGGER_SOURCE_LABELS:
+                AI_INGEST_QUEUED_RUNS.labels(trigger_source=trigger_source).set(
+                    queued_counts[trigger_source]
+                )
+                AI_INGEST_ACTIVE_RUNS.labels(trigger_source=trigger_source).set(
+                    active_counts[trigger_source]
+                )
+
+        try:
+            watermarks = await self.store.get_latest_watermarks_by_table()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Ingestion watermark gauge reconciliation failed error_type=%s",
+                type(exc).__name__,
+            )
+        else:
+            latest_by_label: dict[str, datetime] = {}
+            for source_table, watermark in watermarks.items():
+                table_label = self._table_label(source_table)
+                current = latest_by_label.get(table_label)
+                if current is None or watermark > current:
+                    latest_by_label[table_label] = watermark
+            for table_label, watermark in latest_by_label.items():
+                AI_INGEST_WATERMARK_LAG_SECONDS.labels(
+                    source_table=table_label
+                ).set(self._watermark_lag_seconds(watermark))
 
     async def _heartbeat_loop(
         self,
@@ -231,25 +287,33 @@ class IngestWorker:
             since = explicit_since
             if since is None and run.request.mode is IngestRunMode.INCREMENTAL:
                 since = await self.store.get_watermark(source_table, scope_key)
-            partial = await asyncio.to_thread(
-                self.ingest_function,
-                tables=[source_table],
-                source_db_url=self.settings.source_db_url,
-                limit=None,
-                embed_batch_size=max(1, int(self.settings.embed_batch_size)),
-                read_batch_size=500,
-                season_year=run.request.season_year,
-                use_legacy_renderer=False,
-                since=since,
-                skip_embedding=False,
-                max_concurrency=2,
-                commit_interval=500,
-                parallel_engine="thread",
-                workers=4,
-                row_stale_cleanup="off",
-                lease_run_id=run.run_id,
-                lease_owner=self.owner,
-            )
+            table_label = self._table_label(source_table)
+            table_started_at = perf_counter()
+            try:
+                partial = await asyncio.to_thread(
+                    self.ingest_function,
+                    tables=[source_table],
+                    source_db_url=self.settings.source_db_url,
+                    limit=None,
+                    embed_batch_size=max(1, int(self.settings.embed_batch_size)),
+                    read_batch_size=500,
+                    season_year=run.request.season_year,
+                    use_legacy_renderer=False,
+                    since=since,
+                    skip_embedding=False,
+                    max_concurrency=2,
+                    commit_interval=500,
+                    parallel_engine="thread",
+                    workers=4,
+                    row_stale_cleanup="off",
+                    lease_run_id=run.run_id,
+                    lease_owner=self.owner,
+                )
+            finally:
+                AI_INGEST_TABLE_DURATION_SECONDS.labels(
+                    source_table=table_label
+                ).observe(max(0.0, perf_counter() - table_started_at))
+            self._record_table_result_metrics(partial)
             if lease_lost is not None and lease_lost.is_set():
                 raise IngestLeaseLostError
             table_results.update(partial.tables)
@@ -260,3 +324,24 @@ class IngestWorker:
         if value is None or isinstance(value, datetime):
             return value
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    @staticmethod
+    def _table_label(source_table: str) -> str:
+        return source_table if source_table in set(DEFAULT_TABLES) else "other"
+
+    def _record_table_result_metrics(self, result: IngestExecutionResult) -> None:
+        for source_table, table_result in result.tables.items():
+            table_label = self._table_label(source_table)
+            AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(
+                source_table=table_label
+            ).inc(table_result.written_chunks)
+            AI_INGEST_TABLE_SOURCE_ROWS_TOTAL.labels(
+                source_table=table_label
+            ).inc(table_result.source_rows)
+
+    @staticmethod
+    def _watermark_lag_seconds(watermark: datetime) -> float:
+        normalized = watermark
+        if normalized.tzinfo is None:
+            normalized = normalized.replace(tzinfo=UTC)
+        return max(0.0, (datetime.now(UTC) - normalized.astimezone(UTC)).total_seconds())

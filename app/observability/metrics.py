@@ -217,6 +217,18 @@ AI_INGEST_RUN_COMPLETIONS_TOTAL = Counter(
     ["status", "trigger_source"],
 )
 
+AI_INGEST_LEASE_RECOVERIES_TOTAL = Counter(
+    "ai_ingest_lease_recoveries_total",
+    "Expired ingestion leases processed by recovery outcome.",
+    ["result"],
+)
+
+AI_INGEST_TABLE_SOURCE_ROWS_TOTAL = Counter(
+    "ai_ingest_table_source_rows_total",
+    "Source rows processed by configured source table.",
+    ["source_table"],
+)
+
 AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL = Counter(
     "ai_ingest_table_written_chunks_total",
     "RAG chunks written by configured source table.",
@@ -284,6 +296,13 @@ AI_INGEST_RUN_DURATION_SECONDS = Histogram(
     buckets=_INGEST_RUN_BUCKETS,
 )
 
+AI_INGEST_TABLE_DURATION_SECONDS = Histogram(
+    "ai_ingest_table_duration_seconds",
+    "Duration of ingestion work by configured source table.",
+    ["source_table"],
+    buckets=_INGEST_RUN_BUCKETS,
+)
+
 # Coach 동적 프롬프트 사이즈 (B 작업 효과 추적). 문자 수 단위.
 _COACH_PROMPT_BUCKETS = (
     500,
@@ -322,8 +341,20 @@ AI_CHAT_QUEUE_DEPTH = Gauge(
 
 AI_INGEST_ACTIVE_RUNS = Gauge(
     "ai_ingest_active_runs",
-    "Currently claimed durable ingestion runs.",
+    "Persisted RUNNING ingestion runs.",
     ["trigger_source"],
+)
+
+AI_INGEST_QUEUED_RUNS = Gauge(
+    "ai_ingest_queued_runs",
+    "Persisted QUEUED ingestion runs.",
+    ["trigger_source"],
+)
+
+AI_INGEST_WATERMARK_LAG_SECONDS = Gauge(
+    "ai_ingest_watermark_lag_seconds",
+    "Age of the latest successful watermark by configured source table.",
+    ["source_table"],
 )
 
 
@@ -332,6 +363,9 @@ _INGEST_TRIGGER_SOURCES = {
     "MANUAL_API",
     "CLI_RECOVERY",
 }
+INGEST_TRIGGER_SOURCE_LABELS = tuple(sorted(_INGEST_TRIGGER_SOURCES | {"UNKNOWN"}))
+
+
 _INGEST_STATUSES = {
     "SUCCEEDED",
     "FAILED",
@@ -380,10 +414,15 @@ __all__ = [
     "AI_HTTP_REQUEST_DURATION_SECONDS",
     "AI_HTTP_REQUESTS_TOTAL",
     "AI_INGEST_ACTIVE_RUNS",
+    "AI_INGEST_LEASE_RECOVERIES_TOTAL",
+    "AI_INGEST_QUEUED_RUNS",
     "AI_INGEST_RUN_COMPLETIONS_TOTAL",
     "AI_INGEST_RUN_DURATION_SECONDS",
     "AI_INGEST_SUBMISSIONS_TOTAL",
+    "AI_INGEST_TABLE_DURATION_SECONDS",
+    "AI_INGEST_TABLE_SOURCE_ROWS_TOTAL",
     "AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL",
+    "AI_INGEST_WATERMARK_LAG_SECONDS",
     "AI_LLM_CALL_DURATION_SECONDS",
     "AI_LLM_FALLBACK_TOTAL",
     "AI_LLM_RETRY_ATTEMPTS_TOTAL",
@@ -396,6 +435,7 @@ __all__ = [
     "AI_RETRIEVAL_FALLBACK_LEVEL_TOTAL",
     "AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL",
     "AI_SEMANTIC_RESPONSE_CACHE_TOTAL",
+    "INGEST_TRIGGER_SOURCE_LABELS",
     "metrics_asgi_app",
     "normalize_ingest_terminal_status",
     "normalize_ingest_trigger_source",

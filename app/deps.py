@@ -572,9 +572,9 @@ async def lifespan(app):
     ingest_worker_stop_event: Optional[asyncio.Event] = None
     if settings.ingest_worker_enabled:
         ingest_store = get_ingest_run_store()
-        recovered, failed = await ingest_store.recover_expired()
         ingest_worker_stop_event = asyncio.Event()
         ingest_worker = IngestWorker(store=ingest_store, settings=settings)
+        recovered, failed = await ingest_worker.recover_expired_once()
         ingest_worker_task = asyncio.create_task(
             ingest_worker.run_forever(ingest_worker_stop_event)
         )
