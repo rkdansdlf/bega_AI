@@ -417,6 +417,63 @@ class IngestRunStore:
                 ).fetchall()
         return len(recovered), len(failed)
 
+    async def count_active_by_status(self) -> dict[tuple[str, str], int]:
+        """Return persisted queue and running counts for metrics reconciliation."""
+
+        async with self.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    """
+                    SELECT status, trigger_source, count(*) AS run_count
+                    FROM ai_ingest_runs
+                    WHERE status IN ('QUEUED', 'RUNNING')
+                    GROUP BY status, trigger_source
+                    """
+                )
+            ).fetchall()
+
+        counts: dict[tuple[str, str], int] = {}
+        for row in rows:
+            if isinstance(row, Mapping):
+                status = str(row["status"])
+                trigger_source = str(row["trigger_source"])
+                run_count = int(row["run_count"])
+            else:
+                status, trigger_source, run_count = row
+                status = str(status)
+                trigger_source = str(trigger_source)
+                run_count = int(run_count)
+            counts[(status, trigger_source)] = run_count
+        return counts
+
+    async def get_latest_watermarks_by_table(self) -> dict[str, datetime]:
+        """Return the newest durable watermark per table across all run scopes."""
+
+        async with self.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    """
+                    SELECT source_table,
+                           max(last_successful_updated_at) AS last_successful_updated_at
+                    FROM ai_ingest_watermarks
+                    WHERE last_successful_updated_at IS NOT NULL
+                    GROUP BY source_table
+                    """
+                )
+            ).fetchall()
+
+        watermarks: dict[str, datetime] = {}
+        for row in rows:
+            if isinstance(row, Mapping):
+                source_table = str(row["source_table"])
+                watermark = row["last_successful_updated_at"]
+            else:
+                source_table, watermark = row
+                source_table = str(source_table)
+            if isinstance(watermark, datetime):
+                watermarks[source_table] = watermark
+        return watermarks
+
     async def get_watermark(
         self,
         source_table: str,

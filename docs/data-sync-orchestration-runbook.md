@@ -111,10 +111,23 @@ AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lea
 다음 Prometheus 지표를 실행 ID 상태 조회 및 JobRunr 기록과 함께 확인합니다.
 
 - `ai_ingest_submissions_total{trigger_source,result}`: 생성/중복 제출
-- `ai_ingest_active_runs{trigger_source}`: worker가 소유한 현재 실행
+- `ai_ingest_active_runs{trigger_source}`: DB에 저장된 현재 `RUNNING` 실행
+- `ai_ingest_queued_runs{trigger_source}`: DB에 저장된 현재 `QUEUED` 실행
 - `ai_ingest_run_completions_total{status,trigger_source}`: terminal 결과
 - `ai_ingest_run_duration_seconds{status,trigger_source}`: 실행 시간
+- `ai_ingest_table_duration_seconds{source_table}`: 허용된 테이블별 처리 시간
+- `ai_ingest_table_source_rows_total{source_table}`: 허용된 테이블별 처리 원본 행 수
 - `ai_ingest_table_written_chunks_total{source_table}`: 허용된 테이블별 작성 청크
+- `ai_ingest_watermark_lag_seconds{source_table}`: 허용된 테이블별 최근 성공 watermark 지연
+- `ai_ingest_lease_recoveries_total{result}`: 만료 리스 재대기/최종 실패 수
+
+Backend Prometheus에서는 다음 지표를 함께 확인합니다.
+
+- `backend_ai_ingest_submissions_total{result,deduplicated}`: 제출 성공/실패와 중복 제거 결과
+- `backend_ai_ingest_monitor_terminal_total{status}`: backend가 관측한 terminal 상태
+- `backend_ai_ingest_orchestration_duration_seconds{status}`: backend 기준 전체 오케스트레이션 시간
+- `backend_ai_ingest_cache_invalidations_total{result}`: 성공 후 읽기 캐시 무효화 결과
+- `backend_ai_ingest_manual_data_required_total`: 운영자 수동 데이터 인계 횟수
 
 라벨은 고정 집합으로 정규화되며 run ID, 토큰, 오류 본문을 라벨에 넣지 않습니다.
 

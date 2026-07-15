@@ -88,10 +88,15 @@ def test_metric_objects_accept_labels_and_observations() -> None:
 def test_ingest_metrics_use_only_bounded_labels() -> None:
     from app.observability.metrics import (
         AI_INGEST_ACTIVE_RUNS,
+        AI_INGEST_LEASE_RECOVERIES_TOTAL,
+        AI_INGEST_QUEUED_RUNS,
         AI_INGEST_RUN_COMPLETIONS_TOTAL,
         AI_INGEST_RUN_DURATION_SECONDS,
         AI_INGEST_SUBMISSIONS_TOTAL,
+        AI_INGEST_TABLE_DURATION_SECONDS,
+        AI_INGEST_TABLE_SOURCE_ROWS_TOTAL,
         AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL,
+        AI_INGEST_WATERMARK_LAG_SECONDS,
     )
 
     assert AI_INGEST_SUBMISSIONS_TOTAL._labelnames == (
@@ -107,7 +112,12 @@ def test_ingest_metrics_use_only_bounded_labels() -> None:
         "trigger_source",
     )
     assert AI_INGEST_ACTIVE_RUNS._labelnames == ("trigger_source",)
+    assert AI_INGEST_QUEUED_RUNS._labelnames == ("trigger_source",)
+    assert AI_INGEST_LEASE_RECOVERIES_TOTAL._labelnames == ("result",)
+    assert AI_INGEST_TABLE_DURATION_SECONDS._labelnames == ("source_table",)
+    assert AI_INGEST_TABLE_SOURCE_ROWS_TOTAL._labelnames == ("source_table",)
     assert AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL._labelnames == ("source_table",)
+    assert AI_INGEST_WATERMARK_LAG_SECONDS._labelnames == ("source_table",)
 
 
 def test_rag_total_decorator_observes_total_stage() -> None:

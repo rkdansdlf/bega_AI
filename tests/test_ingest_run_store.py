@@ -187,6 +187,53 @@ def test_recover_expired_increments_before_requeue_and_fails_exhausted_runs():
     assert "status = 'FAILED'" in sql
 
 
+def test_count_active_by_status_groups_persisted_queue_and_running_rows():
+    pool = _Pool(
+        [[
+            {
+                "status": "QUEUED",
+                "trigger_source": "BACKEND_SCHEDULED",
+                "run_count": 2,
+            },
+            {
+                "status": "RUNNING",
+                "trigger_source": "MANUAL_API",
+                "run_count": 1,
+            },
+        ]]
+    )
+    store = IngestRunStore(pool)
+
+    counts = asyncio.run(store.count_active_by_status())
+
+    assert counts == {
+        ("QUEUED", "BACKEND_SCHEDULED"): 2,
+        ("RUNNING", "MANUAL_API"): 1,
+    }
+    sql = pool.connection_instance.executed[0][0]
+    assert "status IN ('QUEUED', 'RUNNING')" in sql
+    assert "GROUP BY status, trigger_source" in sql
+
+
+def test_get_latest_watermarks_by_table_aggregates_all_scopes():
+    pool = _Pool(
+        [[
+            {
+                "source_table": "game",
+                "last_successful_updated_at": WATERMARK,
+            }
+        ]]
+    )
+    store = IngestRunStore(pool)
+
+    watermarks = asyncio.run(store.get_latest_watermarks_by_table())
+
+    assert watermarks == {"game": WATERMARK}
+    sql = pool.connection_instance.executed[0][0]
+    assert "max(last_successful_updated_at)" in sql.lower()
+    assert "GROUP BY source_table" in sql
+
+
 def test_get_watermark_returns_last_successful_timestamp():
     pool = _Pool([(WATERMARK,)])
     store = IngestRunStore(pool)
