@@ -106,14 +106,14 @@ def test_document_query_tool_reuses_query_embedding_cache(monkeypatch):
     )
     calls = {"count": 0}
 
-    def _fake_embed_texts(texts, settings):
+    async def _fake_embed_query(query, settings):
         calls["count"] += 1
-        return [[0.1, 0.2, 0.3]]
+        return [0.1, 0.2, 0.3]
 
-    monkeypatch.setattr("app.tools.document_query.embed_texts", _fake_embed_texts)
+    monkeypatch.setattr("app.tools.document_query.async_embed_query", _fake_embed_query)
 
-    first = tool._embed_query("  테스트 질의 ")
-    second = tool._embed_query("테스트   질의")
+    first = asyncio.run(tool._embed_query("  테스트 질의 "))
+    second = asyncio.run(tool._embed_query("테스트   질의"))
 
     assert calls["count"] == 1
     assert first == second
@@ -128,7 +128,10 @@ def test_document_query_tool_uses_exact_term_fallback_on_similarity_timeout(
     )
     similarity_calls = []
 
-    monkeypatch.setattr(tool, "_embed_query", lambda query: [0.1, 0.2, 0.3])
+    async def _fake_embed_query(query):
+        return [0.1, 0.2, 0.3]
+
+    monkeypatch.setattr(tool, "_embed_query", _fake_embed_query)
 
     async def _fake_similarity_search(
         conn, embedding, *, limit, keyword=None, filters=None, settings=None, intent="", **kwargs
