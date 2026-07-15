@@ -1,7 +1,7 @@
 # KBO Internal Data Synchronization Orchestration Design
 
 Date: 2026-07-15
-Status: Pending written-spec review
+Status: Approved by user
 Scope: `bega_AI`, `bega_backend/BEGA_PROJECT`, `bega_frontend`, and the trusted root sync handoff
 
 ## Context
