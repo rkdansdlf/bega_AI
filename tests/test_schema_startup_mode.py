@@ -54,3 +54,21 @@ def test_auto_schema_preparation_keeps_compatibility_startup_ddl():
 
     ensure_startup_schema.assert_awaited_once()
     validate.assert_not_awaited()
+
+
+def test_ingest_run_store_uses_worker_lease_and_recovery_settings():
+    settings = SimpleNamespace(
+        ingest_worker_lease_seconds=240,
+        ingest_worker_max_recovery_attempts=2,
+    )
+    pool = object()
+
+    with (
+        patch.object(deps, "get_settings", return_value=settings),
+        patch.object(deps, "get_connection_pool", return_value=pool),
+    ):
+        store = deps.get_ingest_run_store()
+
+    assert store.pool is pool
+    assert store.lease_seconds == 240
+    assert store.max_recovery_attempts == 2
