@@ -239,6 +239,12 @@ class Settings(BaseSettings):
     chat_semantic_cache_shadow_enabled: bool = Field(
         False, validation_alias="CHAT_SEMANTIC_CACHE_SHADOW_ENABLED"
     )
+    chat_semantic_cache_rollout_percent: int = Field(
+        0, validation_alias="CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT"
+    )
+    chat_semantic_cache_kill_switch: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_KILL_SWITCH"
+    )
     chat_semantic_cache_min_similarity: float = Field(
         0.93, validation_alias="CHAT_SEMANTIC_CACHE_MIN_SIMILARITY"
     )
@@ -641,6 +647,14 @@ class Settings(BaseSettings):
     def _validate_chat_semantic_cache_candidate_limit(cls, value: int) -> int:
         if value > 10:
             raise ValueError("CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT must be <= 10")
+        return value
+
+    @field_validator("chat_semantic_cache_rollout_percent")
+    def _validate_chat_semantic_cache_rollout_percent(cls, value: int) -> int:
+        if value < 0 or value > 100:
+            raise ValueError(
+                "CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT must be between 0 and 100"
+            )
         return value
 
     @field_validator("chat_semantic_cache_hnsw_ef_search")

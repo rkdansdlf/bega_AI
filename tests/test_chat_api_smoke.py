@@ -523,6 +523,40 @@ def test_semantic_cache_shadow_mode_enables_lookup_but_disables_serving() -> Non
     assert chat_stream._is_semantic_cache_serving_enabled(settings) is False
 
 
+def test_semantic_cache_rollout_zero_disables_lookup_and_serving() -> None:
+    settings = SimpleNamespace(
+        chat_semantic_cache_enabled=True,
+        chat_semantic_cache_shadow_enabled=False,
+        chat_semantic_cache_rollout_percent=0,
+        chat_semantic_cache_kill_switch=False,
+    )
+
+    assert chat_stream._is_semantic_cache_lookup_enabled(settings) is False
+    assert chat_stream._is_semantic_cache_serving_enabled(settings) is False
+
+
+def test_semantic_cache_kill_switch_overrides_full_rollout() -> None:
+    settings = SimpleNamespace(
+        chat_semantic_cache_enabled=True,
+        chat_semantic_cache_shadow_enabled=False,
+        chat_semantic_cache_rollout_percent=100,
+        chat_semantic_cache_kill_switch=True,
+    )
+
+    assert chat_stream._is_semantic_cache_lookup_enabled(settings) is False
+    assert chat_stream._is_semantic_cache_serving_enabled(settings) is False
+
+
+def test_semantic_cache_rollout_selection_is_deterministic_and_bounded() -> None:
+    cache_key = "stable-cache-key"
+
+    assert chat_stream._semantic_cache_rollout_selected(cache_key, 0) is False
+    assert chat_stream._semantic_cache_rollout_selected(cache_key, 100) is True
+    assert chat_stream._semantic_cache_rollout_selected(
+        cache_key, 5
+    ) is chat_stream._semantic_cache_rollout_selected(cache_key, 5)
+
+
 def test_semantic_cache_quality_gate_rejects_team_mismatch() -> None:
     ok, reason = chat_stream._semantic_cache_quality_gate(
         question="LG 팀 분위기 정리해줘",
