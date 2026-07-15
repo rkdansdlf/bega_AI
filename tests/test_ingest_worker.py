@@ -168,6 +168,8 @@ def test_execute_uses_incremental_watermark_for_each_table():
     assert result.tables == {"game": TABLE_RESULT}
     assert calls[0]["tables"] == ["game"]
     assert calls[0]["since"] == NOW
+    assert calls[0]["lease_run_id"] == RUN_ID
+    assert calls[0]["lease_owner"] == "worker-1"
     assert worker.store.watermark_requests == [
         ("game", build_watermark_scope_key(REQUEST))
     ]

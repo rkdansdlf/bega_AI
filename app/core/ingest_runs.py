@@ -35,6 +35,10 @@ class IngestRunStatus(str, Enum):
     MANUAL_BASEBALL_DATA_REQUIRED = "MANUAL_BASEBALL_DATA_REQUIRED"
 
 
+class IngestLeaseLostError(RuntimeError):
+    """Raised when a durable ingestion worker no longer owns its run lease."""
+
+
 def _normalize_iso_timestamp(value: datetime | str | None) -> str | None:
     if value is None:
         return None

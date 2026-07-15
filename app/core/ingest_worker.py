@@ -19,6 +19,7 @@ from scripts.ingest_from_kbo import (
 )
 
 from .ingest_runs import (
+    IngestLeaseLostError,
     IngestRunMode,
     IngestRunRecord,
     IngestRunStatus,
@@ -36,10 +37,6 @@ from ..observability.metrics import (
 
 
 logger = logging.getLogger(__name__)
-
-
-class IngestLeaseLostError(RuntimeError):
-    """Raised internally when another worker owns or recovered the run lease."""
 
 
 class IngestWorker:
@@ -250,6 +247,8 @@ class IngestWorker:
                 parallel_engine="thread",
                 workers=4,
                 row_stale_cleanup="off",
+                lease_run_id=run.run_id,
+                lease_owner=self.owner,
             )
             if lease_lost is not None and lease_lost.is_set():
                 raise IngestLeaseLostError
