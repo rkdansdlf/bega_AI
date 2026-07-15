@@ -75,4 +75,5 @@ test_rag_search.py
 !/tests/test_operator_data_validation_rules.py
 !/tests/test_operator_data_validation_files.py
 !/tests/test_rag_recovered_fast_path.py
+!/tests/test_ingest_runs.py
 /.worktrees
