@@ -41,6 +41,7 @@ jobs:
             tests/test_coach.py \
             tests/test_coach_dual.py \
             tests/test_coach_router_year_resolution.py \
+            tests/test_pooled_connection.py \
             tests/test_rag_caching.py \
             tests/test_semantic_cache_shadow_eval.py \
             -q
