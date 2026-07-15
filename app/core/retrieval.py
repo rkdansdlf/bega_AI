@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _INTERNAL_FILTER_INCLUDE_INNING_SCORES = "_include_game_inning_scores"
 _INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES = "_exclude_source_tables"
+_INTERNAL_FILTER_INCLUDE_SOURCE_TABLES = "source_table_in"
 _SUPPRESSED_SOURCE_TABLES = ("game_inning_scores",)
 _PGVECTOR_SEARCH_PATH = "public, extensions, security"
 
@@ -216,6 +217,7 @@ async def similarity_search(
 
     include_game_inning_scores = False
     exclude_source_tables: List[str] = []
+    include_source_tables: List[str] = []
     cleaned_filters: Dict[str, Any] = {}
     if filters:
         include_game_inning_scores = bool(
@@ -228,6 +230,13 @@ async def similarity_search(
             exclude_source_tables = [
                 str(value) for value in raw_excluded_tables if value
             ]
+        raw_included_tables = filters.get(_INTERNAL_FILTER_INCLUDE_SOURCE_TABLES)
+        if isinstance(raw_included_tables, str):
+            include_source_tables = [raw_included_tables]
+        elif isinstance(raw_included_tables, Sequence):
+            include_source_tables = [
+                str(value) for value in raw_included_tables if value
+            ]
         cleaned_filters = {
             key: value
             for key, value in filters.items()
@@ -235,6 +244,7 @@ async def similarity_search(
             not in {
                 _INTERNAL_FILTER_INCLUDE_INNING_SCORES,
                 _INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES,
+                _INTERNAL_FILTER_INCLUDE_SOURCE_TABLES,
             }
         }
         if cleaned_filters.get("source_table") == "game_inning_scores":
@@ -263,6 +273,10 @@ async def similarity_search(
     for source_table in suppressed_tables:
         filter_clauses.append("source_table <> %s")
         filter_params.append(source_table)
+
+    if include_source_tables:
+        filter_clauses.append("source_table = ANY(%s)")
+        filter_params.append(include_source_tables)
 
     # 제공된 필터 조건을 SQL WHERE 절로 변환합니다.
     if cleaned_filters:
@@ -475,6 +489,7 @@ async def similarity_search_with_fallback(
     internal_keys = {
         _INTERNAL_FILTER_INCLUDE_INNING_SCORES,
         _INTERNAL_FILTER_EXCLUDE_SOURCE_TABLES,
+        _INTERNAL_FILTER_INCLUDE_SOURCE_TABLES,
     }
     internal_filters = {k: v for k, v in base_filters.items() if k in internal_keys}
 

@@ -63,6 +63,32 @@ REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = {
         "observed_at",
         "completed_at",
     ),
+    # rag_chunks is owned by the backend/data migration path, but is a hard
+    # runtime dependency of managed AI retrieval and must be validated before
+    # accepting traffic.
+    "rag_chunks": (
+        "id",
+        "season_year",
+        "team_id",
+        "source_table",
+        "source_row_id",
+        "title",
+        "content",
+        "content_tsv",
+        "embedding",
+        "meta",
+        "metadata",
+        "source_type",
+        "source_uri",
+        "topic_key",
+        "content_hash",
+        "quality_score",
+        "is_active",
+        "valid_from",
+        "valid_to",
+        "expires_at",
+        "updated_at",
+    ),
 }
 
 REQUIRED_INDEXES: tuple[str, ...] = (

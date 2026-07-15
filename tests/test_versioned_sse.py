@@ -211,6 +211,22 @@ async def test_v2_marks_done_as_error_after_legacy_error() -> None:
     assert done["data"]["reason"] == "error"
 
 
+@pytest.mark.asyncio
+async def test_v2_preserves_cancelled_terminal_reason_from_legacy_meta() -> None:
+    emitted = await _collect(
+        {
+            "event": "meta",
+            "data": json.dumps({"finish_reason": "cancelled", "cancelled": True}),
+        },
+        {"event": "done", "data": "[DONE]"},
+        endpoint="chat",
+        version=2,
+    )
+
+    done = json.loads(emitted[-1]["data"])
+    assert done["data"]["reason"] == "cancelled"
+
+
 def test_coach_public_error_payload_exposes_retryability() -> None:
     from app.routers.coach import _coach_public_error_payload
 
