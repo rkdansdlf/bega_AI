@@ -1,0 +1,4113 @@
+{
+  "components": {
+    "schemas": {
+      "Body_analyze_ticket_image_ai_vision_ticket_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_analyze_ticket_image_ai_vision_ticket_post",
+        "type": "object"
+      },
+      "Body_analyze_ticket_image_vision_ticket_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_analyze_ticket_image_vision_ticket_post",
+        "type": "object"
+      },
+      "Body_classify_seat_view_image_ai_vision_seat_view_classify_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_classify_seat_view_image_ai_vision_seat_view_classify_post",
+        "type": "object"
+      },
+      "Body_classify_seat_view_image_vision_seat_view_classify_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_classify_seat_view_image_vision_seat_view_classify_post",
+        "type": "object"
+      },
+      "Body_transcribe_audio_ai_chat_voice_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_transcribe_audio_ai_chat_voice_post",
+        "type": "object"
+      },
+      "CoachAnalyzeRequest": {
+        "description": "POST `/ai/coach/analyze` body, including existing compatibility aliases.",
+        "properties": {
+          "analysis_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "game_review",
+                  "game_preview"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Type"
+          },
+          "away_team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Away Team Id"
+          },
+          "expected_cache_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Cache Key"
+          },
+          "focus": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Focus",
+            "type": "array"
+          },
+          "game_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Game Id"
+          },
+          "home_team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Home Team Id"
+          },
+          "league_context": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "League Context"
+          },
+          "lineup_signature": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lineup Signature"
+          },
+          "question_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question Override"
+          },
+          "request_mode": {
+            "default": "manual_detail",
+            "enum": [
+              "auto_brief",
+              "manual_detail"
+            ],
+            "title": "Request Mode",
+            "type": "string"
+          },
+          "starter_signature": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starter Signature"
+          },
+          "team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
+          }
+        },
+        "title": "CoachAnalyzeRequest",
+        "type": "object"
+      },
+      "CoachAutoBriefOpsGate": {
+        "properties": {
+          "checks": {
+            "$ref": "#/components/schemas/CoachAutoBriefOpsGateChecks"
+          },
+          "failed_locked_count": {
+            "title": "Failed Locked Count",
+            "type": "integer"
+          },
+          "insufficient_count": {
+            "title": "Insufficient Count",
+            "type": "integer"
+          },
+          "insufficient_ratio": {
+            "title": "Insufficient Ratio",
+            "type": "number"
+          },
+          "pending_wait_count": {
+            "title": "Pending Wait Count",
+            "type": "integer"
+          },
+          "thresholds": {
+            "$ref": "#/components/schemas/CoachAutoBriefOpsGateThresholds"
+          },
+          "verdict": {
+            "enum": [
+              "PASS",
+              "WARN",
+              "FAIL"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict",
+          "thresholds",
+          "failed_locked_count",
+          "pending_wait_count",
+          "insufficient_count",
+          "insufficient_ratio"
+        ],
+        "title": "CoachAutoBriefOpsGate",
+        "type": "object"
+      },
+      "CoachAutoBriefOpsGateChecks": {
+        "properties": {
+          "failed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failed",
+            "type": "array"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "title": "CoachAutoBriefOpsGateChecks",
+        "type": "object"
+      },
+      "CoachAutoBriefOpsGateThresholds": {
+        "properties": {
+          "fail_on_missing_report": {
+            "title": "Fail On Missing Report",
+            "type": "boolean"
+          },
+          "max_failed_locked": {
+            "title": "Max Failed Locked",
+            "type": "integer"
+          },
+          "max_insufficient_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Insufficient Ratio"
+          },
+          "max_pending_wait": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Pending Wait"
+          },
+          "max_unresolved": {
+            "title": "Max Unresolved",
+            "type": "integer"
+          },
+          "min_selected_targets": {
+            "title": "Min Selected Targets",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_unresolved",
+          "max_failed_locked",
+          "min_selected_targets",
+          "fail_on_missing_report"
+        ],
+        "title": "CoachAutoBriefOpsGateThresholds",
+        "type": "object"
+      },
+      "CoachAutoBriefOpsHealthResponse": {
+        "properties": {
+          "date_window": {
+            "title": "Date Window",
+            "type": "string"
+          },
+          "gate": {
+            "$ref": "#/components/schemas/CoachAutoBriefOpsGate"
+          },
+          "generated_at_utc": {
+            "format": "date-time",
+            "title": "Generated At Utc",
+            "type": "string"
+          },
+          "latest_report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoachAutoBriefOpsLatestReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recommended_command": {
+            "title": "Recommended Command",
+            "type": "string"
+          },
+          "runbook_path": {
+            "title": "Runbook Path",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/CoachAutoBriefOpsSummary"
+          },
+          "unresolved_targets": {
+            "items": {
+              "$ref": "#/components/schemas/CoachAutoBriefOpsTargetSample"
+            },
+            "title": "Unresolved Targets",
+            "type": "array"
+          },
+          "window": {
+            "enum": [
+              "today",
+              "tomorrow",
+              "custom"
+            ],
+            "title": "Window",
+            "type": "string"
+          }
+        },
+        "required": [
+          "window",
+          "date_window",
+          "generated_at_utc",
+          "runbook_path",
+          "recommended_command",
+          "summary",
+          "gate"
+        ],
+        "title": "CoachAutoBriefOpsHealthResponse",
+        "type": "object"
+      },
+      "CoachAutoBriefOpsLatestReport": {
+        "properties": {
+          "cache_state_breakdown": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Cache State Breakdown",
+            "type": "object"
+          },
+          "completed_count": {
+            "default": 0,
+            "title": "Completed Count",
+            "type": "integer"
+          },
+          "data_quality_breakdown": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Data Quality Breakdown",
+            "type": "object"
+          },
+          "date_window": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Window"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "run_finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Finished At"
+          },
+          "run_started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Started At"
+          },
+          "unresolved_count": {
+            "default": 0,
+            "title": "Unresolved Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "CoachAutoBriefOpsLatestReport",
+        "type": "object"
+      },
+      "CoachAutoBriefOpsSummary": {
+        "properties": {
+          "cache_hit_count": {
+            "title": "Cache Hit Count",
+            "type": "integer"
+          },
+          "cache_state_breakdown": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Cache State Breakdown",
+            "type": "object"
+          },
+          "completed_count": {
+            "title": "Completed Count",
+            "type": "integer"
+          },
+          "data_quality_breakdown": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Data Quality Breakdown",
+            "type": "object"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "generated_success_count": {
+            "title": "Generated Success Count",
+            "type": "integer"
+          },
+          "in_progress_count": {
+            "title": "In Progress Count",
+            "type": "integer"
+          },
+          "loaded_target_count": {
+            "title": "Loaded Target Count",
+            "type": "integer"
+          },
+          "selected_target_count": {
+            "title": "Selected Target Count",
+            "type": "integer"
+          },
+          "unresolved_count": {
+            "title": "Unresolved Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "loaded_target_count",
+          "selected_target_count",
+          "generated_success_count",
+          "cache_hit_count",
+          "in_progress_count",
+          "failed_count",
+          "unresolved_count",
+          "completed_count"
+        ],
+        "title": "CoachAutoBriefOpsSummary",
+        "type": "object"
+      },
+      "CoachAutoBriefOpsTargetSample": {
+        "properties": {
+          "away_team_id": {
+            "title": "Away Team Id",
+            "type": "string"
+          },
+          "cache_key": {
+            "title": "Cache Key",
+            "type": "string"
+          },
+          "cache_state": {
+            "title": "Cache State",
+            "type": "string"
+          },
+          "data_quality": {
+            "title": "Data Quality",
+            "type": "string"
+          },
+          "game_date": {
+            "title": "Game Date",
+            "type": "string"
+          },
+          "game_id": {
+            "title": "Game Id",
+            "type": "string"
+          },
+          "game_status_bucket": {
+            "title": "Game Status Bucket",
+            "type": "string"
+          },
+          "headline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headline"
+          },
+          "home_team_id": {
+            "title": "Home Team Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "stage_label": {
+            "title": "Stage Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "game_id",
+          "game_date",
+          "away_team_id",
+          "home_team_id",
+          "stage_label",
+          "game_status_bucket",
+          "cache_key",
+          "cache_state",
+          "data_quality"
+        ],
+        "title": "CoachAutoBriefOpsTargetSample",
+        "type": "object"
+      },
+      "CoachCacheResetRequest": {
+        "description": "``POST /coach/cache/reset`` 입력. cache_key 단건 또는 team_id+year 일괄.",
+        "properties": {
+          "cache_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Key"
+          },
+          "include_stale_pending": {
+            "default": true,
+            "title": "Include Stale Pending",
+            "type": "boolean"
+          },
+          "retryable_only": {
+            "default": false,
+            "title": "Retryable Only",
+            "type": "boolean"
+          },
+          "team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Year"
+          }
+        },
+        "title": "CoachCacheResetRequest",
+        "type": "object"
+      },
+      "EvidenceItem": {
+        "properties": {
+          "claim": {
+            "title": "Claim",
+            "type": "string"
+          },
+          "excerpt": {
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim",
+          "source",
+          "excerpt"
+        ],
+        "title": "EvidenceItem",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IngestPayload": {
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "player_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Id"
+          },
+          "season_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Year"
+          },
+          "source_row_id": {
+            "title": "Source Row Id",
+            "type": "string"
+          },
+          "source_table": {
+            "title": "Source Table",
+            "type": "string"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "team_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "content",
+          "source_table",
+          "source_row_id"
+        ],
+        "title": "IngestPayload",
+        "type": "object"
+      },
+      "JsonValue": {},
+      "ModerationResult": {
+        "properties": {
+          "action": {
+            "enum": [
+              "ALLOW",
+              "BLOCK"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "decisionSource": {
+            "enum": [
+              "RULE",
+              "MODEL",
+              "FALLBACK"
+            ],
+            "title": "Decisionsource",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "riskLevel": {
+            "enum": [
+              "LOW",
+              "MEDIUM",
+              "HIGH"
+            ],
+            "title": "Risklevel",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "reason",
+          "action",
+          "decisionSource",
+          "riskLevel"
+        ],
+        "title": "ModerationResult",
+        "type": "object"
+      },
+      "ReleaseDecisionArtifactRecord": {
+        "properties": {
+          "allowed_roots": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Roots",
+            "type": "array"
+          },
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "draft_response": {
+            "$ref": "#/components/schemas/ReleaseDecisionRunResult"
+          },
+          "evaluation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseDecisionEvaluateResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "markdown": {
+            "title": "Markdown",
+            "type": "string"
+          },
+          "saved_at_utc": {
+            "title": "Saved At Utc",
+            "type": "string"
+          },
+          "scenario": {
+            "title": "Scenario",
+            "type": "string"
+          },
+          "seed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Seed Paths",
+            "type": "array"
+          },
+          "task_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Prompt"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "saved_at_utc",
+          "scenario",
+          "draft_response",
+          "markdown"
+        ],
+        "title": "ReleaseDecisionArtifactRecord",
+        "type": "object"
+      },
+      "ReleaseDecisionArtifactSummary": {
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "GO",
+              "NO_GO",
+              "PENDING"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "eval_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "PASS",
+                  "FAIL"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eval Status"
+          },
+          "json_filename": {
+            "title": "Json Filename",
+            "type": "string"
+          },
+          "markdown_filename": {
+            "title": "Markdown Filename",
+            "type": "string"
+          },
+          "saved_at_utc": {
+            "title": "Saved At Utc",
+            "type": "string"
+          },
+          "scenario": {
+            "title": "Scenario",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "scenario",
+          "decision",
+          "saved_at_utc",
+          "markdown_filename",
+          "json_filename"
+        ],
+        "title": "ReleaseDecisionArtifactSummary",
+        "type": "object"
+      },
+      "ReleaseDecisionDraft": {
+        "properties": {
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "confidence": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "title": "Confidence",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "GO",
+              "NO_GO",
+              "PENDING"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItem"
+            },
+            "minItems": 2,
+            "title": "Evidence",
+            "type": "array"
+          },
+          "next_actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Next Actions",
+            "type": "array"
+          },
+          "risks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Risks",
+            "type": "array"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "decision",
+          "summary",
+          "confidence"
+        ],
+        "title": "ReleaseDecisionDraft",
+        "type": "object"
+      },
+      "ReleaseDecisionDraftRequest": {
+        "properties": {
+          "allowed_roots": {
+            "description": "Additional repo-relative allowed roots inside the workspace.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Roots",
+            "type": "array"
+          },
+          "max_output_tokens": {
+            "default": 2200,
+            "maximum": 8000.0,
+            "minimum": 400.0,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "max_tool_rounds": {
+            "default": 6,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Tool Rounds",
+            "type": "integer"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional Responses API model.",
+            "title": "Model"
+          },
+          "scenario": {
+            "description": "Built-in scenario preset name.",
+            "title": "Scenario",
+            "type": "string"
+          },
+          "seed_paths": {
+            "description": "Additional repo-relative seed paths.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Seed Paths",
+            "type": "array"
+          },
+          "task_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional override prompt for the selected scenario.",
+            "title": "Task Prompt"
+          }
+        },
+        "required": [
+          "scenario"
+        ],
+        "title": "ReleaseDecisionDraftRequest",
+        "type": "object"
+      },
+      "ReleaseDecisionDraftResponse": {
+        "properties": {
+          "markdown": {
+            "title": "Markdown",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ReleaseDecisionRunResult"
+          }
+        },
+        "required": [
+          "result",
+          "markdown"
+        ],
+        "title": "ReleaseDecisionDraftResponse",
+        "type": "object"
+      },
+      "ReleaseDecisionEvalCaseSummary": {
+        "properties": {
+          "case_id": {
+            "title": "Case Id",
+            "type": "string"
+          },
+          "expected_decision": {
+            "title": "Expected Decision",
+            "type": "string"
+          },
+          "required_keywords": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Keywords",
+            "type": "array"
+          },
+          "required_sources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Sources",
+            "type": "array"
+          },
+          "scenario": {
+            "title": "Scenario",
+            "type": "string"
+          }
+        },
+        "required": [
+          "case_id",
+          "scenario",
+          "expected_decision"
+        ],
+        "title": "ReleaseDecisionEvalCaseSummary",
+        "type": "object"
+      },
+      "ReleaseDecisionEvalResult": {
+        "properties": {
+          "case_id": {
+            "title": "Case Id",
+            "type": "string"
+          },
+          "decision_ok": {
+            "title": "Decision Ok",
+            "type": "boolean"
+          },
+          "keyword_hits": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Keyword Hits",
+            "type": "object"
+          },
+          "missing_keywords": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Keywords",
+            "type": "array"
+          },
+          "missing_sources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Sources",
+            "type": "array"
+          },
+          "source_hits": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Source Hits",
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "PASS",
+              "FAIL"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "case_id",
+          "status",
+          "decision_ok",
+          "keyword_hits",
+          "source_hits",
+          "missing_keywords",
+          "missing_sources"
+        ],
+        "title": "ReleaseDecisionEvalResult",
+        "type": "object"
+      },
+      "ReleaseDecisionEvaluateRequest": {
+        "properties": {
+          "case_id": {
+            "title": "Case Id",
+            "type": "string"
+          },
+          "draft": {
+            "$ref": "#/components/schemas/ReleaseDecisionDraft"
+          }
+        },
+        "required": [
+          "case_id",
+          "draft"
+        ],
+        "title": "ReleaseDecisionEvaluateRequest",
+        "type": "object"
+      },
+      "ReleaseDecisionEvaluateResponse": {
+        "properties": {
+          "case": {
+            "$ref": "#/components/schemas/ReleaseDecisionEvalCaseSummary"
+          },
+          "evaluation": {
+            "$ref": "#/components/schemas/ReleaseDecisionEvalResult"
+          }
+        },
+        "required": [
+          "case",
+          "evaluation"
+        ],
+        "title": "ReleaseDecisionEvaluateResponse",
+        "type": "object"
+      },
+      "ReleaseDecisionPresetResponse": {
+        "properties": {
+          "allowed_roots": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Roots",
+            "type": "array"
+          },
+          "scenario": {
+            "title": "Scenario",
+            "type": "string"
+          },
+          "seed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Seed Paths",
+            "type": "array"
+          },
+          "task_prompt": {
+            "title": "Task Prompt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scenario",
+          "task_prompt",
+          "seed_paths",
+          "allowed_roots"
+        ],
+        "title": "ReleaseDecisionPresetResponse",
+        "type": "object"
+      },
+      "ReleaseDecisionRunResult": {
+        "properties": {
+          "draft": {
+            "$ref": "#/components/schemas/ReleaseDecisionDraft"
+          },
+          "generated_at_utc": {
+            "title": "Generated At Utc",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "raw_response_text": {
+            "title": "Raw Response Text",
+            "type": "string"
+          },
+          "response_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Id"
+          },
+          "scenario": {
+            "title": "Scenario",
+            "type": "string"
+          },
+          "seed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Seed Paths",
+            "type": "array"
+          },
+          "task_prompt": {
+            "title": "Task Prompt",
+            "type": "string"
+          },
+          "tool_trace": {
+            "items": {
+              "$ref": "#/components/schemas/ToolTraceItem"
+            },
+            "title": "Tool Trace",
+            "type": "array"
+          }
+        },
+        "required": [
+          "scenario",
+          "model",
+          "task_prompt",
+          "seed_paths",
+          "generated_at_utc",
+          "raw_response_text",
+          "draft"
+        ],
+        "title": "ReleaseDecisionRunResult",
+        "type": "object"
+      },
+      "ReleaseDecisionSaveRequest": {
+        "properties": {
+          "allowed_roots": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Roots",
+            "type": "array"
+          },
+          "draft_response": {
+            "$ref": "#/components/schemas/ReleaseDecisionRunResult"
+          },
+          "evaluation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseDecisionEvaluateResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "markdown": {
+            "minLength": 1,
+            "title": "Markdown",
+            "type": "string"
+          },
+          "scenario": {
+            "title": "Scenario",
+            "type": "string"
+          },
+          "seed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Seed Paths",
+            "type": "array"
+          },
+          "task_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Prompt"
+          }
+        },
+        "required": [
+          "scenario",
+          "draft_response",
+          "markdown"
+        ],
+        "title": "ReleaseDecisionSaveRequest",
+        "type": "object"
+      },
+      "RunIngestPayload": {
+        "properties": {
+          "mode": {
+            "default": "INCREMENTAL",
+            "title": "Mode",
+            "type": "string"
+          },
+          "season_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Season Year"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          },
+          "tables": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tables"
+          },
+          "trigger_source": {
+            "default": "MANUAL_API",
+            "title": "Trigger Source",
+            "type": "string"
+          }
+        },
+        "title": "RunIngestPayload",
+        "type": "object"
+      },
+      "SearchAnalysisResponse": {
+        "description": "검색 분석 결과를 담는 응답 모델",
+        "properties": {
+          "entity_analysis": {
+            "additionalProperties": true,
+            "title": "Entity Analysis",
+            "type": "object"
+          },
+          "execution_time_ms": {
+            "title": "Execution Time Ms",
+            "type": "number"
+          },
+          "performance_metrics": {
+            "additionalProperties": true,
+            "title": "Performance Metrics",
+            "type": "object"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "search_strategy": {
+            "additionalProperties": true,
+            "title": "Search Strategy",
+            "type": "object"
+          }
+        },
+        "required": [
+          "query",
+          "execution_time_ms",
+          "entity_analysis",
+          "search_strategy",
+          "results",
+          "performance_metrics"
+        ],
+        "title": "SearchAnalysisResponse",
+        "type": "object"
+      },
+      "SeatViewClassification": {
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "SeatViewClassification",
+        "type": "object"
+      },
+      "TicketInfo": {
+        "properties": {
+          "awayTeam": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awayteam"
+          },
+          "date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date"
+          },
+          "homeTeam": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hometeam"
+          },
+          "peopleCount": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peoplecount"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "reservationNumber": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reservationnumber"
+          },
+          "row": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row"
+          },
+          "seat": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seat"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section"
+          },
+          "stadium": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stadium"
+          },
+          "time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time"
+          }
+        },
+        "title": "TicketInfo",
+        "type": "object"
+      },
+      "ToolTraceItem": {
+        "properties": {
+          "arguments": {
+            "additionalProperties": true,
+            "title": "Arguments",
+            "type": "object"
+          },
+          "result_preview": {
+            "title": "Result Preview",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_name",
+          "arguments",
+          "result_preview"
+        ],
+        "title": "ToolTraceItem",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "InternalApiKey": {
+        "description": "AI 내부 호출용 키. Authorization Bearer 토큰을 사용할 수 있습니다.",
+        "in": "header",
+        "name": "X-Internal-Api-Key",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "title": "KBO AI Service",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/ai/chat/cache": {
+      "delete": {
+        "description": "특정 intent의 캐시 항목을 모두 삭제합니다.",
+        "operationId": "flush_cache_by_intent_ai_chat_cache_delete",
+        "parameters": [
+          {
+            "description": "삭제할 intent",
+            "in": "query",
+            "name": "intent",
+            "required": true,
+            "schema": {
+              "description": "삭제할 intent",
+              "title": "Intent",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Cache-Admin-Token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Cache-Admin-Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Flush Cache By Intent",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/ai/chat/cache/stats": {
+      "get": {
+        "description": "캐시 현황 통계를 반환합니다.",
+        "operationId": "chat_cache_stats_ai_chat_cache_stats_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Cache-Admin-Token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Cache-Admin-Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Chat Cache Stats",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/ai/chat/cache/{cache_key}": {
+      "delete": {
+        "description": "특정 캐시 키를 무효화합니다.",
+        "operationId": "invalidate_cache_entry_ai_chat_cache__cache_key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cache_key",
+            "required": true,
+            "schema": {
+              "title": "Cache Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Cache-Admin-Token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Cache-Admin-Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Invalidate Cache Entry",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/ai/chat/completion": {
+      "post": {
+        "description": "단일 JSON 응답으로 전체 채팅 답변을 반환하는 엔드포인트입니다.",
+        "operationId": "chat_completion_ai_chat_completion_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Chat Completion",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/ai/chat/stream": {
+      "get": {
+        "description": "GET 요청을 통해 질문을 받고, 답변을 SSE 스트림으로 반환합니다.",
+        "operationId": "chat_stream_get_ai_chat_stream_get",
+        "parameters": [
+          {
+            "description": "질문 텍스트",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "질문 텍스트",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "style",
+            "required": false,
+            "schema": {
+              "default": "markdown",
+              "pattern": "^(markdown|json|compact)$",
+              "title": "Style",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Chat Stream Get",
+        "tags": [
+          "chat"
+        ]
+      },
+      "post": {
+        "description": "POST 요청을 통해 질문을 받고, 답변을 SSE 스트림으로 반환합니다.",
+        "operationId": "chat_stream_post_ai_chat_stream_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "style",
+            "required": false,
+            "schema": {
+              "default": "markdown",
+              "pattern": "^(markdown|json|compact)$",
+              "title": "Style",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AI-Event-Version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Event-Version"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Chat Stream Post",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/ai/chat/voice": {
+      "post": {
+        "operationId": "transcribe_audio_ai_chat_voice_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_transcribe_audio_ai_chat_voice_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Transcribe Audio",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/ai/coach/analyze": {
+      "post": {
+        "description": "특정 팀(들)에 대한 심층 분석을 요청합니다. 'The Coach' 페르소나가 적용됩니다.",
+        "operationId": "analyze_team_ai_coach_analyze_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AI-Event-Version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Event-Version"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CoachAnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Analyze Team",
+        "tags": [
+          "coach"
+        ]
+      }
+    },
+    "/ai/coach/analyze-legacy": {
+      "post": {
+        "description": "기존 방식의 Coach 분석 (전체 에이전트 파이프라인 사용).\nFast Path에 문제가 있을 경우 대안으로 사용.\ndeprecate: COACH_ANALYZE_LEGACY_ENABLED=0 으로 비활성화 가능.",
+        "operationId": "analyze_team_legacy_ai_coach_analyze_legacy_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CoachAnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Analyze Team Legacy",
+        "tags": [
+          "coach"
+        ]
+      }
+    },
+    "/ai/coach/auto-brief/ops/health": {
+      "get": {
+        "operationId": "get_auto_brief_health_ai_coach_auto_brief_ops_health_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "window",
+            "required": false,
+            "schema": {
+              "default": "today",
+              "enum": [
+                "today",
+                "tomorrow",
+                "custom"
+              ],
+              "title": "Window",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sample_size",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Sample Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachAutoBriefOpsHealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Get Auto Brief Health",
+        "tags": [
+          "coach-auto-brief-ops"
+        ]
+      }
+    },
+    "/ai/coach/cache/reset": {
+      "post": {
+        "description": "FAILED_LOCKED 상태의 Coach 분석 캐시를 운영자가 수동으로 즉시 복구한다.\n\n삭제된 row는 다음 분석 요청에서 자연 재생성된다. 활성 PENDING lease와\nCOMPLETED row는 보호된다. cache_key 단건 또는 (team_id, year) 묶음을 받는다.",
+        "operationId": "reset_coach_cache_ai_coach_cache_reset_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CoachCacheResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Reset Coach Cache",
+        "tags": [
+          "coach"
+        ]
+      }
+    },
+    "/ai/ingest/": {
+      "post": {
+        "operationId": "ingest_document_ai_ingest__post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Ingest Document",
+        "tags": [
+          "ingest"
+        ]
+      }
+    },
+    "/ai/ingest/run": {
+      "post": {
+        "description": "Persist or deduplicate a durable internal-DB ingestion run.",
+        "operationId": "run_ingestion_job_ai_ingest_run_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunIngestPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Run Ingestion Job",
+        "tags": [
+          "ingest"
+        ]
+      }
+    },
+    "/ai/ingest/runs/{run_id}": {
+      "get": {
+        "description": "Return only sanitized durable run status fields.",
+        "operationId": "get_ingestion_run_ai_ingest_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Get Ingestion Run",
+        "tags": [
+          "ingest"
+        ]
+      }
+    },
+    "/ai/release-decision/artifacts": {
+      "get": {
+        "operationId": "list_release_decision_artifacts_ai_release_decision_artifacts_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReleaseDecisionArtifactSummary"
+                  },
+                  "title": "Response List Release Decision Artifacts Ai Release Decision Artifacts Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "List Release Decision Artifacts",
+        "tags": [
+          "release-decision"
+        ]
+      }
+    },
+    "/ai/release-decision/artifacts/{artifact_id}": {
+      "get": {
+        "operationId": "get_release_decision_artifact_ai_release_decision_artifacts__artifact_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseDecisionArtifactRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Get Release Decision Artifact",
+        "tags": [
+          "release-decision"
+        ]
+      }
+    },
+    "/ai/release-decision/draft": {
+      "post": {
+        "operationId": "draft_release_decision_ai_release_decision_draft_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseDecisionDraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseDecisionDraftResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Draft Release Decision",
+        "tags": [
+          "release-decision"
+        ]
+      }
+    },
+    "/ai/release-decision/eval-cases": {
+      "get": {
+        "operationId": "list_release_decision_eval_cases_ai_release_decision_eval_cases_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReleaseDecisionEvalCaseSummary"
+                  },
+                  "title": "Response List Release Decision Eval Cases Ai Release Decision Eval Cases Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "List Release Decision Eval Cases",
+        "tags": [
+          "release-decision"
+        ]
+      }
+    },
+    "/ai/release-decision/evaluate": {
+      "post": {
+        "operationId": "evaluate_release_decision_draft_ai_release_decision_evaluate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseDecisionEvaluateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseDecisionEvaluateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Evaluate Release Decision Draft",
+        "tags": [
+          "release-decision"
+        ]
+      }
+    },
+    "/ai/release-decision/presets": {
+      "get": {
+        "operationId": "list_release_decision_presets_ai_release_decision_presets_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReleaseDecisionPresetResponse"
+                  },
+                  "title": "Response List Release Decision Presets Ai Release Decision Presets Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "List Release Decision Presets",
+        "tags": [
+          "release-decision"
+        ]
+      }
+    },
+    "/ai/release-decision/save": {
+      "post": {
+        "operationId": "save_release_decision_artifact_ai_release_decision_save_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseDecisionSaveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseDecisionArtifactSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Save Release Decision Artifact",
+        "tags": [
+          "release-decision"
+        ]
+      }
+    },
+    "/ai/search/": {
+      "get": {
+        "description": "검색 알고리즘을 자세히 분석하고 성능을 측정하는 디버깅 엔드포인트입니다.\n개발자가 검색 품질을 개선하기 위해 사용합니다.",
+        "operationId": "debug_search_ai_search__get",
+        "parameters": [
+          {
+            "description": "분석할 질문 또는 키워드",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "description": "분석할 질문 또는 키워드",
+              "minLength": 2,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "description": "검색 결과 개수",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "description": "검색 결과 개수",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "시즌 연도 (예: 2025)",
+            "in": "query",
+            "name": "year",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "시즌 연도 (예: 2025)",
+              "title": "Year"
+            }
+          },
+          {
+            "description": "팀명 (예: LG, KIA)",
+            "in": "query",
+            "name": "team",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "팀명 (예: LG, KIA)",
+              "title": "Team"
+            }
+          },
+          {
+            "description": "다중 쿼리 검색 사용 여부",
+            "in": "query",
+            "name": "use_multi_query",
+            "required": false,
+            "schema": {
+              "default": true,
+              "description": "다중 쿼리 검색 사용 여부",
+              "title": "Use Multi Query",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchAnalysisResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Debug Search",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/ai/search/compare-methods": {
+      "get": {
+        "description": "단일 쿼리 검색과 다중 쿼리 검색 성능을 비교하는 엔드포인트입니다.",
+        "operationId": "compare_search_methods_ai_search_compare_methods_get",
+        "parameters": [
+          {
+            "description": "비교 테스트할 질문",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "description": "비교 테스트할 질문",
+              "minLength": 2,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Compare Search Methods",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/ai/search/test-entity-extraction": {
+      "get": {
+        "description": "질문에서 엔티티 추출이 올바르게 작동하는지 테스트하는 엔드포인트입니다.",
+        "operationId": "test_entity_extraction_ai_search_test_entity_extraction_get",
+        "parameters": [
+          {
+            "description": "엔티티 추출을 테스트할 질문",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "description": "엔티티 추출을 테스트할 질문",
+              "minLength": 2,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Test Entity Extraction",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/ai/vision/seat-view-classify": {
+      "post": {
+        "description": "Classify an uploaded baseball-related image for seat-view moderation.",
+        "operationId": "classify_seat_view_image_ai_vision_seat_view_classify_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_classify_seat_view_image_ai_vision_seat_view_classify_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeatViewClassification"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Classify Seat View Image",
+        "tags": [
+          "vision"
+        ]
+      }
+    },
+    "/ai/vision/ticket": {
+      "post": {
+        "description": "Analyzes an uploaded ticket image using Gemini Vision (Native or OpenRouter) to extract details.",
+        "operationId": "analyze_ticket_image_ai_vision_ticket_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_analyze_ticket_image_ai_vision_ticket_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Analyze Ticket Image",
+        "tags": [
+          "vision"
+        ]
+      }
+    },
+    "/coach/analyze": {
+      "post": {
+        "description": "특정 팀(들)에 대한 심층 분석을 요청합니다. 'The Coach' 페르소나가 적용됩니다.",
+        "operationId": "analyze_team_coach_analyze_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AI-Event-Version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Ai-Event-Version"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CoachAnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Analyze Team",
+        "tags": [
+          "coach"
+        ]
+      }
+    },
+    "/coach/analyze-legacy": {
+      "post": {
+        "description": "기존 방식의 Coach 분석 (전체 에이전트 파이프라인 사용).\nFast Path에 문제가 있을 경우 대안으로 사용.\ndeprecate: COACH_ANALYZE_LEGACY_ENABLED=0 으로 비활성화 가능.",
+        "operationId": "analyze_team_legacy_coach_analyze_legacy_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CoachAnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Analyze Team Legacy",
+        "tags": [
+          "coach"
+        ]
+      }
+    },
+    "/coach/cache/reset": {
+      "post": {
+        "description": "FAILED_LOCKED 상태의 Coach 분석 캐시를 운영자가 수동으로 즉시 복구한다.\n\n삭제된 row는 다음 분석 요청에서 자연 재생성된다. 활성 PENDING lease와\nCOMPLETED row는 보호된다. cache_key 단건 또는 (team_id, year) 묶음을 받는다.",
+        "operationId": "reset_coach_cache_coach_cache_reset_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CoachCacheResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Reset Coach Cache",
+        "tags": [
+          "coach"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "애플리케이션의 상태를 확인하는 헬스 체크 엔드포인트.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/moderation/safety-check": {
+      "post": {
+        "description": "게시글/댓글 텍스트를 점진 Hybrid 정책(RULE + MODEL)으로 검사합니다.",
+        "operationId": "safety_check_moderation_safety_check_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModerationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Safety Check",
+        "tags": [
+          "moderation"
+        ]
+      }
+    },
+    "/vision/seat-view-classify": {
+      "post": {
+        "description": "Classify an uploaded baseball-related image for seat-view moderation.",
+        "operationId": "classify_seat_view_image_vision_seat_view_classify_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_classify_seat_view_image_vision_seat_view_classify_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeatViewClassification"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Classify Seat View Image",
+        "tags": [
+          "vision"
+        ]
+      }
+    },
+    "/vision/ticket": {
+      "post": {
+        "description": "Analyzes an uploaded ticket image using Gemini Vision (Native or OpenRouter) to extract details.",
+        "operationId": "analyze_ticket_image_vision_ticket_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_analyze_ticket_image_vision_ticket_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Analyze Ticket Image",
+        "tags": [
+          "vision"
+        ]
+      }
+    }
+  }
+}
