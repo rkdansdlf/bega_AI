@@ -2208,6 +2208,21 @@ def _quoted_checkpoint_fields(order: CheckpointOrder) -> str:
     return ", ".join(f'"{field.name}"' for field in order.fields)
 
 
+def resolve_update_filter_column(
+    profile: Mapping[str, Any],
+    *,
+    since: Optional[datetime],
+) -> Optional[str]:
+    if since is not None:
+        column = profile.get("since_filter_column", "updated_at")
+    else:
+        column = profile.get("since_filter_column")
+    if column is None:
+        return None
+    normalized = str(column).strip()
+    return normalized or None
+
+
 def build_select_query(
     table: str,
     profile: Dict[str, Any],
@@ -2224,7 +2239,7 @@ def build_select_query(
     if checkpoint_order is not None:
         custom_sql = profile.get("checkpoint_select_sql") or custom_sql
     season_filter_column = profile.get("season_filter_column", "season_year")
-    since_filter_column = profile.get("since_filter_column", "updated_at")
+    since_filter_column = resolve_update_filter_column(profile, since=since)
     date_to_exclusive_filter_column = profile.get("date_to_exclusive_filter_column")
     if (
         checkpoint_order is not None
@@ -2258,7 +2273,13 @@ def build_select_query(
             and source_updated_before is not None
             and since_filter_column
         ):
-            where_clauses.append(f"{since_filter_column} <= %s")
+            if since is None:
+                where_clauses.append(
+                    f"({since_filter_column} IS NULL OR "
+                    f"{since_filter_column} <= %s)"
+                )
+            else:
+                where_clauses.append(f"{since_filter_column} <= %s")
             params.append(source_updated_before)
         if date_to_exclusive is not None and date_to_exclusive_filter_column:
             where_clauses.append(f"{date_to_exclusive_filter_column} < %s")
@@ -2314,7 +2335,18 @@ def build_select_query(
         and since_filter_column
     ):
         column_name = str(since_filter_column).split(".")[-1]
-        where_parts.append(sql.SQL("{} <= %s").format(sql.Identifier(column_name)))
+        if since is None:
+            identifier = sql.Identifier(column_name)
+            where_parts.append(
+                sql.SQL("({} IS NULL OR {} <= %s)").format(
+                    identifier,
+                    identifier,
+                )
+            )
+        else:
+            where_parts.append(
+                sql.SQL("{} <= %s").format(sql.Identifier(column_name))
+            )
         params.append(source_updated_before)
     if date_to_exclusive is not None and date_to_exclusive_filter_column:
         column_name = str(date_to_exclusive_filter_column).split(".")[-1]
@@ -3030,7 +3062,7 @@ def ingest_table(
         source_updated_before = None
         if checkpointed:
             requires_source_updated_before = bool(
-                profile.get("since_filter_column", "updated_at")
+                resolve_update_filter_column(profile, since=since)
             )
             checkpoint_order = resolve_checkpoint_order(
                 source_conn,

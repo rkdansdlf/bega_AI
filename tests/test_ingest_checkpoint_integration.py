@@ -70,6 +70,7 @@ class _EventCheckpointSession:
     events: list[str]
     state: _CheckpointState
     fail_advance: bool
+    source_table: str = "teams"
 
     def __init__(self, *, requires_source_updated_before: bool) -> None:
         self.initial = deepcopy(self.state.durable)
@@ -77,7 +78,6 @@ class _EventCheckpointSession:
         self.requires_source_updated_before = requires_source_updated_before
         if (
             self.current is not None
-            and not self.current.completed
             and self.current.source_updated_before is None
             and (
                 self.current.cursor is not None
@@ -133,7 +133,7 @@ class _EventCheckpointSession:
         self.events.append("checkpoint.upsert")
         if self.fail_advance:
             raise RuntimeError("scripted checkpoint failure")
-        current = self.current or _CheckpointRecord()
+        current = self.current or _CheckpointRecord(source_table=self.source_table)
         durable_max = current.max_updated_at
         if durable_max is None or (
             max_updated_at is not None and max_updated_at > durable_max
@@ -156,7 +156,7 @@ class _EventCheckpointSession:
 
     def complete(self, _cursor):
         self.events.append("checkpoint.complete")
-        current = self.current or _CheckpointRecord()
+        current = self.current or _CheckpointRecord(source_table=self.source_table)
         self.current = replace(
             current,
             source_updated_before=self.source_updated_before,
@@ -213,8 +213,10 @@ class _EventCursor:
                 )
                 and (
                     since is None
-                    or row.get("updated_at") is None
-                    or row["updated_at"] >= since
+                    or (
+                        row.get("updated_at") is not None
+                        and row["updated_at"] >= since
+                    )
                 )
             ]
 
@@ -293,6 +295,7 @@ def _payload_for_task(task):
 def _run_fake_checkpoint_ingest(
     monkeypatch,
     *,
+    table_name="teams",
     rows=(),
     render_payloads=None,
     completed_checkpoint=False,
@@ -316,6 +319,7 @@ def _run_fake_checkpoint_ingest(
         durable = None
         if completed_checkpoint:
             durable = _CheckpointRecord(
+                source_table=table_name,
                 cursor=CheckpointCursor((10,)),
                 committed_batches=4,
                 source_rows=10,
@@ -356,6 +360,7 @@ def _run_fake_checkpoint_ingest(
     _ConfiguredSession.events = events
     _ConfiguredSession.state = state
     _ConfiguredSession.fail_advance = fail_advance
+    _ConfiguredSession.source_table = table_name
 
     def _build_select_query(*_args, **kwargs):
         captured_resumes.append(kwargs.get("resume_cursor"))
@@ -390,7 +395,19 @@ def _run_fake_checkpoint_ingest(
         )
     monkeypatch.setattr(module, "get_settings", lambda: SimpleNamespace())
     monkeypatch.setattr(module, "resolve_primary_key_columns", lambda *_args: ["id"])
-    monkeypatch.setattr(module, "resolve_checkpoint_order", lambda *_args: ORDER)
+    monkeypatch.setattr(
+        module,
+        "validate_required_source_columns",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_checkpoint_order",
+        lambda _connection, name, _profile: CheckpointOrder(
+            name,
+            (CheckpointOrderField("id", "integer"),),
+        ),
+    )
     monkeypatch.setattr(module, "build_select_query", _build_select_query)
     monkeypatch.setattr(
         module,
@@ -413,7 +430,7 @@ def _run_fake_checkpoint_ingest(
     result = module.ingest_table(
         source,
         destination,
-        "teams",
+        table_name,
         limit=None,
         embed_batch_size=2,
         read_batch_size=read_batch_size,
@@ -904,7 +921,6 @@ def test_last_data_commit_crash_resumes_with_completion_only(monkeypatch):
         committed_batches=1,
         source_rows=1,
         written_chunks=1,
-        source_updated_before=CUTOFF,
     )
     assert first_events[-2:] == ["checkpoint.complete", "destination.commit"]
     assert first_events.count("metric.checkpoint:teams:created") == 1
@@ -992,9 +1008,76 @@ def test_checkpoint_ingest_increments_existing_counters_at_batch_commit(monkeypa
     ) - chunks_before == 2
 
 
+def test_kbo_seasons_full_checkpoint_skips_source_cutoff_sampling(monkeypatch):
+    captured_cutoffs: list[datetime | None] = []
+
+    result, events = _run_fake_checkpoint_ingest(
+        monkeypatch,
+        table_name="kbo_seasons",
+        rows=[],
+        captured_cutoffs=captured_cutoffs,
+        source_clock_values=[CUTOFF],
+    )
+
+    assert "source.clock" not in events
+    assert "source.execute" in events
+    assert captured_cutoffs == [None]
+    assert result.attempt_source_rows == 0
+
+
+def test_game_full_checkpoint_keeps_null_updates_and_excludes_late_updates(
+    monkeypatch,
+):
+    captured_cutoffs: list[datetime | None] = []
+
+    result, events = _run_fake_checkpoint_ingest(
+        monkeypatch,
+        table_name="game",
+        rows=[
+            {"id": 1, "updated_at": None},
+            {"id": 2, "updated_at": CUTOFF + timedelta(minutes=1)},
+        ],
+        captured_cutoffs=captured_cutoffs,
+        source_clock_values=[CUTOFF],
+    )
+
+    assert events.count("source.clock") == 1
+    assert captured_cutoffs == [CUTOFF]
+    assert result.attempt_source_rows == 1
+
+
+def test_completed_progressed_checkpoint_without_cutoff_fails_before_source_query(
+    monkeypatch,
+):
+    state = _CheckpointState(
+        durable=_CheckpointRecord(
+            source_table="game",
+            cursor=CheckpointCursor((1,)),
+            committed_batches=1,
+            source_rows=1,
+            completed=True,
+        )
+    )
+    events: list[str] = []
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        _run_fake_checkpoint_ingest(
+            monkeypatch,
+            table_name="game",
+            rows=[],
+            state=state,
+            events=events,
+            observe_metrics=True,
+            source_clock_values=[CUTOFF],
+        )
+
+    assert events == ["metric.checkpoint:game:incompatible"]
+
+
 def test_recovery_excludes_row_updated_behind_cursor_after_fixed_cutoff(monkeypatch):
     state = _CheckpointState(
         durable=_CheckpointRecord(
+            source_table="game",
             cursor=CheckpointCursor((1,)),
             committed_batches=1,
             source_rows=1,
@@ -1007,6 +1090,7 @@ def test_recovery_excludes_row_updated_behind_cursor_after_fixed_cutoff(monkeypa
 
     result, events = _run_fake_checkpoint_ingest(
         monkeypatch,
+        table_name="game",
         rows=[
             {"id": 1, "updated_at": CUTOFF + timedelta(minutes=1)},
             {"id": 2, "updated_at": CUTOFF - timedelta(minutes=1)},
@@ -1025,6 +1109,7 @@ def test_suffix_update_after_cutoff_cannot_advance_current_watermark(monkeypatch
     previous_max = CUTOFF - timedelta(hours=1)
     state = _CheckpointState(
         durable=_CheckpointRecord(
+            source_table="game",
             cursor=CheckpointCursor((1,)),
             committed_batches=1,
             source_rows=1,
@@ -1036,6 +1121,7 @@ def test_suffix_update_after_cutoff_cannot_advance_current_watermark(monkeypatch
 
     result, _events = _run_fake_checkpoint_ingest(
         monkeypatch,
+        table_name="game",
         rows=[{"id": 2, "updated_at": CUTOFF + timedelta(minutes=2)}],
         state=state,
     )
@@ -1051,6 +1137,7 @@ def test_crash_restart_reuses_persisted_cutoff_without_resampling(monkeypatch):
     with pytest.raises(RuntimeError, match="scripted destination commit failure"):
         _run_fake_checkpoint_ingest(
             monkeypatch,
+            table_name="game",
             rows=[{"id": 1, "updated_at": CUTOFF - timedelta(minutes=1)}],
             state=state,
             events=first_events,
@@ -1066,6 +1153,7 @@ def test_crash_restart_reuses_persisted_cutoff_without_resampling(monkeypatch):
     captured_cutoffs: list[datetime | None] = []
     _run_fake_checkpoint_ingest(
         monkeypatch,
+        table_name="game",
         rows=[],
         state=state,
         events=second_events,
@@ -1083,6 +1171,7 @@ def test_next_normal_run_sees_updates_deferred_by_prior_cutoff(monkeypatch):
 
     result, events = _run_fake_checkpoint_ingest(
         monkeypatch,
+        table_name="game",
         rows=[{"id": 1, "updated_at": deferred}],
         state=_CheckpointState(),
         since=previous_watermark,
@@ -1099,6 +1188,7 @@ def test_zero_row_completion_persists_sampled_source_cutoff(monkeypatch):
 
     result, events = _run_fake_checkpoint_ingest(
         monkeypatch,
+        table_name="game",
         rows=[],
         state=state,
         source_clock_values=[CUTOFF],
@@ -1114,6 +1204,7 @@ def test_zero_row_completion_persists_sampled_source_cutoff(monkeypatch):
 def test_progressed_incomplete_checkpoint_without_cutoff_fails_closed(monkeypatch):
     state = _CheckpointState(
         durable=_CheckpointRecord(
+            source_table="game",
             cursor=CheckpointCursor((1,)),
             committed_batches=1,
             source_rows=1,
@@ -1123,6 +1214,7 @@ def test_progressed_incomplete_checkpoint_without_cutoff_fails_closed(monkeypatc
     with pytest.raises(IngestCheckpointIncompatibleError):
         _run_fake_checkpoint_ingest(
             monkeypatch,
+            table_name="game",
             rows=[],
             state=state,
             source_clock_values=[CUTOFF],
