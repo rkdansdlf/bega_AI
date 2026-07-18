@@ -786,3 +786,113 @@ def test_retains_malformed_references_in_parameter_request_media_and_schema_path
 
     for value in range(1, 7):
         assert f'"$ref": {value}' in rendered.endpoints or f'"$ref": {value}' in rendered.schemas
+
+
+def test_retains_valid_reference_siblings_for_parameter_header_and_media_schemas() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Reference siblings", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "get": {
+                    "tags": ["references"],
+                    "parameters": [{
+                        "name": "filter",
+                        "in": "query",
+                        "schema": {
+                            "$ref": "#/components/schemas/S",
+                            "description": "parameter keep",
+                            "default": "not-an-example",
+                        },
+                    }],
+                    "responses": {
+                        "200": {
+                            "headers": {
+                                "X-Shape": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/S",
+                                        "x-header": {"keep": True},
+                                    }
+                                }
+                            },
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/S",
+                                        "x-media": {"keep": True},
+                                    }
+                                },
+                                "text/plain": {
+                                    "schema": {"$ref": "#/components/schemas/S"}
+                                },
+                            },
+                        }
+                    },
+                }
+            }
+        },
+        "components": {"schemas": {"S": {"type": "string"}}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert rendered.endpoints.count("[S](api-schemas.md#s)") == 4
+    assert '"description": "parameter keep"' in rendered.endpoints
+    assert '"default": "not-an-example"' in rendered.endpoints
+    assert '"x-header": {' in rendered.endpoints
+    assert '"x-media": {' in rendered.endpoints
+    assert 'Example: `"not-an-example"`' not in rendered.endpoints
+    assert rendered.endpoints.count("Unsupported media schema siblings:") == 1
+
+
+def test_retains_reference_siblings_in_component_and_nested_property_schemas() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Schema reference siblings", "version": "1"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "S": {"type": "string"},
+                "Wrapper": {
+                    "$ref": "#/components/schemas/S",
+                    "title": "root title",
+                    "description": "root keep",
+                    "default": False,
+                    "x-root": {"keep": True},
+                },
+                "Container": {
+                    "type": "object",
+                    "properties": {
+                        "value": {
+                            "$ref": "#/components/schemas/S",
+                            "format": "nested-format",
+                            "description": "nested keep",
+                            "default": "nested default",
+                            "x-nested": {"keep": True},
+                        }
+                    },
+                },
+            }
+        },
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert "root keep" in rendered.schemas
+    assert "nested keep" in rendered.schemas
+    assert "Default: `false`" in rendered.schemas
+    assert 'Default: `"nested default"`' in rendered.schemas
+    assert '"x-root": {' in rendered.schemas
+    assert '"x-nested": {' in rendered.schemas
+    assert '"title": "root title"' in rendered.schemas
+    assert '"format": "nested-format"' in rendered.schemas
+    assert '"$ref": "#/components/schemas/S"' not in rendered.schemas
+    assert 'Example: `"nested default"`' not in rendered.schemas
