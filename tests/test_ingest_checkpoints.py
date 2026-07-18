@@ -5,14 +5,18 @@ from uuid import UUID
 import pytest
 
 from app.core.ingest_checkpoints import (
+    CURSOR_VERSION,
     CheckpointCursor,
     CheckpointOrder,
     CheckpointOrderField,
+    IngestCheckpoint,
     IngestCheckpointIncompatibleError,
     IngestCheckpointCursorTypeError,
     IngestCheckpointCursorUnavailableError,
     IngestCheckpointMissingFieldError,
     IngestCheckpointOrderError,
+    IngestCheckpointRepository,
+    IngestCheckpointSession,
     decode_cursor,
     encode_cursor,
     cursor_from_row,
@@ -29,6 +33,57 @@ ORDER = CheckpointOrder(
     ),
     query_version="1",
 )
+RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
+SCOPE_KEY = "season:2026"
+NOW = datetime(2026, 7, 18, 4, 0, tzinfo=UTC)
+
+
+def _checkpoint_row(
+    *,
+    run_id=RUN_ID,
+    source_table="game",
+    scope_key=SCOPE_KEY,
+    cursor_version=CURSOR_VERSION,
+    cursor_signature=None,
+    cursor=CheckpointCursor((date(2026, 7, 18), "g1")),
+    committed_batches=0,
+    source_rows=0,
+    written_chunks=0,
+    reused_embeddings=0,
+    embedded_chunks=0,
+    max_updated_at=None,
+    completed=False,
+    completed_at=None,
+):
+    return (
+        run_id,
+        source_table,
+        scope_key,
+        cursor_version,
+        cursor_signature or ORDER.signature,
+        encode_cursor(ORDER, cursor) if cursor is not None else None,
+        committed_batches,
+        source_rows,
+        written_chunks,
+        reused_embeddings,
+        embedded_chunks,
+        max_updated_at,
+        completed,
+        completed_at or (NOW if completed else None),
+    )
+
+
+class _RecordingCursor:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.executed = []
+
+    def execute(self, statement, params=()):
+        self.executed.append((" ".join(statement.split()), params))
+        return self
+
+    def fetchone(self):
+        return self.rows.pop(0) if self.rows else None
 
 
 class FakeCatalogCursor:
@@ -285,3 +340,448 @@ def test_naive_datetime_is_normalized_to_utc():
     cursor = cursor_from_row(order, {"key": datetime(2026, 7, 18, 4, 0)})
 
     assert cursor == CheckpointCursor((datetime(2026, 7, 18, 4, 0, tzinfo=UTC),))
+
+
+def test_repository_load_uses_explicit_columns_and_decodes_typed_cursor():
+    cursor = _RecordingCursor(rows=[_checkpoint_row()])
+    repository = IngestCheckpointRepository(ORDER)
+
+    loaded = repository.load(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        for_update=True,
+    )
+
+    assert loaded == IngestCheckpoint(
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        cursor_version=CURSOR_VERSION,
+        cursor_signature=ORDER.signature,
+        cursor=CheckpointCursor((date(2026, 7, 18), "g1")),
+    )
+    sql, params = cursor.executed[0]
+    assert "SELECT *" not in sql
+    assert "cursor_payload" in sql
+    assert "completed_at" in sql
+    assert "FOR UPDATE" in sql
+    assert params == (RUN_ID, "game")
+
+
+def test_advance_locks_identity_and_returns_monotonic_progress():
+    cursor = _RecordingCursor(
+        rows=[
+            None,
+            None,
+            _checkpoint_row(
+                cursor=CheckpointCursor((date(2026, 7, 18), "g2")),
+                source_rows=2,
+                written_chunks=3,
+                reused_embeddings=1,
+                embedded_chunks=2,
+                committed_batches=1,
+                max_updated_at=NOW,
+            ),
+        ]
+    )
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+
+    updated = session.advance(
+        cursor,
+        next_cursor=CheckpointCursor((date(2026, 7, 18), "g2")),
+        source_rows_delta=2,
+        written_chunks_delta=3,
+        reused_embeddings_delta=1,
+        embedded_chunks_delta=2,
+        max_updated_at=NOW,
+    )
+
+    load_sql, lock_sql, insert_sql = (statement for statement, _ in cursor.executed)
+    assert "FOR UPDATE" not in load_sql
+    assert "FOR UPDATE" in lock_sql
+    assert "WHERE run_id = %s AND source_table = %s" in lock_sql
+    assert "INSERT INTO ai_ingest_checkpoints" in insert_sql
+    assert updated.source_rows == 2
+    assert updated.written_chunks == 3
+    assert updated.committed_batches == 1
+    assert updated.max_updated_at == NOW
+    assert session.current == updated
+    insert_params = cursor.executed[2][1]
+    assert insert_params[:5] == (
+        RUN_ID,
+        "game",
+        SCOPE_KEY,
+        CURSOR_VERSION,
+        ORDER.signature,
+    )
+    assert insert_params[6:] == (1, 2, 3, 1, 2, NOW)
+
+
+@pytest.mark.parametrize(
+    "stored_overrides",
+    [
+        {"scope_key": "other"},
+        {"cursor_version": CURSOR_VERSION + 1},
+        {"cursor_signature": "other"},
+        {"run_id": UUID("22222222-2222-4222-8222-222222222222")},
+        {"source_table": "other"},
+    ],
+)
+def test_start_rejects_identity_scope_version_or_signature_mismatch(
+    stored_overrides,
+):
+    cursor = _RecordingCursor(rows=[_checkpoint_row(**stored_overrides)])
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        IngestCheckpointSession.start(
+            cursor,
+            run_id=RUN_ID,
+            source_table="game",
+            scope_key=SCOPE_KEY,
+            order=ORDER,
+        )
+
+
+def test_start_reports_resumed_and_completed_state_from_persisted_row():
+    cursor = _RecordingCursor(rows=[_checkpoint_row(completed=True)])
+
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+
+    assert session.resumed is True
+    assert session.completed is True
+
+
+def test_advance_rejects_stale_persisted_state_before_mutating():
+    initial_row = _checkpoint_row(
+        committed_batches=1,
+        source_rows=1,
+        written_chunks=1,
+    )
+    stale_row = _checkpoint_row(
+        committed_batches=1,
+        source_rows=2,
+        written_chunks=1,
+    )
+    cursor = _RecordingCursor(rows=[initial_row, stale_row])
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+    initial = session.current
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        session.advance(
+            cursor,
+            next_cursor=CheckpointCursor((date(2026, 7, 18), "g2")),
+            source_rows_delta=1,
+            written_chunks_delta=1,
+            reused_embeddings_delta=0,
+            embedded_chunks_delta=1,
+            max_updated_at=NOW,
+        )
+
+    assert len(cursor.executed) == 2
+    assert "FOR UPDATE" in cursor.executed[1][0]
+    assert session.current == initial
+
+
+def test_zero_output_advance_increments_batch_and_uses_absolute_counters():
+    initial_row = _checkpoint_row(
+        committed_batches=4,
+        source_rows=7,
+        written_chunks=5,
+        reused_embeddings=2,
+        embedded_chunks=3,
+        max_updated_at=NOW,
+    )
+    returned_row = _checkpoint_row(
+        cursor=CheckpointCursor((date(2026, 7, 18), "g2")),
+        committed_batches=5,
+        source_rows=9,
+        written_chunks=5,
+        reused_embeddings=2,
+        embedded_chunks=3,
+        max_updated_at=NOW,
+    )
+    cursor = _RecordingCursor(rows=[initial_row, initial_row, returned_row])
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+
+    updated = session.advance(
+        cursor,
+        next_cursor=CheckpointCursor((date(2026, 7, 18), "g2")),
+        source_rows_delta=2,
+        written_chunks_delta=0,
+        reused_embeddings_delta=0,
+        embedded_chunks_delta=0,
+        max_updated_at=None,
+    )
+
+    assert updated.committed_batches == 5
+    assert updated.source_rows == 9
+    assert updated.written_chunks == 5
+    update_sql, update_params = cursor.executed[2]
+    assert "committed_batches = %s" in update_sql
+    assert "committed_batches +" not in update_sql
+    assert update_params[1:7] == (5, 9, 5, 2, 3, NOW)
+    assert update_params[-2:] == (RUN_ID, "game")
+
+
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        (-1, 0, 0, 0),
+        (0, -1, 0, 0),
+        (0, 0, -1, 0),
+        (0, 0, 0, -1),
+    ],
+)
+def test_advance_rejects_negative_deltas(deltas):
+    cursor = _RecordingCursor(rows=[None])
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+
+    with pytest.raises(ValueError, match="nonnegative"):
+        session.advance(
+            cursor,
+            next_cursor=CheckpointCursor((date(2026, 7, 18), "g1")),
+            source_rows_delta=deltas[0],
+            written_chunks_delta=deltas[1],
+            reused_embeddings_delta=deltas[2],
+            embedded_chunks_delta=deltas[3],
+            max_updated_at=None,
+        )
+
+    assert len(cursor.executed) == 1
+    assert session.current is None
+
+
+def test_advance_reopens_completed_checkpoint_and_clears_completion_time():
+    completed_row = _checkpoint_row(
+        committed_batches=1,
+        source_rows=1,
+        completed=True,
+    )
+    returned_row = _checkpoint_row(
+        cursor=CheckpointCursor((date(2026, 7, 18), "g2")),
+        committed_batches=2,
+        source_rows=2,
+    )
+    cursor = _RecordingCursor(rows=[completed_row, completed_row, returned_row])
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+
+    updated = session.advance(
+        cursor,
+        next_cursor=CheckpointCursor((date(2026, 7, 18), "g2")),
+        source_rows_delta=1,
+        written_chunks_delta=0,
+        reused_embeddings_delta=0,
+        embedded_chunks_delta=0,
+        max_updated_at=None,
+    )
+
+    assert updated.completed is False
+    assert session.completed is False
+    update_sql = cursor.executed[2][0]
+    assert "completed = false" in update_sql
+    assert "completed_at = NULL" in update_sql
+
+
+def test_advance_missing_returning_row_preserves_session_state():
+    cursor = _RecordingCursor(rows=[None, None, None])
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        session.advance(
+            cursor,
+            next_cursor=CheckpointCursor((date(2026, 7, 18), "g1")),
+            source_rows_delta=1,
+            written_chunks_delta=0,
+            reused_embeddings_delta=0,
+            embedded_chunks_delta=0,
+            max_updated_at=None,
+        )
+
+    assert session.current is None
+
+
+def test_advance_accepts_canonical_return_for_naive_datetime_cursor():
+    datetime_order = CheckpointOrder(
+        source_table="event",
+        fields=(CheckpointOrderField("occurred_at", "datetime"),),
+    )
+    naive_cursor = CheckpointCursor((datetime(2026, 7, 18, 4, 0),))
+    canonical_cursor = CheckpointCursor((datetime(2026, 7, 18, 4, 0, tzinfo=UTC),))
+    returned_row = (
+        RUN_ID,
+        "event",
+        SCOPE_KEY,
+        CURSOR_VERSION,
+        datetime_order.signature,
+        encode_cursor(datetime_order, canonical_cursor),
+        1,
+        1,
+        0,
+        0,
+        0,
+        None,
+        False,
+        None,
+    )
+    cursor = _RecordingCursor(rows=[None, None, returned_row])
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="event",
+        scope_key=SCOPE_KEY,
+        order=datetime_order,
+    )
+
+    updated = session.advance(
+        cursor,
+        next_cursor=naive_cursor,
+        source_rows_delta=1,
+        written_chunks_delta=0,
+        reused_embeddings_delta=0,
+        embedded_chunks_delta=0,
+        max_updated_at=None,
+    )
+
+    assert updated.cursor == canonical_cursor
+
+
+def test_complete_can_create_zero_row_checkpoint():
+    cursor = _RecordingCursor(
+        rows=[None, None, _checkpoint_row(cursor=None, completed=True)]
+    )
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+
+    completed = session.complete(cursor)
+
+    assert completed.completed is True
+    assert completed.cursor is None
+    assert completed.source_rows == 0
+    assert completed.committed_batches == 0
+    assert session.resumed is False
+    assert session.completed is True
+    assert "FOR UPDATE" in cursor.executed[1][0]
+    assert "INSERT INTO ai_ingest_checkpoints" in cursor.executed[2][0]
+
+
+def test_complete_updates_only_completion_fields_and_never_increments_batches():
+    initial_row = _checkpoint_row(
+        committed_batches=4,
+        source_rows=7,
+        written_chunks=5,
+        reused_embeddings=2,
+        embedded_chunks=3,
+        max_updated_at=NOW,
+    )
+    completed_row = _checkpoint_row(
+        committed_batches=4,
+        source_rows=7,
+        written_chunks=5,
+        reused_embeddings=2,
+        embedded_chunks=3,
+        max_updated_at=NOW,
+        completed=True,
+    )
+    cursor = _RecordingCursor(rows=[initial_row, initial_row, completed_row])
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+
+    completed = session.complete(cursor)
+
+    assert completed.committed_batches == 4
+    update_sql, params = cursor.executed[2]
+    set_clause = update_sql.split("SET", 1)[1].split("WHERE", 1)[0]
+    assert "completed = true" in set_clause
+    assert "completed_at = clock_timestamp()" in set_clause
+    assert "updated_at = clock_timestamp()" in set_clause
+    assert "committed_batches" not in set_clause
+    assert "source_rows" not in set_clause
+    assert params == (RUN_ID, "game")
+
+
+def test_complete_rejects_stale_or_missing_returning_state_without_mutating():
+    initial_row = _checkpoint_row(committed_batches=1, source_rows=1)
+    stale_row = _checkpoint_row(committed_batches=2, source_rows=1)
+    stale_cursor = _RecordingCursor(rows=[initial_row, stale_row])
+    stale_session = IngestCheckpointSession.start(
+        stale_cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+    stale_initial = stale_session.current
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        stale_session.complete(stale_cursor)
+
+    assert stale_session.current == stale_initial
+    assert len(stale_cursor.executed) == 2
+
+    missing_cursor = _RecordingCursor(rows=[initial_row, initial_row, None])
+    missing_session = IngestCheckpointSession.start(
+        missing_cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+    )
+    missing_initial = missing_session.current
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        missing_session.complete(missing_cursor)
+
+    assert missing_session.current == missing_initial

@@ -1,4 +1,6 @@
-"""Typed cursor primitives for durable ingest checkpoints."""
+"""Typed cursor primitives and persistence for durable ingest checkpoints."""
+
+from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -222,3 +224,523 @@ class IngestCheckpoint:
     max_updated_at: datetime | None = None
     completed: bool = False
     completed_at: datetime | None = None
+
+
+_CHECKPOINT_COLUMNS = (
+    "run_id",
+    "source_table",
+    "scope_key",
+    "cursor_version",
+    "cursor_signature",
+    "cursor_payload",
+    "committed_batches",
+    "source_rows",
+    "written_chunks",
+    "reused_embeddings",
+    "embedded_chunks",
+    "max_updated_at",
+    "completed",
+    "completed_at",
+)
+_CHECKPOINT_SELECT = ", ".join(_CHECKPOINT_COLUMNS)
+
+
+def _checkpoint_row_mapping(row: Any) -> Mapping[str, Any]:
+    if isinstance(row, Mapping):
+        return row
+    try:
+        return dict(zip(_CHECKPOINT_COLUMNS, row, strict=True))
+    except (TypeError, ValueError) as exc:
+        raise IngestCheckpointIncompatibleError(
+            "stored checkpoint row does not match the checkpoint schema"
+        ) from exc
+
+
+def _stored_cursor_payload(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint cursor payload is invalid JSON"
+            ) from exc
+    if not isinstance(value, Mapping):
+        raise IngestCheckpointIncompatibleError(
+            "stored checkpoint cursor payload is not a mapping"
+        )
+    return value
+
+
+def _checkpoint_from_row(order: CheckpointOrder, row: Any) -> IngestCheckpoint:
+    values = _checkpoint_row_mapping(row)
+    try:
+        payload = values["cursor_payload"]
+        cursor = (
+            decode_cursor(order, _stored_cursor_payload(payload))
+            if payload is not None
+            else None
+        )
+        return IngestCheckpoint(
+            run_id=values["run_id"],
+            source_table=str(values["source_table"]),
+            scope_key=str(values["scope_key"]),
+            cursor_version=int(values["cursor_version"]),
+            cursor_signature=str(values["cursor_signature"]),
+            cursor=cursor,
+            committed_batches=int(values["committed_batches"]),
+            source_rows=int(values["source_rows"]),
+            written_chunks=int(values["written_chunks"]),
+            reused_embeddings=int(values["reused_embeddings"]),
+            embedded_chunks=int(values["embedded_chunks"]),
+            max_updated_at=values["max_updated_at"],
+            completed=bool(values["completed"]),
+            completed_at=values["completed_at"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise IngestCheckpointIncompatibleError(
+            "stored checkpoint row contains invalid values"
+        ) from exc
+
+
+def _maximum_updated_at(
+    persisted: datetime | None,
+    candidate: datetime | None,
+) -> datetime | None:
+    if persisted is None:
+        return candidate
+    if candidate is None:
+        return persisted
+    return max(persisted, candidate)
+
+
+class IngestCheckpointRepository:
+    """Synchronous destination-cursor repository for checkpoint progress."""
+
+    def __init__(self, order: CheckpointOrder) -> None:
+        self.order = order
+
+    def load(
+        self,
+        db_cursor: Any,
+        *,
+        run_id: UUID,
+        source_table: str,
+        for_update: bool = False,
+    ) -> IngestCheckpoint | None:
+        lock_clause = " FOR UPDATE" if for_update else ""
+        db_cursor.execute(
+            f"""
+            SELECT {_CHECKPOINT_SELECT}
+            FROM ai_ingest_checkpoints
+            WHERE run_id = %s AND source_table = %s{lock_clause}
+            """,
+            (run_id, source_table),
+        )
+        row = db_cursor.fetchone()
+        return _checkpoint_from_row(self.order, row) if row is not None else None
+
+    def advance(
+        self,
+        db_cursor: Any,
+        *,
+        run_id: UUID,
+        source_table: str,
+        scope_key: str,
+        current: IngestCheckpoint | None,
+        next_cursor: CheckpointCursor,
+        source_rows_delta: int,
+        written_chunks_delta: int,
+        reused_embeddings_delta: int,
+        embedded_chunks_delta: int,
+        max_updated_at: datetime | None,
+    ) -> IngestCheckpoint:
+        deltas = (
+            source_rows_delta,
+            written_chunks_delta,
+            reused_embeddings_delta,
+            embedded_chunks_delta,
+        )
+        if any(delta < 0 for delta in deltas):
+            raise ValueError("checkpoint progress deltas must be nonnegative")
+
+        persisted = self.load(
+            db_cursor,
+            run_id=run_id,
+            source_table=source_table,
+            for_update=True,
+        )
+        self._require_expected(
+            persisted,
+            current,
+            run_id=run_id,
+            source_table=source_table,
+            scope_key=scope_key,
+        )
+        if persisted is not None and persisted.cursor is not None:
+            ensure_cursor_advances(self.order, persisted.cursor, next_cursor)
+
+        committed_batches = (persisted.committed_batches if persisted else 0) + 1
+        source_rows = (persisted.source_rows if persisted else 0) + source_rows_delta
+        written_chunks = (
+            (persisted.written_chunks if persisted else 0) + written_chunks_delta
+        )
+        reused_embeddings = (
+            (persisted.reused_embeddings if persisted else 0)
+            + reused_embeddings_delta
+        )
+        embedded_chunks = (
+            (persisted.embedded_chunks if persisted else 0) + embedded_chunks_delta
+        )
+        durable_max_updated_at = _maximum_updated_at(
+            persisted.max_updated_at if persisted else None,
+            max_updated_at,
+        )
+        encoded_cursor = encode_cursor(self.order, next_cursor)
+        durable_cursor = decode_cursor(self.order, encoded_cursor)
+        cursor_payload = json.dumps(
+            encoded_cursor,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        if persisted is None:
+            db_cursor.execute(
+                f"""
+                INSERT INTO ai_ingest_checkpoints (
+                    run_id,
+                    source_table,
+                    scope_key,
+                    cursor_version,
+                    cursor_signature,
+                    cursor_payload,
+                    committed_batches,
+                    source_rows,
+                    written_chunks,
+                    reused_embeddings,
+                    embedded_chunks,
+                    max_updated_at,
+                    completed,
+                    completed_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s::jsonb,
+                    %s, %s, %s, %s, %s, %s,
+                    false, NULL, clock_timestamp()
+                )
+                RETURNING {_CHECKPOINT_SELECT}
+                """,
+                (
+                    run_id,
+                    source_table,
+                    scope_key,
+                    CURSOR_VERSION,
+                    self.order.signature,
+                    cursor_payload,
+                    committed_batches,
+                    source_rows,
+                    written_chunks,
+                    reused_embeddings,
+                    embedded_chunks,
+                    durable_max_updated_at,
+                ),
+            )
+        else:
+            db_cursor.execute(
+                f"""
+                UPDATE ai_ingest_checkpoints
+                SET cursor_payload = %s::jsonb,
+                    committed_batches = %s,
+                    source_rows = %s,
+                    written_chunks = %s,
+                    reused_embeddings = %s,
+                    embedded_chunks = %s,
+                    max_updated_at = %s,
+                    completed = false,
+                    completed_at = NULL,
+                    updated_at = clock_timestamp()
+                WHERE run_id = %s AND source_table = %s
+                RETURNING {_CHECKPOINT_SELECT}
+                """,
+                (
+                    cursor_payload,
+                    committed_batches,
+                    source_rows,
+                    written_chunks,
+                    reused_embeddings,
+                    embedded_chunks,
+                    durable_max_updated_at,
+                    run_id,
+                    source_table,
+                ),
+            )
+
+        updated = self._returned_checkpoint(db_cursor)
+        self._require_compatible(
+            updated,
+            run_id=run_id,
+            source_table=source_table,
+            scope_key=scope_key,
+        )
+        if (
+            updated.cursor != durable_cursor
+            or updated.committed_batches != committed_batches
+            or updated.source_rows != source_rows
+            or updated.written_chunks != written_chunks
+            or updated.reused_embeddings != reused_embeddings
+            or updated.embedded_chunks != embedded_chunks
+            or updated.max_updated_at != durable_max_updated_at
+            or updated.completed
+            or updated.completed_at is not None
+        ):
+            raise IngestCheckpointIncompatibleError(
+                "checkpoint advance returned unexpected durable state"
+            )
+        return updated
+
+    def complete(
+        self,
+        db_cursor: Any,
+        *,
+        run_id: UUID,
+        source_table: str,
+        scope_key: str,
+        current: IngestCheckpoint | None,
+    ) -> IngestCheckpoint:
+        persisted = self.load(
+            db_cursor,
+            run_id=run_id,
+            source_table=source_table,
+            for_update=True,
+        )
+        self._require_expected(
+            persisted,
+            current,
+            run_id=run_id,
+            source_table=source_table,
+            scope_key=scope_key,
+        )
+
+        if persisted is None:
+            db_cursor.execute(
+                f"""
+                INSERT INTO ai_ingest_checkpoints (
+                    run_id,
+                    source_table,
+                    scope_key,
+                    cursor_version,
+                    cursor_signature,
+                    cursor_payload,
+                    committed_batches,
+                    source_rows,
+                    written_chunks,
+                    reused_embeddings,
+                    embedded_chunks,
+                    max_updated_at,
+                    completed,
+                    completed_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, NULL,
+                    0, 0, 0, 0, 0, NULL,
+                    true, clock_timestamp(), clock_timestamp()
+                )
+                RETURNING {_CHECKPOINT_SELECT}
+                """,
+                (
+                    run_id,
+                    source_table,
+                    scope_key,
+                    CURSOR_VERSION,
+                    self.order.signature,
+                ),
+            )
+        else:
+            db_cursor.execute(
+                f"""
+                UPDATE ai_ingest_checkpoints
+                SET completed = true,
+                    completed_at = clock_timestamp(),
+                    updated_at = clock_timestamp()
+                WHERE run_id = %s AND source_table = %s
+                RETURNING {_CHECKPOINT_SELECT}
+                """,
+                (run_id, source_table),
+            )
+
+        completed = self._returned_checkpoint(db_cursor)
+        self._require_compatible(
+            completed,
+            run_id=run_id,
+            source_table=source_table,
+            scope_key=scope_key,
+        )
+        expected = persisted or IngestCheckpoint(
+            run_id=run_id,
+            source_table=source_table,
+            scope_key=scope_key,
+            cursor_version=CURSOR_VERSION,
+            cursor_signature=self.order.signature,
+            cursor=None,
+        )
+        if (
+            completed.cursor != expected.cursor
+            or completed.committed_batches != expected.committed_batches
+            or completed.source_rows != expected.source_rows
+            or completed.written_chunks != expected.written_chunks
+            or completed.reused_embeddings != expected.reused_embeddings
+            or completed.embedded_chunks != expected.embedded_chunks
+            or completed.max_updated_at != expected.max_updated_at
+            or not completed.completed
+            or completed.completed_at is None
+        ):
+            raise IngestCheckpointIncompatibleError(
+                "checkpoint completion returned unexpected durable state"
+            )
+        return completed
+
+    def _require_expected(
+        self,
+        persisted: IngestCheckpoint | None,
+        expected: IngestCheckpoint | None,
+        *,
+        run_id: UUID,
+        source_table: str,
+        scope_key: str,
+    ) -> None:
+        if persisted is not None:
+            self._require_compatible(
+                persisted,
+                run_id=run_id,
+                source_table=source_table,
+                scope_key=scope_key,
+            )
+        if persisted != expected:
+            raise IngestCheckpointIncompatibleError(
+                "persisted checkpoint changed after session start"
+            )
+
+    def _require_compatible(
+        self,
+        stored: IngestCheckpoint,
+        *,
+        run_id: UUID,
+        source_table: str,
+        scope_key: str,
+    ) -> None:
+        if (
+            stored.run_id != run_id
+            or stored.source_table != source_table
+            or stored.scope_key != scope_key
+            or stored.cursor_version != CURSOR_VERSION
+            or stored.cursor_signature != self.order.signature
+        ):
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint is incompatible with the ingest session"
+            )
+
+    def _returned_checkpoint(self, db_cursor: Any) -> IngestCheckpoint:
+        row = db_cursor.fetchone()
+        if row is None:
+            raise IngestCheckpointIncompatibleError(
+                "checkpoint mutation returned no durable row"
+            )
+        return _checkpoint_from_row(self.order, row)
+
+
+class IngestCheckpointSession:
+    """Tracks the checkpoint state durably observed by one transaction."""
+
+    def __init__(
+        self,
+        repository: IngestCheckpointRepository,
+        *,
+        run_id: UUID,
+        source_table: str,
+        scope_key: str,
+        initial: IngestCheckpoint | None,
+    ) -> None:
+        self.repository = repository
+        self.run_id = run_id
+        self.source_table = source_table
+        self.scope_key = scope_key
+        self.initial = initial
+        self.current = initial
+
+    @classmethod
+    def start(
+        cls,
+        db_cursor: Any,
+        *,
+        run_id: UUID,
+        source_table: str,
+        scope_key: str,
+        order: CheckpointOrder,
+    ) -> IngestCheckpointSession:
+        repository = IngestCheckpointRepository(order)
+        initial = repository.load(
+            db_cursor,
+            run_id=run_id,
+            source_table=source_table,
+        )
+        if initial is not None:
+            repository._require_compatible(
+                initial,
+                run_id=run_id,
+                source_table=source_table,
+                scope_key=scope_key,
+            )
+        return cls(
+            repository,
+            run_id=run_id,
+            source_table=source_table,
+            scope_key=scope_key,
+            initial=initial,
+        )
+
+    @property
+    def resumed(self) -> bool:
+        return self.initial is not None
+
+    @property
+    def completed(self) -> bool:
+        return bool(self.current and self.current.completed)
+
+    def advance(
+        self,
+        db_cursor: Any,
+        *,
+        next_cursor: CheckpointCursor,
+        source_rows_delta: int,
+        written_chunks_delta: int,
+        reused_embeddings_delta: int,
+        embedded_chunks_delta: int,
+        max_updated_at: datetime | None,
+    ) -> IngestCheckpoint:
+        updated = self.repository.advance(
+            db_cursor,
+            run_id=self.run_id,
+            source_table=self.source_table,
+            scope_key=self.scope_key,
+            current=self.current,
+            next_cursor=next_cursor,
+            source_rows_delta=source_rows_delta,
+            written_chunks_delta=written_chunks_delta,
+            reused_embeddings_delta=reused_embeddings_delta,
+            embedded_chunks_delta=embedded_chunks_delta,
+            max_updated_at=max_updated_at,
+        )
+        self.current = updated
+        return updated
+
+    def complete(self, db_cursor: Any) -> IngestCheckpoint:
+        completed = self.repository.complete(
+            db_cursor,
+            run_id=self.run_id,
+            source_table=self.source_table,
+            scope_key=self.scope_key,
+            current=self.current,
+        )
+        self.current = completed
+        return completed
