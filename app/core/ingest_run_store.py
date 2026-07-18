@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from .ingest_runs import (
+    IngestLeaseLostError,
     IngestRunRecord,
     IngestRunRequest,
     IngestRunStatus,
@@ -578,4 +579,4 @@ class IngestRunStore:
     @staticmethod
     def _require_owned_run(row: Any, run_id: UUID) -> None:
         if row is None:
-            raise RuntimeError(f"ingest run lease is not owned: {run_id}")
+            raise IngestLeaseLostError("ingest run lease is not owned")
