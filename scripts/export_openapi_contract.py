@@ -229,6 +229,9 @@ def _append_parameters(
             f"{_escape_cell(description) if isinstance(description, str) else _escape_cell(_stable_json(description))} | "
             f"{_escape_cell(example)} |"
         )
+        _append_reference_siblings(
+            lines, f"parameter {_escape_code(name)} schema siblings", parameter.get("schema")
+        )
         _append_examples(lines, parameter)
         if "content" in parameter:
             lines.extend(["", f"#### Parameter content: `{_escape_code(name)}`"])
@@ -358,6 +361,9 @@ def _append_headers(
             f"{_escape_cell(description) if isinstance(description, str) else _escape_cell(_stable_json(description))} | "
             f"{_escape_cell(example)} |"
         )
+        _append_reference_siblings(
+            lines, f"header {_escape_code(str(name))} schema siblings", header_schema
+        )
         _append_examples(lines, header)
         if "content" in header:
             lines.extend(["", f"#### Header content: `{_escape_code(str(name))}`"])
@@ -392,6 +398,9 @@ def _append_content(
         if "schema" in media:
             lines.append(
                 f"- Schema: {_schema_label(media['schema'], schema_anchors=schema_anchors)}"
+            )
+            _append_reference_siblings(
+                lines, "media schema siblings", media["schema"]
             )
         _append_examples(lines, media)
         represented = {"example", "examples"}
@@ -479,6 +488,16 @@ def _schema_is_rendered(schema: object) -> bool:
         return False
     if isinstance(schema, Mapping) and "$ref" in schema:
         return isinstance(schema["$ref"], str)
+    return True
+
+
+def _append_reference_siblings(lines: list[str], label: str, schema: object) -> bool:
+    if not isinstance(schema, Mapping) or not isinstance(schema.get("$ref"), str):
+        return False
+    siblings = {key: value for key, value in schema.items() if key != "$ref"}
+    if not siblings:
+        return False
+    _append_unsupported(lines, label, siblings)
     return True
 
 
@@ -606,6 +625,8 @@ def _append_schema(
     }
     if _schema_is_rendered(schema) and isinstance(schema.get("$ref"), str):
         known.add("$ref")
+    if _append_reference_siblings(lines, "schema reference siblings", schema):
+        known.update(schema)
     unsupported = {key: value for key, value in schema.items() if key not in known}
     if unsupported:
         _append_unsupported(lines, "schema fields", unsupported)
@@ -685,6 +706,10 @@ def _append_property_metadata(
             represented.add("items")
     if metadata:
         lines.append(f"- `{_escape_code(name)}`: {'; '.join(metadata)}")
+    if _append_reference_siblings(
+        lines, f"property {_escape_code(name)} schema siblings", schema
+    ):
+        represented.update(schema)
     remaining = {key: value for key, value in schema.items() if key not in represented}
     if remaining:
         _append_unsupported(lines, f"property {_escape_code(name)} metadata", remaining)
