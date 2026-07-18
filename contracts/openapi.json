@@ -1737,26 +1737,6 @@
           },
           {
             "in": "header",
-            "name": "X-Internal-Api-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "X-Internal-Api-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
             "name": "X-Cache-Admin-Token",
             "required": false,
             "schema": {
@@ -1802,26 +1782,6 @@
         "description": "캐시 현황 통계를 반환합니다.",
         "operationId": "chat_cache_stats_ai_chat_cache_stats_get",
         "parameters": [
-          {
-            "in": "header",
-            "name": "X-Internal-Api-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "X-Internal-Api-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
           {
             "in": "header",
             "name": "X-Cache-Admin-Token",
@@ -1875,26 +1835,6 @@
             "required": true,
             "schema": {
               "title": "Cache Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Internal-Api-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "X-Internal-Api-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
               "type": "string"
             }
           },
@@ -3965,11 +3905,6 @@
             "description": "Validation Error"
           }
         },
-        "security": [
-          {
-            "InternalApiKey": []
-          }
-        ],
         "summary": "Safety Check",
         "tags": [
           "moderation"
