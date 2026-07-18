@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
+import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -700,25 +700,43 @@ def test_heartbeat_cancellation_does_not_mark_lease_lost():
 
 def test_long_sync_ingest_keeps_heartbeating_past_lease_interval():
     store = _Store()
+    ingest_started = threading.Event()
+    release_ingest = threading.Event()
+    required_heartbeat_calls = 32
 
-    def slow_ingest(**kwargs):
+    def blocked_ingest(**kwargs):
         assert kwargs["lease_run_id"] == RUN_ID
-        time.sleep(0.08)
+        ingest_started.set()
+        if not release_ingest.wait(timeout=5.0):
+            raise AssertionError("test did not release blocked ingest")
         return EXECUTION_RESULT
 
     worker = IngestWorker(
         store=store,
         settings=SETTINGS,
         owner="worker-1",
-        ingest_function=slow_ingest,
+        ingest_function=blocked_ingest,
     )
-    worker.lease_seconds = 0.06
+    worker.lease_seconds = 0.3
     worker.heartbeat_interval_seconds = 0.01
-    worker.heartbeat_safety_margin_seconds = 0.01
+    worker.heartbeat_safety_margin_seconds = 0.05
 
-    assert asyncio.run(worker.run_once()) is True
+    async def scenario():
+        run_task = asyncio.create_task(worker.run_once())
+        try:
+            assert await asyncio.to_thread(ingest_started.wait, 5.0) is True
+            await _wait_for_heartbeat_calls(
+                store,
+                required_heartbeat_calls,
+                timeout=5.0,
+            )
+        finally:
+            release_ingest.set()
+        return await asyncio.wait_for(run_task, timeout=5.0)
+
+    assert asyncio.run(scenario()) is True
     assert store.successful_run_id == RUN_ID
-    assert store.heartbeat_calls >= 2
+    assert store.heartbeat_calls >= required_heartbeat_calls
 
 
 def test_expired_lease_during_success_finish_is_left_for_recovery(monkeypatch):
@@ -731,5 +749,50 @@ def test_expired_lease_during_success_finish_is_left_for_recovery(monkeypatch):
     monkeypatch.setattr(worker, "_execute", AsyncMock(return_value=EXECUTION_RESULT))
 
     assert asyncio.run(worker.run_once()) is True
+    assert store.successful_run_id is None
+    assert store.failed is None
+
+
+def test_expired_lease_during_failure_finish_is_left_for_recovery(monkeypatch):
+    class _FinishRaceStore(_Store):
+        async def finish_failed(self, *args, **kwargs):
+            raise IngestLeaseLostError
+
+    store = _FinishRaceStore()
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    monkeypatch.setattr(
+        worker,
+        "_execute",
+        AsyncMock(side_effect=RuntimeError("execution failed")),
+    )
+
+    assert asyncio.run(worker.run_once()) is True
+    assert store.failed is None
+    assert store.successful_run_id is None
+    assert store.manual_contract is None
+
+
+def test_expired_lease_during_manual_finish_is_left_for_recovery(monkeypatch):
+    contract = {
+        "code": "MANUAL_BASEBALL_DATA_REQUIRED",
+        "entity": "game",
+        "missing_fields": ["game_date"],
+        "import_source": "operator_manual_data",
+    }
+
+    class _FinishRaceStore(_Store):
+        async def finish_manual_data_required(self, *args, **kwargs):
+            raise IngestLeaseLostError
+
+    store = _FinishRaceStore()
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    monkeypatch.setattr(
+        worker,
+        "_execute",
+        AsyncMock(side_effect=ManualBaseballDataRequiredError(contract)),
+    )
+
+    assert asyncio.run(worker.run_once()) is True
+    assert store.manual_contract is None
     assert store.successful_run_id is None
     assert store.failed is None
