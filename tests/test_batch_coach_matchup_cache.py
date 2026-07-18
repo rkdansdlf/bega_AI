@@ -888,6 +888,62 @@ def test_call_analyze_stops_reading_after_done_marker() -> None:
     assert result["meta"]["cache_state"] == "COMPLETED"
 
 
+def test_call_analyze_can_fail_missing_done_without_db_polling(monkeypatch) -> None:
+    target = MatchupTarget(
+        cache_key="missing-done-no-db-poll",
+        game_id="20250310SSHH4",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    class MissingDoneResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def aiter_lines(self):
+            yield "event: status"
+            yield 'data: {"status":"processing"}'
+
+    class Client:
+        def stream(self, *args, **kwargs):
+            return MissingDoneResponse()
+
+    async def unexpected_db_poll(*args, **kwargs):
+        raise AssertionError("missing-DONE smoke must not poll the database")
+
+    monkeypatch.setattr(batch_module, "_wait_cache_completion", unexpected_db_poll)
+
+    result = asyncio.run(
+        call_analyze(
+            client=Client(),
+            base_url="http://127.0.0.1:18080/api/ai",
+            target=target,
+            wait_for_cache_completion_on_missing_done=False,
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "missing_done_event_no_payload"
+
+
 def test_call_analyze_with_deadline_returns_in_progress_when_pending_row_exists(
     monkeypatch,
 ) -> None:

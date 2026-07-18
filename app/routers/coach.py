@@ -28,6 +28,7 @@ from typing import (
     AsyncIterator,
     Tuple,
     Sequence,
+    Coroutine,
 )
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -148,6 +149,15 @@ COACH_CACHE_LEASE_STALE_SECONDS = 90
 COACH_CACHE_MAX_RETRYABLE_ATTEMPTS = 3
 COACH_CACHE_CLAIM_DB_ATTEMPTS = 2
 COACH_PENDING_RECHECK_AFTER_SECONDS = 120
+COACH_AUTO_BRIEF_BACKGROUND_MAX_TASKS = max(
+    1,
+    int(os.getenv("COACH_AUTO_BRIEF_BACKGROUND_MAX_TASKS", "5")),
+)
+COACH_AUTO_BRIEF_BACKGROUND_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("COACH_AUTO_BRIEF_BACKGROUND_TIMEOUT_SECONDS", "120")),
+)
+_AUTO_BRIEF_BACKGROUND_TASKS: Set[asyncio.Task[None]] = set()
 VOLATILE_CACHE_TTL_SECONDS = 300
 COMPLETED_CACHE_TTL_SECONDS = 86400
 COACH_LLM_STATUS_HEARTBEAT_SECONDS = 3.0
@@ -3682,7 +3692,20 @@ async def _cancel_heartbeat_task(task: Optional[asyncio.Task]) -> None:
         pass
 
 
-async def _generate_auto_brief_cache_background(
+def _schedule_auto_brief_background_task(
+    coroutine: Coroutine[Any, Any, None],
+) -> asyncio.Task[None]:
+    if len(_AUTO_BRIEF_BACKGROUND_TASKS) >= COACH_AUTO_BRIEF_BACKGROUND_MAX_TASKS:
+        coroutine.close()
+        raise TimeoutError("auto_brief_background_capacity_exceeded")
+
+    task = asyncio.create_task(coroutine)
+    _AUTO_BRIEF_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_AUTO_BRIEF_BACKGROUND_TASKS.discard)
+    return task
+
+
+async def _generate_auto_brief_cache_background_unbounded(
     *,
     pool: AsyncConnectionPool,
     cache_key: str,
@@ -3706,7 +3729,7 @@ async def _generate_auto_brief_cache_background(
     """
     lease_lost_event = asyncio.Event()
     heartbeat_task: Optional[asyncio.Task] = asyncio.create_task(
-        await _heartbeat_cache_lease(
+        _heartbeat_cache_lease(
             pool=pool,
             cache_key=cache_key,
             lease_owner=lease_owner,
@@ -3900,6 +3923,83 @@ async def _generate_auto_brief_cache_background(
             )
     finally:
         await _cancel_heartbeat_task(heartbeat_task)
+
+
+async def _generate_auto_brief_cache_background(
+    *,
+    pool: AsyncConnectionPool,
+    cache_key: str,
+    lease_owner: str,
+    home_team_canonical: str,
+    away_team_canonical: str,
+    home_name: str,
+    away_name: str,
+    year: int,
+    resolved_focus: List[str],
+    game_evidence: Any,
+    evidence_assessment: Any,
+    analysis_type: str,
+    coach_model_name: str,
+    cache_attempt_count: int,
+) -> None:
+    try:
+        await asyncio.wait_for(
+            _generate_auto_brief_cache_background_unbounded(
+                pool=pool,
+                cache_key=cache_key,
+                lease_owner=lease_owner,
+                home_team_canonical=home_team_canonical,
+                away_team_canonical=away_team_canonical,
+                home_name=home_name,
+                away_name=away_name,
+                year=year,
+                resolved_focus=resolved_focus,
+                game_evidence=game_evidence,
+                evidence_assessment=evidence_assessment,
+                analysis_type=analysis_type,
+                coach_model_name=coach_model_name,
+                cache_attempt_count=cache_attempt_count,
+            ),
+            timeout=COACH_AUTO_BRIEF_BACKGROUND_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.error(
+            "[AutoBriefBG] Generation timed out game_id=%s cache_key=%s timeout_seconds=%.1f",
+            getattr(game_evidence, "game_id", None),
+            cache_key,
+            COACH_AUTO_BRIEF_BACKGROUND_TIMEOUT_SECONDS,
+        )
+        try:
+            await asyncio.wait_for(
+                _store_failed_cache(
+                    pool=pool,
+                    cache_key=cache_key,
+                    lease_owner=lease_owner,
+                    team_id=home_team_canonical,
+                    year=year,
+                    prompt_version=COACH_CACHE_PROMPT_VERSION,
+                    model_name=coach_model_name,
+                    attempt_count=cache_attempt_count,
+                    error_code=COACH_LLM_TIMEOUT_ERROR_CODE,
+                    error_message="auto_brief_background_timeout",
+                ),
+                timeout=10.0,
+            )
+        except Exception as store_exc:  # noqa: BLE001
+            logger.warning(
+                "[AutoBriefBG] Failed to store timeout state cache_key=%s: %s",
+                cache_key,
+                store_exc,
+            )
+
+
+async def cancel_auto_brief_background_tasks() -> None:
+    tasks = list(_AUTO_BRIEF_BACKGROUND_TASKS)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _AUTO_BRIEF_BACKGROUND_TASKS.difference_update(tasks)
 
 
 async def _claim_cache_generation_once(
@@ -11922,8 +12022,8 @@ async def analyze_team(
                         cache_error_code,
                         auto_brief_data_quality,
                     )
-                    asyncio.create_task(
-                        await _generate_auto_brief_cache_background(
+                    _schedule_auto_brief_background_task(
+                        _generate_auto_brief_cache_background(
                             pool=pool,
                             cache_key=cache_key,
                             lease_owner=cache_lease_owner,
@@ -12326,7 +12426,7 @@ async def analyze_team(
                         return
 
                 heartbeat_task = asyncio.create_task(
-                    await _heartbeat_cache_lease(
+                    _heartbeat_cache_lease(
                         pool=pool,
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
