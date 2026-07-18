@@ -58,6 +58,9 @@ class CheckpointOrder:
     fields: tuple[CheckpointOrderField, ...]
     query_version: str = "1"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", tuple(self.fields))
+
     @property
     def signature(self) -> str:
         payload = {
@@ -77,12 +80,17 @@ class CheckpointOrder:
 class CheckpointCursor:
     values: tuple[Any, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", tuple(self.values))
+
 
 def _normalize_cursor_value(kind: CursorScalarType, value: Any) -> Any:
     if kind == "integer" and isinstance(value, int) and not isinstance(value, bool):
         return value
     if kind == "decimal" and isinstance(value, Decimal):
-        return value
+        if value.is_finite():
+            return value
+        raise IngestCheckpointCursorTypeError("decimal cursor value must be finite")
     if kind == "datetime" and isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     if kind == "date" and isinstance(value, date) and not isinstance(value, datetime):
@@ -146,6 +154,8 @@ def encode_cursor(order: CheckpointOrder, cursor: CheckpointCursor) -> dict[str,
 
 
 def decode_cursor(order: CheckpointOrder, payload: Mapping[str, Any]) -> CheckpointCursor:
+    if not isinstance(payload, Mapping):
+        raise IngestCheckpointIncompatibleError("stored cursor payload is not a mapping")
     items = payload.get("values")
     if not isinstance(items, list) or len(items) != len(order.fields):
         raise IngestCheckpointIncompatibleError("stored cursor arity mismatch")
@@ -178,9 +188,22 @@ def ensure_cursor_advances(
     previous: CheckpointCursor,
     current: CheckpointCursor,
 ) -> None:
-    del order
-    if current.values <= previous.values:
+    previous_values = _normalized_cursor_values(order, previous)
+    current_values = _normalized_cursor_values(order, current)
+    if current_values <= previous_values:
         raise IngestCheckpointOrderError("checkpoint cursor did not advance")
+
+
+def _normalized_cursor_values(
+    order: CheckpointOrder,
+    cursor: CheckpointCursor,
+) -> tuple[Any, ...]:
+    if len(order.fields) != len(cursor.values):
+        raise IngestCheckpointIncompatibleError("cursor arity mismatch")
+    return tuple(
+        _normalize_cursor_value(field.scalar_type, value)
+        for field, value in zip(order.fields, cursor.values, strict=True)
+    )
 
 
 @dataclass(frozen=True)
