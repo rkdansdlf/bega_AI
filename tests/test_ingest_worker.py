@@ -241,6 +241,7 @@ def test_execute_uses_incremental_watermark_for_each_table():
     assert calls[0]["since"] == NOW
     assert calls[0]["lease_run_id"] == RUN_ID
     assert calls[0]["lease_owner"] == "worker-1"
+    assert calls[0]["checkpoint_scope_key"] == build_watermark_scope_key(REQUEST)
     assert worker.store.watermark_requests == [
         ("game", build_watermark_scope_key(REQUEST))
     ]
@@ -253,6 +254,95 @@ def test_execute_uses_incremental_watermark_for_each_table():
     assert _read_metric_value(
         "ai_ingest_table_written_chunks_total", {"source_table": "game"}
     ) - chunks_before == TABLE_RESULT.written_chunks
+
+
+def test_checkpoint_result_keeps_cumulative_and_attempt_counts_separate():
+    result = IngestTableResult(
+        "game",
+        10,
+        20,
+        3,
+        7,
+        NOW,
+        checkpoint_resumed=True,
+        checkpoint_committed_batches=4,
+        checkpoint_completed=True,
+        attempt_source_rows=2,
+        attempt_written_chunks=1,
+    )
+
+    assert result.source_rows == 20
+    assert result.written_chunks == 10
+    assert result.attempt_source_rows == 2
+    assert result.attempt_written_chunks == 1
+
+
+def test_worker_does_not_duplicate_script_owned_checkpoint_batch_metrics():
+    worker = IngestWorker(store=_Store(), settings=SETTINGS, owner="worker-1")
+    result = IngestTableResult(
+        "game",
+        10,
+        20,
+        3,
+        7,
+        NOW,
+        checkpoint_resumed=True,
+        checkpoint_committed_batches=4,
+        checkpoint_completed=True,
+        attempt_source_rows=2,
+        attempt_written_chunks=1,
+    )
+    rows_before = _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "game"}
+    )
+    chunks_before = _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "game"}
+    )
+
+    worker._record_table_result_metrics(
+        IngestExecutionResult(tables={"game": result})
+    )
+
+    assert _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "game"}
+    ) == rows_before
+    assert _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "game"}
+    ) == chunks_before
+
+
+def test_table_metrics_do_not_repeat_completed_checkpoint_cumulative_counts():
+    worker = IngestWorker(store=_Store(), settings=SETTINGS, owner="worker-1")
+    result = IngestTableResult(
+        "game",
+        10,
+        20,
+        3,
+        7,
+        NOW,
+        checkpoint_resumed=True,
+        checkpoint_committed_batches=4,
+        checkpoint_completed=True,
+        attempt_source_rows=0,
+        attempt_written_chunks=0,
+    )
+    rows_before = _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "game"}
+    )
+    chunks_before = _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "game"}
+    )
+
+    worker._record_table_result_metrics(
+        IngestExecutionResult(tables={"game": result})
+    )
+
+    assert _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "game"}
+    ) == rows_before
+    assert _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "game"}
+    ) == chunks_before
 
 
 def test_execute_records_completed_table_counts_before_later_table_failure():
@@ -446,7 +536,10 @@ def test_heartbeat_retries_recognized_transient_error_without_losing_lease(
 ):
     store = _ScriptedHeartbeatStore([transient_error, NOW])
     worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
-    worker.lease_seconds = 0.1
+    # This case verifies retry recovery, not deadline exhaustion. Keep enough
+    # lease budget that a loaded full-suite event loop cannot consume it before
+    # the scripted immediate retry runs.
+    worker.lease_seconds = 5.0
     worker.heartbeat_interval_seconds = 0.001
     worker.heartbeat_safety_margin_seconds = 0.01
     worker.heartbeat_retry_initial_seconds = 0.001

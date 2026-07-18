@@ -47,12 +47,15 @@ DB_POOL_MIN_SIZE = 1
 DB_POOL_MAX_SIZE = 30
 INGEST_DB_POOL_MIN_SIZE = 1
 INGEST_DB_POOL_MAX_SIZE = 2
-INGEST_ORCHESTRATION_MIGRATION_SQL = (
-    Path(__file__).resolve().parent
-    / "db"
-    / "migrations"
-    / "003_ai_ingest_orchestration.sql"
-).read_text(encoding="utf-8")
+INGEST_ORCHESTRATION_MIGRATION_SQLS = tuple(
+    (
+        Path(__file__).resolve().parent / "db" / "migrations" / filename
+    ).read_text(encoding="utf-8")
+    for filename in (
+        "003_ai_ingest_orchestration.sql",
+        "004_ai_ingest_checkpoints.sql",
+    )
+)
 
 # 전역 싱글톤: stateless 컴포넌트 (앱 수명 동안 재사용)
 _shared_context_formatter = None
@@ -541,10 +544,11 @@ async def _ensure_startup_schema(pool, settings) -> None:
 
 
 async def _ensure_ingest_orchestration_schema(pool) -> None:
-    """Provision the durable queue in compatibility schema mode."""
+    """Provision the durable queue and checkpoints in compatibility mode."""
 
     async with pool.connection() as conn:
-        await conn.execute(INGEST_ORCHESTRATION_MIGRATION_SQL)
+        for migration_sql in INGEST_ORCHESTRATION_MIGRATION_SQLS:
+            await conn.execute(migration_sql)
     logger.info("[Lifespan] AI ingest orchestration tables ensured")
 
 

@@ -89,6 +89,25 @@ REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = {
         "last_run_id",
         "updated_at",
     ),
+    "ai_ingest_checkpoints": (
+        "run_id",
+        "source_table",
+        "scope_key",
+        "cursor_version",
+        "cursor_signature",
+        "cursor_payload",
+        "committed_batches",
+        "source_rows",
+        "written_chunks",
+        "reused_embeddings",
+        "embedded_chunks",
+        "max_updated_at",
+        "source_updated_before",
+        "completed",
+        "completed_at",
+        "created_at",
+        "updated_at",
+    ),
     # rag_chunks is owned by the backend/data migration path, but is a hard
     # runtime dependency of managed AI retrieval and must be validated before
     # accepting traffic.
@@ -129,6 +148,7 @@ REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_chat_semantic_shadow_request_key",
     "ux_ai_ingest_runs_active_request",
     "idx_ai_ingest_runs_status_requested",
+    "idx_ai_ingest_checkpoints_updated_at",
 )
 
 OPTIONAL_VECTOR_INDEX = "idx_chat_semantic_cache_embedding_hnsw"

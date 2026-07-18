@@ -42,3 +42,10 @@ TRUSTED_INGEST_SOURCE_TABLES: tuple[str, ...] = (
 TRUSTED_INGEST_SOURCE_SET = frozenset(TRUSTED_INGEST_SOURCE_TABLES)
 MAX_INGEST_TABLE_NAME_LENGTH = 128
 MAX_INGEST_TABLES_PER_RUN = len(TRUSTED_INGEST_SOURCE_TABLES)
+
+
+def normalize_ingest_source_table(value: object) -> str:
+    """Return a bounded metric label for trusted ingestion sources."""
+
+    normalized = str(value or "").strip()
+    return normalized if normalized in TRUSTED_INGEST_SOURCE_SET else "other"

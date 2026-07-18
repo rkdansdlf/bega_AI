@@ -15,7 +15,6 @@ import psycopg
 from psycopg_pool import PoolTimeout
 
 from scripts.ingest_from_kbo import (
-    DEFAULT_TABLES,
     IngestExecutionResult,
     ManualBaseballDataRequiredError,
     ingest,
@@ -29,6 +28,7 @@ from .ingest_runs import (
     IngestTableResult,
     build_watermark_scope_key,
 )
+from .ingest_sources import normalize_ingest_source_table
 from ..observability.metrics import (
     AI_INGEST_ACTIVE_RUNS,
     AI_INGEST_HEARTBEATS_TOTAL,
@@ -479,6 +479,7 @@ class IngestWorker:
                     row_stale_cleanup="off",
                     lease_run_id=run.run_id,
                     lease_owner=self.owner,
+                    checkpoint_scope_key=scope_key,
                 )
             finally:
                 AI_INGEST_TABLE_DURATION_SECONDS.labels(
@@ -498,10 +499,15 @@ class IngestWorker:
 
     @staticmethod
     def _table_label(source_table: str) -> str:
-        return source_table if source_table in set(DEFAULT_TABLES) else "other"
+        return normalize_ingest_source_table(source_table)
 
     def _record_table_result_metrics(self, result: IngestExecutionResult) -> None:
         for source_table, table_result in result.tables.items():
+            if (
+                table_result.attempt_source_rows is not None
+                or table_result.attempt_written_chunks is not None
+            ):
+                continue
             table_label = self._table_label(source_table)
             AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(
                 source_table=table_label
