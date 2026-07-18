@@ -811,7 +811,9 @@ def test_call_analyze_with_deadline_returns_failed_on_wall_timeout(
         batch_module, "_build_terminal_cache_result_if_available", lambda *a, **kw: None
     )
     monkeypatch.setattr(
-        batch_module, "_build_in_progress_cache_result_if_available", lambda *a, **kw: None
+        batch_module,
+        "_build_in_progress_cache_result_if_available",
+        lambda *a, **kw: None,
     )
 
     result = asyncio.run(
@@ -861,8 +863,7 @@ def test_call_analyze_stops_reading_after_done_marker() -> None:
         async def aiter_lines(self):
             yield "event: meta"
             yield (
-                'data: {"cache_state":"COMPLETED","cached":true,'
-                '"in_progress":false}'
+                'data: {"cache_state":"COMPLETED","cached":true,' '"in_progress":false}'
             )
             yield "data: [DONE]"
             await asyncio.Event().wait()
