@@ -552,3 +552,168 @@ def test_retains_nested_property_schema_metadata_and_facets() -> None:
     assert '"x-ui": {' in rendered.schemas
     assert '"compact": true' in rendered.schemas
     assert '"items": false' in rendered.schemas
+
+
+def test_renders_header_content_with_explicit_examples_only() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Header content", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "get": {
+                    "tags": ["headers"],
+                    "responses": {
+                        "200": {
+                            "headers": {
+                                "X-Widget": {
+                                    "content": {
+                                        "text/plain": {
+                                            "schema": {"type": "string", "default": "not-an-example"},
+                                            "example": "explicit text",
+                                        },
+                                        "application/json": {
+                                            "schema": {"$ref": "#/components/schemas/WidgetHeader"},
+                                            "examples": {"valid": {"value": {"id": "w-1"}}},
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        "components": {"schemas": {"WidgetHeader": {"type": "object"}}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert "#### Header content: `X-Widget`" in rendered.endpoints
+    assert rendered.endpoints.index("#### Media type: `application/json`") < rendered.endpoints.index("#### Media type: `text/plain`")
+    assert "[WidgetHeader](api-schemas.md#widgetheader)" in rendered.endpoints
+    assert "#### Example: valid" in rendered.endpoints
+    assert '"id": "w-1"' in rendered.endpoints
+    assert '"explicit text"' in rendered.endpoints
+    assert "not-an-example" not in rendered.endpoints
+
+
+def test_retains_unrendered_parameter_metadata_without_known_field_duplicates() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Parameter metadata", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "get": {
+                    "tags": ["parameters"],
+                    "parameters": [{
+                        "name": "mode",
+                        "in": "query",
+                        "required": True,
+                        "description": "Mode",
+                        "schema": {"type": "string"},
+                        "style": "form",
+                        "explode": False,
+                        "allowReserved": True,
+                        "deprecated": True,
+                        "x-ui": {"compact": True},
+                    }],
+                }
+            }
+        },
+        "components": {"schemas": {}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert '"allowReserved": true' in rendered.endpoints
+    assert '"deprecated": true' in rendered.endpoints
+    assert '"explode": false' in rendered.endpoints
+    assert '"style": "form"' in rendered.endpoints
+    assert '"x-ui": {' in rendered.endpoints
+    assert '"name": "mode"' not in rendered.endpoints
+    assert '"in": "query"' not in rendered.endpoints
+    assert '"required": true' not in rendered.endpoints
+    assert '"description": "Mode"' not in rendered.endpoints
+
+
+def test_retains_unrendered_request_body_metadata_without_known_field_duplicates() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Request metadata", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "post": {
+                    "tags": ["requests"],
+                    "requestBody": {
+                        "required": True,
+                        "description": "Widget input",
+                        "content": {"application/json": {"schema": {"type": "object"}}},
+                        "x-policy": {"audit": True},
+                    },
+                }
+            }
+        },
+        "components": {"schemas": {}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert '"x-policy": {' in rendered.endpoints
+    assert '"audit": true' in rendered.endpoints
+    assert '"required": true' not in rendered.endpoints
+    assert '"description": "Widget input"' not in rendered.endpoints
+    assert '"content": {' not in rendered.endpoints
+
+
+def test_retains_unrendered_header_metadata_without_known_field_duplicates() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Header metadata", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "get": {
+                    "tags": ["headers"],
+                    "responses": {
+                        "200": {
+                            "headers": {
+                                "X-Mode": {
+                                    "description": "Mode header",
+                                    "schema": {"type": "string"},
+                                    "deprecated": True,
+                                    "style": "simple",
+                                    "explode": False,
+                                    "allowReserved": True,
+                                    "allowEmptyValue": False,
+                                    "x-ui": {"compact": True},
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        "components": {"schemas": {}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    for field in ("allowReserved", "allowEmptyValue", "deprecated", "explode", "style", "x-ui"):
+        assert f'"{field}"' in rendered.endpoints
+    assert '"description": "Mode header"' not in rendered.endpoints
+    assert '"schema": {' not in rendered.endpoints
