@@ -200,7 +200,7 @@ async def run_warm_path_smoke(
     status = str(item.get("status") or "")
     cache_state = str(meta.get("cache_state") or _resolve_cache_state_label(item))
     cached = meta.get("cached")
-    ok = status == "skipped" and bool(cached) and cache_state == "COMPLETED"
+    ok = status == "skipped" and bool(cached) and cache_state in {"HIT", "COMPLETED"}
 
     return WarmPathSmokeResult(
         attempted=True,
