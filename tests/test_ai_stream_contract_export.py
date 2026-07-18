@@ -97,10 +97,14 @@ def test_contract_document_contains_named_requests_and_event_union() -> None:
     schemas = document["components"]["schemas"]
 
     assert document["openapi"] == "3.1.0"
-    assert document["info"]["version"] == "2.0.0"
+    assert document["info"]["version"] == "2.1.0"
     assert "ChatStreamRequest" in schemas
     assert "CoachAnalyzeRequest" in schemas
     assert "AiStreamV2Event" in schemas
+    assert "AiStreamHttpError" in schemas
+    http_error = schemas["AiStreamHttpError"]
+    assert set(http_error["required"]) == {"code", "message", "retryable"}
+    assert http_error["additionalProperties"] is False
     discriminator = schemas["AiStreamV2Event"]["discriminator"]
     assert discriminator["propertyName"] == "type"
     assert set(discriminator["mapping"]) == {

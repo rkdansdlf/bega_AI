@@ -4,12 +4,14 @@
 애플리케이션의 핵심 구성 요소를 설정하는 팩토리 함수를 포함합니다.
 """
 
-from fastapi import FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
 from .config import get_settings
+from .deprecation import LegacyApiDeprecationMiddleware
 from .deps import lifespan
+from .internal_auth import require_ai_internal_token
 from .routers import (
     chat_stream,
     search,
@@ -20,6 +22,23 @@ from .routers import (
     moderation,
     release_decision,
 )
+from .streaming.http_errors import install_ai_stream_http_error_handler
+
+
+def _include_internal_router(
+    app: FastAPI,
+    router: APIRouter,
+    *,
+    prefix: str = "",
+    deprecated: bool | None = None,
+) -> None:
+    """내부 업무 라우터를 공통 토큰 인증과 함께 등록합니다."""
+    app.include_router(
+        router,
+        prefix=prefix,
+        dependencies=[Depends(require_ai_internal_token)],
+        deprecated=deprecated,
+    )
 
 
 def create_app() -> FastAPI:
@@ -53,29 +72,31 @@ def create_app() -> FastAPI:
         redoc_url="/redoc" if api_docs_enabled else None,
         openapi_url="/openapi.json" if api_docs_enabled else None,
     )
+    install_ai_stream_http_error_handler(app)
+    app.add_middleware(LegacyApiDeprecationMiddleware)
 
-    # CORS(Cross-Origin Resource Sharing) 미들웨어 추가
-    # 다른 도메인에서의 요청을 허용하기 위한 설정입니다.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_allowed_origins,  # 허용할 출처 목록
-        allow_credentials=True,  # 자격 증명(쿠키 등) 허용
-        allow_methods=["*"],  # 모든 HTTP 메소드 허용
-        allow_headers=["*"],  # 모든 HTTP 헤더 허용
-    )
+    # 브라우저의 FastAPI 직접 호출은 로컬 개발 또는 명시적 opt-in에서만 허용합니다.
+    if settings.browser_direct_access_enabled and settings.cors_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_allowed_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # API 라우터 등록
     # 각 라우터는 특정 기능 그룹(채팅, 검색, 데이터 수집)에 대한 엔드포인트를 정의합니다.
-    app.include_router(chat_stream.router)
-    app.include_router(search.router)
-    app.include_router(ingest.router)
-    app.include_router(vision.router)
-    app.include_router(vision.router, prefix="/ai")
-    app.include_router(coach.router)
-    app.include_router(coach.router, prefix="/ai")
-    app.include_router(coach_auto_brief_ops.router)
-    app.include_router(moderation.router)
-    app.include_router(release_decision.router)
+    _include_internal_router(app, chat_stream.router)
+    _include_internal_router(app, search.router)
+    _include_internal_router(app, ingest.router)
+    _include_internal_router(app, vision.router, deprecated=True)
+    _include_internal_router(app, vision.router, prefix="/ai")
+    _include_internal_router(app, coach.router, deprecated=True)
+    _include_internal_router(app, coach.router, prefix="/ai")
+    _include_internal_router(app, coach_auto_brief_ops.router)
+    _include_internal_router(app, moderation.router)
+    _include_internal_router(app, release_decision.router)
 
     if settings.metrics_enabled:
         # Prometheus /metrics 엔드포인트 마운트
@@ -119,18 +140,9 @@ def create_app() -> FastAPI:
             },
         )
 
-        protected_prefixes = (
-            "/ai/chat",
-            "/coach",
-            "/ai/coach",
-            "/vision",
-            "/ai/vision",
-            "/ai/search",
-            "/ai/ingest",
-            "/ai/release-decision",
-        )
+        public_paths = {"/health"}
         for path, operations in openapi_schema.get("paths", {}).items():
-            if any(path.startswith(prefix) for prefix in protected_prefixes):
+            if path not in public_paths:
                 for operation in operations.values():
                     if not isinstance(operation, dict):
                         continue

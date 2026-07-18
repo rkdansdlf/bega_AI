@@ -45,10 +45,12 @@ def stream_app(monkeypatch):
     test_app.dependency_overrides[chat_stream.rate_limit_chat_dependency] = lambda: None
 
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.internal_auth.record_security_event", lambda *args, **kwargs: None
+    )
 
     mock_pool = MagicMock()
     mock_conn_ctx = MagicMock()

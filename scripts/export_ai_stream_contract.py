@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.contracts.stream_events_v2 import event_schema
+from app.contracts.stream_events_v2 import AiStreamHttpError, event_schema
 from app.contracts.stream_requests import ChatStreamRequest, CoachAnalyzeRequest
 
 CONTRACT_PATH = ROOT / "contracts" / "ai-stream-v2.openapi.json"
@@ -43,17 +43,21 @@ def build_contract_document() -> dict[str, Any]:
     coach_request = CoachAnalyzeRequest.model_json_schema(
         ref_template="#/components/schemas/{model}"
     )
+    http_error = AiStreamHttpError.model_json_schema(
+        ref_template="#/components/schemas/{model}"
+    )
     event_union = event_schema()
 
     schemas["ChatStreamRequest"] = _extract_schema(chat_request, schemas)
     schemas["CoachAnalyzeRequest"] = _extract_schema(coach_request, schemas)
+    schemas["AiStreamHttpError"] = _extract_schema(http_error, schemas)
     schemas["AiStreamV2Event"] = _extract_schema(event_union, schemas)
 
     return {
         "openapi": "3.1.0",
         "info": {
             "title": "Bega AI Stream Contract",
-            "version": "2.0.0",
+            "version": "2.1.0",
         },
         "paths": {},
         "components": {"schemas": schemas},

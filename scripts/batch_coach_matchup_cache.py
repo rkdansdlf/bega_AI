@@ -3,7 +3,7 @@
 Prediction 자동 조회와 동일한 매치업 캐시 키를 수동 배치로 생성합니다.
 
 기본 정책:
-- 런타임 `/coach/analyze`는 자동 재생성을 하지 않습니다.
+- 런타임 `/ai/coach/analyze`는 자동 재생성을 하지 않습니다.
 - 캐시 재생성은 이 스크립트 같은 수동 배치에서만 수행합니다.
 """
 
@@ -1221,7 +1221,7 @@ async def call_analyze(
     try:
         async with client.stream(
             "POST",
-            f"{base_url.rstrip('/')}/coach/analyze",
+            f"{base_url.rstrip('/')}/ai/coach/analyze",
             json=payload,
             headers={"Accept": "text/event-stream"},
         ) as response:

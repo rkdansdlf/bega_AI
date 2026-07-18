@@ -6,9 +6,9 @@ import json
 from collections.abc import AsyncIterator
 
 import pytest
-from fastapi import HTTPException
 from prometheus_client import REGISTRY
 
+from app.streaming.http_errors import AiStreamHttpException
 from app.streaming.versioned_sse import (
     negotiate_event_version,
     versioned_event_source,
@@ -45,12 +45,16 @@ def test_negotiates_supported_versions(raw: str | None, expected: int) -> None:
 
 
 def test_unsupported_version_is_406() -> None:
-    with pytest.raises(HTTPException) as raised:
+    with pytest.raises(AiStreamHttpException) as raised:
         negotiate_event_version("3", endpoint="coach")
 
     assert raised.value.status_code == 406
-    assert raised.value.detail == {
+    assert raised.value.error.model_dump(mode="json") == {
         "code": "AI_EVENT_VERSION_UNSUPPORTED",
+        "message": "지원하지 않는 AI 이벤트 버전입니다.",
+        "detail": None,
+        "retryable": False,
+        "retry_after_seconds": None,
         "supported_versions": ["1", "2"],
     }
 
