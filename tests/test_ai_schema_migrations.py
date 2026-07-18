@@ -72,13 +72,31 @@ def test_data_sync_runbook_documents_persistent_checkpoint_operations():
     text = (ROOT / "docs" / "data-sync-orchestration-runbook.md").read_text(
         encoding="utf-8"
     )
-    for required in (
-        "004_ai_ingest_checkpoints.sql",
-        "ai_ingest_checkpoints",
-        "INGEST_CHECKPOINT_INCOMPATIBLE",
-        "INGEST_CHECKPOINT_CURSOR_UNAVAILABLE",
-        "ai_ingest_checkpoint_events_total",
-        "row_stale_cleanup",
-        "rollback",
+    for statement in (
+        "Managed migration script applies `001_ai_runtime_cache.sql` -> "
+        "`003_ai_ingest_orchestration.sql` -> "
+        "`004_ai_ingest_checkpoints.sql`.",
+        "Compatibility startup applies `003_ai_ingest_orchestration.sql` -> "
+        "`004_ai_ingest_checkpoints.sql`.",
+        "Exactly one `ai_ingest_checkpoints` row per `(run_id, source_table)` "
+        "is retained after terminal completion.",
+        "Resume uses a typed ascending keyset and never an offset.",
+        "Chunks and their cursor commit together under the lease fence.",
+        "`source_file` static documents create no checkpoint row and restart atomically.",
+        "The generic terminal status error code remains "
+        "`INGEST_EXECUTION_FAILED`; the five `INGEST_CHECKPOINT_*` "
+        "identifiers are internal typed exception and metric classifications, "
+        "not status-payload error codes.",
+        "`MANUAL_BASEBALL_DATA_REQUIRED` remains the separate operator handoff.",
+        "Operators observe checkpoint failures through "
+        "`ai_ingest_checkpoint_events_total{source_table,result}` and AI worker "
+        "logs with `run_id` and `error_type`.",
+        "Checkpoint metric results are limited to `created`, `advanced`, "
+        "`completed`, `resumed`, `incompatible`, and `rejected`.",
+        "Rollback preserves migration 004 and retained checkpoint audit rows; "
+        "older code ignores them.",
+        "No automatic checkpoint retention job exists.",
+        "A separately approved local-only disposable live PostgreSQL smoke is "
+        "required to remove the residual PostgreSQL risk.",
     ):
-        assert required in text
+        assert statement in text
