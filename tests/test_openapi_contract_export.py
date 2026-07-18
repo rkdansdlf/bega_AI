@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from scripts.export_openapi_contract import render_contract_json, render_openapi_markdown
 
 
@@ -373,3 +375,180 @@ def test_preserves_media_encoding_and_component_references() -> None:
     assert "#/components/responses/Uploaded" in rendered.endpoints
     assert "#/components/headers/RequestId" in rendered.endpoints
     assert '"encoding": {' in rendered.endpoints
+
+
+def test_uses_collision_safe_schema_anchor_registry_for_headings_and_references() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Anchor edges", "version": "1"},
+        "paths": {
+            "/anchors": {
+                "get": {
+                    "tags": ["anchors"],
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Foo"}
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Foo": {
+                    "type": "object",
+                    "properties": {"next": {"$ref": "#/components/schemas/foo"}},
+                },
+                "foo": {
+                    "type": "object",
+                    "properties": {"next": {"$ref": "#/components/schemas/Foo!"}},
+                },
+                "Foo!": {"type": "object"},
+            }
+        },
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    anchors = {
+        name: anchor
+        for anchor, name in re.findall(
+            r'<a id="([^"]+)"></a>\n## ([^\n]+)', rendered.schemas
+        )
+    }
+    assert set(anchors) == {"Foo", "foo", "Foo!"}
+    assert len(set(anchors.values())) == 3
+    assert rendered.endpoints.count(f"[Foo](api-schemas.md#{anchors['Foo']})") == 1
+    assert f"[foo](api-schemas.md#{anchors['foo']})" in rendered.schemas
+    assert f"[Foo!](api-schemas.md#{anchors['Foo!']})" in rendered.schemas
+    for name, anchor in anchors.items():
+        assert rendered.schemas.count(f'<a id="{anchor}"></a>') == 1
+
+
+def test_renders_parameter_content_without_synthesizing_examples() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Parameter content", "version": "1"},
+        "paths": {
+            "/search": {
+                "get": {
+                    "tags": ["parameters"],
+                    "parameters": [
+                        {
+                            "name": "filter",
+                            "in": "query",
+                            "content": {
+                                "text/plain": {
+                                    "schema": {"type": "string", "default": "not-an-example"},
+                                    "example": "explicit text",
+                                },
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Filter"},
+                                    "examples": {"valid": {"value": {"team": "LG"}}},
+                                },
+                            },
+                        }
+                    ],
+                }
+            }
+        },
+        "components": {"schemas": {"Filter": {"type": "object"}}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert "#### Parameter content: `filter`" in rendered.endpoints
+    assert rendered.endpoints.index("#### Media type: `application/json`") < rendered.endpoints.index("#### Media type: `text/plain`")
+    assert "[Filter](api-schemas.md#filter)" in rendered.endpoints
+    assert "#### Example: valid" in rendered.endpoints
+    assert '"team": "LG"' in rendered.endpoints
+    assert '"explicit text"' in rendered.endpoints
+    assert "not-an-example" not in rendered.endpoints
+
+
+def test_renders_response_links_and_preserves_only_unrendered_response_metadata() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Response links", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "post": {
+                    "tags": ["responses"],
+                    "responses": {
+                        "201": {
+                            "description": "Created",
+                            "links": {
+                                "z-next": {"operationId": "get_widget", "parameters": {"id": "$response.body#/id"}},
+                                "a-related": {"operationRef": "#/paths/~1widgets/get"},
+                            },
+                            "x-trace": {"requestId": "abc"},
+                        }
+                    },
+                }
+            }
+        },
+        "components": {"schemas": {}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert rendered.endpoints.index("##### Link: a-related") < rendered.endpoints.index("##### Link: z-next")
+    assert '"operationId": "get_widget"' in rendered.endpoints
+    assert '"operationRef": "#/paths/~1widgets/get"' in rendered.endpoints
+    assert '"x-trace": {' in rendered.endpoints
+    assert '"links": {' not in rendered.endpoints
+
+
+def test_retains_nested_property_schema_metadata_and_facets() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Property edges", "version": "1"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Tag": {"type": "string"},
+                "Widget": {
+                    "type": "object",
+                    "properties": {
+                        "tags": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"$ref": "#/components/schemas/Tag"},
+                            "contains": {"type": "string", "pattern": "^[A-Z]"},
+                            "x-ui": {"compact": True},
+                        },
+                        "invalid_items": {"type": "array", "items": False},
+                    },
+                },
+            }
+        },
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert "| `tags` | no | `array` |  | minItems=1 |" in rendered.schemas
+    assert "Items: [Tag](api-schemas.md#tag)" in rendered.schemas
+    assert '"contains": {' in rendered.schemas
+    assert '"x-ui": {' in rendered.schemas
+    assert '"compact": true' in rendered.schemas
+    assert '"items": false' in rendered.schemas

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -49,11 +50,14 @@ def render_openapi_markdown(
     if not isinstance(components, Mapping):
         raise ValueError("OpenAPI field must be an object: components")
     schemas = _require_mapping(components, "schemas")
+    schema_anchors = _schema_anchor_registry(schemas)
     operations = _collect_operations(paths)
     endpoints = _render_endpoints(
-        document, source_path, update_command, paths, operations
+        document, source_path, update_command, paths, operations, schema_anchors
     )
-    schema_docs = _render_schemas(document, source_path, update_command, schemas)
+    schema_docs = _render_schemas(
+        document, source_path, update_command, schemas, schema_anchors
+    )
     return RenderedDocuments(endpoints, schema_docs, len(operations), len(schemas))
 
 
@@ -100,6 +104,7 @@ def _render_endpoints(
     update_command: str,
     paths: Mapping[str, Any],
     operations: list[_Operation],
+    schema_anchors: Mapping[str, str],
 ) -> str:
     title, version = _title_and_version(document)
     lines = [
@@ -137,9 +142,11 @@ def _render_endpoints(
         path_item = paths[operation.path]
         if not isinstance(path_item, Mapping):
             raise ValueError("OpenAPI paths entries must be objects")
-        _append_parameters(lines, _merged_parameters(path_item, definition))
-        _append_request_body(lines, definition.get("requestBody"))
-        _append_responses(lines, definition.get("responses"))
+        _append_parameters(
+            lines, _merged_parameters(path_item, definition), schema_anchors
+        )
+        _append_request_body(lines, definition.get("requestBody"), schema_anchors)
+        _append_responses(lines, definition.get("responses"), schema_anchors)
 
     return _finish(lines)
 
@@ -201,7 +208,11 @@ def _merged_parameters(
     ]
 
 
-def _append_parameters(lines: list[str], parameters: list[Mapping[str, Any]]) -> None:
+def _append_parameters(
+    lines: list[str],
+    parameters: list[Mapping[str, Any]],
+    schema_anchors: Mapping[str, str],
+) -> None:
     if not parameters:
         return
     lines.extend(["", "#### Parameters", "", "| Name | In | Required | Schema | Description | Example |", "| --- | --- | --- | --- | --- | --- |"])
@@ -214,14 +225,19 @@ def _append_parameters(lines: list[str], parameters: list[Mapping[str, Any]]) ->
             "| "
             f"`{_escape_code(name)}` | {_escape_cell(location)} | "
             f"{'yes' if parameter.get('required') is True else 'no'} | "
-            f"{_schema_label(parameter.get('schema'))} | "
+            f"{_schema_label(parameter.get('schema'), schema_anchors=schema_anchors)} | "
             f"{_escape_cell(description) if isinstance(description, str) else _escape_cell(_stable_json(description))} | "
             f"{_escape_cell(example)} |"
         )
         _append_examples(lines, parameter)
+        if "content" in parameter:
+            lines.extend(["", f"#### Parameter content: `{_escape_code(name)}`"])
+            _append_content(lines, parameter["content"], schema_anchors)
 
 
-def _append_request_body(lines: list[str], request_body: object) -> None:
+def _append_request_body(
+    lines: list[str], request_body: object, schema_anchors: Mapping[str, str]
+) -> None:
     if request_body is None:
         return
     lines.extend(["", "### Request body"])
@@ -230,13 +246,17 @@ def _append_request_body(lines: list[str], request_body: object) -> None:
         return
     lines.append(f"- Required: **{'yes' if request_body.get('required') is True else 'no'}**")
     if isinstance(request_body.get("$ref"), str):
-        lines.append(f"- Reference: {_schema_label({'$ref': request_body['$ref']})}")
+        lines.append(
+            f"- Reference: {_schema_label({'$ref': request_body['$ref']}, schema_anchors=schema_anchors)}"
+        )
     if isinstance(request_body.get("description"), str):
         lines.append(request_body["description"])
-    _append_content(lines, request_body.get("content"))
+    _append_content(lines, request_body.get("content"), schema_anchors)
 
 
-def _append_responses(lines: list[str], responses: object) -> None:
+def _append_responses(
+    lines: list[str], responses: object, schema_anchors: Mapping[str, str]
+) -> None:
     if responses is None:
         return
     lines.extend(["", "### Responses"])
@@ -255,9 +275,18 @@ def _append_responses(lines: list[str], responses: object) -> None:
         elif description is not None:
             _append_unsupported(lines, "response description", description)
         if isinstance(response.get("$ref"), str):
-            lines.append(f"- Reference: {_schema_label({'$ref': response['$ref']})}")
-        _append_headers(lines, response.get("headers"))
-        _append_content(lines, response.get("content"))
+            lines.append(
+                f"- Reference: {_schema_label({'$ref': response['$ref']}, schema_anchors=schema_anchors)}"
+            )
+        _append_headers(lines, response.get("headers"), schema_anchors)
+        _append_content(lines, response.get("content"), schema_anchors)
+        _append_response_links(lines, response.get("links"))
+        represented = {"$ref", "description", "headers", "content", "links"}
+        metadata = {
+            key: value for key, value in response.items() if key not in represented
+        }
+        if metadata:
+            _append_unsupported(lines, "response metadata", metadata)
 
 
 def _response_sort_key(item: tuple[object, object]) -> tuple[int, int, str]:
@@ -269,7 +298,9 @@ def _response_sort_key(item: tuple[object, object]) -> tuple[int, int, str]:
     return (2, 0, status)
 
 
-def _append_headers(lines: list[str], headers: object) -> None:
+def _append_headers(
+    lines: list[str], headers: object, schema_anchors: Mapping[str, str]
+) -> None:
     if headers is None:
         return
     lines.extend(["", "#### Headers"])
@@ -289,14 +320,16 @@ def _append_headers(lines: list[str], headers: object) -> None:
         lines.append(
             "| "
             f"`{_escape_code(str(name))}` | {'yes' if header.get('required') is True else 'no'} | "
-            f"{_schema_label(header_schema)} | "
+            f"{_schema_label(header_schema, schema_anchors=schema_anchors)} | "
             f"{_escape_cell(description) if isinstance(description, str) else _escape_cell(_stable_json(description))} | "
             f"{_escape_cell(example)} |"
         )
         _append_examples(lines, header)
 
 
-def _append_content(lines: list[str], content: object) -> None:
+def _append_content(
+    lines: list[str], content: object, schema_anchors: Mapping[str, str]
+) -> None:
     if content is None:
         return
     if not isinstance(content, Mapping):
@@ -308,11 +341,33 @@ def _append_content(lines: list[str], content: object) -> None:
             _append_unsupported(lines, "media type", media)
             continue
         if "schema" in media:
-            lines.append(f"- Schema: {_schema_label(media['schema'])}")
+            lines.append(
+                f"- Schema: {_schema_label(media['schema'], schema_anchors=schema_anchors)}"
+            )
         _append_examples(lines, media)
         unsupported = {key: value for key, value in media.items() if key not in {"schema", "example", "examples"}}
         if unsupported:
             _append_unsupported(lines, "media type fields", unsupported)
+
+
+def _append_response_links(lines: list[str], links: object) -> None:
+    if links is None:
+        return
+    lines.extend(["", "#### Links"])
+    if not isinstance(links, Mapping):
+        _append_unsupported(lines, "response links", links)
+        return
+    for name, link in sorted(links.items(), key=lambda item: str(item[0])):
+        lines.extend(
+            [
+                "",
+                f"##### Link: {_escape_cell(str(name))}",
+                "",
+                "```json",
+                _stable_json(link),
+                "```",
+            ]
+        )
 
 
 def _append_examples(lines: list[str], owner: Mapping[str, Any]) -> None:
@@ -343,7 +398,11 @@ def _append_examples(lines: list[str], owner: Mapping[str, Any]) -> None:
             _append_unsupported(lines, f"example {_escape_code(str(name))}", example)
 
 
-def _schema_label(schema: object, schema_document: str = "api-schemas.md") -> str:
+def _schema_label(
+    schema: object,
+    schema_document: str = "api-schemas.md",
+    schema_anchors: Mapping[str, str] | None = None,
+) -> str:
     if not isinstance(schema, Mapping):
         return "-" if schema is None else f"`{_escape_code(_stable_json(schema))}`"
     reference = schema.get("$ref")
@@ -351,7 +410,8 @@ def _schema_label(schema: object, schema_document: str = "api-schemas.md") -> st
         prefix = "#/components/schemas/"
         if reference.startswith(prefix):
             name = reference.removeprefix(prefix)
-            return f"[{_escape_cell(name)}]({schema_document}#{_anchor(name)})"
+            anchor = schema_anchors.get(name, _anchor(name)) if schema_anchors else _anchor(name)
+            return f"[{_escape_cell(name)}]({schema_document}#{anchor})"
         return f"`{_escape_code(reference)}`"
     schema_type = schema.get("type")
     if isinstance(schema_type, str):
@@ -397,6 +457,7 @@ def _render_schemas(
     source_path: str,
     update_command: str,
     schemas: Mapping[str, Any],
+    schema_anchors: Mapping[str, str],
 ) -> str:
     title, version = _title_and_version(document)
     lines = [
@@ -410,18 +471,20 @@ def _render_schemas(
         f"Schemas: **{len(schemas)}**",
     ]
     for name, schema in sorted(schemas.items(), key=lambda item: str(item[0]).lower()):
-        _append_schema(lines, str(name), schema)
+        _append_schema(lines, str(name), schema, schema_anchors)
     return _finish(lines)
 
 
-def _append_schema(lines: list[str], name: str, schema: object) -> None:
-    lines.extend(["", f'<a id="{_anchor(name)}"></a>', f"## {name}"])
+def _append_schema(
+    lines: list[str], name: str, schema: object, schema_anchors: Mapping[str, str]
+) -> None:
+    lines.extend(["", f'<a id="{schema_anchors[name]}"></a>', f"## {name}"])
     if not isinstance(schema, Mapping):
         _append_unsupported(lines, "schema", schema)
         return
     if isinstance(schema.get("description"), str):
         lines.extend(["", schema["description"]])
-    lines.append(f"- Type: {_schema_label(schema)}")
+    lines.append(f"- Type: {_schema_label(schema, schema_anchors=schema_anchors)}")
     required = schema.get("required")
     if isinstance(required, list) and all(isinstance(item, str) for item in required):
         if required:
@@ -452,19 +515,25 @@ def _append_schema(lines: list[str], name: str, schema: object) -> None:
         items = schema["items"]
         if isinstance(items, (Mapping, list)):
             if isinstance(items, list):
-                lines.append(f"- Items: {', '.join(_schema_label(item) for item in items)}")
+                lines.append(
+                    f"- Items: {', '.join(_schema_label(item, schema_anchors=schema_anchors) for item in items)}"
+                )
             else:
-                lines.append(f"- Items: {_schema_label(items)}")
+                lines.append(
+                    f"- Items: {_schema_label(items, schema_anchors=schema_anchors)}"
+                )
         else:
             _append_unsupported(lines, "items", items)
-    _append_property_table(lines, schema)
-    _append_composition(lines, schema)
+    _append_property_table(lines, schema, schema_anchors)
+    _append_composition(lines, schema, schema_anchors)
     if "additionalProperties" in schema:
         value = schema["additionalProperties"]
         if isinstance(value, bool):
             lines.append(f"- Additional properties: {'allowed' if value else 'not allowed'}")
         elif isinstance(value, Mapping):
-            lines.append(f"- Additional properties: {_schema_label(value)}")
+            lines.append(
+                f"- Additional properties: {_schema_label(value, schema_anchors=schema_anchors)}"
+            )
         else:
             _append_unsupported(lines, "additionalProperties", value)
     known = {
@@ -480,7 +549,9 @@ def _append_schema(lines: list[str], name: str, schema: object) -> None:
         _append_unsupported(lines, "schema fields", unsupported)
 
 
-def _append_property_table(lines: list[str], schema: Mapping[str, Any]) -> None:
+def _append_property_table(
+    lines: list[str], schema: Mapping[str, Any], schema_anchors: Mapping[str, str]
+) -> None:
     if "properties" not in schema:
         return
     properties = schema["properties"]
@@ -496,29 +567,63 @@ def _append_property_table(lines: list[str], schema: Mapping[str, Any]) -> None:
         lines.append(
             "| "
             f"`{_escape_code(str(name))}` | {'yes' if name in required_names else 'no'} | "
-            f"{_schema_label(property_schema)} | "
+            f"{_schema_label(property_schema, schema_anchors=schema_anchors)} | "
             f"{_escape_cell(description) if isinstance(description, str) else _escape_cell(_stable_json(description))} | "
             f"{_escape_cell(constraints)} |"
         )
         if isinstance(property_schema, Mapping):
-            _append_property_metadata(lines, str(name), property_schema)
+            _append_property_metadata(lines, str(name), property_schema, schema_anchors)
 
 
-def _append_property_metadata(lines: list[str], name: str, schema: Mapping[str, Any]) -> None:
+def _append_property_metadata(
+    lines: list[str],
+    name: str,
+    schema: Mapping[str, Any],
+    schema_anchors: Mapping[str, str],
+) -> None:
     metadata: list[str] = []
+    represented = {
+        "$ref", "type", "format", "description", "minLength", "maxLength",
+        "pattern", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+        "multipleOf", "minItems", "maxItems", "uniqueItems", "minProperties",
+        "maxProperties",
+    }
     if "default" in schema:
         metadata.append(f"Default: `{_inline_json(schema['default'])}`")
+        represented.add("default")
     if "enum" in schema and isinstance(schema["enum"], list):
         metadata.append(f"Enum: {', '.join(f'`{_enum_value(item)}`' for item in schema['enum'])}")
+        represented.add("enum")
     if "const" in schema:
         metadata.append(f"Const: `{_inline_json(schema['const'])}`")
+        represented.add("const")
     flags = [flag for flag in ("nullable", "readOnly", "writeOnly", "deprecated") if schema.get(flag) is True]
     if flags:
         metadata.append(f"Flags: {', '.join(f'`{flag}`' for flag in flags)}")
+        represented.update(flags)
     if "example" in schema:
         metadata.append(f"Example: `{_inline_json(schema['example'])}`")
+        represented.add("example")
+    if "items" in schema:
+        items = schema["items"]
+        if isinstance(items, list):
+            metadata.append(
+                "Items: "
+                + ", ".join(
+                    _schema_label(item, schema_anchors=schema_anchors) for item in items
+                )
+            )
+            represented.add("items")
+        elif isinstance(items, Mapping):
+            metadata.append(
+                f"Items: {_schema_label(items, schema_anchors=schema_anchors)}"
+            )
+            represented.add("items")
     if metadata:
         lines.append(f"- `{_escape_code(name)}`: {'; '.join(metadata)}")
+    remaining = {key: value for key, value in schema.items() if key not in represented}
+    if remaining:
+        _append_unsupported(lines, f"property {_escape_code(name)} metadata", remaining)
 
 
 def _constraints_label(schema: Mapping[str, Any]) -> str:
@@ -533,7 +638,9 @@ def _constraints_label(schema: Mapping[str, Any]) -> str:
     return ", ".join(constraints)
 
 
-def _append_composition(lines: list[str], schema: Mapping[str, Any]) -> None:
+def _append_composition(
+    lines: list[str], schema: Mapping[str, Any], schema_anchors: Mapping[str, str]
+) -> None:
     composition_keys = ("allOf", "anyOf", "oneOf", "not", "discriminator")
     if not any(key in schema for key in composition_keys):
         return
@@ -543,9 +650,13 @@ def _append_composition(lines: list[str], schema: Mapping[str, Any]) -> None:
             continue
         value = schema[key]
         if key in {"allOf", "anyOf", "oneOf"} and isinstance(value, list):
-            lines.append(f"- `{key}`: {', '.join(_schema_label(item) for item in value)}")
+            lines.append(
+                f"- `{key}`: {', '.join(_schema_label(item, schema_anchors=schema_anchors) for item in value)}"
+            )
         elif key == "not" and isinstance(value, Mapping):
-            lines.append(f"- `not`: {_schema_label(value)}")
+            lines.append(
+                f"- `not`: {_schema_label(value, schema_anchors=schema_anchors)}"
+            )
         else:
             _append_unsupported(lines, key, value)
 
@@ -554,12 +665,25 @@ def _enum_value(value: object) -> str:
     return value if isinstance(value, str) else _inline_json(value)
 
 
+def _schema_anchor_registry(schemas: Mapping[str, Any]) -> dict[str, str]:
+    names = sorted((str(name) for name in schemas), key=lambda name: (name.lower(), name))
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        groups.setdefault(_anchor(name), []).append(name)
+
+    anchors: dict[str, str] = {}
+    for base, group in groups.items():
+        if len(group) == 1:
+            anchors[group[0]] = base
+            continue
+        for name in group:
+            digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+            anchors[name] = f"{base}--{digest}"
+    return anchors
+
+
 def _anchor(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "schema"
-    if re.fullmatch(r"[A-Za-z0-9]+", value):
-        return normalized
-    encoded = "-".join(f"{ord(character):x}" for character in value)
-    return f"{normalized}--{encoded}"
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "schema"
 
 
 def _title_and_version(document: Mapping[str, Any]) -> tuple[str, str]:
