@@ -3254,7 +3254,7 @@ def ingest(
 ) -> IngestExecutionResult:
     leased = lease_run_id is not None or lease_owner is not None
     if leased:
-        if lease_run_id is None or not lease_owner:
+        if lease_run_id is None or lease_owner is None or not lease_owner.strip():
             raise ValueError("lease_run_id and lease_owner must be provided together")
         if not checkpoint_scope_key:
             raise ValueError("checkpoint_scope_key is required for leased ingestion")
