@@ -24,9 +24,7 @@ Flush Cache By Intent
 | Name | In | Required | Schema | Description | Example |
 | --- | --- | --- | --- | --- | --- |
 | `intent` | query | yes | `string` | 삭제할 intent |  |
-| `Authorization` | header | no | `string` |  |  |
 | `X-Cache-Admin-Token` | header | no | `string` |  |  |
-| `X-Internal-Api-Key` | header | no | `string` |  |  |
 
 ### Responses
 
@@ -55,9 +53,7 @@ Chat Cache Stats
 
 | Name | In | Required | Schema | Description | Example |
 | --- | --- | --- | --- | --- | --- |
-| `Authorization` | header | no | `string` |  |  |
 | `X-Cache-Admin-Token` | header | no | `string` |  |  |
-| `X-Internal-Api-Key` | header | no | `string` |  |  |
 
 ### Responses
 
@@ -87,9 +83,7 @@ Invalidate Cache Entry
 | Name | In | Required | Schema | Description | Example |
 | --- | --- | --- | --- | --- | --- |
 | `cache_key` | path | yes | `string` |  |  |
-| `Authorization` | header | no | `string` |  |  |
 | `X-Cache-Admin-Token` | header | no | `string` |  |  |
-| `X-Internal-Api-Key` | header | no | `string` |  |  |
 
 ### Responses
 
@@ -620,7 +614,7 @@ Safety Check
 게시글/댓글 텍스트를 점진 Hybrid 정책(RULE + MODEL)으로 검사합니다.
 - Operation ID: `safety_check_moderation_safety_check_post`
 - Tags: `moderation`
-- Security: `InternalApiKey`
+- Security: Not specified in OpenAPI
 - Deprecated: no
 
 #### Parameters
