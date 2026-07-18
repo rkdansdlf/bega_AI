@@ -451,10 +451,10 @@ async def test_endpoint_stream_missing_version_header_preserves_v1(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_endpoint_stream_rejects_unsupported_version_before_work() -> None:
-    from fastapi import HTTPException
     from app.routers import coach
+    from app.streaming.http_errors import AiStreamHttpException
 
-    with pytest.raises(HTTPException) as raised:
+    with pytest.raises(AiStreamHttpException) as raised:
         await coach.analyze_team(
             coach.AnalyzeRequest(home_team_id="LG"),
             object(),
@@ -464,7 +464,15 @@ async def test_endpoint_stream_rejects_unsupported_version_before_work() -> None
         )
 
     assert raised.value.status_code == 406
-    assert raised.value.detail["code"] == "AI_EVENT_VERSION_UNSUPPORTED"
+    assert raised.value.error.model_dump(mode="json") == {
+        "code": "AI_EVENT_VERSION_UNSUPPORTED",
+        "message": "지원하지 않는 AI 이벤트 버전입니다.",
+        "detail": None,
+        "retryable": False,
+        "retry_after_seconds": None,
+        "supported_versions": ["1", "2"],
+    }
+    assert not isinstance(raised.value.error.detail, dict)
 
 
 # ============================================================
