@@ -4,9 +4,38 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - 'app/**'
+      - 'contracts/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'main.py'
+      - 'requirements.txt'
+      - 'requirements-dev'
+      - 'Dockerfile'
+      - 'Dockerfile.free_threaded'
+      - 'pytest.ini'
+      - '.github/workflows/ci.yml'
   push:
     branches:
+      - main
       - develop
+    paths:
+      - 'app/**'
+      - 'contracts/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'main.py'
+      - 'requirements.txt'
+      - 'requirements-dev'
+      - 'Dockerfile'
+      - 'Dockerfile.free_threaded'
+      - 'pytest.ini'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: ai-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Job 1: Lint
