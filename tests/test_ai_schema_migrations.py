@@ -38,3 +38,16 @@ def test_ingest_orchestration_migration_defines_durable_run_and_watermark_tables
     assert "PRIMARY KEY (source_table, scope_key)" in sql
     assert "MANUAL_BASEBALL_DATA_REQUIRED" in sql
     assert "WHERE status IN ('QUEUED', 'RUNNING')" in sql
+
+
+def test_ingest_checkpoint_migration_defines_durable_progress_table():
+    sql = (MIGRATION_DIR / "004_ai_ingest_checkpoints.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints" in sql
+    assert "PRIMARY KEY (run_id, source_table)" in sql
+    assert "cursor_signature varchar(64) NOT NULL" in sql
+    assert "cursor_payload jsonb" in sql
+    assert "source_rows = 0 OR cursor_payload IS NOT NULL" in sql
+    assert "idx_ai_ingest_checkpoints_updated_at" in sql
