@@ -10,7 +10,7 @@ The durable ingestion worker claims an `ai_ingest_runs` row, executes the synchr
 
 The observed large-table `game_summary` run progressed through committed batches, then lost its lease after a worker restart. Runtime evidence included PostgreSQL `OperationalError` and `PoolTimeout` failures, with no successful heartbeat after the recovered claim. Embedding work already runs through `asyncio.to_thread`, and the synchronous ingestion path checks a database lease fence before writes. The failure is therefore more consistent with coordination connection loss or pool pressure than with the event loop being directly blocked by the embedding call.
 
-The current heartbeat and terminal-update SQL also checks status and owner but does not require `lease_expires_at > now()`. An expired owner may renew or finish a run before the recovery loop processes it. That lease resurrection weakens the intended fencing contract.
+The original heartbeat and terminal-update SQL checked status and owner without a safe actual-time fence. PostgreSQL `now()` is transaction-stable, so a long transaction or row-lock wait can retain a stale timestamp and authorize a mutation after real expiry. That lease resurrection weakens the intended fencing contract.
 
 ## Goals
 
@@ -96,7 +96,7 @@ The dedicated pool serves all `IngestRunStore` operations:
 
 The existing general pool remains responsible for chat, coach, retrieval, and other application database work. The synchronous ingestion pipeline continues to manage its existing source and target connections and is not moved into the coordination pool.
 
-The application opens the coordination pool during startup and fails startup if the pool cannot become ready. On shutdown, worker tasks are cancelled before the coordination pool is closed. The lifecycle is idempotent so partial startup failures do not leak a pool.
+The application opens the coordination pool during startup and fails startup if the pool cannot become ready. The complete startup, `yield`, and teardown path is protected by one exception-safe lifecycle. Any post-open failure sets the ingest stop event, cancels and awaits every created task, and independently attempts every closer. Cleanup never creates an embedding backend that startup did not initialize. A startup or request exception remains primary; otherwise the first cleanup failure is raised only after all cleanup attempts finish. Worker tasks are stopped before either pool is closed, and one pool-close failure cannot skip the other pool.
 
 ### Lease ownership invariant
 
@@ -104,9 +104,9 @@ Only a run that satisfies every condition below may renew or transition terminal
 
 - `status = 'RUNNING'`
 - `lease_owner` equals the current worker owner
-- `lease_expires_at > now()`
+- `lease_expires_at > clock_timestamp()`
 
-The existing per-write lease guard remains in place. The stricter store queries extend the same invariant to heartbeat and terminal state changes.
+Every lease decision uses PostgreSQL `clock_timestamp()`, not transaction-stable `now()`. The synchronous per-write guard first locks the run row, then checks status, owner, and expiry against the actual database clock while holding that lock. Heartbeat and terminal store mutations likewise lock the run row before their actual-time predicate; claim and recovery use the same actual-time semantics.
 
 No expired owner is allowed to resurrect its lease, mark the run successful, mark it failed, or record a manual-data terminal result. Once expired, the persisted run remains for the recovery loop to requeue or fail according to the configured recovery-attempt limit.
 
@@ -114,23 +114,23 @@ No expired owner is allowed to resurrect its lease, mark the run successful, mar
 
 ### Normal operation
 
-1. `claim_next` returns a running record with a database lease expiry.
-2. The worker records a local monotonic confirmation time when the claim is received.
+1. Immediately before requesting `claim_next`, the worker records a conservative local monotonic confirmation point.
+2. `claim_next` returns a running record with a database lease expiry.
 3. The heartbeat loop waits the normal interval of `lease_seconds / 3`.
-4. A successful heartbeat atomically extends the database expiry and returns the new expiry.
-5. The worker resets its local confirmation time and returns to the normal interval.
+4. Immediately before each renewal request, the worker records another conservative confirmation point and bounds the in-flight await by the remaining safe budget.
+5. A successful heartbeat atomically extends the database expiry and returns the new expiry. The next local deadline is based on the request-start confirmation point, never the later response time.
 
 The monotonic clock is used for local retry budgeting so wall-clock adjustments do not extend the retry window. PostgreSQL remains authoritative for the actual lease validity.
 
 ### Transient heartbeat failure
 
-The first heartbeat exception does not set `lease_lost`. The worker logs only the run identifier and exception class, records a `retry` metric, and retries with bounded exponential backoff beginning at one second.
+Only recognized transient coordination failures are retried: `psycopg.OperationalError`, `psycopg.InterfaceError`, and `psycopg_pool.PoolTimeout`. The first recognized transient failure does not set `lease_lost`; the worker logs only bounded context, records a `retry` metric, and retries with bounded exponential backoff beginning at one second. Programming, mapping, authentication, and configuration failures set `lease_lost` immediately, log only run ID and error class, and are not retried.
 
 Retries stop before the last confirmed lease can expire. The local safety deadline is:
 
 `last_confirmed_monotonic + lease_seconds - safety_margin`
 
-The safety margin is at most five seconds and scales down for short test leases. Retry delay never exceeds the remaining safe budget. A successful retry records `success`, refreshes the confirmation time, and restores the normal heartbeat cadence.
+The safety margin is up to five seconds and scales down for short leases. Both retry delay and each in-flight `store.heartbeat` await are bounded by the remaining safe budget. A timeout at the deadline records exactly one `exhausted` result, sets `lease_lost`, and returns. A successful retry records `success` and restores normal cadence from its conservative request-start confirmation point.
 
 No additional operator-configurable retry knobs are introduced. Retry timing is derived from the existing lease duration so invalid combinations cannot be configured.
 
@@ -139,7 +139,8 @@ No additional operator-configurable retry knobs are introduced. Retry timing is 
 Lease loss is confirmed in either case:
 
 - The heartbeat update returns no row because status, owner, or expiry no longer matches.
-- Transient exceptions continue until the local safety deadline.
+- A heartbeat call or transient retry reaches the local safety deadline.
+- A non-transient implementation or configuration failure makes safe renewal impossible.
 
 The first case records `rejected`; the second records `exhausted`. Both set the shared `lease_lost` event exactly once.
 
@@ -158,6 +159,8 @@ A newly claiming worker receives a new owner value. The expired worker cannot re
 
 - Coordination pool startup failure: fail application startup with a sanitized error class and pool statistics that contain no connection string.
 - Single or brief runtime connection failure: retry inside the current lease budget.
+- Non-transient heartbeat failure: set local lease loss immediately without a retry or success metric; log only run ID and error class.
+- In-flight heartbeat timeout: record exactly one `exhausted` result at the conservative safety deadline.
 - Heartbeat rejection: stop the current worker's durable progress immediately and leave persisted state to the current owner or recovery loop.
 - Retry-budget exhaustion: set lease loss, block later writes and terminal updates, and wait for recovery.
 - Terminal-update race with recovery: translate a zero-row update into `IngestLeaseLostError`; do not replace the recovered run with a generic execution failure.
@@ -183,8 +186,11 @@ All implementation follows red-green-refactor cycles.
 
 ### Worker unit tests
 
-- One heartbeat exception does not immediately set `lease_lost`.
+- One recognized transient heartbeat exception does not immediately set `lease_lost`.
 - Multiple transient exceptions followed by success restore normal cadence.
+- A hung renewal is cancelled by the remaining safe budget and records one exhaustion.
+- A delayed success keeps its request-start confirmation point.
+- A non-transient exception sets lease loss without retrying or logging its message.
 - Exceptions lasting through the safe deadline set `lease_lost` and record `exhausted`.
 - A heartbeat rejection sets `lease_lost` immediately and records `rejected`.
 - Cancellation during a retry propagates without recording lease exhaustion.
@@ -194,8 +200,9 @@ All implementation follows red-green-refactor cycles.
 
 ### Store unit tests
 
-- Heartbeat SQL requires status, owner, and `lease_expires_at > now()`.
-- Success, failure, and manual-data terminal SQL require an unexpired owned lease.
+- Claim, heartbeat, terminal, and recovery lease SQL uses `clock_timestamp()`.
+- Heartbeat and terminal mutations lock the run row before checking actual-time ownership.
+- The synchronous write guard locks first and performs its actual-time ownership check second.
 - A zero-row terminal update raises `IngestLeaseLostError`.
 - Recovery keeps the existing requeue and exhaustion behavior.
 
@@ -203,7 +210,8 @@ All implementation follows red-green-refactor cycles.
 
 - The ingestion store receives the dedicated pool, not the general pool.
 - Startup opens both required pools and closes a partially opened coordination pool on failure.
-- Shutdown cancels worker tasks before closing the coordination pool.
+- Post-open startup failure cancels and awaits all partially created tasks.
+- Shutdown attempts every task and closer, preserves a primary request exception, and closes both pools independently.
 - General pool contention in a deterministic fake does not consume the coordination pool's heartbeat connection.
 
 ### Regression and policy verification

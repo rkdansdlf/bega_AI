@@ -123,28 +123,37 @@ def test_claim_next_uses_skip_locked_and_assigns_lease_owner():
 
     assert record is not None
     assert record.status is IngestRunStatus.RUNNING
-    sql = " ".join(item[0] for item in pool.connection_instance.executed)
-    assert "FOR UPDATE SKIP LOCKED" in sql
-    assert "lease_owner = %s" in sql
+    lock_sql, claim_sql = (
+        item[0] for item in pool.connection_instance.executed
+    )
+    assert "FOR UPDATE SKIP LOCKED" in lock_sql
+    assert "lease_owner = %s" in claim_sql
+    assert "clock_timestamp()" in claim_sql
+    assert "now()" not in claim_sql
     assert pool.connection_instance.transaction_entries == 1
 
 
 def test_heartbeat_requires_unexpired_owner_and_returns_new_expiry():
-    pool = _Pool([{"lease_expires_at": WATERMARK}])
+    pool = _Pool([(RUN_ID,), {"lease_expires_at": WATERMARK}])
     store = IngestRunStore(pool, lease_seconds=120)
 
     lease_expires_at = asyncio.run(store.heartbeat(RUN_ID, "worker-1"))
 
-    sql = pool.connection_instance.executed[0][0]
-    assert "status = 'RUNNING'" in sql
-    assert "lease_owner = %s" in sql
-    assert "lease_expires_at > now()" in sql
-    assert "RETURNING lease_expires_at" in sql
+    lock_sql, heartbeat_sql = (
+        item[0] for item in pool.connection_instance.executed
+    )
+    assert "FOR UPDATE" in lock_sql
+    assert "status = 'RUNNING'" not in lock_sql
+    assert "status = 'RUNNING'" in heartbeat_sql
+    assert "lease_owner = %s" in heartbeat_sql
+    assert "lease_expires_at > clock_timestamp()" in heartbeat_sql
+    assert "RETURNING lease_expires_at" in heartbeat_sql
+    assert "now()" not in heartbeat_sql
     assert lease_expires_at == WATERMARK
 
 
 def test_finish_success_advances_only_committed_table_watermarks():
-    pool = _Pool([(RUN_ID,), None])
+    pool = _Pool([(RUN_ID,), (RUN_ID,), None])
     store = IngestRunStore(pool)
     result = IngestTableResult("game", 3, 4, 1, 2, WATERMARK)
 
@@ -158,18 +167,23 @@ def test_finish_success_advances_only_committed_table_watermarks():
         )
     )
 
-    sql = " ".join(item[0] for item in pool.connection_instance.executed)
-    assert "status = 'SUCCEEDED'" in sql
-    assert "INSERT INTO ai_ingest_watermarks" in sql
-    assert "ON CONFLICT (source_table, scope_key)" in sql
-    assert "GREATEST" in sql
-    assert "lease_owner = %s" in sql
-    assert "lease_expires_at > now()" in sql
+    lock_sql, terminal_sql, watermark_sql = (
+        item[0] for item in pool.connection_instance.executed
+    )
+    assert "FOR UPDATE" in lock_sql
+    assert "status = 'RUNNING'" not in lock_sql
+    assert "status = 'SUCCEEDED'" in terminal_sql
+    assert "lease_owner = %s" in terminal_sql
+    assert "lease_expires_at > clock_timestamp()" in terminal_sql
+    assert "now()" not in terminal_sql
+    assert "INSERT INTO ai_ingest_watermarks" in watermark_sql
+    assert "ON CONFLICT (source_table, scope_key)" in watermark_sql
+    assert "GREATEST" in watermark_sql
     assert pool.connection_instance.transaction_entries == 1
 
 
 def test_finish_failed_never_advances_watermarks_and_sanitizes_error():
-    pool = _Pool([(RUN_ID,)])
+    pool = _Pool([(RUN_ID,), (RUN_ID,)])
     store = IngestRunStore(pool)
 
     asyncio.run(
@@ -181,16 +195,19 @@ def test_finish_failed_never_advances_watermarks_and_sanitizes_error():
         )
     )
 
-    sql, params = pool.connection_instance.executed[0]
+    lock_sql = pool.connection_instance.executed[0][0]
+    sql, params = pool.connection_instance.executed[1]
+    assert "FOR UPDATE" in lock_sql
     assert "status = %s" in sql
     assert params[0] == "FAILED"
     assert "ai_ingest_watermarks" not in sql
     assert len(params[2]) == 1000
-    assert "lease_expires_at > now()" in sql
+    assert "lease_expires_at > clock_timestamp()" in sql
+    assert "now()" not in sql
 
 
 def test_manual_data_terminal_requires_unexpired_owned_lease():
-    pool = _Pool([(RUN_ID,)])
+    pool = _Pool([(RUN_ID,), (RUN_ID,)])
     store = IngestRunStore(pool)
 
     asyncio.run(
@@ -205,10 +222,13 @@ def test_manual_data_terminal_requires_unexpired_owned_lease():
         )
     )
 
-    sql = pool.connection_instance.executed[0][0]
+    lock_sql = pool.connection_instance.executed[0][0]
+    sql = pool.connection_instance.executed[1][0]
+    assert "FOR UPDATE" in lock_sql
     assert "status = 'RUNNING'" in sql
     assert "lease_owner = %s" in sql
-    assert "lease_expires_at > now()" in sql
+    assert "lease_expires_at > clock_timestamp()" in sql
+    assert "now()" not in sql
 
 
 def test_recover_expired_increments_before_requeue_and_fails_exhausted_runs():
@@ -219,10 +239,16 @@ def test_recover_expired_increments_before_requeue_and_fails_exhausted_runs():
 
     assert recovered == 1
     assert failed == 1
-    sql = " ".join(item[0] for item in pool.connection_instance.executed)
-    assert "recovery_attempts = recovery_attempts + 1" in sql
-    assert "status = 'QUEUED'" in sql
-    assert "status = 'FAILED'" in sql
+    recovery_sql, failure_sql = (
+        item[0] for item in pool.connection_instance.executed
+    )
+    assert "recovery_attempts = recovery_attempts + 1" in recovery_sql
+    assert "status = 'QUEUED'" in recovery_sql
+    assert "clock_timestamp()" in recovery_sql
+    assert "FOR UPDATE SKIP LOCKED" in recovery_sql
+    assert "status = 'FAILED'" in failure_sql
+    assert "clock_timestamp()" in failure_sql
+    assert "FOR UPDATE SKIP LOCKED" in failure_sql
 
 
 def test_count_active_by_status_groups_persisted_queue_and_running_rows():

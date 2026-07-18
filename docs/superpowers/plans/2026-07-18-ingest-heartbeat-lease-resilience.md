@@ -4,7 +4,7 @@
 
 **Goal:** Keep durable AI ingestion leases alive through transient PostgreSQL coordination failures while preventing expired workers from renewing, writing terminal state, or competing with recovery.
 
-**Architecture:** Move every `IngestRunStore` operation to a dedicated 1–2 connection asynchronous PostgreSQL pool. Renew heartbeats with lease-budgeted exponential retry, enforce `lease_expires_at > now()` on every owner mutation, and preserve the existing per-batch write fence and recovery loop.
+**Architecture:** Move every `IngestRunStore` operation to a dedicated 1–2 connection asynchronous PostgreSQL pool. Fence lease decisions with lock-first `clock_timestamp()` checks, bound every in-flight heartbeat by a conservative monotonic deadline, retry only recognized transient psycopg/pool failures, and protect the complete FastAPI lifespan with exhaustive independent cleanup.
 
 **Tech Stack:** Python 3.11+, FastAPI lifespan, `asyncio`, psycopg 3, `psycopg_pool.AsyncConnectionPool`, Prometheus client, pytest.
 
@@ -16,12 +16,13 @@
 - This plan makes no database schema migration and adds no persistent batch checkpoint.
 - This plan makes no external embedding request and writes no shared production database.
 - Preserve the synchronous renderer, chunker, embedding, `rag_chunks` write path, and current recovery-attempt semantics.
-- Use test-first red-green-refactor cycles and keep each task in its own commit.
+- Use test-first red-green-refactor cycles. The original tasks were committed separately; the approved final-review corrections are one coherent fix commit.
 
 ## File Structure
 
 - Modify `app/core/ingest_run_store.py`: make PostgreSQL authoritative for unexpired ownership and return renewed lease expiry from heartbeat.
 - Modify `tests/test_ingest_run_store.py`: prove heartbeat and all terminal mutations reject expired leases.
+- Modify `scripts/ingest_from_kbo.py` and `tests/test_ingest_results.py`: lock the run row before the synchronous actual-time write fence.
 - Modify `app/core/ingest_worker.py`: add bounded heartbeat retry, cancellation-safe loss handling, and terminal-race handling.
 - Modify `tests/test_ingest_worker.py`: prove transient recovery, exhaustion, rejection, cancellation, long-running heartbeat, and terminal fencing.
 - Modify `app/observability/metrics.py`: define the bounded heartbeat result counter.
@@ -30,6 +31,17 @@
 - Modify `tests/test_deps_db_pool_observability.py`: prove pool separation, size limits, startup cleanup, and idempotent close.
 - Modify `tests/test_schema_startup_mode.py`: prove `IngestRunStore` receives the coordination pool.
 - Modify `docs/data-sync-orchestration-runbook.md`: document retry, strict expiry, dedicated pool, heartbeat metrics, and rollback behavior.
+- Amend this plan and the approved design so the documented contract matches the final implementation.
+
+## Final-review amendment (authoritative)
+
+The following requirements supersede any earlier code snippet in this plan that uses transaction-stable `now()`, retries a generic `Exception`, starts confirmation timing after a response, leaves a heartbeat await unbounded, or performs teardown only after `yield`:
+
+- `claim_next`, heartbeat, terminal transitions, recovery, and the synchronous write guard use PostgreSQL `clock_timestamp()` for lease decisions. Heartbeat, terminal transitions, and synchronous writes acquire the run-row lock before evaluating status, owner, and actual-time expiry; recovery uses `FOR UPDATE SKIP LOCKED` candidates so a lock wait cannot stale its clock decision.
+- The worker records monotonic confirmation immediately before the claim request and before every renewal request. Each `store.heartbeat` await is bounded by the remaining safe budget. A deadline timeout records one `exhausted` result, and delayed success keeps the request-start confirmation point.
+- Only `psycopg.OperationalError`, `psycopg.InterfaceError`, and `psycopg_pool.PoolTimeout` are retried. Cancellation propagates; any other exception sets `lease_lost` immediately, logs only run ID and error class, and records neither retry nor success.
+- Lifespan resource/task state is initialized before startup and the whole startup/`yield`/teardown flow is protected by `finally`. Cleanup sets the ingest stop event, cancels and awaits every created task, attempts HTTP/cache/runtime cleanup, and closes ingest/general pools independently. A primary startup/request exception wins; normal shutdown raises the first cleanup failure only after all attempts. Cleanup never calls `get_backend()` when startup did not initialize the embedding backend.
+- Deterministic fake cursor and lifecycle behavior tests are the default. No live PostgreSQL, external embedding request, shared database write, migration, or persistent checkpoint is introduced.
 
 ---
 
@@ -49,16 +61,20 @@ Add the following heartbeat test after `test_claim_next_uses_skip_locked_and_ass
 
 ```python
 def test_heartbeat_requires_unexpired_owner_and_returns_new_expiry():
-    pool = _Pool([{"lease_expires_at": WATERMARK}])
+    pool = _Pool([(RUN_ID,), {"lease_expires_at": WATERMARK}])
     store = IngestRunStore(pool, lease_seconds=120)
 
     lease_expires_at = asyncio.run(store.heartbeat(RUN_ID, "worker-1"))
 
-    sql = pool.connection_instance.executed[0][0]
-    assert "status = 'RUNNING'" in sql
-    assert "lease_owner = %s" in sql
-    assert "lease_expires_at > now()" in sql
-    assert "RETURNING lease_expires_at" in sql
+    lock_sql, heartbeat_sql = (
+        item[0] for item in pool.connection_instance.executed
+    )
+    assert "FOR UPDATE" in lock_sql
+    assert "status = 'RUNNING'" not in lock_sql
+    assert "status = 'RUNNING'" in heartbeat_sql
+    assert "lease_owner = %s" in heartbeat_sql
+    assert "lease_expires_at > clock_timestamp()" in heartbeat_sql
+    assert "RETURNING lease_expires_at" in heartbeat_sql
     assert lease_expires_at == WATERMARK
 ```
 
@@ -66,20 +82,20 @@ Add these assertions to `test_finish_success_advances_only_committed_table_water
 
 ```python
     assert "lease_owner = %s" in sql
-    assert "lease_expires_at > now()" in sql
+    assert "lease_expires_at > clock_timestamp()" in sql
 ```
 
 Add this assertion to `test_finish_failed_never_advances_watermarks_and_sanitizes_error`:
 
 ```python
-    assert "lease_expires_at > now()" in sql
+    assert "lease_expires_at > clock_timestamp()" in sql
 ```
 
 Add a manual-data terminal test to prove the shared terminal helper is also fenced:
 
 ```python
 def test_manual_data_terminal_requires_unexpired_owned_lease():
-    pool = _Pool([(RUN_ID,)])
+    pool = _Pool([(RUN_ID,), (RUN_ID,)])
     store = IngestRunStore(pool)
 
     asyncio.run(
@@ -94,10 +110,12 @@ def test_manual_data_terminal_requires_unexpired_owned_lease():
         )
     )
 
-    sql = pool.connection_instance.executed[0][0]
+    lock_sql = pool.connection_instance.executed[0][0]
+    sql = pool.connection_instance.executed[1][0]
+    assert "FOR UPDATE" in lock_sql
     assert "status = 'RUNNING'" in sql
     assert "lease_owner = %s" in sql
-    assert "lease_expires_at > now()" in sql
+    assert "lease_expires_at > clock_timestamp()" in sql
 ```
 
 - [ ] **Step 2: Run the store tests and confirm red**
@@ -112,41 +130,7 @@ Expected: FAIL because heartbeat returns `True` instead of `WATERMARK`, uses `RE
 
 - [ ] **Step 3: Implement strict heartbeat and terminal fences**
 
-Replace `IngestRunStore.heartbeat` with:
-
-```python
-    async def heartbeat(self, run_id: UUID, owner: str) -> datetime | None:
-        async with self.pool.connection() as conn:
-            row = await (
-                await conn.execute(
-                    """
-                    UPDATE ai_ingest_runs
-                    SET heartbeat_at = now(),
-                        lease_expires_at = now() + make_interval(secs => %s),
-                        updated_at = now()
-                    WHERE run_id = %s
-                      AND status = 'RUNNING'
-                      AND lease_owner = %s
-                      AND lease_expires_at > now()
-                    RETURNING lease_expires_at
-                    """,
-                    (self.lease_seconds, run_id, owner),
-                )
-            ).fetchone()
-        if row is None:
-            return None
-        if isinstance(row, Mapping):
-            return row["lease_expires_at"]
-        return row[0]
-```
-
-Add the following predicate immediately after `AND lease_owner = %s` in both the success update and `_finish_terminal` update:
-
-```sql
-AND lease_expires_at > now()
-```
-
-Do not change `recover_expired`; PostgreSQL expiry remains its source of truth.
+Implement `heartbeat`, success, failure, and manual-data terminal mutations as explicit transactions that first select the run row `FOR UPDATE`, then issue the owner/status/`lease_expires_at > clock_timestamp()` mutation. Return the renewed expiry from heartbeat and preserve zero-row ownership rejection. Change claim timestamps to `clock_timestamp()`. Change recovery to actual-time `FOR UPDATE SKIP LOCKED` candidate CTEs so recovery keeps the existing attempt semantics without making a stale decision after a lock wait.
 
 - [ ] **Step 4: Run store tests and confirm green**
 
@@ -259,7 +243,9 @@ Add the following tests:
 
 ```python
 def test_heartbeat_retries_transient_error_without_losing_lease():
-    store = _ScriptedHeartbeatStore([RuntimeError("temporary db failure"), NOW])
+    store = _ScriptedHeartbeatStore(
+        [psycopg.OperationalError("temporary db failure"), NOW]
+    )
     worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
     worker.lease_seconds = 0.1
     worker.heartbeat_interval_seconds = 0.001
@@ -293,7 +279,7 @@ def test_heartbeat_retries_transient_error_without_losing_lease():
 
 
 def test_heartbeat_exhaustion_marks_lease_lost():
-    store = _ScriptedHeartbeatStore([RuntimeError("db unavailable")] * 20)
+    store = _ScriptedHeartbeatStore([PoolTimeout("db unavailable")] * 20)
     worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
     worker.lease_seconds = 0.02
     worker.heartbeat_interval_seconds = 0.001
@@ -433,83 +419,16 @@ Import `AI_INGEST_HEARTBEATS_TOTAL` beside the existing ingest metrics. Add thes
         )
 ```
 
-Replace `_heartbeat_loop` with:
+Implement `_heartbeat_loop` with the final-review amendment's conservative timing contract:
 
-```python
-    async def _heartbeat_loop(
-        self,
-        run: IngestRunRecord,
-        lease_lost: asyncio.Event,
-    ) -> None:
-        loop = asyncio.get_running_loop()
-        last_confirmed = loop.time()
-        interval = max(0.001, float(self.heartbeat_interval_seconds))
-        retry_initial = max(0.001, float(self.heartbeat_retry_initial_seconds))
-        safety_margin = max(
-            0.0,
-            min(float(self.heartbeat_safety_margin_seconds), self.lease_seconds / 2),
-        )
-
-        while True:
-            await asyncio.sleep(interval)
-            retry_delay = retry_initial
-            attempt = 0
-            while True:
-                attempt += 1
-                try:
-                    lease_expires_at = await self.store.heartbeat(
-                        run.run_id,
-                        self.owner,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    remaining = (
-                        last_confirmed
-                        + float(self.lease_seconds)
-                        - safety_margin
-                        - loop.time()
-                    )
-                    if remaining <= 0:
-                        AI_INGEST_HEARTBEATS_TOTAL.labels(result="exhausted").inc()
-                        logger.error(
-                            "Ingestion heartbeat retry budget exhausted "
-                            "run_id=%s attempts=%d error_type=%s",
-                            run.run_id,
-                            attempt,
-                            type(exc).__name__,
-                        )
-                        lease_lost.set()
-                        return
-                    AI_INGEST_HEARTBEATS_TOTAL.labels(result="retry").inc()
-                    logger.warning(
-                        "Ingestion heartbeat retry scheduled "
-                        "run_id=%s attempt=%d remaining_seconds=%.3f error_type=%s",
-                        run.run_id,
-                        attempt,
-                        remaining,
-                        type(exc).__name__,
-                    )
-                    await asyncio.sleep(min(retry_delay, remaining))
-                    retry_delay = min(
-                        retry_delay * 2,
-                        max(retry_initial, interval),
-                    )
-                    continue
-
-                if lease_expires_at is None:
-                    AI_INGEST_HEARTBEATS_TOTAL.labels(result="rejected").inc()
-                    logger.error(
-                        "Ingestion run lease rejected run_id=%s",
-                        run.run_id,
-                    )
-                    lease_lost.set()
-                    return
-
-                AI_INGEST_HEARTBEATS_TOTAL.labels(result="success").inc()
-                last_confirmed = loop.time()
-                break
-```
+- accept the monotonic point captured immediately before `claim_next`;
+- compute `safe_deadline = last_confirmed + lease_seconds - safety_margin`;
+- capture `request_started` before every renewal and wrap `store.heartbeat` in `asyncio.timeout(remaining)`;
+- on a local timeout, increment `exhausted` exactly once, set `lease_lost`, and return;
+- retry only `psycopg.OperationalError`, `psycopg.InterfaceError`, and `PoolTimeout` with bounded backoff;
+- propagate `asyncio.CancelledError`, and stop immediately without retry metrics for every other exception;
+- on success, set `last_confirmed = request_started`, not the later response time; and
+- retain `None` as PostgreSQL's authoritative ownership rejection.
 
 In `run_once`, wrap each terminal store call so `IngestLeaseLostError` is treated as ownership handoff. Use this pattern for manual-data and success transitions:
 
@@ -711,7 +630,7 @@ def test_ingest_heartbeat_does_not_acquire_busy_general_pool(monkeypatch) -> Non
 
     class _Connection:
         async def execute(self, statement, params):
-            assert "lease_expires_at > now()" in statement
+            assert "lease_expires_at > clock_timestamp()" in statement
             assert params[1] == run_id
             return _Cursor()
 
@@ -760,19 +679,7 @@ Change `test_ingest_run_store_uses_worker_lease_and_recovery_settings` in `tests
     assert store.pool is pool
 ```
 
-Add `import inspect` to `tests/test_schema_startup_mode.py` and add this shutdown-order contract test:
-
-```python
-def test_lifespan_stops_ingest_tasks_before_closing_coordination_pool():
-    source = inspect.getsource(deps.lifespan)
-
-    assert source.index("ingest_worker_task.cancel()") < source.index(
-        "await close_ingest_connection_pool()"
-    )
-    assert source.index("ingest_recovery_task.cancel()") < source.index(
-        "await close_ingest_connection_pool()"
-    )
-```
+Use async behavior tests rather than source-text ordering assertions. Enter the real async context manager with deterministic fake loops and closers, then prove post-open initial-recovery failure cancels and awaits partial tasks, one task cleanup failure does not skip later tasks or closers, one pool-close failure does not skip the other pool, and a request exception remains primary over sanitized cleanup failures.
 
 - [ ] **Step 2: Run dependency tests and confirm red**
 
@@ -895,9 +802,10 @@ Add the dedicated close function:
 ```python
 async def close_ingest_connection_pool() -> None:
     global _ingest_connection_pool
-    if _ingest_connection_pool is not None:
-        await _ingest_connection_pool.close()
-        _ingest_connection_pool = None
+    pool = _ingest_connection_pool
+    _ingest_connection_pool = None
+    if pool is not None:
+        await pool.close()
 ```
 
 - [ ] **Step 4: Implement fail-fast startup cleanup and store injection**
@@ -914,7 +822,7 @@ async def _prepare_required_database_pools(
         await general_pool.open(wait=True, timeout=10.0)
         await ingest_pool.open(wait=True, timeout=10.0)
         await _prepare_schema(general_pool, settings)
-    except Exception as exc:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
         logger.error(
             "[Lifespan] required DB pool preparation failed "
             "error_type=%s general_pool_stats=%s ingest_pool_stats=%s",
@@ -926,8 +834,18 @@ async def _prepare_required_database_pools(
                 max_size=INGEST_DB_POOL_MAX_SIZE,
             ),
         )
-        await close_ingest_connection_pool()
-        await close_connection_pool()
+        for resource_name, closer in (
+            ("ingest_pool", close_ingest_connection_pool),
+            ("general_pool", close_connection_pool),
+        ):
+            try:
+                await closer()
+            except BaseException as cleanup_exc:  # noqa: BLE001
+                logger.error(
+                    "[Lifespan] startup cleanup failed resource=%s error_type=%s",
+                    resource_name,
+                    type(cleanup_exc).__name__,
+                )
         raise
     logger.info("[Lifespan] required database pools opened")
     return general_pool, ingest_pool
@@ -956,13 +874,7 @@ At the start of `lifespan`, replace the current general-pool open and separate `
     _initialize_shared_baseball_agent_runtime()
 ```
 
-At shutdown, after all worker and recovery tasks have been cancelled and awaited, close the coordination pool before the general pool:
-
-```python
-    reset_shared_baseball_agent_runtime()
-    await close_ingest_connection_pool()
-    await close_connection_pool()
-```
+Wrap startup, `yield`, and teardown in one `try`/`except BaseException`/`finally`. Initialize task/resource references before startup, remember whether a primary exception is active, set the ingest stop event, cancel and await each created task independently, and attempt HTTP clients, the already-created embedding backend, shared runtime, ingest pool, and general pool independently. Log cleanup failures by resource and error class only. Re-raise the primary startup/request exception; on normal shutdown raise the first cleanup failure after every attempt.
 
 - [ ] **Step 5: Run dependency tests and confirm green**
 
@@ -1003,9 +915,9 @@ AI ingest coordination uses a dedicated PostgreSQL pool with one minimum and two
 Replace the lease paragraph under `## 리스 만료와 재시작 복구` with:
 
 ```markdown
-AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lease를 확인합니다. heartbeat는 정상 상태에서 lease 시간의 1/3 간격으로 실행됩니다. 일시적인 PostgreSQL 연결·풀 오류는 마지막으로 확인된 lease의 안전 여유 5초 전까지만 지수 백오프로 재시도합니다. 한 번의 오류만으로 작업을 포기하지 않지만 안전 시간이 끝나면 이전 worker는 lease 상실 상태가 됩니다.
+AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lease를 확인합니다. heartbeat는 정상 상태에서 lease 시간의 1/3 간격으로 실행됩니다. 식별된 일시적 PostgreSQL 연결·풀 오류만 지수 백오프로 재시도하며 안전 여유는 짧은 lease에 맞춰 줄어드는 최대 5초입니다. 각 heartbeat 호출도 남은 안전 시간으로 제한되고, 안전 시간이 끝나면 이전 worker는 lease 상실 상태가 됩니다.
 
-heartbeat와 성공·실패·`MANUAL_BASEBALL_DATA_REQUIRED` 종료는 모두 DB에서 `RUNNING`, owner 일치, `lease_expires_at > now()`를 만족해야 합니다. 만료된 owner는 recovery가 실행되기 전이라도 lease를 되살리거나 terminal 상태를 기록할 수 없습니다. 동기 ingest 경로는 각 쓰기 배치 직전에 같은 DB owner·만료 조건을 확인하고 run row를 배치 commit까지 잠급니다.
+heartbeat와 성공·실패·`MANUAL_BASEBALL_DATA_REQUIRED` 종료는 모두 DB에서 `RUNNING`, owner 일치, `lease_expires_at > clock_timestamp()`를 만족해야 합니다. 만료된 owner는 recovery가 실행되기 전이라도 lease를 되살리거나 terminal 상태를 기록할 수 없습니다. 동기 ingest 경로는 run row를 먼저 잠근 뒤 실제 DB 시각으로 같은 owner·만료 조건을 확인합니다.
 
 `AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS` 미만이면 만료 실행을 `QUEUED`로 되돌리고, 한도에 도달하면 `FAILED` 및 `INGEST_LEASE_EXPIRED`로 종결합니다. watermark는 시즌과 명시적 `since` 범위별로 분리되고 `SUCCEEDED` 트랜잭션에서만 단조 증가합니다. 이번 안정화에는 배치 checkpoint가 포함되지 않으므로 recovery 실행은 이미 커밋된 청크를 content hash 기반으로 재확인할 수 있습니다.
 ```

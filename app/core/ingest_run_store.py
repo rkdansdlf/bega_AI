@@ -197,11 +197,12 @@ class IngestRunStore:
                         f"""
                         UPDATE ai_ingest_runs
                         SET status = 'RUNNING',
-                            started_at = COALESCE(started_at, now()),
-                            heartbeat_at = now(),
+                            started_at = COALESCE(started_at, clock_timestamp()),
+                            heartbeat_at = clock_timestamp(),
                             lease_owner = %s,
-                            lease_expires_at = now() + make_interval(secs => %s),
-                            updated_at = now()
+                            lease_expires_at = clock_timestamp()
+                                + make_interval(secs => %s),
+                            updated_at = clock_timestamp()
                         WHERE run_id = %s
                           AND status = 'QUEUED'
                         RETURNING {_RUN_SELECT}
@@ -213,22 +214,27 @@ class IngestRunStore:
 
     async def heartbeat(self, run_id: UUID, owner: str) -> datetime | None:
         async with self.pool.connection() as conn:
-            row = await (
-                await conn.execute(
-                    """
-                    UPDATE ai_ingest_runs
-                    SET heartbeat_at = now(),
-                        lease_expires_at = now() + make_interval(secs => %s),
-                        updated_at = now()
-                    WHERE run_id = %s
-                      AND status = 'RUNNING'
-                      AND lease_owner = %s
-                      AND lease_expires_at > now()
-                    RETURNING lease_expires_at
-                    """,
-                    (self.lease_seconds, run_id, owner),
-                )
-            ).fetchone()
+            async with conn.transaction():
+                locked = await self._lock_run(conn, run_id)
+                if locked is None:
+                    return None
+                row = await (
+                    await conn.execute(
+                        """
+                        UPDATE ai_ingest_runs
+                        SET heartbeat_at = clock_timestamp(),
+                            lease_expires_at = clock_timestamp()
+                                + make_interval(secs => %s),
+                            updated_at = clock_timestamp()
+                        WHERE run_id = %s
+                          AND status = 'RUNNING'
+                          AND lease_owner = %s
+                          AND lease_expires_at > clock_timestamp()
+                        RETURNING lease_expires_at
+                        """,
+                        (self.lease_seconds, run_id, owner),
+                    )
+                ).fetchone()
         if row is None:
             return None
         if isinstance(row, Mapping):
@@ -249,20 +255,24 @@ class IngestRunStore:
         }
         async with self.pool.connection() as conn:
             async with conn.transaction():
+                self._require_owned_run(
+                    await self._lock_run(conn, run_id),
+                    run_id,
+                )
                 finished = await (
                     await conn.execute(
                         """
                         UPDATE ai_ingest_runs
                         SET status = 'SUCCEEDED',
                             table_summary = %s::jsonb,
-                            finished_at = now(),
-                            heartbeat_at = now(),
+                            finished_at = clock_timestamp(),
+                            heartbeat_at = clock_timestamp(),
                             lease_expires_at = NULL,
-                            updated_at = now()
+                            updated_at = clock_timestamp()
                         WHERE run_id = %s
                           AND status = 'RUNNING'
                           AND lease_owner = %s
-                          AND lease_expires_at > now()
+                          AND lease_expires_at > clock_timestamp()
                         RETURNING run_id
                         """,
                         (json.dumps(summary, sort_keys=True), run_id, owner),
@@ -352,6 +362,10 @@ class IngestRunStore:
     ) -> None:
         async with self.pool.connection() as conn:
             async with conn.transaction():
+                self._require_owned_run(
+                    await self._lock_run(conn, run_id),
+                    run_id,
+                )
                 finished = await (
                     await conn.execute(
                         """
@@ -360,14 +374,14 @@ class IngestRunStore:
                             error_code = %s,
                             error_message = %s,
                             table_summary = %s::jsonb,
-                            finished_at = now(),
-                            heartbeat_at = now(),
+                            finished_at = clock_timestamp(),
+                            heartbeat_at = clock_timestamp(),
                             lease_expires_at = NULL,
-                            updated_at = now()
+                            updated_at = clock_timestamp()
                         WHERE run_id = %s
                           AND status = 'RUNNING'
                           AND lease_owner = %s
-                          AND lease_expires_at > now()
+                          AND lease_expires_at > clock_timestamp()
                         RETURNING run_id
                         """,
                         (
@@ -388,17 +402,24 @@ class IngestRunStore:
                 recovered = await (
                     await conn.execute(
                         """
-                        UPDATE ai_ingest_runs
+                        WITH expired_runs AS (
+                            SELECT run_id
+                            FROM ai_ingest_runs
+                            WHERE status = 'RUNNING'
+                              AND lease_expires_at < clock_timestamp()
+                              AND recovery_attempts < %s
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        UPDATE ai_ingest_runs AS runs
                         SET status = 'QUEUED',
                             recovery_attempts = recovery_attempts + 1,
                             lease_owner = NULL,
                             lease_expires_at = NULL,
                             heartbeat_at = NULL,
-                            updated_at = now()
-                        WHERE status = 'RUNNING'
-                          AND lease_expires_at < now()
-                          AND recovery_attempts < %s
-                        RETURNING run_id
+                            updated_at = clock_timestamp()
+                        FROM expired_runs
+                        WHERE runs.run_id = expired_runs.run_id
+                        RETURNING runs.run_id
                         """,
                         (self.max_recovery_attempts,),
                     )
@@ -406,18 +427,25 @@ class IngestRunStore:
                 failed = await (
                     await conn.execute(
                         """
-                        UPDATE ai_ingest_runs
+                        WITH expired_runs AS (
+                            SELECT run_id
+                            FROM ai_ingest_runs
+                            WHERE status = 'RUNNING'
+                              AND lease_expires_at < clock_timestamp()
+                              AND recovery_attempts >= %s
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        UPDATE ai_ingest_runs AS runs
                         SET status = 'FAILED',
                             error_code = 'INGEST_LEASE_EXPIRED',
                             error_message = 'Ingestion worker lease expired after recovery limit.',
-                            finished_at = now(),
+                            finished_at = clock_timestamp(),
                             lease_owner = NULL,
                             lease_expires_at = NULL,
-                            updated_at = now()
-                        WHERE status = 'RUNNING'
-                          AND lease_expires_at < now()
-                          AND recovery_attempts >= %s
-                        RETURNING run_id
+                            updated_at = clock_timestamp()
+                        FROM expired_runs
+                        WHERE runs.run_id = expired_runs.run_id
+                        RETURNING runs.run_id
                         """,
                         (self.max_recovery_attempts,),
                     )
@@ -532,6 +560,20 @@ class IngestRunStore:
                 """,
                 (source_table, scope_key, watermark, run_id),
             )
+
+    @staticmethod
+    async def _lock_run(conn: Any, run_id: UUID) -> Any:
+        return await (
+            await conn.execute(
+                """
+                SELECT run_id
+                FROM ai_ingest_runs
+                WHERE run_id = %s
+                FOR UPDATE
+                """,
+                (run_id,),
+            )
+        ).fetchone()
 
     @staticmethod
     def _require_owned_run(row: Any, run_id: UUID) -> None:

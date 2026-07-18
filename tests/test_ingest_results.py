@@ -28,8 +28,8 @@ class _UndefinedSourceCursor:
 
 
 class _LeaseCursor:
-    def __init__(self, row):
-        self.row = row
+    def __init__(self, rows):
+        self.rows = list(rows)
         self.queries = []
 
     def __enter__(self):
@@ -42,12 +42,12 @@ class _LeaseCursor:
         self.queries.append((query, params))
 
     def fetchone(self):
-        return self.row
+        return self.rows.pop(0) if self.rows else None
 
 
 class _LeaseConnection:
-    def __init__(self, row):
-        self.cursor_instance = _LeaseCursor(row)
+    def __init__(self, rows):
+        self.cursor_instance = _LeaseCursor(rows)
 
     def cursor(self):
         return self.cursor_instance
@@ -165,14 +165,20 @@ def test_missing_trusted_static_source_raises_manual_contract(monkeypatch):
     assert raised.value.contract["missing_fields"] == ["source_file"]
 
 
-def test_sync_lease_guard_fences_writes_with_database_row_lock():
-    connection = _LeaseConnection(row=None)
+def test_sync_lease_guard_locks_row_before_checking_actual_database_time():
+    connection = _LeaseConnection(rows=[(1,), None])
     guard = module.build_ingest_lease_guard(connection, "run-1", "worker-1")
 
     with pytest.raises(IngestLeaseLostError):
         guard(True)
 
-    query, params = connection.cursor_instance.queries[0]
-    assert "lease_expires_at > now()" in query
-    assert "FOR SHARE" in query
-    assert params == ("run-1", "worker-1")
+    lock_query, lock_params = connection.cursor_instance.queries[0]
+    check_query, check_params = connection.cursor_instance.queries[1]
+    assert "FOR SHARE" in lock_query
+    assert "status = 'RUNNING'" not in lock_query
+    assert lock_params == ("run-1",)
+    assert "lease_expires_at > clock_timestamp()" in check_query
+    assert "status = 'RUNNING'" in check_query
+    assert "lease_owner = %s" in check_query
+    assert "FOR SHARE" not in check_query
+    assert check_params == ("run-1", "worker-1")

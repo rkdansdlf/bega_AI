@@ -11,6 +11,9 @@ from time import perf_counter
 from typing import Any, Callable
 from uuid import uuid4
 
+import psycopg
+from psycopg_pool import PoolTimeout
+
 from scripts.ingest_from_kbo import (
     DEFAULT_TABLES,
     IngestExecutionResult,
@@ -44,6 +47,12 @@ from ..observability.metrics import (
 
 
 logger = logging.getLogger(__name__)
+
+_TRANSIENT_HEARTBEAT_EXCEPTIONS = (
+    psycopg.OperationalError,
+    psycopg.InterfaceError,
+    PoolTimeout,
+)
 
 
 class IngestWorker:
@@ -86,6 +95,7 @@ class IngestWorker:
         """Process one queued run and return whether work was claimed."""
 
         await self._refresh_run_gauges()
+        claim_confirmation = asyncio.get_running_loop().time()
         run = await self.store.claim_next(self.owner)
         if run is None:
             return False
@@ -96,7 +106,13 @@ class IngestWorker:
         terminal_status = None
         result = None
         lease_lost = asyncio.Event()
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop(run, lease_lost))
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(
+                run,
+                lease_lost,
+                claim_confirmation,
+            )
+        )
         try:
             result = await self._execute(run, lease_lost)
             if lease_lost.is_set():
@@ -291,9 +307,14 @@ class IngestWorker:
         self,
         run: IngestRunRecord,
         lease_lost: asyncio.Event,
+        last_confirmed_monotonic: float | None = None,
     ) -> None:
         loop = asyncio.get_running_loop()
-        last_confirmed = loop.time()
+        last_confirmed = (
+            loop.time()
+            if last_confirmed_monotonic is None
+            else float(last_confirmed_monotonic)
+        )
         interval = max(0.001, float(self.heartbeat_interval_seconds))
         retry_initial = max(0.001, float(self.heartbeat_retry_initial_seconds))
         safety_margin = max(
@@ -302,35 +323,68 @@ class IngestWorker:
         )
 
         while True:
-            await asyncio.sleep(interval)
+            safe_deadline = (
+                last_confirmed + float(self.lease_seconds) - safety_margin
+            )
+            remaining = safe_deadline - loop.time()
+            if remaining <= 0:
+                self._record_heartbeat_exhausted(
+                    run,
+                    lease_lost,
+                    attempts=0,
+                    error_type="TimeoutError",
+                )
+                return
+            await asyncio.sleep(min(interval, remaining))
             retry_delay = retry_initial
             attempt = 0
             while True:
                 attempt += 1
-                try:
-                    lease_expires_at = await self.store.heartbeat(
-                        run.run_id,
-                        self.owner,
+                request_started = loop.time()
+                remaining = safe_deadline - request_started
+                if remaining <= 0:
+                    self._record_heartbeat_exhausted(
+                        run,
+                        lease_lost,
+                        attempts=attempt - 1,
+                        error_type="TimeoutError",
                     )
+                    return
+                heartbeat_timeout = asyncio.timeout(remaining)
+                try:
+                    async with heartbeat_timeout:
+                        lease_expires_at = await self.store.heartbeat(
+                            run.run_id,
+                            self.owner,
+                        )
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:  # noqa: BLE001
-                    remaining = (
-                        last_confirmed
-                        + float(self.lease_seconds)
-                        - safety_margin
-                        - loop.time()
-                    )
-                    if remaining <= 0:
-                        AI_INGEST_HEARTBEATS_TOTAL.labels(result="exhausted").inc()
-                        logger.error(
-                            "Ingestion heartbeat retry budget exhausted "
-                            "run_id=%s attempts=%d error_type=%s",
-                            run.run_id,
-                            attempt,
-                            type(exc).__name__,
+                except TimeoutError as exc:
+                    if heartbeat_timeout.expired():
+                        self._record_heartbeat_exhausted(
+                            run,
+                            lease_lost,
+                            attempts=attempt,
+                            error_type=type(exc).__name__,
                         )
-                        lease_lost.set()
+                        return
+                    logger.error(
+                        "Ingestion heartbeat stopped on non-transient error "
+                        "run_id=%s error_type=%s",
+                        run.run_id,
+                        type(exc).__name__,
+                    )
+                    lease_lost.set()
+                    return
+                except _TRANSIENT_HEARTBEAT_EXCEPTIONS as exc:
+                    remaining = safe_deadline - loop.time()
+                    if remaining <= 0:
+                        self._record_heartbeat_exhausted(
+                            run,
+                            lease_lost,
+                            attempts=attempt,
+                            error_type=type(exc).__name__,
+                        )
                         return
                     AI_INGEST_HEARTBEATS_TOTAL.labels(result="retry").inc()
                     logger.warning(
@@ -347,6 +401,15 @@ class IngestWorker:
                         max(retry_initial, interval),
                     )
                     continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "Ingestion heartbeat stopped on non-transient error "
+                        "run_id=%s error_type=%s",
+                        run.run_id,
+                        type(exc).__name__,
+                    )
+                    lease_lost.set()
+                    return
 
                 if lease_expires_at is None:
                     AI_INGEST_HEARTBEATS_TOTAL.labels(result="rejected").inc()
@@ -358,8 +421,28 @@ class IngestWorker:
                     return
 
                 AI_INGEST_HEARTBEATS_TOTAL.labels(result="success").inc()
-                last_confirmed = loop.time()
+                last_confirmed = request_started
                 break
+
+    @staticmethod
+    def _record_heartbeat_exhausted(
+        run: IngestRunRecord,
+        lease_lost: asyncio.Event,
+        *,
+        attempts: int,
+        error_type: str,
+    ) -> None:
+        if lease_lost.is_set():
+            return
+        AI_INGEST_HEARTBEATS_TOTAL.labels(result="exhausted").inc()
+        logger.error(
+            "Ingestion heartbeat retry budget exhausted "
+            "run_id=%s attempts=%d error_type=%s",
+            run.run_id,
+            attempts,
+            error_type,
+        )
+        lease_lost.set()
 
     async def _execute(
         self,

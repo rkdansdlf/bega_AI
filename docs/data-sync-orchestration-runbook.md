@@ -30,7 +30,7 @@
    AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS=1
    ```
 
-   AI ingest coordination uses a dedicated PostgreSQL pool with one minimum and two maximum connections per AI process. The pool is not configurable independently: its bounded size is part of the heartbeat isolation contract. Failure to open this required pool fails AI startup instead of starting a worker without durable coordination.
+   AI ingest coordination uses a dedicated PostgreSQL pool with one minimum and two maximum connections per AI process. The pool is not configurable independently: its bounded size is part of the heartbeat isolation contract. Failure to open this required pool fails AI startup instead of starting a worker without durable coordination. 시작 또는 종료 중 오류가 나도 생성된 모든 background task를 취소·대기하고 두 DB pool을 각각 닫으므로 한쪽 close 실패가 다른 쪽 정리를 건너뛰지 않습니다.
 
 3. AI 서비스의 내부 상태 및 metrics 경로가 정상인지 확인합니다.
 4. backend를 처음에는 `AI_INGEST_ENABLED=false`로 배포하고 AI 연결·내부 토큰·JobRunr 저장소를 확인합니다.
@@ -95,9 +95,9 @@ cd /path/to/bega_AI
 
 ## 리스 만료와 재시작 복구
 
-AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lease를 확인합니다. heartbeat는 정상 상태에서 lease 시간의 1/3 간격으로 실행됩니다. 일시적인 PostgreSQL 연결·풀 오류는 마지막으로 확인된 lease의 안전 여유 5초 전까지만 지수 백오프로 재시도합니다. 한 번의 오류만으로 작업을 포기하지 않지만 안전 시간이 끝나면 이전 worker는 lease 상실 상태가 됩니다.
+AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lease를 확인합니다. heartbeat는 정상 상태에서 lease 시간의 1/3 간격으로 실행됩니다. `psycopg.OperationalError`, `psycopg.InterfaceError`, `psycopg_pool.PoolTimeout`처럼 식별된 일시적 연결·트랜잭션 오류만 지수 백오프로 재시도합니다. 안전 여유는 최대 5초이며 짧은 lease에서는 함께 축소됩니다. 각 heartbeat 호출 자체도 남은 안전 시간으로 제한되고, 그 시각에 도달하면 `exhausted`를 정확히 한 번 기록한 뒤 lease 상실 상태가 됩니다. 프로그래밍·매핑·인증·설정 오류는 재시도하지 않고 즉시 lease 상실로 처리합니다.
 
-heartbeat와 성공·실패·`MANUAL_BASEBALL_DATA_REQUIRED` 종료는 모두 DB에서 `RUNNING`, owner 일치, `lease_expires_at > now()`를 만족해야 합니다. 만료된 owner는 recovery가 실행되기 전이라도 lease를 되살리거나 terminal 상태를 기록할 수 없습니다. 동기 ingest 경로는 각 쓰기 배치 직전에 같은 DB owner·만료 조건을 확인하고 run row를 배치 commit까지 잠급니다.
+heartbeat와 성공·실패·`MANUAL_BASEBALL_DATA_REQUIRED` 종료는 모두 DB에서 `RUNNING`, owner 일치, `lease_expires_at > clock_timestamp()`를 만족해야 합니다. 트랜잭션 시작 시각에 고정되는 `now()`는 lease 판단에 사용하지 않습니다. 동기 ingest 경로와 store mutation은 run row lock을 먼저 얻은 뒤 실제 DB 시각으로 owner·만료 조건을 확인합니다. 만료된 owner는 recovery가 실행되기 전이라도 lease를 되살리거나 terminal 상태를 기록할 수 없습니다.
 
 `AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS` 미만이면 만료 실행을 `QUEUED`로 되돌리고, 한도에 도달하면 `FAILED` 및 `INGEST_LEASE_EXPIRED`로 종결합니다. watermark는 시즌과 명시적 `since` 범위별로 분리되고 `SUCCEEDED` 트랜잭션에서만 단조 증가합니다. 이번 안정화에는 배치 checkpoint가 포함되지 않으므로 recovery 실행은 이미 커밋된 청크를 content hash 기반으로 재확인할 수 있습니다.
 

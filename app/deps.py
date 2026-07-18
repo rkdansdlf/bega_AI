@@ -320,16 +320,18 @@ def _format_connection_pool_stats(
 async def close_connection_pool() -> None:
     """앱 종료 시 커넥션 풀을 닫습니다."""
     global _connection_pool
-    if _connection_pool is not None:
-        await _connection_pool.close()
-        _connection_pool = None
+    pool = _connection_pool
+    _connection_pool = None
+    if pool is not None:
+        await pool.close()
 
 
 async def close_ingest_connection_pool() -> None:
     global _ingest_connection_pool
-    if _ingest_connection_pool is not None:
-        await _ingest_connection_pool.close()
-        _ingest_connection_pool = None
+    pool = _ingest_connection_pool
+    _ingest_connection_pool = None
+    if pool is not None:
+        await pool.close()
 
 
 async def _chat_cache_cleanup_loop(interval_seconds: int = 3600) -> None:
@@ -577,7 +579,7 @@ async def _prepare_required_database_pools(
         await general_pool.open(wait=True, timeout=10.0)
         await ingest_pool.open(wait=True, timeout=10.0)
         await _prepare_schema(general_pool, settings)
-    except Exception as exc:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
         logger.error(
             "[Lifespan] required DB pool preparation failed "
             "error_type=%s general_pool_stats=%s ingest_pool_stats=%s",
@@ -589,8 +591,19 @@ async def _prepare_required_database_pools(
                 max_size=INGEST_DB_POOL_MAX_SIZE,
             ),
         )
-        await close_ingest_connection_pool()
-        await close_connection_pool()
+        for resource_name, closer in (
+            ("ingest_pool", close_ingest_connection_pool),
+            ("general_pool", close_connection_pool),
+        ):
+            try:
+                await closer()
+            except BaseException as cleanup_exc:  # noqa: BLE001
+                logger.error(
+                    "[Lifespan] startup cleanup failed "
+                    "resource=%s error_type=%s",
+                    resource_name,
+                    type(cleanup_exc).__name__,
+                )
         raise
     logger.info("[Lifespan] required database pools opened")
     return general_pool, ingest_pool
@@ -610,99 +623,127 @@ def get_ingest_run_store() -> IngestRunStore:
 @asynccontextmanager
 async def lifespan(app):
     """앱 시작/종료 시 실행되는 lifespan 이벤트"""
-    # 시작 시
-    settings = get_settings()
-    load_clf()
-    pool, _ = await _prepare_required_database_pools(settings)
-    _initialize_shared_baseball_agent_runtime()
-
-    # [Chat Caching] 만료 항목 주기적 삭제 백그라운드 태스크 시작
-    cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
-    logger.info("[Lifespan] chat_response_cache cleanup task started (interval=1h)")
-
-    # [Observability] DB 풀 stats를 주기적으로 Prometheus gauge에 publish
-    db_pool_metrics_task = asyncio.create_task(_db_pool_metrics_loop())
-    logger.info("[Lifespan] db pool metrics publisher started (interval=30s)")
-
-    # [Coach Recovery] FAILED_LOCKED 캐시 자동 복구 루프 (기본 비활성, env opt-in)
-    coach_recovery_task: Optional[asyncio.Task] = None
-    if get_settings().coach_failed_recovery_enabled:
-        coach_recovery_task = asyncio.create_task(_coach_failed_cache_recovery_loop())
-        logger.info("[Lifespan] coach FAILED_LOCKED recovery loop started")
-
-    ingest_worker_task: Optional[asyncio.Task] = None
-    ingest_recovery_task: Optional[asyncio.Task] = None
+    del app
+    background_tasks: list[asyncio.Task[Any]] = []
     ingest_worker_stop_event: Optional[asyncio.Event] = None
-    if settings.ingest_worker_enabled:
-        ingest_store = get_ingest_run_store()
-        ingest_worker_stop_event = asyncio.Event()
-        ingest_worker = IngestWorker(store=ingest_store, settings=settings)
-        recovered, failed = await ingest_worker.recover_expired_once()
-        ingest_worker_task = asyncio.create_task(
-            ingest_worker.run_forever(ingest_worker_stop_event)
-        )
-        ingest_recovery_task = asyncio.create_task(
-            ingest_worker.run_recovery_forever(ingest_worker_stop_event)
-        )
+    embedding_backend: Any = None
+    database_resources_started = False
+    runtime_initialized = False
+    primary_exception = False
+    try:
+        settings = get_settings()
+        load_clf()
+        database_resources_started = True
+        await _prepare_required_database_pools(settings)
+        _initialize_shared_baseball_agent_runtime()
+        runtime_initialized = True
+
+        cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
+        background_tasks.append(cleanup_task)
         logger.info(
-            "[Lifespan] ingest worker started recovered=%d failed=%d",
-            recovered,
-            failed,
+            "[Lifespan] chat_response_cache cleanup task started (interval=1h)"
         )
 
-    # [Embedding Cache] 백엔드 미리 초기화 (startup 로그 출력)
-    try:
-        from .core.embedding_cache import get_backend as _get_embed_backend
+        db_pool_metrics_task = asyncio.create_task(_db_pool_metrics_loop())
+        background_tasks.append(db_pool_metrics_task)
+        logger.info("[Lifespan] db pool metrics publisher started (interval=30s)")
 
-        await _get_embed_backend()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[Lifespan] embedding cache backend init failed: %s", exc)
+        if settings.coach_failed_recovery_enabled:
+            coach_recovery_task = asyncio.create_task(
+                _coach_failed_cache_recovery_loop()
+            )
+            background_tasks.append(coach_recovery_task)
+            logger.info("[Lifespan] coach FAILED_LOCKED recovery loop started")
 
-    yield
+        if settings.ingest_worker_enabled:
+            ingest_store = get_ingest_run_store()
+            ingest_worker_stop_event = asyncio.Event()
+            ingest_worker = IngestWorker(store=ingest_store, settings=settings)
+            recovered, failed = await ingest_worker.recover_expired_once()
+            ingest_worker_task = asyncio.create_task(
+                ingest_worker.run_forever(ingest_worker_stop_event)
+            )
+            background_tasks.append(ingest_worker_task)
+            ingest_recovery_task = asyncio.create_task(
+                ingest_worker.run_recovery_forever(ingest_worker_stop_event)
+            )
+            background_tasks.append(ingest_recovery_task)
+            logger.info(
+                "[Lifespan] ingest worker started recovered=%d failed=%d",
+                recovered,
+                failed,
+            )
 
-    # 종료 시: cleanup 태스크 취소 후 리소스 정리
-    cleanup_task.cancel()
-    db_pool_metrics_task.cancel()
-    if coach_recovery_task is not None:
-        coach_recovery_task.cancel()
-    if ingest_worker_stop_event is not None:
-        ingest_worker_stop_event.set()
-    if ingest_worker_task is not None:
-        ingest_worker_task.cancel()
-    if ingest_recovery_task is not None:
-        ingest_recovery_task.cancel()
-    background_tasks = [cleanup_task, db_pool_metrics_task]
-    if coach_recovery_task is not None:
-        background_tasks.append(coach_recovery_task)
-    if ingest_worker_task is not None:
-        background_tasks.append(ingest_worker_task)
-    if ingest_recovery_task is not None:
-        background_tasks.append(ingest_recovery_task)
-    for task in background_tasks:
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            from .core.embedding_cache import get_backend as _get_embed_backend
 
-    # httpx 클라이언트 정리
-    await close_shared_httpx_clients()
+            embedding_backend = await _get_embed_backend()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[Lifespan] embedding cache backend init failed error_type=%s",
+                type(exc).__name__,
+            )
 
-    # 임베딩 캐시 백엔드 정리 (Redis 사용 시 클라이언트 close)
-    try:
-        from .core.embedding_cache import get_backend as _get_embed_backend
-        from .core.embedding_cache import RedisEmbeddingBackend as _RedisBackend
+        yield
+    except BaseException:  # noqa: BLE001
+        primary_exception = True
+        raise
+    finally:
+        cleanup_errors: list[tuple[str, BaseException]] = []
+        if ingest_worker_stop_event is not None:
+            ingest_worker_stop_event.set()
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except BaseException as exc:  # noqa: BLE001
+                cleanup_errors.append(("background_task", exc))
 
-        backend = await _get_embed_backend()
-        if isinstance(backend, _RedisBackend):
-            client = getattr(backend, "_client", None)
-            if client is not None and hasattr(client, "aclose"):
-                await client.aclose()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[Lifespan] embedding cache cleanup failed: %s", exc)
+        async def attempt_async_cleanup(resource_name: str, closer: Any) -> None:
+            try:
+                await closer()
+            except BaseException as exc:  # noqa: BLE001
+                cleanup_errors.append((resource_name, exc))
 
-    reset_shared_baseball_agent_runtime()
-    await close_ingest_connection_pool()
-    await close_connection_pool()  # 모든 커넥션 정리
+        if database_resources_started:
+            await attempt_async_cleanup("http_clients", close_shared_httpx_clients)
+
+            if embedding_backend is not None:
+                try:
+                    from .core.embedding_cache import (
+                        RedisEmbeddingBackend as _RedisBackend,
+                    )
+
+                    if isinstance(embedding_backend, _RedisBackend):
+                        client = getattr(embedding_backend, "_client", None)
+                        if client is not None and hasattr(client, "aclose"):
+                            await client.aclose()
+                except BaseException as exc:  # noqa: BLE001
+                    cleanup_errors.append(("embedding_cache", exc))
+
+            if runtime_initialized:
+                try:
+                    reset_shared_baseball_agent_runtime()
+                except BaseException as exc:  # noqa: BLE001
+                    cleanup_errors.append(("baseball_agent_runtime", exc))
+
+            await attempt_async_cleanup(
+                "ingest_pool",
+                close_ingest_connection_pool,
+            )
+            await attempt_async_cleanup("general_pool", close_connection_pool)
+
+        for resource_name, exc in cleanup_errors:
+            logger.error(
+                "[Lifespan] cleanup failed resource=%s error_type=%s",
+                resource_name,
+                type(exc).__name__,
+            )
+        if cleanup_errors and not primary_exception:
+            raise cleanup_errors[0][1]
 
 
 async def get_db_connection() -> AsyncGenerator[psycopg.AsyncConnection, None]:

@@ -86,6 +86,7 @@ def test_metric_objects_accept_labels_and_observations() -> None:
 
 
 def test_ingest_metrics_use_only_bounded_labels() -> None:
+    from app.observability import metrics as metrics_module
     from app.observability.metrics import (
         AI_INGEST_ACTIVE_RUNS,
         AI_INGEST_HEARTBEATS_TOTAL,
@@ -116,6 +117,7 @@ def test_ingest_metrics_use_only_bounded_labels() -> None:
     assert AI_INGEST_QUEUED_RUNS._labelnames == ("trigger_source",)
     assert AI_INGEST_LEASE_RECOVERIES_TOTAL._labelnames == ("result",)
     assert AI_INGEST_HEARTBEATS_TOTAL._labelnames == ("result",)
+    assert "AI_INGEST_HEARTBEATS_TOTAL" in metrics_module.__all__
     assert AI_INGEST_TABLE_DURATION_SECONDS._labelnames == ("source_table",)
     assert AI_INGEST_TABLE_SOURCE_ROWS_TOTAL._labelnames == ("source_table",)
     assert AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL._labelnames == ("source_table",)

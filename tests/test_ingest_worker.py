@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -8,6 +9,8 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+import psycopg
+from psycopg_pool import PoolTimeout
 
 from app.core.ingest_runs import (
     IngestLeaseLostError,
@@ -410,8 +413,9 @@ def test_lease_loss_prevents_terminal_success_and_further_tables(monkeypatch):
     store = _Store()
     worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
 
-    async def lose_lease(run, lease_lost):
+    async def lose_lease(run, lease_lost, last_confirmed_monotonic):
         del run
+        assert last_confirmed_monotonic > 0
         lease_lost.set()
 
     async def complete_after_lease_loss(run, lease_lost):
@@ -428,8 +432,19 @@ def test_lease_loss_prevents_terminal_success_and_further_tables(monkeypatch):
     assert store.failed is None
 
 
-def test_heartbeat_retries_transient_error_without_losing_lease():
-    store = _ScriptedHeartbeatStore([RuntimeError("temporary db failure"), NOW])
+@pytest.mark.parametrize(
+    "transient_error",
+    [
+        psycopg.OperationalError("temporary db failure"),
+        psycopg.InterfaceError("temporary db interface failure"),
+        PoolTimeout("temporary coordination pool pressure"),
+    ],
+    ids=["operational", "interface", "pool-timeout"],
+)
+def test_heartbeat_retries_recognized_transient_error_without_losing_lease(
+    transient_error,
+):
+    store = _ScriptedHeartbeatStore([transient_error, NOW])
     worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
     worker.lease_seconds = 0.1
     worker.heartbeat_interval_seconds = 0.001
@@ -463,19 +478,19 @@ def test_heartbeat_retries_transient_error_without_losing_lease():
 
 
 def test_heartbeat_exhaustion_marks_lease_lost():
-    store = _ScriptedHeartbeatStore([RuntimeError("db unavailable")] * 20)
+    store = _ScriptedHeartbeatStore([PoolTimeout("db unavailable")] * 20)
     worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
-    worker.lease_seconds = 0.02
+    worker.lease_seconds = 0.08
     worker.heartbeat_interval_seconds = 0.001
-    worker.heartbeat_safety_margin_seconds = 0.01
-    worker.heartbeat_retry_initial_seconds = 0.001
+    worker.heartbeat_safety_margin_seconds = 0.02
+    worker.heartbeat_retry_initial_seconds = 0.01
     lease_lost = asyncio.Event()
     exhausted_before = _read_metric_value(
         "ai_ingest_heartbeats_total", {"result": "exhausted"}
     )
 
     async def scenario():
-        await asyncio.wait_for(worker._heartbeat_loop(RUN, lease_lost), timeout=0.2)
+        await asyncio.wait_for(worker._heartbeat_loop(RUN, lease_lost), timeout=0.3)
 
     asyncio.run(scenario())
 
@@ -484,6 +499,152 @@ def test_heartbeat_exhaustion_marks_lease_lost():
     assert _read_metric_value(
         "ai_ingest_heartbeats_total", {"result": "exhausted"}
     ) - exhausted_before == 1
+
+
+def test_hung_heartbeat_call_times_out_at_safe_deadline_exactly_once():
+    call_cancelled = False
+
+    class _HungHeartbeatStore(_Store):
+        async def heartbeat(self, run_id, owner):
+            nonlocal call_cancelled
+            assert run_id == RUN_ID
+            assert owner == "worker-1"
+            self.heartbeat_calls += 1
+            try:
+                await asyncio.Event().wait()
+            finally:
+                call_cancelled = True
+
+    store = _HungHeartbeatStore(claimed=None)
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    worker.lease_seconds = 0.08
+    worker.heartbeat_interval_seconds = 0.001
+    worker.heartbeat_safety_margin_seconds = 0.02
+    lease_lost = asyncio.Event()
+    exhausted_before = _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "exhausted"}
+    )
+
+    asyncio.run(
+        asyncio.wait_for(worker._heartbeat_loop(RUN, lease_lost), timeout=0.2)
+    )
+
+    assert lease_lost.is_set() is True
+    assert store.heartbeat_calls == 1
+    assert call_cancelled is True
+    assert _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "exhausted"}
+    ) - exhausted_before == 1
+
+
+def test_delayed_success_keeps_request_start_as_confirmation_point():
+    second_call_cancelled = False
+
+    class _DelayedThenHungStore(_Store):
+        async def heartbeat(self, run_id, owner):
+            nonlocal second_call_cancelled
+            assert run_id == RUN_ID
+            assert owner == "worker-1"
+            self.heartbeat_calls += 1
+            if self.heartbeat_calls == 1:
+                await asyncio.sleep(0.12)
+                return NOW
+            try:
+                await asyncio.Event().wait()
+            finally:
+                second_call_cancelled = True
+
+    store = _DelayedThenHungStore(claimed=None)
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    worker.lease_seconds = 0.2
+    worker.heartbeat_interval_seconds = 0.001
+    worker.heartbeat_safety_margin_seconds = 0.02
+    lease_lost = asyncio.Event()
+    exhausted_before = _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "exhausted"}
+    )
+
+    asyncio.run(
+        asyncio.wait_for(worker._heartbeat_loop(RUN, lease_lost), timeout=0.24)
+    )
+
+    assert lease_lost.is_set() is True
+    assert store.heartbeat_calls == 2
+    assert second_call_cancelled is True
+    assert _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "exhausted"}
+    ) - exhausted_before == 1
+
+
+def test_non_transient_heartbeat_error_stops_without_retry_or_secret_log(
+    caplog,
+):
+    secret = "postgresql://user:secret@internal/db"
+    store = _ScriptedHeartbeatStore([ValueError(secret), NOW])
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    worker.lease_seconds = 0.5
+    worker.heartbeat_interval_seconds = 0.001
+    lease_lost = asyncio.Event()
+    before = {
+        result: _read_metric_value(
+            "ai_ingest_heartbeats_total", {"result": result}
+        )
+        for result in ("success", "retry", "rejected", "exhausted")
+    }
+    caplog.set_level(logging.ERROR)
+
+    asyncio.run(
+        asyncio.wait_for(worker._heartbeat_loop(RUN, lease_lost), timeout=0.1)
+    )
+
+    assert lease_lost.is_set() is True
+    assert store.heartbeat_calls == 1
+    assert "ValueError" in caplog.text
+    assert str(RUN_ID) in caplog.text
+    assert secret not in caplog.text
+    for result, previous in before.items():
+        assert _read_metric_value(
+            "ai_ingest_heartbeats_total", {"result": result}
+        ) == previous
+
+
+def test_run_once_records_initial_confirmation_before_claim_request(monkeypatch):
+    class _DelayedClaimStore(_Store):
+        def __init__(self):
+            super().__init__()
+            self.claim_started = 0.0
+            self.claim_returned = 0.0
+
+        async def claim_next(self, owner):
+            self.claim_started = asyncio.get_running_loop().time()
+            await asyncio.sleep(0.03)
+            claimed = await super().claim_next(owner)
+            self.claim_returned = asyncio.get_running_loop().time()
+            return claimed
+
+    store = _DelayedClaimStore()
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    confirmation = {}
+
+    async def capture_confirmation(run, lease_lost, last_confirmed_monotonic):
+        del run
+        confirmation["value"] = last_confirmed_monotonic
+        lease_lost.set()
+
+    async def finish_after_heartbeat_started(run, lease_lost):
+        del run
+        while "value" not in confirmation:
+            await asyncio.sleep(0)
+        assert lease_lost.is_set()
+        return EXECUTION_RESULT
+
+    monkeypatch.setattr(worker, "_heartbeat_loop", capture_confirmation)
+    monkeypatch.setattr(worker, "_execute", finish_after_heartbeat_started)
+
+    assert asyncio.run(worker.run_once()) is True
+
+    assert confirmation["value"] <= store.claim_started
+    assert confirmation["value"] < store.claim_returned - 0.01
 
 
 def test_heartbeat_rejection_marks_lease_lost_without_retry():
