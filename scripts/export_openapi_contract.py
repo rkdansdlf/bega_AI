@@ -23,7 +23,25 @@ ENDPOINTS_PATH = ROOT / "docs" / "api-endpoints.md"
 SCHEMAS_PATH = ROOT / "docs" / "api-schemas.md"
 UPDATE_COMMAND = "python scripts/export_openapi_contract.py"
 HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head", "trace")
+
+
+def _committed_openapi_title() -> str:
+    """Read the canonical non-secret documentation title from the contract."""
+
+    document = json.loads(CONTRACT_PATH.read_bytes().decode("utf-8"))
+    if not isinstance(document, Mapping):
+        raise ValueError("Committed OpenAPI document must be an object")
+    info = document.get("info")
+    if not isinstance(info, Mapping):
+        raise ValueError("Committed OpenAPI info must be an object")
+    title = info.get("title")
+    if not isinstance(title, str):
+        raise ValueError("Committed OpenAPI info title must be a string")
+    return title
+
+
 DOCUMENTATION_ENV = {
+    "APP_NAME": _committed_openapi_title(),
     "APP_ENV": "local",
     "AI_INTERNAL_TOKEN": "openapi-contract-generation-token",
     "AI_DOCS_ENABLED": "true",
@@ -135,6 +153,7 @@ def _render_endpoints(
     ]
 
     current_tag: str | None = None
+    rendered_path_metadata: set[str] = set()
     for operation in operations:
         if operation.tag != current_tag:
             lines.extend(["", f"## {operation.tag}"])
@@ -157,11 +176,15 @@ def _render_endpoints(
         path_item = paths[operation.path]
         if not isinstance(path_item, Mapping):
             raise ValueError("OpenAPI paths entries must be objects")
+        if operation.path not in rendered_path_metadata:
+            _append_path_item_metadata(lines, operation.path, path_item)
+            rendered_path_metadata.add(operation.path)
         _append_parameters(
             lines, _merged_parameters(path_item, definition), schema_anchors
         )
         _append_request_body(lines, definition.get("requestBody"), schema_anchors)
         _append_responses(lines, definition.get("responses"), schema_anchors)
+        _append_operation_metadata(lines, operation, definition)
 
     return _finish(lines)
 
@@ -192,10 +215,51 @@ def _security_label(definition: Mapping[str, Any]) -> str:
     return " OR ".join(requirements)
 
 
+def _append_path_item_metadata(
+    lines: list[str], path: str, path_item: Mapping[str, Any]
+) -> None:
+    metadata = {
+        key: value
+        for key, value in path_item.items()
+        if key not in HTTP_METHODS and key != "parameters"
+    }
+    if metadata:
+        _append_unsupported(lines, f"path item `{_escape_code(path)}` metadata", metadata)
+
+
+def _append_operation_metadata(
+    lines: list[str], operation: _Operation, definition: Mapping[str, Any]
+) -> None:
+    represented: set[str] = {"parameters"}
+    if isinstance(definition.get("summary"), str):
+        represented.add("summary")
+    if isinstance(definition.get("description"), str):
+        represented.add("description")
+    if isinstance(definition.get("operationId"), str):
+        represented.add("operationId")
+    if definition.get("tags"):
+        represented.add("tags")
+    if "security" in definition:
+        represented.add("security")
+    if "deprecated" in definition:
+        represented.add("deprecated")
+    if definition.get("requestBody") is not None:
+        represented.add("requestBody")
+    if definition.get("responses") is not None:
+        represented.add("responses")
+    metadata = {key: value for key, value in definition.items() if key not in represented}
+    if metadata:
+        _append_unsupported(
+            lines,
+            f"operation {operation.method.upper()} `{_escape_code(operation.path)}` metadata",
+            metadata,
+        )
+
+
 def _merged_parameters(
     path_item: Mapping[str, Any], operation: Mapping[str, Any]
 ) -> list[Mapping[str, Any]]:
-    merged: dict[tuple[str, str], Mapping[str, Any]] = {}
+    merged: dict[tuple[str, ...], Mapping[str, Any]] = {}
     for owner in (path_item, operation):
         parameters = owner.get("parameters", [])
         if not isinstance(parameters, list):
@@ -203,24 +267,39 @@ def _merged_parameters(
         for parameter in parameters:
             if not isinstance(parameter, Mapping):
                 raise ValueError("OpenAPI parameter must be an object")
-            location = parameter.get("in")
-            name = parameter.get("name")
-            if not isinstance(location, str) or not isinstance(name, str):
-                raise ValueError("OpenAPI parameter must include string in and name")
-            merged[(location, name)] = parameter
+            merged[_parameter_identity(parameter)] = parameter
     location_order = {"path": 0, "query": 1, "header": 2, "cookie": 3}
     return [
         parameter
         for _, parameter in sorted(
             merged.items(),
             key=lambda item: (
-                location_order.get(item[0][0], len(location_order)),
-                item[0][0].lower(),
+                location_order.get(item[0][1], len(location_order))
+                if item[0][0] == "parameter"
+                else len(location_order) + 1,
                 item[0][1].lower(),
-                item[0][1],
+                item[0][-1].lower(),
+                item[0][-1],
             ),
         )
     ]
+
+
+def _parameter_identity(parameter: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return a stable merge key without rejecting valid reference-only parameters."""
+
+    reference = parameter.get("$ref")
+    if (
+        isinstance(reference, str)
+        and "name" not in parameter
+        and "in" not in parameter
+    ):
+        return ("reference", reference)
+    location = parameter.get("in")
+    name = parameter.get("name")
+    if not isinstance(location, str) or not isinstance(name, str):
+        raise ValueError("OpenAPI parameter must include string in and name")
+    return ("parameter", location, name)
 
 
 def _append_parameters(
@@ -232,8 +311,9 @@ def _append_parameters(
         return
     lines.extend(["", "#### Parameters", "", "| Name | In | Required | Schema | Description | Example |", "| --- | --- | --- | --- | --- | --- |"])
     for parameter in parameters:
-        name = parameter["name"]
-        location = parameter["in"]
+        reference_only = _is_reference_only_parameter(parameter)
+        name = parameter["$ref"] if reference_only else parameter["name"]
+        location = "reference" if reference_only else parameter["in"]
         description = parameter.get("description", "")
         example = f"`{_inline_json(parameter['example'])}`" if "example" in parameter else ""
         lines.append(
@@ -247,11 +327,15 @@ def _append_parameters(
         _append_reference_siblings(
             lines, f"parameter {_escape_code(name)} schema siblings", parameter.get("schema")
         )
-        _append_examples(lines, parameter)
+        _append_examples(lines, parameter, include_singular=False)
         if "content" in parameter:
             lines.extend(["", f"#### Parameter content: `{_escape_code(name)}`"])
             _append_content(lines, parameter["content"], schema_anchors)
-        represented = {"name", "in", "required", "description", "example", "examples"}
+        represented = {"required", "description", "example", "examples"}
+        if reference_only:
+            represented.add("$ref")
+        else:
+            represented.update(("name", "in"))
         if "schema" in parameter and _schema_is_rendered(parameter["schema"]):
             represented.add("schema")
         if "content" in parameter and parameter["content"] is not None:
@@ -260,9 +344,22 @@ def _append_parameters(
             key: value for key, value in parameter.items() if key not in represented
         }
         if metadata:
-            _append_unsupported(
-                lines, f"parameter {_escape_code(name)} metadata", metadata
+            metadata_label = (
+                "parameter reference metadata"
+                if reference_only
+                else f"parameter {_escape_code(name)} metadata"
             )
+            _append_unsupported(
+                lines, metadata_label, metadata
+            )
+
+
+def _is_reference_only_parameter(parameter: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(parameter.get("$ref"), str)
+        and "name" not in parameter
+        and "in" not in parameter
+    )
 
 
 def _append_request_body(
@@ -446,8 +543,10 @@ def _append_response_links(lines: list[str], links: object) -> None:
         )
 
 
-def _append_examples(lines: list[str], owner: Mapping[str, Any]) -> None:
-    if "example" in owner:
+def _append_examples(
+    lines: list[str], owner: Mapping[str, Any], *, include_singular: bool = True
+) -> None:
+    if include_singular and "example" in owner:
         lines.extend(["", "#### Example", "", "```json", _stable_json(owner["example"]), "```"])
     if "examples" not in owner:
         return
@@ -933,11 +1032,28 @@ def _build_contract_document() -> dict[str, Any]:
     previous = {key: os.environ.get(key) for key in DOCUMENTATION_ENV}
     os.environ.update(DOCUMENTATION_ENV)
     try:
-        from app.config import get_settings
-        from app.main import create_app
+        from app import config as app_config
 
-        get_settings.cache_clear()
-        document = json.loads(json.dumps(create_app().openapi(), ensure_ascii=False))
+        settings_getter = app_config.get_settings
+        documentation_settings = settings_getter.__wrapped__()
+
+        def get_documentation_settings() -> object:
+            return documentation_settings
+
+        previous_config_get_settings = app_config.get_settings
+        app_config.get_settings = get_documentation_settings
+        try:
+            from app import main as app_main
+        finally:
+            app_config.get_settings = previous_config_get_settings
+
+        previous_main_get_settings = app_main.get_settings
+        app_main.get_settings = get_documentation_settings
+        try:
+            app = app_main.create_app()
+        finally:
+            app_main.get_settings = previous_main_get_settings
+        document = json.loads(json.dumps(app.openapi(), ensure_ascii=False))
         if not isinstance(document, dict):
             raise ValueError("OpenAPI document must be an object")
         paths = _require_mapping(document, "paths")
@@ -952,9 +1068,6 @@ def _build_contract_document() -> dict[str, Any]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        from app.config import get_settings
-
-        get_settings.cache_clear()
         _remove_transient_app_modules(existing_app_modules)
         _remove_transient_prometheus_collectors(prometheus_collectors)
 
@@ -1011,7 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
         stale_paths = [
             path
             for path, expected in artifacts.items()
-            if not path.exists() or path.read_text(encoding="utf-8") != expected
+            if not path.exists() or path.read_bytes() != expected.encode("utf-8")
         ]
         if stale_paths:
             for path in stale_paths:
