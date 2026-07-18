@@ -6,6 +6,7 @@ from app.core.ingest_checkpoints import (
     CheckpointOrder,
     CheckpointOrderField,
     IngestCheckpointCursorUnavailableError,
+    decode_cursor,
 )
 
 try:
@@ -287,7 +288,7 @@ def test_custom_checkpoint_registry_is_exact_and_static_profiles_are_isolated():
         "team_franchises": (("id", "integer"),),
         "player_basic": (("player_id", "text"),),
         "team_name_mapping": (("full_name", "text"),),
-        "team_profiles": (("team_id", "text"),),
+        "team_profiles": (("id", "integer"),),
         "team_season_batting": (("id", "integer"),),
         "team_season_pitching": (("id", "integer"),),
         "stat_rankings": (("id", "integer"),),
@@ -321,6 +322,69 @@ def test_custom_checkpoint_query_wraps_output_aliases(sample_since):
     assert 'ROW("id") > ROW(%s)' in query
     assert query.rstrip().endswith('ORDER BY "id" ASC')
     assert params == (2026, sample_since, 41)
+
+
+def test_team_profiles_checkpoint_uses_unique_id_for_same_team_profiles():
+    profile = TABLE_PROFILES["team_profiles"]
+    order = ingest_script.resolve_checkpoint_order(None, "team_profiles", profile)
+    rows = [
+        {"id": 41, "team_id": "TEST_TEAM", "profile": "history"},
+        {"id": 42, "team_id": "TEST_TEAM", "profile": "identity"},
+    ]
+
+    yielded = list(
+        ingest_script.iter_checkpoint_rows(rows, order=order, previous=None)
+    )
+    query, params = build_select_query(
+        table="team_profiles",
+        profile=profile,
+        pk_columns=["id"],
+        limit=None,
+        season_year=None,
+        since=None,
+        checkpoint_order=order,
+        resume_cursor=CheckpointCursor((41,)),
+    )
+
+    assert order.fields == (CheckpointOrderField("id", "integer"),)
+    assert [cursor for _row, cursor in yielded] == [
+        CheckpointCursor((41,)),
+        CheckpointCursor((42,)),
+    ]
+    assert 'ROW("id") > ROW(%s)' in query
+    assert query.rstrip().endswith('ORDER BY "id" ASC')
+    assert params == (41,)
+
+
+def test_datetime_naive_checkpoint_query_rebinds_naive_parameter():
+    order = CheckpointOrder(
+        "event",
+        (CheckpointOrderField("occurred_at", "datetime_naive"),),
+    )
+    payload = {
+        "values": [
+            {
+                "field": "occurred_at",
+                "type": "datetime_naive",
+                "value": "2026-07-18T04:00:00",
+            }
+        ]
+    }
+    resume = decode_cursor(order, payload)
+
+    _query, params = build_select_query(
+        table="event",
+        profile={"season_filter_column": None, "since_filter_column": None},
+        pk_columns=["occurred_at"],
+        limit=None,
+        season_year=None,
+        since=None,
+        checkpoint_order=order,
+        resume_cursor=resume,
+    )
+
+    assert params == (datetime(2026, 7, 18, 4, 0),)
+    assert params[0].tzinfo is None
 
 
 def test_game_summary_checkpoint_source_has_one_logical_row_per_id(sample_since):

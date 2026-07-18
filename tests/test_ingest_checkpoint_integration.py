@@ -230,6 +230,8 @@ def _run_fake_checkpoint_ingest(
     read_batch_size=2,
     observe_metrics=False,
     start_error=None,
+    checkpoint_scope_key=SCOPE_KEY,
+    captured_scopes=None,
 ):
     events = [] if events is None else events
     if state is None:
@@ -247,6 +249,7 @@ def _run_fake_checkpoint_ingest(
         state = _CheckpointState(durable=durable)
     captured_resumes = [] if captured_resumes is None else captured_resumes
     lease_calls = [] if lease_calls is None else lease_calls
+    captured_scopes = [] if captured_scopes is None else captured_scopes
     source = _EventConnection(events, state, rows=list(rows), source=True)
     destination = _EventConnection(
         events,
@@ -259,6 +262,7 @@ def _run_fake_checkpoint_ingest(
         def start(cls, cursor, **kwargs):
             if start_error is not None:
                 raise start_error
+            captured_scopes.append(kwargs["scope_key"])
             return super().start(cursor, **kwargs)
 
     _ConfiguredSession.events = events
@@ -332,7 +336,7 @@ def _run_fake_checkpoint_ingest(
         stats={},
         lease_guard=lambda write=False: lease_calls.append(write),
         checkpoint_run_id=RUN_ID,
-        checkpoint_scope_key=SCOPE_KEY,
+        checkpoint_scope_key=checkpoint_scope_key,
     )
     return result, events
 
@@ -517,6 +521,76 @@ def test_leased_ingest_rejects_blank_owner_before_runtime_or_connections(
             row_stale_cleanup="off",
             **OPTIONS,
         )
+
+
+@pytest.mark.parametrize("scope_key", ["   ", "x" * 65])
+def test_leased_ingest_rejects_invalid_checkpoint_scope_before_runtime_or_connections(
+    monkeypatch,
+    scope_key,
+):
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("runtime and connections must not be opened")
+
+    monkeypatch.setattr(module, "_require_psycopg", _unexpected)
+    monkeypatch.setattr(module, "get_settings", _unexpected)
+    monkeypatch.setattr(module.psycopg, "connect", _unexpected)
+
+    with pytest.raises(ValueError, match="checkpoint_scope_key"):
+        module.ingest(
+            tables=["game"],
+            lease_run_id=RUN_ID,
+            lease_owner="worker-1",
+            checkpoint_scope_key=scope_key,
+            row_stale_cleanup="off",
+            **OPTIONS,
+        )
+
+
+@pytest.mark.parametrize("scope_key", ["   ", "x" * 65])
+def test_direct_checkpoint_ingest_rejects_invalid_scope_before_runtime_or_cursors(
+    monkeypatch,
+    scope_key,
+):
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("runtime and cursors must not be opened")
+
+    monkeypatch.setattr(module, "get_settings", _unexpected)
+
+    with pytest.raises(ValueError, match="checkpoint_scope_key"):
+        module.ingest_table(
+            SimpleNamespace(cursor=_unexpected),
+            SimpleNamespace(cursor=_unexpected),
+            "teams",
+            limit=None,
+            embed_batch_size=2,
+            read_batch_size=2,
+            season_year=2026,
+            since=None,
+            use_legacy_renderer=False,
+            skip_embedding=True,
+            max_concurrency=1,
+            commit_interval=500,
+            parallel_engine="thread",
+            workers=1,
+            row_stale_cleanup="off",
+            stats={},
+            lease_guard=lambda _write=False: None,
+            checkpoint_run_id=RUN_ID,
+            checkpoint_scope_key=scope_key,
+        )
+
+
+def test_direct_checkpoint_ingest_strips_scope_before_session_start(monkeypatch):
+    captured_scopes: list[str] = []
+
+    _run_fake_checkpoint_ingest(
+        monkeypatch,
+        rows=[],
+        checkpoint_scope_key=f"  {SCOPE_KEY}  ",
+        captured_scopes=captured_scopes,
+    )
+
+    assert captured_scopes == [SCOPE_KEY]
 
 
 def test_chunk_write_and_checkpoint_precede_one_commit(monkeypatch):

@@ -1433,7 +1433,7 @@ CUSTOM_CHECKPOINT_ORDERS = {
     "team_franchises": (("id", "integer"),),
     "player_basic": (("player_id", "text"),),
     "team_name_mapping": (("full_name", "text"),),
-    "team_profiles": (("team_id", "text"),),
+    "team_profiles": (("id", "integer"),),
     "team_season_batting": (("id", "integer"),),
     "team_season_pitching": (("id", "integer"),),
     "stat_rankings": (("id", "integer"),),
@@ -1550,8 +1550,10 @@ def _postgres_type_to_cursor_type(pg_type: str) -> CursorScalarType:
         return "decimal"
     if normalized == "date":
         return "date"
-    if normalized in {"timestamp with time zone", "timestamp without time zone"}:
+    if normalized == "timestamp with time zone":
         return "datetime"
+    if normalized == "timestamp without time zone":
+        return "datetime_naive"
     if normalized == "uuid":
         return "uuid"
     if normalized in {"text", "character", "character varying"} or normalized.startswith(
@@ -2860,6 +2862,17 @@ def _checkpoint_result(
     )
 
 
+def _normalize_checkpoint_scope_key(scope_key: str) -> str:
+    if not isinstance(scope_key, str):
+        raise ValueError("checkpoint_scope_key must be a string")
+    normalized = scope_key.strip()
+    if not normalized:
+        raise ValueError("checkpoint_scope_key must not be empty")
+    if len(normalized) > 64:
+        raise ValueError("checkpoint_scope_key must not exceed 64 characters")
+    return normalized
+
+
 @_trace_checkpoint_rejections
 def ingest_table(
     source_conn: Any,
@@ -2885,8 +2898,10 @@ def ingest_table(
     checkpoint_scope_key: Optional[str] = None,
 ) -> IngestTableResult:
     checkpointed = checkpoint_run_id is not None or checkpoint_scope_key is not None
+    if checkpoint_scope_key is not None:
+        checkpoint_scope_key = _normalize_checkpoint_scope_key(checkpoint_scope_key)
     if checkpointed:
-        if checkpoint_run_id is None or not checkpoint_scope_key:
+        if checkpoint_run_id is None or checkpoint_scope_key is None:
             raise ValueError(
                 "checkpoint_run_id and checkpoint_scope_key must be provided together"
             )
@@ -3331,11 +3346,13 @@ def ingest(
     lease_owner: Optional[str] = None,
     checkpoint_scope_key: Optional[str] = None,
 ) -> IngestExecutionResult:
+    if checkpoint_scope_key is not None:
+        checkpoint_scope_key = _normalize_checkpoint_scope_key(checkpoint_scope_key)
     leased = lease_run_id is not None or lease_owner is not None
     if leased:
         if lease_run_id is None or lease_owner is None or not lease_owner.strip():
             raise ValueError("lease_run_id and lease_owner must be provided together")
-        if not checkpoint_scope_key:
+        if checkpoint_scope_key is None:
             raise ValueError("checkpoint_scope_key is required for leased ingestion")
         checkpoint_tables = [
             table
