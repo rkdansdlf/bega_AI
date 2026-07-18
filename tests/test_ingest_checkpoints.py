@@ -36,6 +36,7 @@ ORDER = CheckpointOrder(
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
 SCOPE_KEY = "season:2026"
 NOW = datetime(2026, 7, 18, 4, 0, tzinfo=UTC)
+CUTOFF = datetime(2026, 7, 18, 5, 0, tzinfo=UTC)
 
 
 def _checkpoint_row(
@@ -52,6 +53,7 @@ def _checkpoint_row(
     reused_embeddings=0,
     embedded_chunks=0,
     max_updated_at=None,
+    source_updated_before=None,
     completed=False,
     completed_at=None,
 ):
@@ -68,6 +70,7 @@ def _checkpoint_row(
         reused_embeddings,
         embedded_chunks,
         max_updated_at,
+        source_updated_before,
         completed,
         completed_at or (NOW if completed else None),
     )
@@ -87,6 +90,7 @@ def _checkpoint_mapping(**overrides):
         "reused_embeddings",
         "embedded_chunks",
         "max_updated_at",
+        "source_updated_before",
         "completed",
         "completed_at",
     )
@@ -168,6 +172,47 @@ def test_resolve_checkpoint_order_distinguishes_postgres_timestamp_types():
         CheckpointOrderField("local_time", "datetime_naive"),
         CheckpointOrderField("absolute_time", "datetime"),
     )
+
+
+@pytest.mark.parametrize(
+    ("pg_type", "expected"),
+    [
+        ("timestamp(0) without time zone", "datetime_naive"),
+        ("timestamp(3) without time zone", "datetime_naive"),
+        ("timestamp(6) without time zone", "datetime_naive"),
+        ("timestamp(0) with time zone", "datetime"),
+        ("timestamp(3) with time zone", "datetime"),
+        ("timestamp(6) with time zone", "datetime"),
+    ],
+)
+def test_resolve_checkpoint_order_accepts_valid_timestamp_precision_forms(
+    pg_type,
+    expected,
+):
+    conn = FakeCatalogConnection([("occurred_at", pg_type, True)])
+
+    order = ingest_script.resolve_checkpoint_order(conn, "event", {})
+
+    assert order.fields == (CheckpointOrderField("occurred_at", expected),)
+
+
+@pytest.mark.parametrize(
+    "pg_type",
+    [
+        "timestamp() with time zone",
+        "timestamp(7) with time zone",
+        "timestamp(10) without time zone",
+        "timestamp(-1) without time zone",
+        "timestamp(03) with time zone",
+        "timestamp(3) with local time zone",
+        "timestamp(3)",
+    ],
+)
+def test_resolve_checkpoint_order_rejects_invalid_timestamp_precision_forms(pg_type):
+    conn = FakeCatalogConnection([("occurred_at", pg_type, True)])
+
+    with pytest.raises(IngestCheckpointCursorTypeError):
+        ingest_script.resolve_checkpoint_order(conn, "event", {})
 
 
 def test_resolve_checkpoint_order_rejects_float_primary_key():
@@ -479,7 +524,7 @@ def test_legacy_datetime_signature_is_incompatible_with_datetime_naive_order():
 
 
 def test_repository_load_uses_explicit_columns_and_decodes_typed_cursor():
-    cursor = _RecordingCursor(rows=[_checkpoint_row()])
+    cursor = _RecordingCursor(rows=[_checkpoint_row(source_updated_before=CUTOFF)])
     repository = IngestCheckpointRepository(ORDER)
 
     loaded = repository.load(
@@ -496,10 +541,12 @@ def test_repository_load_uses_explicit_columns_and_decodes_typed_cursor():
         cursor_version=CURSOR_VERSION,
         cursor_signature=ORDER.signature,
         cursor=CheckpointCursor((date(2026, 7, 18), "g1")),
+        source_updated_before=CUTOFF,
     )
     sql, params = cursor.executed[0]
     assert "SELECT *" not in sql
     assert "cursor_payload" in sql
+    assert "source_updated_before" in sql
     assert "completed_at" in sql
     assert "FOR UPDATE" in sql
     assert params == (RUN_ID, "game")
@@ -518,6 +565,7 @@ def test_advance_locks_identity_and_returns_monotonic_progress():
                 embedded_chunks=2,
                 committed_batches=1,
                 max_updated_at=NOW,
+                source_updated_before=CUTOFF,
             ),
         ]
     )
@@ -527,7 +575,9 @@ def test_advance_locks_identity_and_returns_monotonic_progress():
         source_table="game",
         scope_key=SCOPE_KEY,
         order=ORDER,
+        requires_source_updated_before=True,
     )
+    session.bind_source_updated_before(CUTOFF)
 
     updated = session.advance(
         cursor,
@@ -548,6 +598,7 @@ def test_advance_locks_identity_and_returns_monotonic_progress():
     assert updated.written_chunks == 3
     assert updated.committed_batches == 1
     assert updated.max_updated_at == NOW
+    assert updated.source_updated_before == CUTOFF
     assert session.current == updated
     insert_params = cursor.executed[2][1]
     assert insert_params[:5] == (
@@ -557,7 +608,72 @@ def test_advance_locks_identity_and_returns_monotonic_progress():
         CURSOR_VERSION,
         ORDER.signature,
     )
-    assert insert_params[6:] == (1, 2, 3, 1, 2, NOW)
+    assert insert_params[6:] == (1, 2, 3, 1, 2, NOW, CUTOFF)
+
+
+def test_start_reuses_persisted_source_cutoff_without_rebinding():
+    cursor = _RecordingCursor(
+        rows=[
+            _checkpoint_row(
+                committed_batches=1,
+                source_rows=1,
+                source_updated_before=CUTOFF,
+            )
+        ]
+    )
+
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+        requires_source_updated_before=True,
+    )
+
+    assert session.source_updated_before == CUTOFF
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        session.bind_source_updated_before(CUTOFF + timedelta(seconds=1))
+
+
+def test_start_rejects_progressed_incomplete_checkpoint_missing_required_cutoff():
+    cursor = _RecordingCursor(
+        rows=[_checkpoint_row(committed_batches=1, source_rows=1)]
+    )
+
+    with pytest.raises(IngestCheckpointIncompatibleError, match="source update cutoff"):
+        IngestCheckpointSession.start(
+            cursor,
+            run_id=RUN_ID,
+            source_table="game",
+            scope_key=SCOPE_KEY,
+            order=ORDER,
+            requires_source_updated_before=True,
+        )
+
+
+def test_start_allows_completed_legacy_checkpoint_without_required_cutoff():
+    cursor = _RecordingCursor(
+        rows=[
+            _checkpoint_row(
+                committed_batches=1,
+                source_rows=1,
+                completed=True,
+            )
+        ]
+    )
+
+    session = IngestCheckpointSession.start(
+        cursor,
+        run_id=RUN_ID,
+        source_table="game",
+        scope_key=SCOPE_KEY,
+        order=ORDER,
+        requires_source_updated_before=True,
+    )
+
+    assert session.completed is True
+    assert session.source_updated_before is None
 
 
 @pytest.mark.parametrize(
@@ -799,6 +915,7 @@ def test_advance_accepts_canonical_return_for_naive_datetime_cursor():
         0,
         0,
         None,
+        None,
         False,
         None,
     )
@@ -826,7 +943,15 @@ def test_advance_accepts_canonical_return_for_naive_datetime_cursor():
 
 def test_complete_can_create_zero_row_checkpoint():
     cursor = _RecordingCursor(
-        rows=[None, None, _checkpoint_row(cursor=None, completed=True)]
+        rows=[
+            None,
+            None,
+            _checkpoint_row(
+                cursor=None,
+                source_updated_before=CUTOFF,
+                completed=True,
+            ),
+        ]
     )
     session = IngestCheckpointSession.start(
         cursor,
@@ -834,7 +959,9 @@ def test_complete_can_create_zero_row_checkpoint():
         source_table="game",
         scope_key=SCOPE_KEY,
         order=ORDER,
+        requires_source_updated_before=True,
     )
+    session.bind_source_updated_before(CUTOFF)
 
     completed = session.complete(cursor)
 
@@ -842,10 +969,12 @@ def test_complete_can_create_zero_row_checkpoint():
     assert completed.cursor is None
     assert completed.source_rows == 0
     assert completed.committed_batches == 0
+    assert completed.source_updated_before == CUTOFF
     assert session.resumed is False
     assert session.completed is True
     assert "FOR UPDATE" in cursor.executed[1][0]
     assert "INSERT INTO ai_ingest_checkpoints" in cursor.executed[2][0]
+    assert CUTOFF in cursor.executed[2][1]
 
 
 def test_complete_updates_only_completion_fields_and_never_increments_batches():
@@ -885,7 +1014,7 @@ def test_complete_updates_only_completion_fields_and_never_increments_batches():
     assert "updated_at = clock_timestamp()" in set_clause
     assert "committed_batches" not in set_clause
     assert "source_rows" not in set_clause
-    assert params == (RUN_ID, "game")
+    assert params == (None, RUN_ID, "game")
 
 
 def test_complete_rejects_stale_or_missing_returning_state_without_mutating():

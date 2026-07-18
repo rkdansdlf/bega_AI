@@ -460,6 +460,22 @@ def _row_updated_at(row: Mapping[str, Any], profile: Mapping[str, Any]) -> datet
     return None
 
 
+def _read_source_updated_before(cursor: Any) -> datetime:
+    cursor.execute("SELECT clock_timestamp() AS source_updated_before")
+    row = cursor.fetchone()
+    if isinstance(row, Mapping):
+        value = row.get("source_updated_before")
+    elif isinstance(row, Sequence) and row:
+        value = row[0]
+    else:
+        value = None
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise IngestCheckpointIncompatibleError(
+            "source database clock did not return an aware timestamp"
+        )
+    return value
+
+
 # TABLE_PROFILES에 테이블별 메타가 있음: 설명, select_sql, 제목 구성용 필드(title_fields), 본문 하이라이트(highlights), 기본키 힌트(pk_hint), 전용 렌더러(renderer).
 TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
     "kbo_metrics_explained": {
@@ -760,6 +776,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["id", "game_id"],
         "season_filter_column": "ks.season_year",
         "since_filter_column": "gm.updated_at",
+        "watermark_fields": ("game_updated_at",),
     },
     "game_flow_summary": {
         "description": "KBO 경기 흐름 요약",
@@ -1550,9 +1567,9 @@ def _postgres_type_to_cursor_type(pg_type: str) -> CursorScalarType:
         return "decimal"
     if normalized == "date":
         return "date"
-    if normalized == "timestamp with time zone":
+    if re.fullmatch(r"timestamp(?:\([0-6]\))? with time zone", normalized):
         return "datetime"
-    if normalized == "timestamp without time zone":
+    if re.fullmatch(r"timestamp(?:\([0-6]\))? without time zone", normalized):
         return "datetime_naive"
     if normalized == "uuid":
         return "uuid"
@@ -2198,6 +2215,7 @@ def build_select_query(
     limit: Optional[int],
     season_year: Optional[int],
     since: Optional[datetime],
+    source_updated_before: Optional[datetime] = None,
     date_to_exclusive: Optional[Any] = None,
     checkpoint_order: Optional[CheckpointOrder] = None,
     resume_cursor: Optional[CheckpointCursor] = None,
@@ -2208,6 +2226,14 @@ def build_select_query(
     season_filter_column = profile.get("season_filter_column", "season_year")
     since_filter_column = profile.get("since_filter_column", "updated_at")
     date_to_exclusive_filter_column = profile.get("date_to_exclusive_filter_column")
+    if (
+        checkpoint_order is not None
+        and since_filter_column
+        and source_updated_before is None
+    ):
+        raise IngestCheckpointIncompatibleError(
+            "checkpointed update-filter query requires a source update cutoff"
+        )
     params: List[Any] = []
     if custom_sql:
         stripped = custom_sql.strip()
@@ -2227,6 +2253,13 @@ def build_select_query(
         if since is not None and since_filter_column:
             where_clauses.append(f"{since_filter_column} >= %s")
             params.append(since)
+        if (
+            checkpoint_order is not None
+            and source_updated_before is not None
+            and since_filter_column
+        ):
+            where_clauses.append(f"{since_filter_column} <= %s")
+            params.append(source_updated_before)
         if date_to_exclusive is not None and date_to_exclusive_filter_column:
             where_clauses.append(f"{date_to_exclusive_filter_column} < %s")
             params.append(date_to_exclusive)
@@ -2275,6 +2308,14 @@ def build_select_query(
         column_name = str(since_filter_column).split(".")[-1]
         where_parts.append(sql.SQL("{} >= %s").format(sql.Identifier(column_name)))
         params.append(since)
+    if (
+        checkpoint_order is not None
+        and source_updated_before is not None
+        and since_filter_column
+    ):
+        column_name = str(since_filter_column).split(".")[-1]
+        where_parts.append(sql.SQL("{} <= %s").format(sql.Identifier(column_name)))
+        params.append(source_updated_before)
     if date_to_exclusive is not None and date_to_exclusive_filter_column:
         column_name = str(date_to_exclusive_filter_column).split(".")[-1]
         where_parts.append(sql.SQL("{} < %s").format(sql.Identifier(column_name)))
@@ -2986,7 +3027,11 @@ def ingest_table(
         checkpoint_session = None
         checkpoint_order = None
         resume_cursor = None
+        source_updated_before = None
         if checkpointed:
+            requires_source_updated_before = bool(
+                profile.get("since_filter_column", "updated_at")
+            )
             checkpoint_order = resolve_checkpoint_order(
                 source_conn,
                 table_name,
@@ -2998,6 +3043,7 @@ def ingest_table(
                 source_table=table_name,
                 scope_key=checkpoint_scope_key,
                 order=checkpoint_order,
+                requires_source_updated_before=requires_source_updated_before,
             )
             if checkpoint_session.resumed:
                 _record_checkpoint_event(table_name, "resumed")
@@ -3012,6 +3058,10 @@ def ingest_table(
 
         pk_columns = resolve_primary_key_columns(source_conn, table_name, profile)
         if checkpointed:
+            source_updated_before = checkpoint_session.source_updated_before
+            if requires_source_updated_before and source_updated_before is None:
+                source_updated_before = _read_source_updated_before(read_cur)
+                checkpoint_session.bind_source_updated_before(source_updated_before)
             query, params = build_select_query(
                 table_name,
                 profile,
@@ -3019,6 +3069,7 @@ def ingest_table(
                 limit,
                 season_year,
                 since,
+                source_updated_before=source_updated_before,
                 date_to_exclusive=date_to_exclusive,
                 checkpoint_order=checkpoint_order,
                 resume_cursor=resume_cursor,

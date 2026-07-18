@@ -82,8 +82,8 @@ def test_complete_contract_includes_ingest_checkpoints():
         "run_id", "source_table", "scope_key", "cursor_version",
         "cursor_signature", "cursor_payload", "committed_batches",
         "source_rows", "written_chunks", "reused_embeddings",
-        "embedded_chunks", "max_updated_at", "completed", "completed_at",
-        "created_at", "updated_at",
+        "embedded_chunks", "max_updated_at", "source_updated_before",
+        "completed", "completed_at", "created_at", "updated_at",
     }
     assert "idx_ai_ingest_checkpoints_updated_at" in REQUIRED_INDEXES
 ```
@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints (
     reused_embeddings bigint NOT NULL DEFAULT 0,
     embedded_chunks bigint NOT NULL DEFAULT 0,
     max_updated_at timestamptz,
+    source_updated_before timestamptz,
     completed boolean NOT NULL DEFAULT false,
     completed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -153,6 +154,9 @@ CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints (
         OR (completed = true AND completed_at IS NOT NULL)
     )
 );
+
+ALTER TABLE ai_ingest_checkpoints
+    ADD COLUMN IF NOT EXISTS source_updated_before timestamptz;
 
 CREATE INDEX IF NOT EXISTS idx_ai_ingest_checkpoints_updated_at
     ON ai_ingest_checkpoints (updated_at);
@@ -318,7 +322,8 @@ from uuid import UUID
 
 CURSOR_VERSION = 1
 CursorScalarType = Literal[
-    "integer", "decimal", "date", "datetime", "uuid", "text", "boolean"
+    "integer", "decimal", "date", "datetime", "datetime_naive",
+    "uuid", "text", "boolean"
 ]
 
 
@@ -385,7 +390,8 @@ class CheckpointCursor:
 ```
 
 Implement canonical scalar normalization with `datetime` checked before `date`,
-naive datetime normalized to UTC, and boolean rejected from the integer branch:
+aware timestamps normalized as instants, `datetime_naive` wall-clock fields kept
+offset-free, and boolean rejected from the integer branch:
 
 ```python
 def _normalize_cursor_value(kind: CursorScalarType, value: Any) -> Any:
@@ -395,6 +401,12 @@ def _normalize_cursor_value(kind: CursorScalarType, value: Any) -> Any:
         return value
     if kind == "datetime" and isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if kind == "datetime_naive" and isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value
+        raise IngestCheckpointCursorTypeError(
+            "datetime_naive cursor value must not include a timezone offset"
+        )
     if kind == "date" and isinstance(value, date) and not isinstance(value, datetime):
         return value
     if kind == "uuid" and isinstance(value, UUID):
@@ -410,7 +422,7 @@ def _normalize_cursor_value(kind: CursorScalarType, value: Any) -> Any:
 
 def _json_cursor_value(kind: CursorScalarType, value: Any) -> Any:
     normalized = _normalize_cursor_value(kind, value)
-    if kind in {"decimal", "date", "datetime", "uuid"}:
+    if kind in {"decimal", "date", "datetime", "datetime_naive", "uuid"}:
         return normalized.isoformat() if hasattr(normalized, "isoformat") else str(normalized)
     return normalized
 
@@ -633,7 +645,7 @@ CUSTOM_CHECKPOINT_ORDERS = {
     "team_franchises": (("id", "integer"),),
     "player_basic": (("player_id", "text"),),
     "team_name_mapping": (("full_name", "text"),),
-    "team_profiles": (("team_id", "text"),),
+    "team_profiles": (("id", "integer"),),
     "team_season_batting": (("id", "integer"),),
     "team_season_pitching": (("id", "integer"),),
     "stat_rankings": (("id", "integer"),),
@@ -657,8 +669,10 @@ def _postgres_type_to_cursor_type(pg_type: str) -> CursorScalarType:
         return "decimal"
     if normalized == "date":
         return "date"
-    if normalized in {"timestamp with time zone", "timestamp without time zone"}:
+    if re.fullmatch(r"timestamp(?:\([0-6]\))? with time zone", normalized):
         return "datetime"
+    if re.fullmatch(r"timestamp(?:\([0-6]\))? without time zone", normalized):
+        return "datetime_naive"
     if normalized == "uuid":
         return "uuid"
     if normalized in {"text", "character", "character varying"} or normalized.startswith(("character(", "character varying(")):

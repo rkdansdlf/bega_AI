@@ -102,6 +102,7 @@ REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = {
         "reused_embeddings",
         "embedded_chunks",
         "max_updated_at",
+        "source_updated_before",
         "completed",
         "completed_at",
         "created_at",

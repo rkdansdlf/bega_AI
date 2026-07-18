@@ -102,8 +102,8 @@ def test_complete_contract_includes_ingest_checkpoints():
         "run_id", "source_table", "scope_key", "cursor_version",
         "cursor_signature", "cursor_payload", "committed_batches",
         "source_rows", "written_chunks", "reused_embeddings",
-        "embedded_chunks", "max_updated_at", "completed", "completed_at",
-        "created_at", "updated_at",
+        "embedded_chunks", "max_updated_at", "source_updated_before",
+        "completed", "completed_at", "created_at", "updated_at",
     }
     assert "idx_ai_ingest_checkpoints_updated_at" in REQUIRED_INDEXES
 

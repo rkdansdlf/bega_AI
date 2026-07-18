@@ -6,6 +6,7 @@ from app.core.ingest_checkpoints import (
     CheckpointOrder,
     CheckpointOrderField,
     IngestCheckpointCursorUnavailableError,
+    IngestCheckpointIncompatibleError,
     decode_cursor,
 )
 
@@ -29,6 +30,11 @@ import scripts.ingest_from_kbo as ingest_script
 @pytest.fixture
 def sample_since():
     return datetime(2025, 4, 1, 12, 0)
+
+
+@pytest.fixture
+def sample_cutoff():
+    return datetime(2025, 4, 1, 13, 0)
 
 
 def test_ingest_from_kbo_does_not_force_pytest_env_flag() -> None:
@@ -302,7 +308,7 @@ def test_custom_checkpoint_registry_is_exact_and_static_profiles_are_isolated():
     assert all("checkpoint_query_version" not in profile for profile in static_profiles)
 
 
-def test_custom_checkpoint_query_wraps_output_aliases(sample_since):
+def test_custom_checkpoint_query_wraps_output_aliases(sample_since, sample_cutoff):
     profile = TABLE_PROFILES["game"]
     order = ingest_script.resolve_checkpoint_order(None, "game", profile)
     cursor = CheckpointCursor((41,))
@@ -314,6 +320,7 @@ def test_custom_checkpoint_query_wraps_output_aliases(sample_since):
         limit=None,
         season_year=2026,
         since=sample_since,
+        source_updated_before=sample_cutoff,
         checkpoint_order=order,
         resume_cursor=cursor,
     )
@@ -321,7 +328,38 @@ def test_custom_checkpoint_query_wraps_output_aliases(sample_since):
     assert "WITH checkpoint_source AS" in query
     assert 'ROW("id") > ROW(%s)' in query
     assert query.rstrip().endswith('ORDER BY "id" ASC')
-    assert params == (2026, sample_since, 41)
+    assert "gm.updated_at <= %s" in query
+    assert params == (2026, sample_since, sample_cutoff, 41)
+
+
+def test_custom_checkpoint_query_freezes_update_window_before_resume(
+    sample_since,
+    sample_cutoff,
+):
+    order = CheckpointOrder(
+        "sample",
+        (CheckpointOrderField("id", "integer"),),
+    )
+    query, params = build_select_query(
+        table="sample",
+        profile={
+            "select_sql": "SELECT s.* FROM sample s ORDER BY s.id DESC",
+            "season_filter_column": None,
+            "since_filter_column": "s.updated_at",
+        },
+        pk_columns=["id"],
+        limit=None,
+        season_year=None,
+        since=sample_since,
+        source_updated_before=sample_cutoff,
+        checkpoint_order=order,
+        resume_cursor=CheckpointCursor((41,)),
+    )
+
+    assert "s.updated_at >= %s AND s.updated_at <= %s" in query
+    assert query.index("s.updated_at <= %s") < query.index('ROW("id") > ROW(%s)')
+    assert query.rstrip().endswith('ORDER BY "id" ASC')
+    assert params == (sample_since, sample_cutoff, 41)
 
 
 def test_team_profiles_checkpoint_uses_unique_id_for_same_team_profiles():
@@ -406,6 +444,7 @@ def test_game_summary_checkpoint_source_has_one_logical_row_per_id(sample_since)
         limit=10,
         season_year=2026,
         since=sample_since,
+        source_updated_before=datetime(2026, 7, 18, 13, 0),
         date_to_exclusive=datetime(2026, 8, 1).date(),
         checkpoint_order=order,
         resume_cursor=CheckpointCursor((91,)),
@@ -420,7 +459,14 @@ def test_game_summary_checkpoint_source_has_one_logical_row_per_id(sample_since)
         not in query
     )
     assert query.count('ROW("id") > ROW(%s)') == 1
-    assert params == (2026, sample_since, datetime(2026, 8, 1).date(), 91, 10)
+    assert params == (
+        2026,
+        sample_since,
+        datetime(2026, 7, 18, 13, 0),
+        datetime(2026, 8, 1).date(),
+        91,
+        10,
+    )
 
 
 def test_game_flow_checkpoint_preserves_nested_order_and_strips_final_order():
@@ -436,6 +482,7 @@ def test_game_flow_checkpoint_preserves_nested_order_and_strips_final_order():
         limit=None,
         season_year=None,
         since=None,
+        source_updated_before=datetime(2026, 7, 18, 13, 0),
         checkpoint_order=order,
         resume_cursor=None,
     )
@@ -443,7 +490,7 @@ def test_game_flow_checkpoint_preserves_nested_order_and_strips_final_order():
     assert query.count("ORDER BY ip.inning") == 1
     assert "ORDER BY game_date DESC, game_id" not in query
     assert query.rstrip().endswith('ORDER BY "game_id" ASC')
-    assert params == ()
+    assert params == (datetime(2026, 7, 18, 13, 0),)
 
 
 def test_generic_checkpoint_query_uses_composite_primary_key():
@@ -472,6 +519,7 @@ def test_generic_checkpoint_query_uses_composite_primary_key():
 
 def test_generic_checkpoint_query_has_exact_order_limit_and_parameter_order(
     sample_since,
+    sample_cutoff,
 ):
     order = CheckpointOrder(
         "plain_table",
@@ -493,6 +541,7 @@ def test_generic_checkpoint_query_has_exact_order_limit_and_parameter_order(
         limit=25,
         season_year=2026,
         since=sample_since,
+        source_updated_before=sample_cutoff,
         date_to_exclusive=date_to_exclusive,
         checkpoint_order=order,
         resume_cursor=CheckpointCursor((2025, "P100")),
@@ -500,17 +549,38 @@ def test_generic_checkpoint_query_has_exact_order_limit_and_parameter_order(
 
     assert query.as_string() == (
         'SELECT * FROM "plain_table" WHERE "season" = %s AND "updated_at" >= %s '
-        'AND "game_date" < %s AND ROW("season", "entity_id") > ROW(%s, %s) '
+        'AND "updated_at" <= %s AND "game_date" < %s '
+        'AND ROW("season", "entity_id") > ROW(%s, %s) '
         'ORDER BY "season" ASC, "entity_id" ASC LIMIT %s'
     )
     assert params == (
         2026,
         sample_since,
+        sample_cutoff,
         date_to_exclusive,
         2025,
         "P100",
         25,
     )
+
+
+def test_generic_checkpoint_query_requires_cutoff_for_update_filtered_profile():
+    order = CheckpointOrder(
+        "plain_table",
+        (CheckpointOrderField("id", "integer"),),
+    )
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        build_select_query(
+            table="plain_table",
+            profile={"season_filter_column": None, "since_filter_column": "updated_at"},
+            pk_columns=["id"],
+            limit=None,
+            season_year=None,
+            since=None,
+            checkpoint_order=order,
+            resume_cursor=None,
+        )
 
 
 def test_checkpoint_query_rejects_unsafe_order_field():
@@ -673,6 +743,7 @@ def test_game_profile_uses_game_metadata_updated_at(sample_since) -> None:
     assert profile["since_filter_column"] == "gm.updated_at"
     assert "LEFT JOIN game_metadata gm" in profile["select_sql"]
     assert "gm.updated_at AS game_updated_at" in profile["select_sql"]
+    assert profile["watermark_fields"] == ("game_updated_at",)
 
     query, params = build_select_query(
         table="game",
@@ -685,6 +756,21 @@ def test_game_profile_uses_game_metadata_updated_at(sample_since) -> None:
 
     assert "WHERE ks.season_year = %s AND gm.updated_at >= %s" in query
     assert params == (2025, sample_since)
+
+
+def test_game_watermark_uses_the_same_timestamp_as_its_incremental_filter():
+    profile = TABLE_PROFILES["game"]
+    game_updated_at = datetime(2026, 7, 18, 4, 0)
+
+    value = ingest_script._row_updated_at(
+        {
+            "updated_at": datetime(2026, 7, 18, 5, 0),
+            "game_updated_at": game_updated_at,
+        },
+        profile,
+    )
+
+    assert value == game_updated_at.replace(tzinfo=ingest_script.timezone.utc)
 
 
 def test_core_schedule_profiles_declare_required_source_fields() -> None:
