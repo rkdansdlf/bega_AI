@@ -40,6 +40,9 @@ def test_metric_objects_accept_labels_and_observations() -> None:
         AI_EMBEDDING_CACHE_TOTAL,
         AI_LLM_CALL_DURATION_SECONDS,
         AI_LLM_RETRY_ATTEMPTS_TOTAL,
+        AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL,
+        AI_MODEL_USAGE_OUTCOME_TOTAL,
+        AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL,
         AI_RAG_STAGE_DURATION_SECONDS,
         AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL,
         AI_SEMANTIC_RESPONSE_CACHE_TOTAL,
@@ -57,6 +60,22 @@ def test_metric_objects_accept_labels_and_observations() -> None:
     AI_CHAT_COST_ESTIMATE_USD_TOTAL.labels(
         route="completion", provider="test", model="unit-test"
     ).inc(0.001)
+    AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL.labels(
+        role="planner",
+        provider="openrouter",
+        model="vendor/planner",
+        token_type="input",
+        outcome="success",
+    ).inc(10)
+    AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL.labels(
+        role="planner", provider="openrouter", model="vendor/planner"
+    ).inc(0.001)
+    AI_MODEL_USAGE_OUTCOME_TOTAL.labels(
+        role="planner",
+        provider="openrouter",
+        model="vendor/planner",
+        result="priced",
+    ).inc()
     AI_RAG_STAGE_DURATION_SECONDS.labels(stage="embed").observe(0.05)
     AI_LLM_CALL_DURATION_SECONDS.labels(provider="test", route="rag").observe(1.2)
     AI_DB_POOL_SIZE.labels(state="available").set(7)
@@ -64,6 +83,41 @@ def test_metric_objects_accept_labels_and_observations() -> None:
     assert _read_metric_value(
         "ai_llm_retry_attempts_total", {"provider": "test", "error_class": "429"}
     ) >= 1.0
+
+
+def test_ingest_metrics_use_only_bounded_labels() -> None:
+    from app.observability.metrics import (
+        AI_INGEST_ACTIVE_RUNS,
+        AI_INGEST_LEASE_RECOVERIES_TOTAL,
+        AI_INGEST_QUEUED_RUNS,
+        AI_INGEST_RUN_COMPLETIONS_TOTAL,
+        AI_INGEST_RUN_DURATION_SECONDS,
+        AI_INGEST_SUBMISSIONS_TOTAL,
+        AI_INGEST_TABLE_DURATION_SECONDS,
+        AI_INGEST_TABLE_SOURCE_ROWS_TOTAL,
+        AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL,
+        AI_INGEST_WATERMARK_LAG_SECONDS,
+    )
+
+    assert AI_INGEST_SUBMISSIONS_TOTAL._labelnames == (
+        "trigger_source",
+        "result",
+    )
+    assert AI_INGEST_RUN_COMPLETIONS_TOTAL._labelnames == (
+        "status",
+        "trigger_source",
+    )
+    assert AI_INGEST_RUN_DURATION_SECONDS._labelnames == (
+        "status",
+        "trigger_source",
+    )
+    assert AI_INGEST_ACTIVE_RUNS._labelnames == ("trigger_source",)
+    assert AI_INGEST_QUEUED_RUNS._labelnames == ("trigger_source",)
+    assert AI_INGEST_LEASE_RECOVERIES_TOTAL._labelnames == ("result",)
+    assert AI_INGEST_TABLE_DURATION_SECONDS._labelnames == ("source_table",)
+    assert AI_INGEST_TABLE_SOURCE_ROWS_TOTAL._labelnames == ("source_table",)
+    assert AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL._labelnames == ("source_table",)
+    assert AI_INGEST_WATERMARK_LAG_SECONDS._labelnames == ("source_table",)
 
 
 def test_rag_total_decorator_observes_total_stage() -> None:

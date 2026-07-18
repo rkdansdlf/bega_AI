@@ -262,6 +262,32 @@ async def test_similarity_search_internal_exclude_source_tables_appends_filters(
 
 
 @pytest.mark.asyncio
+async def test_similarity_search_internal_source_table_filter_is_parameterized() -> None:
+    rows = [{"id": 12, "source_table": "kbo_regulations", "similarity": 0.8}]
+    conn = _DummyConnection(rows)
+
+    result = await similarity_search(
+        conn,
+        [0.2, 0.3, 0.4],
+        limit=2,
+        filters={"source_table_in": ["kbo_regulations", "markdown_docs"]},
+    )
+
+    assert result == rows
+    assert conn.last_cursor is not None
+    sql, params = conn.last_cursor.executed[1]
+    assert "source_table_in = %s" not in sql
+    assert "source_table = ANY(%s)" in sql
+    assert params == [
+        "[0.20000000,0.30000000,0.40000000]",
+        "game_inning_scores",
+        ["kbo_regulations", "markdown_docs"],
+        "[0.20000000,0.30000000,0.40000000]",
+        2,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_record_retrieval_event_inserts_best_effort_payload() -> None:
     conn = _DummyConnection([])
 

@@ -565,6 +565,20 @@ def _is_roster_query(query: str) -> bool:
     return _contains_any(query, _ROSTER_TOKENS)
 
 
+def is_operator_data_query(query: str) -> bool:
+    """Return whether a query is covered by the operator-data fast path."""
+    normalized_query = _normalize_text(query).lower()
+    return any(
+        predicate(normalized_query)
+        for predicate in (
+            _is_schedule_query,
+            _is_lineup_query,
+            _is_roster_query,
+            _is_season_event_query,
+        )
+    )
+
+
 def _contains_any(value: str, tokens: Iterable[str]) -> bool:
     return any(token in value for token in tokens)
 

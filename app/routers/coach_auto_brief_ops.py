@@ -10,6 +10,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ..internal_auth import require_ai_internal_token
 from scripts.batch_coach_auto_brief import (
@@ -545,7 +546,8 @@ async def get_auto_brief_health(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     try:
-        return build_auto_brief_health_snapshot(
+        return await run_in_threadpool(
+            build_auto_brief_health_snapshot,
             window=window,
             start=start,
             end=end,

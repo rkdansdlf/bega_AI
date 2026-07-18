@@ -41,6 +41,9 @@ except ImportError:  # pragma: no cover — runtime fallback
         def inc(self, _amount: float = 1.0) -> None:
             return None
 
+        def dec(self, _amount: float = 1.0) -> None:
+            return None
+
         def observe(self, _value: float) -> None:
             return None
 
@@ -136,6 +139,24 @@ AI_CHAT_COST_ESTIMATE_BY_TYPE_USD_TOTAL = Counter(
     ["route", "question_type", "planner_mode", "provider", "model"],
 )
 
+AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL = Counter(
+    "ai_model_usage_token_estimate_total",
+    "Estimated model-call tokens by role and routed model.",
+    ["role", "provider", "model", "token_type", "outcome"],
+)
+
+AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL = Counter(
+    "ai_model_usage_cost_estimate_usd_total",
+    "Catalog-priced estimated model-call cost in USD.",
+    ["role", "provider", "model"],
+)
+
+AI_MODEL_USAGE_OUTCOME_TOTAL = Counter(
+    "ai_model_usage_outcome_total",
+    "Model usage pricing and call outcomes.",
+    ["role", "provider", "model", "result"],
+)
+
 AI_COACH_REQUEST_TOTAL = Counter(
     "ai_coach_request_total",
     "Coach request outcomes by cache state and request mode.",
@@ -172,10 +193,46 @@ AI_CHAT_QUEUE_EVENTS_TOTAL = Counter(
     ["event"],  # event: admitted|queued|admitted_from_queue|overflow|cancelled|released
 )
 
+AI_HTTP_REQUESTS_TOTAL = Counter(
+    "ai_http_requests_total",
+    "AI service HTTP requests by method, route template, and status group.",
+    ["method", "route", "status_group"],
+)
+
 AI_LLM_FALLBACK_TOTAL = Counter(
     "ai_llm_fallback_total",
     "LLM fallback attempts after a model failure.",
     ["provider", "reason"],  # provider: openrouter ; reason: http_status_429|...
+)
+
+AI_INGEST_SUBMISSIONS_TOTAL = Counter(
+    "ai_ingest_submissions_total",
+    "Durable ingestion run submissions.",
+    ["trigger_source", "result"],
+)
+
+AI_INGEST_RUN_COMPLETIONS_TOTAL = Counter(
+    "ai_ingest_run_completions_total",
+    "Durable ingestion run terminal outcomes.",
+    ["status", "trigger_source"],
+)
+
+AI_INGEST_LEASE_RECOVERIES_TOTAL = Counter(
+    "ai_ingest_lease_recoveries_total",
+    "Expired ingestion leases processed by recovery outcome.",
+    ["result"],
+)
+
+AI_INGEST_TABLE_SOURCE_ROWS_TOTAL = Counter(
+    "ai_ingest_table_source_rows_total",
+    "Source rows processed by configured source table.",
+    ["source_table"],
+)
+
+AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL = Counter(
+    "ai_ingest_table_written_chunks_total",
+    "RAG chunks written by configured source table.",
+    ["source_table"],
 )
 
 # ---------------------------------------------------------------------------
@@ -206,6 +263,44 @@ AI_CHAT_QUEUE_ESTIMATED_WAIT_SECONDS = Histogram(
     "Estimated chat queue wait time when a request is queued or rejected.",
     [],
     buckets=_CHAT_QUEUE_WAIT_BUCKETS,
+)
+
+_HTTP_REQUEST_BUCKETS = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    120.0,
+)
+AI_HTTP_REQUEST_DURATION_SECONDS = Histogram(
+    "ai_http_request_duration_seconds",
+    "AI service HTTP request duration by method, route template, and status group.",
+    ["method", "route", "status_group"],
+    buckets=_HTTP_REQUEST_BUCKETS,
+)
+
+_INGEST_RUN_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200)
+AI_INGEST_RUN_DURATION_SECONDS = Histogram(
+    "ai_ingest_run_duration_seconds",
+    "Duration of durable ingestion runs by terminal status and trigger source.",
+    ["status", "trigger_source"],
+    buckets=_INGEST_RUN_BUCKETS,
+)
+
+AI_INGEST_TABLE_DURATION_SECONDS = Histogram(
+    "ai_ingest_table_duration_seconds",
+    "Duration of ingestion work by configured source table.",
+    ["source_table"],
+    buckets=_INGEST_RUN_BUCKETS,
 )
 
 # Coach 동적 프롬프트 사이즈 (B 작업 효과 추적). 문자 수 단위.
@@ -244,6 +339,49 @@ AI_CHAT_QUEUE_DEPTH = Gauge(
     ["state"],  # state: waiting|admitted
 )
 
+AI_INGEST_ACTIVE_RUNS = Gauge(
+    "ai_ingest_active_runs",
+    "Persisted RUNNING ingestion runs.",
+    ["trigger_source"],
+)
+
+AI_INGEST_QUEUED_RUNS = Gauge(
+    "ai_ingest_queued_runs",
+    "Persisted QUEUED ingestion runs.",
+    ["trigger_source"],
+)
+
+AI_INGEST_WATERMARK_LAG_SECONDS = Gauge(
+    "ai_ingest_watermark_lag_seconds",
+    "Age of the latest successful watermark by configured source table.",
+    ["source_table"],
+)
+
+
+_INGEST_TRIGGER_SOURCES = {
+    "BACKEND_SCHEDULED",
+    "MANUAL_API",
+    "CLI_RECOVERY",
+}
+INGEST_TRIGGER_SOURCE_LABELS = tuple(sorted(_INGEST_TRIGGER_SOURCES | {"UNKNOWN"}))
+
+
+_INGEST_STATUSES = {
+    "SUCCEEDED",
+    "FAILED",
+    "MANUAL_BASEBALL_DATA_REQUIRED",
+}
+
+
+def normalize_ingest_trigger_source(value: Any) -> str:
+    normalized = str(value or "").strip().upper()
+    return normalized if normalized in _INGEST_TRIGGER_SOURCES else "UNKNOWN"
+
+
+def normalize_ingest_terminal_status(value: Any) -> str:
+    normalized = str(getattr(value, "value", value) or "").strip().upper()
+    return normalized if normalized in _INGEST_STATUSES else "FAILED"
+
 
 # ---------------------------------------------------------------------------
 # ASGI 통합
@@ -273,14 +411,32 @@ __all__ = [
     "AI_CHAT_TOKEN_ESTIMATE_BY_TYPE_TOTAL",
     "AI_DB_POOL_SIZE",
     "AI_EMBEDDING_CACHE_TOTAL",
+    "AI_HTTP_REQUEST_DURATION_SECONDS",
+    "AI_HTTP_REQUESTS_TOTAL",
+    "AI_INGEST_ACTIVE_RUNS",
+    "AI_INGEST_LEASE_RECOVERIES_TOTAL",
+    "AI_INGEST_QUEUED_RUNS",
+    "AI_INGEST_RUN_COMPLETIONS_TOTAL",
+    "AI_INGEST_RUN_DURATION_SECONDS",
+    "AI_INGEST_SUBMISSIONS_TOTAL",
+    "AI_INGEST_TABLE_DURATION_SECONDS",
+    "AI_INGEST_TABLE_SOURCE_ROWS_TOTAL",
+    "AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL",
+    "AI_INGEST_WATERMARK_LAG_SECONDS",
     "AI_LLM_CALL_DURATION_SECONDS",
     "AI_LLM_FALLBACK_TOTAL",
     "AI_LLM_RETRY_ATTEMPTS_TOTAL",
+    "AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL",
+    "AI_MODEL_USAGE_OUTCOME_TOTAL",
+    "AI_MODEL_USAGE_TOKEN_ESTIMATE_TOTAL",
     "AI_RAG_STAGE_DURATION_SECONDS",
     "AI_RESPONSE_CACHE_BY_INTENT",
     "AI_RESPONSE_CACHE_TOTAL",
     "AI_RETRIEVAL_FALLBACK_LEVEL_TOTAL",
     "AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL",
     "AI_SEMANTIC_RESPONSE_CACHE_TOTAL",
+    "INGEST_TRIGGER_SOURCE_LABELS",
     "metrics_asgi_app",
+    "normalize_ingest_terminal_status",
+    "normalize_ingest_trigger_source",
 ]

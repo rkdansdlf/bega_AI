@@ -316,6 +316,20 @@ def test_operator_data_fast_path_without_rows_keeps_manual_contract() -> None:
     assert "MANUAL_BASEBALL_DATA_REQUIRED" in result["answer"]
 
 
+def test_operator_data_fast_path_without_dated_rows_does_not_fall_through() -> None:
+    pipeline = _operator_pipeline(True, [])
+
+    result = asyncio.run(
+        pipeline._build_operator_or_static_kbo_result(
+            "2026년 6월 5일 KBO 경기 일정 알려줘."
+        )
+    )
+
+    assert result is not None
+    assert result["strategy"] == "manual_baseball_data_required"
+    assert "MANUAL_BASEBALL_DATA_REQUIRED" in result["answer"]
+
+
 def test_operator_data_fast_path_underspecified_rows_keep_manual_contract() -> None:
     pipeline = _operator_pipeline(
         True,

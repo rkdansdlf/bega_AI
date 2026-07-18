@@ -4,9 +4,201 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 from scripts import chat_model_routing_experiment
 from scripts.cleanup_chat_semantic_cache import CleanupScope, build_where_clause
+
+
+def test_model_routing_runbook_and_ci_contract() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    runbook = (
+        repository_root / "docs" / "ai-optimization-rollout-runbook.md"
+    ).read_text(encoding="utf-8")
+    env_example = (repository_root / ".env.example").read_text(encoding="utf-8")
+    workflow = (
+        repository_root / ".github" / "workflows" / "ai-pr-gate.yml"
+    ).read_text(encoding="utf-8")
+    normalized_runbook = " ".join(runbook.lower().split())
+    pricing_line = next(
+        line
+        for line in env_example.splitlines()
+        if line.startswith("CHAT_MODEL_PRICING_JSON=")
+    )
+    pricing_catalog = json.loads(pricing_line.split("=", 1)[1])
+
+    assert "CHAT_MODEL_PRICING_JSON" in env_example
+    assert "CHAT_MODEL_PRICING_JSON" in runbook
+    assert pricing_catalog == {
+        "example-provider": {
+            "example/planner-model": {
+                "input_usd_per_1m_tokens": "0.10",
+                "output_usd_per_1m_tokens": "0.20",
+            },
+            "example/answer-model": {
+                "input_usd_per_1m_tokens": "1.00",
+                "output_usd_per_1m_tokens": "2.00",
+            },
+        },
+    }
+    serialized_pricing_catalog = json.dumps(pricing_catalog).lower()
+    assert "default" not in serialized_pricing_catalog
+    assert "unknown" not in serialized_pricing_catalog
+    assert "credential" not in serialized_pricing_catalog
+    assert "api_key" not in serialized_pricing_catalog
+    assert "Golden path" in runbook
+    assert "scripts/chat_quality_golden_60.json" in runbook
+    assert "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/baseline.json" in runbook
+    assert "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/candidate.json" in runbook
+    assert "--baseline-report outputs/model-routing/baseline.json" in runbook
+    assert "--planner-model-label \"$CHAT_PLANNER_MODEL_NAME\"" in runbook
+    assert "--answer-model-label \"$CHAT_ANSWER_MODEL_NAME\"" in runbook
+    assert "planner reduction of at least 20%" in runbook
+    assert "candidate total model cost must not increase" in runbook
+    assert "answer model must remain fixed" in normalized_runbook
+    assert "Cache bypass is required and defaults to enabled" in runbook
+    assert "defaults to 60 cases" in runbook
+    assert "SHA-256" in runbook
+    assert "exact provider/model catalog entries" in runbook
+    assert "0: valid evidence and all gates pass" in runbook
+    assert "1: valid evidence but a quality or cost criterion fails" in runbook
+    assert "2: invalid or incomplete evidence, configuration, input, or report" in runbook
+    assert "separate live-call approval" in runbook
+    assert "does not authorize deployment" in runbook
+    assert "must not contain answers" in runbook
+    assert (
+        "cli planner/answer labels are evidence assertions only and do not configure "
+        "the server."
+        in normalized_runbook
+    )
+    assert (
+        "before the baseline, configure the controlled ai service with "
+        "`chat_planner_model_name`, `chat_answer_model_name`, and the matching "
+        "`chat_model_pricing_json` catalog."
+        in normalized_runbook
+    )
+    assert "restart or redeploy the controlled ai service" in normalized_runbook
+    assert "health check alone does not prove active model configuration" in normalized_runbook
+    assert "lsof binds the current-shell child pid to the dedicated port" in normalized_runbook
+    assert "labels are evidence matched later by the reports" in normalized_runbook
+    assert (
+        "before the candidate, change only `chat_planner_model_name` and its "
+        "catalog entry as needed; keep `chat_answer_model_name` fixed."
+        in normalized_runbook
+    )
+    assert (
+        "absent usage is invalid only when the selected planner or answer path requires "
+        "an llm call."
+        in normalized_runbook
+    )
+    assert (
+        "a deterministic mode may validly make no model call and therefore have empty "
+        "usage."
+        in normalized_runbook
+    )
+    assert "Actual deployment remains separately approved" in runbook
+    assert 'cat "$CONTROLLED_AI_LOG"' not in runbook
+    assert "inspect locally under access controls" in normalized_runbook
+
+    dotenv_export = "set -a; source ../.env.prod; set +a"
+    baseline_exports = "\n".join(
+        (
+            'export CHAT_PLANNER_MODEL_NAME="$BASELINE_PLANNER_MODEL"',
+            'export CHAT_ANSWER_MODEL_NAME="$FIXED_ANSWER_MODEL"',
+            'export CHAT_MODEL_PRICING_JSON="$BASELINE_PRICING_JSON"',
+        )
+    )
+    candidate_exports = "\n".join(
+        (
+            'export CHAT_PLANNER_MODEL_NAME="$CANDIDATE_PLANNER_MODEL"',
+            'export CHAT_ANSWER_MODEL_NAME="$FIXED_ANSWER_MODEL"',
+            'export CHAT_MODEL_PRICING_JSON="$CANDIDATE_PRICING_JSON"',
+        )
+    )
+    baseline_command = "\n".join(
+        (
+            "AI_MODEL_ROUTING_SAMPLES=scripts/chat_quality_golden_60.json \\",
+            "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/baseline.json \\",
+            "./.venv/bin/python scripts/chat_model_routing_experiment.py \\",
+        )
+    )
+    candidate_command = "\n".join(
+        (
+            "AI_MODEL_ROUTING_SAMPLES=scripts/chat_quality_golden_60.json \\",
+            "AI_MODEL_ROUTING_OUTPUT=outputs/model-routing/candidate.json \\",
+            "./.venv/bin/python scripts/chat_model_routing_experiment.py \\",
+        )
+    )
+
+    assert dotenv_export in runbook
+    for required_variable in (
+        "BASELINE_PLANNER_MODEL",
+        "FIXED_ANSWER_MODEL",
+        "BASELINE_PRICING_JSON",
+        "CANDIDATE_PLANNER_MODEL",
+        "CANDIDATE_PRICING_JSON",
+    ):
+        assert f'${{{required_variable}:?' in runbook
+    preflight_listener = 'lsof -nP -iTCP:"$CONTROLLED_AI_PORT" -sTCP:LISTEN'
+    child_listener = (
+        'lsof -t -a -p "$CONTROLLED_AI_PID" '
+        '-iTCP:"$CONTROLLED_AI_PORT" -sTCP:LISTEN'
+    )
+
+    assert "set -u" in runbook
+    assert "\nset -e\n" not in runbook
+    assert 'CONTROLLED_AI_PORT="${CONTROLLED_AI_PORT:-18001}"' in runbook
+    assert "export AI_MODEL_ROUTING_BASE_URL=http://127.0.0.1:$CONTROLLED_AI_PORT" in runbook
+    assert "command -v lsof >/dev/null 2>&1" in runbook
+    assert "command -v curl >/dev/null 2>&1" in runbook
+    assert preflight_listener in runbook
+    assert child_listener in runbook
+    assert 'listener_pid="$(lsof -t -a -p "$CONTROLLED_AI_PID"' in runbook
+    assert 'if [ "$listener_pid" = "$CONTROLLED_AI_PID" ]' in runbook
+    assert "./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port \"$CONTROLLED_AI_PORT\"" in runbook
+    assert "CONTROLLED_AI_PID=$!" in runbook
+    assert "CONTROLLED_AI_PID_FILE" not in runbook
+    assert "recorded_pid" not in runbook
+    assert 'kill -0 "$CONTROLLED_AI_PID"' in runbook
+    assert 'curl -fsS "$AI_MODEL_ROUTING_BASE_URL/health"' in runbook
+    assert 'kill -TERM "$CONTROLLED_AI_PID"' in runbook
+    assert "for _ in $(seq 1 10); do" in runbook
+    assert 'kill -KILL "$CONTROLLED_AI_PID"' in runbook
+    assert 'wait "$CONTROLLED_AI_PID" 2>/dev/null || true' in runbook
+    assert "while kill -0" not in runbook
+    assert "pkill" not in runbook
+    assert runbook.count("set +e") == 2
+    assert "BASELINE_EXIT_CODE=$?" in runbook
+    assert "CANDIDATE_EXIT_CODE=$?" in runbook
+    assert 'printf \'BASELINE_EXIT_CODE=%s\\n\' "$BASELINE_EXIT_CODE"' in runbook
+    assert 'printf \'CANDIDATE_EXIT_CODE=%s\\n\' "$CANDIDATE_EXIT_CODE"' in runbook
+    assert 'if [ "$BASELINE_EXIT_CODE" -eq 2 ]; then\n  exit "$BASELINE_EXIT_CODE"\nfi' in runbook
+    assert 'trap - EXIT\nexit "$CANDIDATE_EXIT_CODE"' in runbook
+    assert baseline_exports in runbook
+    assert candidate_exports in runbook
+    assert runbook.index(dotenv_export) < runbook.index(baseline_command)
+    assert runbook.index(preflight_listener) < runbook.index(baseline_command)
+    assert runbook.index(child_listener) < runbook.index(
+        'curl -fsS "$AI_MODEL_ROUTING_BASE_URL/health"'
+    ) < runbook.index(baseline_command)
+    assert runbook.index(baseline_exports) < runbook.index(baseline_command)
+    assert runbook.index(baseline_command) < runbook.index("BASELINE_EXIT_CODE=$?")
+    assert runbook.index("BASELINE_EXIT_CODE=$?") < runbook.index(
+        'printf \'BASELINE_EXIT_CODE=%s\\n\' "$BASELINE_EXIT_CODE"'
+    ) < runbook.index(candidate_command)
+    assert runbook.index(candidate_exports) < runbook.index(candidate_command)
+    assert runbook.index(candidate_command) < runbook.index("CANDIDATE_EXIT_CODE=$?")
+    assert runbook.index("CANDIDATE_EXIT_CODE=$?") < runbook.index(
+        'printf \'CANDIDATE_EXIT_CODE=%s\\n\' "$CANDIDATE_EXIT_CODE"'
+    ) < runbook.index('exit "$CANDIDATE_EXIT_CODE"')
+
+    for test_path in (
+        "tests/test_chat_model_usage.py",
+        "tests/test_chat_model_routing_experiment.py",
+        "tests/test_chat_quality_golden_dataset.py",
+    ):
+        assert test_path in workflow
+    assert "scripts/chat_model_routing_experiment.py" not in workflow
 
 
 def test_chat_model_routing_loads_plain_text_questions(tmp_path: Path) -> None:
@@ -40,6 +232,36 @@ def test_chat_model_routing_loads_jsonl_questions(tmp_path: Path) -> None:
 def test_chat_model_routing_percentile_bounds() -> None:
     assert chat_model_routing_experiment._percentile([], 0.95) == 0.0
     assert chat_model_routing_experiment._percentile([10, 20, 30], 0.95) == 30
+
+
+def test_chat_model_routing_cli_keeps_operator_contract(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "chat_model_routing_experiment.py",
+            "--samples",
+            "golden.json",
+            "--baseline-report",
+            "baseline.json",
+            "--planner-model-label",
+            "planner-v2",
+            "--answer-model-label",
+            "answer-v1",
+        ],
+    )
+
+    args = chat_model_routing_experiment.parse_args()
+
+    assert args.samples == "golden.json"
+    assert args.baseline_report == "baseline.json"
+    assert args.planner_model_label == "planner-v2"
+    assert args.answer_model_label == "answer-v1"
+    assert args.internal_api_key_env == "AI_INTERNAL_TOKEN"
+    assert args.limit == 60
+    assert args.cache_bypass is True
 
 
 def test_semantic_cache_cleanup_where_clause_uses_filters() -> None:
