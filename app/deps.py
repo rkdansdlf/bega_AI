@@ -707,7 +707,16 @@ async def lifespan(app):
             except BaseException as exc:  # noqa: BLE001
                 cleanup_errors.append((resource_name, exc))
 
+        async def cancel_coach_background_tasks() -> None:
+            from .routers.coach import cancel_auto_brief_background_tasks
+
+            await cancel_auto_brief_background_tasks()
+
         if database_resources_started:
+            await attempt_async_cleanup(
+                "coach_auto_brief_tasks",
+                cancel_coach_background_tasks,
+            )
             await attempt_async_cleanup("http_clients", close_shared_httpx_clients)
 
             if embedding_backend is not None:
