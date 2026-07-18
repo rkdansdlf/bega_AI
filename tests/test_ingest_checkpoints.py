@@ -101,6 +101,32 @@ def test_resolve_checkpoint_order_rejects_nullable_primary_key_field():
 
 
 @pytest.mark.parametrize(
+    ("rows", "expected_error"),
+    [
+        ([], IngestCheckpointCursorUnavailableError),
+        (
+            [("score", "double precision", True)],
+            IngestCheckpointCursorTypeError,
+        ),
+        (
+            [("entity_id", "text", False)],
+            IngestCheckpointCursorUnavailableError,
+        ),
+    ],
+)
+def test_generic_profile_cannot_bypass_catalog_with_configured_order(
+    rows, expected_error
+):
+    conn = FakeCatalogConnection(rows)
+    profile = {"checkpoint_order": (("configured_id", "integer"),)}
+
+    with pytest.raises(expected_error):
+        ingest_script.resolve_checkpoint_order(conn, "plain_table", profile)
+
+    assert len(conn.catalog_cursor.executed) == 1
+
+
+@pytest.mark.parametrize(
     ("scalar_type", "value"),
     [
         ("integer", 42),
