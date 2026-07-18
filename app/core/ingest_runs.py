@@ -115,6 +115,11 @@ class IngestTableResult:
     reused_embeddings: int
     embedded_chunks: int
     max_updated_at: datetime | None = None
+    checkpoint_resumed: bool = False
+    checkpoint_committed_batches: int = 0
+    checkpoint_completed: bool = False
+    attempt_source_rows: int | None = None
+    attempt_written_chunks: int | None = None
 
 
 @dataclass(frozen=True)

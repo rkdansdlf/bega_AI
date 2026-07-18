@@ -81,10 +81,21 @@ OPTIONS = {
 }
 
 
+def test_ingest_table_result_checkpoint_fields_default_for_legacy_callers():
+    result = IngestTableResult("game", 3, 4, 1, 2, None)
+
+    assert result.checkpoint_resumed is False
+    assert result.checkpoint_committed_batches == 0
+    assert result.checkpoint_completed is False
+    assert result.attempt_source_rows is None
+    assert result.attempt_written_chunks is None
+
+
 def test_ingest_returns_per_table_counts(monkeypatch):
     source = _Connection()
     destination = _Connection()
     connections = iter((source, destination))
+    captured = {}
     monkeypatch.setattr(module, "_require_psycopg", lambda: None)
     monkeypatch.setattr(
         module,
@@ -92,11 +103,12 @@ def test_ingest_returns_per_table_counts(monkeypatch):
         lambda: SimpleNamespace(database_url="postgresql://internal-destination"),
     )
     monkeypatch.setattr(module.psycopg, "connect", lambda *args, **kwargs: next(connections))
-    monkeypatch.setattr(
-        module,
-        "ingest_table",
-        lambda *args, **kwargs: IngestTableResult("game", 3, 4, 0, 0, None),
-    )
+    def _ingest_table(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return IngestTableResult("game", 3, 4, 0, 0, None)
+
+    monkeypatch.setattr(module, "ingest_table", _ingest_table)
 
     result = module.ingest(
         tables=["game"],
@@ -108,6 +120,82 @@ def test_ingest_returns_per_table_counts(monkeypatch):
     assert result.total_written_chunks == 3
     assert source.closed is True
     assert destination.closed is True
+    assert "checkpoint_run_id" not in captured
+    assert "checkpoint_scope_key" not in captured
+
+
+def test_leased_database_ingest_passes_checkpoint_identity(monkeypatch):
+    source = _Connection()
+    destination = _Connection()
+    connections = iter((source, destination))
+    captured = {}
+    lease_guard = lambda _write=False: None
+    monkeypatch.setattr(module, "_require_psycopg", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "get_settings",
+        lambda: SimpleNamespace(database_url="postgresql://internal-destination"),
+    )
+    monkeypatch.setattr(module.psycopg, "connect", lambda *args, **kwargs: next(connections))
+    monkeypatch.setattr(module, "build_ingest_lease_guard", lambda *_args: lease_guard)
+
+    def _ingest_table(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return IngestTableResult("game", 3, 4, 0, 0, None)
+
+    monkeypatch.setattr(module, "ingest_table", _ingest_table)
+
+    module.ingest(
+        tables=["game"],
+        lease_run_id="run-1",
+        lease_owner="worker-1",
+        checkpoint_scope_key="season:2026",
+        source_db_url="postgresql://internal-source",
+        **OPTIONS,
+    )
+
+    assert captured["checkpoint_run_id"] == "run-1"
+    assert captured["checkpoint_scope_key"] == "season:2026"
+    assert captured["lease_guard"] is lease_guard
+
+
+def test_leased_static_ingest_preserves_non_checkpoint_path(monkeypatch):
+    source = _Connection()
+    destination = _Connection()
+    connections = iter((source, destination))
+    captured = {}
+    monkeypatch.setattr(module, "_require_psycopg", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "get_settings",
+        lambda: SimpleNamespace(database_url="postgresql://internal-destination"),
+    )
+    monkeypatch.setattr(module.psycopg, "connect", lambda *args, **kwargs: next(connections))
+    monkeypatch.setattr(
+        module,
+        "build_ingest_lease_guard",
+        lambda *_args: (lambda _write=False: None),
+    )
+
+    def _ingest_table(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return IngestTableResult("kbo_metrics_explained", 1, 1, 0, 0, None)
+
+    monkeypatch.setattr(module, "ingest_table", _ingest_table)
+
+    module.ingest(
+        tables=["kbo_metrics_explained"],
+        lease_run_id="run-1",
+        lease_owner="worker-1",
+        checkpoint_scope_key="season:2026",
+        source_db_url="postgresql://internal-source",
+        **OPTIONS,
+    )
+
+    assert "checkpoint_run_id" not in captured
+    assert "checkpoint_scope_key" not in captured
 
 
 def test_missing_required_source_column_raises_manual_contract():
