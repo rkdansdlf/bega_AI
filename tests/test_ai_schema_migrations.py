@@ -108,6 +108,9 @@ def test_data_sync_runbook_documents_persistent_checkpoint_operations():
         "a nonempty `since_filter_column`.",
         "`kbo_seasons`처럼 해당 필드를 선언하지 않은 FULL profile은 source "
         "clock을 읽거나 기본 `updated_at` 상한을 만들지 않습니다.",
+        "The `teams` and `stadiums` profiles explicitly bind both FULL cutoff "
+        "filtering and watermark extraction to `updated_at`.",
+        "Configured `watermark_fields` are exclusive",
         "`(column IS NULL OR column <= source_updated_before)`",
         "Any progressed eligible legacy checkpoint missing the cutoff fails "
         "closed as `INGEST_CHECKPOINT_INCOMPATIBLE`, whether incomplete or completed.",
@@ -136,7 +139,8 @@ def test_checkpoint_design_documents_timestamp_subtypes_and_frozen_source_window
         "The two timestamp subtypes remain signature-distinct.",
         "source_updated_before",
         "clock_timestamp()",
-        "updated_at <= source_updated_before",
-        "success watermark remains the maximum committed update timestamp",
+        "`(column IS NULL OR column <= source_updated_before)`",
+        "Configured `watermark_fields` are exclusive",
+        "success watermark remains the maximum committed non-NULL update timestamp",
     ):
         assert statement in text
