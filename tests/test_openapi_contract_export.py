@@ -1255,3 +1255,11 @@ assert app_main.app.openapi_url is None
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_committed_complete_openapi_artifacts_are_current() -> None:
+    from scripts.export_openapi_contract import _render_artifacts
+
+    for path, expected in _render_artifacts().items():
+        assert path.exists(), f"missing generated artifact: {path}"
+        assert path.read_text(encoding="utf-8") == expected
