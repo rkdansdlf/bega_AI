@@ -51,3 +51,19 @@ def test_ingest_checkpoint_migration_defines_durable_progress_table():
     assert "cursor_payload jsonb" in sql
     assert "source_rows = 0 OR cursor_payload IS NOT NULL" in sql
     assert "idx_ai_ingest_checkpoints_updated_at" in sql
+
+
+def test_data_sync_runbook_documents_persistent_checkpoint_operations():
+    text = (ROOT / "docs" / "data-sync-orchestration-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        "004_ai_ingest_checkpoints.sql",
+        "ai_ingest_checkpoints",
+        "INGEST_CHECKPOINT_INCOMPATIBLE",
+        "INGEST_CHECKPOINT_CURSOR_UNAVAILABLE",
+        "ai_ingest_checkpoint_events_total",
+        "row_stale_cleanup",
+        "rollback",
+    ):
+        assert required in text

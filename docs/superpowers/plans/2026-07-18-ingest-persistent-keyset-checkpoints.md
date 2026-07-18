@@ -1390,3 +1390,18 @@ git commit -m "docs: operate persistent ingest checkpoints"
 - [ ] Confirm rollback preserves migration 004 and checkpoint audit rows.
 - [ ] Confirm no uncommitted scratch reports or generated artifacts remain.
 - [ ] Do not push, open a PR, merge to `feature`, delete the worktree, or delete the branch without the user's explicit finishing instruction.
+
+## Verification Evidence
+
+Date: 2026-07-18
+
+- RED documentation contract: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ai_schema_migrations.py::test_data_sync_runbook_documents_persistent_checkpoint_operations -q` exited 1 as expected before the runbook update: 0 passed, 1 failed, 0 skipped, 0 warnings.
+- GREEN documentation contract: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ai_schema_migrations.py::test_data_sync_runbook_documents_persistent_checkpoint_operations -q` exited 0: 1 passed, 0 failed, 0 skipped, 0 warnings.
+- Focused checkpoint regression: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ai_schema_migrations.py tests/test_db_schema_contract.py tests/test_schema_startup_mode.py tests/test_ingest_checkpoints.py tests/test_ingest_checkpoint_integration.py tests/test_ingest_query.py tests/test_ingest_results.py tests/test_ingest_worker.py tests/test_ingest_run_store.py tests/test_observability_metrics.py -q` exited 0: 214 passed, 0 failed, 0 skipped, 17 warnings (`datetime.utcnow()` deprecation in checkpoint integration).
+- Static compile: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m compileall -q app scripts tests` exited 0 with no output (non-test gate; pass/skip/fail counts not applicable).
+- Baseball data policy: `python3 /Users/mac/project/KBO_platform/scripts/validate_baseball_data_policy.py` exited 0: `External baseball data policy OK` (zero violations; non-test gate).
+- OpenAPI contract: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python scripts/export_openapi_contract.py --check` exited 0: artifacts current, 0 failures; one existing `google.generativeai` FutureWarning.
+- Full AI suite: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/ -q` exited 0: 1878 passed, 5 skipped, 0 failed, 25 warnings. Skips require unavailable local operator-data migration, validation report, or handoff reports; warnings include the `google.generativeai` FutureWarning, checkpoint-path `datetime.utcnow()` deprecation, deprecated HTTP 422 alias, and Pydantic model field deprecations.
+- Whitespace check: `git diff --check` exited 0 with no output (non-test gate; pass/skip/fail counts not applicable).
+
+Residual risk: no separately approved local-only disposable live PostgreSQL smoke was run. Therefore real PostgreSQL DDL/transaction behavior remains unverified outside the fake-connection coverage; no shared or production database was contacted.
