@@ -105,7 +105,7 @@ def test_manual_data_terminal_requires_unexpired_owned_lease():
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/test_ingest_run_store.py -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_run_store.py -q
 ```
 
 Expected: FAIL because heartbeat returns `True` instead of `WATERMARK`, uses `RETURNING run_id`, and the expiry predicates are absent.
@@ -153,7 +153,7 @@ Do not change `recover_expired`; PostgreSQL expiry remains its source of truth.
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/test_ingest_run_store.py -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_run_store.py -q
 ```
 
 Expected: all tests PASS.
@@ -192,7 +192,7 @@ Import `AI_INGEST_HEARTBEATS_TOTAL` inside `test_ingest_metrics_use_only_bounded
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/test_observability_metrics.py::test_ingest_metrics_use_only_bounded_labels -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_observability_metrics.py::test_ingest_metrics_use_only_bounded_labels -q
 ```
 
 Expected: FAIL with an import error because `AI_INGEST_HEARTBEATS_TOTAL` is not defined.
@@ -212,7 +212,7 @@ AI_INGEST_HEARTBEATS_TOTAL = Counter(
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/test_observability_metrics.py::test_ingest_metrics_use_only_bounded_labels -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_observability_metrics.py::test_ingest_metrics_use_only_bounded_labels -q
 ```
 
 Expected: PASS.
@@ -412,7 +412,7 @@ def test_expired_lease_during_success_finish_is_left_for_recovery(monkeypatch):
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/test_ingest_worker.py -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_worker.py -q
 ```
 
 Expected: FAIL because heartbeat exceptions still set lease loss immediately, timing attributes do not exist, and a terminal lease race escapes `run_once`.
@@ -577,7 +577,7 @@ For generic execution failures, skip `finish_failed` when `lease_lost` is alread
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/test_ingest_worker.py tests/test_observability_metrics.py -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_worker.py tests/test_observability_metrics.py -q
 ```
 
 Expected: all tests PASS, including the long synchronous fake ingest without external HTTP calls.
@@ -779,7 +779,7 @@ def test_lifespan_stops_ingest_tasks_before_closing_coordination_pool():
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/test_deps_db_pool_observability.py tests/test_schema_startup_mode.py -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_deps_db_pool_observability.py tests/test_schema_startup_mode.py -q
 ```
 
 Expected: FAIL because the ingestion pool functions, global, constants, and startup helper do not exist and the store still receives the general pool.
@@ -969,7 +969,7 @@ At shutdown, after all worker and recovery tasks have been cancelled and awaited
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/test_deps_db_pool_observability.py tests/test_schema_startup_mode.py tests/test_db_schema_contract.py -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_deps_db_pool_observability.py tests/test_schema_startup_mode.py tests/test_db_schema_contract.py -q
 ```
 
 Expected: all tests PASS; no real PostgreSQL connection is opened.
@@ -1027,7 +1027,7 @@ Add this rollback note before the numbered rollback steps:
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest \
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest \
   tests/test_ingest_runs.py \
   tests/test_ingest_results.py \
   tests/test_ingest_run_store.py \
@@ -1046,7 +1046,7 @@ Expected: all selected tests PASS.
 Run:
 
 ```bash
-../../.venv/bin/python -m pytest tests/ -q
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/ -q
 ```
 
 Expected: exit code 0 with no failed tests. Tests that require unavailable optional services may be skipped only when their existing skip condition explains the dependency.
@@ -1056,8 +1056,8 @@ Expected: exit code 0 with no failed tests. Tests that require unavailable optio
 Run:
 
 ```bash
-../../.venv/bin/python -m compileall -q app scripts
-../../.venv/bin/python ../../../scripts/validate_baseball_data_policy.py
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m compileall -q app scripts
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python ../../../scripts/validate_baseball_data_policy.py
 git diff --check HEAD~3..HEAD
 git diff --check
 git status --short
