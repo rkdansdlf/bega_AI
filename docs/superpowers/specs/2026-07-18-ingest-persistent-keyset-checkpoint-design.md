@@ -160,8 +160,7 @@ Supported cursor scalar types are integer, decimal, date, timezone-aware or
 naive timestamp, UUID, text, and boolean. Values are encoded with explicit type
 tags in JSON. Decimal, date, timestamp, and UUID values use canonical strings.
 `timestamp without time zone` preserves its wall-clock fields with the
-`datetime_naive` scalar. `timestamp with time zone` is restored as an aware UTC instant
-with the `datetime` scalar. Catalog mapping accepts PostgreSQL
+`datetime_naive` scalar. `timestamp with time zone` uses timezone-aware instants and interprets offset-free values as UTC with the `datetime` scalar. Catalog mapping accepts PostgreSQL
 timestamp precision forms from `timestamp(0)` through `timestamp(6)` and rejects
 malformed or out-of-range precision. The two timestamp subtypes remain signature-distinct.
 

@@ -1452,3 +1452,19 @@ Date: 2026-07-18
 - Whitespace check: `git diff --check` exited 0 with no output before this addendum (non-test gate; pass/skip/fail counts not applicable).
 
 Residual risk: no live PostgreSQL test was run, and no shared or production database or network source was contacted. Unit coverage proves that `datetime_naive` JSON round trips without an offset, rejects aware or offset-bearing values, remains signature-distinct from `datetime`, and reaches the query parameter tuple as a naive Python `datetime`; it does not exercise psycopg binding against PostgreSQL sessions configured with different `TimeZone` settings. Text keyset ordering likewise remains dependent on the source PostgreSQL collation; query predicates and ascending order use the same database expressions, but no live locale/collation matrix was executed.
+
+## Frozen Source Window Final-Fix Verification Evidence
+
+Date: 2026-07-18
+
+- Focused schema/repository/query/precision RED exited 1: 18 failed, 7 passed, 124 deselected. Focused fake recovery RED exited 1: 6 failed, 29 deselected. Same-filter watermark RED exited 1: 2 failed, 36 deselected. Each failure matched the missing fixed-cutoff or precision-qualified timestamp behavior.
+- Focused GREEN: schema/repository/query/precision selection exited 0 with 27 passed and 123 deselected; fake recovery selection exited 0 with 6 passed and 29 deselected. Documentation contract moved from 2 failed to 2 passed after the design and runbook update.
+- Expanded checkpoint/schema/query/worker regression `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_checkpoints.py tests/test_ingest_checkpoint_integration.py tests/test_ingest_query.py tests/test_ingest_results.py tests/test_ingest_worker.py tests/test_ingest_run_store.py tests/test_observability_metrics.py tests/test_ai_schema_migrations.py tests/test_ai_schema_rehearsal_script.py tests/test_db_schema_contract.py tests/test_rag_storage_schema.py tests/test_schema_startup_mode.py tests/test_validate_ai_runtime_schema.py -q` exited 0: 272 passed, 0 failed, 25 existing `datetime.utcnow()` warnings in 21.12 seconds.
+- Code, schema, tests, and behavior documentation were committed as `1a062b6` (`fix: freeze checkpoint source update windows`). Migration 004 now upgrades old and fresh checkpoint tables with `source_updated_before`; update-filtered runs sample and immutably persist one source-clock cutoff; recovery reuses it; progressed legacy rows without it fail closed; and custom/generic queries apply the matching upper bound before resume.
+- Static compile `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m compileall -q app scripts tests` exited 0 with no output.
+- Baseball data policy `python3 /Users/mac/project/KBO_platform/scripts/validate_baseball_data_policy.py` exited 0: `External baseball data policy OK`.
+- OpenAPI contract `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python scripts/export_openapi_contract.py --check` exited 0: `AI OpenAPI artifacts are current`; one existing `google.generativeai` FutureWarning.
+- Full AI suite `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/ -q` exited 0: 1921 passed, 5 skipped, 0 failed, 33 warnings in 358.47 seconds. Skips require unavailable local operator-data migration, validation, or handoff artifacts. Warnings are existing dependency/API deprecations.
+- Whitespace gate `git diff --check HEAD^ HEAD` exited 0 with no output before this addendum.
+
+Residual risk: no live PostgreSQL smoke or locale/collation matrix was run. Fake coverage cannot verify psycopg binding or migration execution against a real server. Text keyset comparisons remain source-collation dependent, and the lower watermark's inclusive comparison deliberately retains a safe duplicate window through the fixed cutoff. No shared/production database, network source, or external baseball-data source was contacted.

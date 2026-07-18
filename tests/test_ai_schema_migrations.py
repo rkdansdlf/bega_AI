@@ -124,7 +124,8 @@ def test_checkpoint_design_documents_timestamp_subtypes_and_frozen_source_window
 
     for statement in (
         "`timestamp without time zone` preserves its wall-clock fields",
-        "`timestamp with time zone` is restored as an aware UTC instant",
+        "`timestamp with time zone` uses timezone-aware instants and interprets "
+        "offset-free values as UTC",
         "timestamp precision forms from `timestamp(0)` through `timestamp(6)`",
         "The two timestamp subtypes remain signature-distinct.",
         "source_updated_before",
