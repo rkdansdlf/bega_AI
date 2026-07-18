@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_DIR = ROOT / "app" / "db" / "migrations"
+MANAGED_MIGRATION_SCRIPT = ROOT / "scripts" / "migrate_ai_runtime_schema.sh"
 
 
 def test_ai_runtime_schema_migration_contains_runtime_cache_tables():
@@ -51,6 +52,20 @@ def test_ingest_checkpoint_migration_defines_durable_progress_table():
     assert "cursor_payload jsonb" in sql
     assert "source_rows = 0 OR cursor_payload IS NOT NULL" in sql
     assert "idx_ai_ingest_checkpoints_updated_at" in sql
+
+
+def test_managed_migration_script_applies_ingest_checkpoint_migration_in_order():
+    script = MANAGED_MIGRATION_SCRIPT.read_text(encoding="utf-8")
+    migration_paths = (
+        '"${AI_ROOT}/app/db/migrations/001_ai_runtime_cache.sql"',
+        '"${AI_ROOT}/app/db/migrations/003_ai_ingest_orchestration.sql"',
+        '"${AI_ROOT}/app/db/migrations/004_ai_ingest_checkpoints.sql"',
+    )
+
+    assert all(path in script for path in migration_paths)
+    assert [script.index(path) for path in migration_paths] == sorted(
+        script.index(path) for path in migration_paths
+    )
 
 
 def test_data_sync_runbook_documents_persistent_checkpoint_operations():
