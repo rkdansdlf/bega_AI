@@ -86,6 +86,7 @@ def test_resolved_ai_internal_token_prefers_explicit_value(monkeypatch):
 
 
 def test_resolved_ai_internal_token_uses_local_dev_fallback(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "")
     monkeypatch.setenv("CORS_ORIGINS", "http://localhost:5176,http://127.0.0.1:5176")
 
