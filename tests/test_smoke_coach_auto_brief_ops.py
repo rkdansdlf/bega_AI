@@ -309,3 +309,82 @@ def test_async_main_returns_2_when_health_collection_fails(monkeypatch) -> None:
     exit_code = asyncio.run(smoke.async_main(args))
 
     assert exit_code == 2
+
+
+def test_warm_path_smoke_accepts_live_cache_hit_state(monkeypatch) -> None:
+    target = _build_target(cache_key="completed-hit", game_date="2026-04-08")
+
+    async def cached_call(**kwargs):
+        assert kwargs["wait_for_cache_completion_on_missing_done"] is False
+        return {
+            "status": "skipped",
+            "reason": "cache_hit",
+            "meta": {"cache_state": "HIT", "cached": True},
+        }
+
+    monkeypatch.setattr(smoke, "call_analyze", cached_call)
+
+    result = asyncio.run(
+        smoke.run_warm_path_smoke(
+            target=target,
+            base_url="http://127.0.0.1:18080/api/ai",
+            internal_api_key="test-internal-token",
+            timeout_seconds=1.0,
+        )
+    )
+
+    assert result.ok is True
+    assert result.reason == "cache_hit"
+    assert result.status == "skipped"
+    assert result.cache_state == "HIT"
+    assert result.cached is True
+
+
+def test_warm_path_smoke_enforces_wall_deadline_and_fails_closed(
+    monkeypatch,
+) -> None:
+    target = MatchupTarget(
+        cache_key="completed-timeout",
+        game_id="20250310SSHH3",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    async def stuck_call(**kwargs):
+        assert kwargs["wait_for_cache_completion_on_missing_done"] is False
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(smoke, "call_analyze", stuck_call)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            smoke.run_warm_path_smoke(
+                target=target,
+                base_url="http://127.0.0.1:18080/api/ai",
+                internal_api_key="test-internal-token",
+                timeout_seconds=0.01,
+            ),
+            timeout=5.0,
+        )
+    )
+
+    assert result.ok is False
+    assert result.reason == "target_wall_timeout"
+    assert result.status == "failed"
+    assert result.cache_state is None
+    assert result.cached is None
+    assert result.elapsed_ms is not None
+    assert result.elapsed_ms < 2000
