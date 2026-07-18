@@ -717,3 +717,72 @@ def test_retains_unrendered_header_metadata_without_known_field_duplicates() -> 
         assert f'"{field}"' in rendered.endpoints
     assert '"description": "Mode header"' not in rendered.endpoints
     assert '"schema": {' not in rendered.endpoints
+
+
+def test_retains_malformed_response_reference_in_stable_metadata() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Malformed response ref", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "get": {
+                    "tags": ["responses"],
+                    "responses": {"200": {"$ref": 42}},
+                }
+            }
+        },
+        "components": {"schemas": {}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert '"$ref": 42' in rendered.endpoints
+    assert "- Reference:" not in rendered.endpoints
+
+
+def test_retains_malformed_references_in_parameter_request_media_and_schema_paths() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Malformed reference audit", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "post": {
+                    "tags": ["references"],
+                    "parameters": [{
+                        "name": "filter",
+                        "in": "query",
+                        "schema": {"type": "string"},
+                        "$ref": 1,
+                    }],
+                    "requestBody": {
+                        "$ref": 2,
+                        "content": {
+                            "application/json": {"schema": {"$ref": 3, "type": "string"}}
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "headers": {"X-Trace": {"$ref": 4}},
+                            "content": {
+                                "application/json": {"schema": {"$ref": 5, "type": "string"}}
+                            },
+                        }
+                    },
+                }
+            }
+        },
+        "components": {"schemas": {"Broken": {"$ref": 6, "type": "string"}}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    for value in range(1, 7):
+        assert f'"$ref": {value}' in rendered.endpoints or f'"$ref": {value}' in rendered.schemas

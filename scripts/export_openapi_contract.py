@@ -233,10 +233,11 @@ def _append_parameters(
         if "content" in parameter:
             lines.extend(["", f"#### Parameter content: `{_escape_code(name)}`"])
             _append_content(lines, parameter["content"], schema_anchors)
-        represented = {
-            "name", "in", "required", "description", "schema", "example",
-            "examples", "content",
-        }
+        represented = {"name", "in", "required", "description", "example", "examples"}
+        if "schema" in parameter and _schema_is_rendered(parameter["schema"]):
+            represented.add("schema")
+        if "content" in parameter and parameter["content"] is not None:
+            represented.add("content")
         metadata = {
             key: value for key, value in parameter.items() if key not in represented
         }
@@ -256,7 +257,9 @@ def _append_request_body(
         _append_unsupported(lines, "request body", request_body)
         return
     lines.append(f"- Required: **{'yes' if request_body.get('required') is True else 'no'}**")
-    represented = {"required", "content"}
+    represented: set[str] = set()
+    if isinstance(request_body.get("required"), bool):
+        represented.add("required")
     if isinstance(request_body.get("$ref"), str):
         lines.append(
             f"- Reference: {_schema_label({'$ref': request_body['$ref']}, schema_anchors=schema_anchors)}"
@@ -266,6 +269,8 @@ def _append_request_body(
         lines.append(request_body["description"])
         represented.add("description")
     _append_content(lines, request_body.get("content"), schema_anchors)
+    if "content" in request_body and request_body["content"] is not None:
+        represented.add("content")
     metadata = {
         key: value for key, value in request_body.items() if key not in represented
     }
@@ -297,10 +302,20 @@ def _append_responses(
             lines.append(
                 f"- Reference: {_schema_label({'$ref': response['$ref']}, schema_anchors=schema_anchors)}"
             )
+        represented: set[str] = set()
+        if isinstance(description, str) or description is not None:
+            represented.add("description")
+        if isinstance(response.get("$ref"), str):
+            represented.add("$ref")
         _append_headers(lines, response.get("headers"), schema_anchors)
+        if "headers" in response and response["headers"] is not None:
+            represented.add("headers")
         _append_content(lines, response.get("content"), schema_anchors)
+        if "content" in response and response["content"] is not None:
+            represented.add("content")
         _append_response_links(lines, response.get("links"))
-        represented = {"$ref", "description", "headers", "content", "links"}
+        if "links" in response and response["links"] is not None:
+            represented.add("links")
         metadata = {
             key: value for key, value in response.items() if key not in represented
         }
@@ -347,9 +362,11 @@ def _append_headers(
         if "content" in header:
             lines.extend(["", f"#### Header content: `{_escape_code(str(name))}`"])
             _append_content(lines, header["content"], schema_anchors)
-        represented = {
-            "description", "schema", "required", "example", "examples", "content",
-        }
+        represented = {"description", "required", "example", "examples"}
+        if "schema" in header and _schema_is_rendered(header["schema"]):
+            represented.add("schema")
+        if "content" in header and header["content"] is not None:
+            represented.add("content")
         if isinstance(header.get("$ref"), str):
             represented.add("$ref")
         metadata = {key: value for key, value in header.items() if key not in represented}
@@ -377,7 +394,10 @@ def _append_content(
                 f"- Schema: {_schema_label(media['schema'], schema_anchors=schema_anchors)}"
             )
         _append_examples(lines, media)
-        unsupported = {key: value for key, value in media.items() if key not in {"schema", "example", "examples"}}
+        represented = {"example", "examples"}
+        if "schema" in media and _schema_is_rendered(media["schema"]):
+            represented.add("schema")
+        unsupported = {key: value for key, value in media.items() if key not in represented}
         if unsupported:
             _append_unsupported(lines, "media type fields", unsupported)
 
@@ -452,6 +472,14 @@ def _schema_label(
             label = f"{label} ({schema['format']})"
         return f"`{_escape_code(label)}`"
     return f"`{_escape_code(_stable_json(schema))}`"
+
+
+def _schema_is_rendered(schema: object) -> bool:
+    if schema is None:
+        return False
+    if isinstance(schema, Mapping) and "$ref" in schema:
+        return isinstance(schema["$ref"], str)
+    return True
 
 
 def _stable_json(value: object) -> str:
@@ -569,13 +597,15 @@ def _append_schema(
         else:
             _append_unsupported(lines, "additionalProperties", value)
     known = {
-        "$ref", "type", "format", "title", "description", "required", "properties",
+        "type", "format", "title", "description", "required", "properties",
         "minLength", "maxLength", "pattern", "minimum", "maximum", "exclusiveMinimum",
         "exclusiveMaximum", "multipleOf", "minItems", "maxItems", "uniqueItems", "minProperties",
         "maxProperties", "default", "enum", "const", "nullable", "readOnly", "writeOnly",
         "deprecated", "example", "examples", "allOf", "anyOf", "oneOf", "not", "discriminator",
         "additionalProperties", "items",
     }
+    if _schema_is_rendered(schema) and isinstance(schema.get("$ref"), str):
+        known.add("$ref")
     unsupported = {key: value for key, value in schema.items() if key not in known}
     if unsupported:
         _append_unsupported(lines, "schema fields", unsupported)
@@ -615,11 +645,13 @@ def _append_property_metadata(
 ) -> None:
     metadata: list[str] = []
     represented = {
-        "$ref", "type", "format", "description", "minLength", "maxLength",
+        "type", "format", "description", "minLength", "maxLength",
         "pattern", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
         "multipleOf", "minItems", "maxItems", "uniqueItems", "minProperties",
         "maxProperties",
     }
+    if _schema_is_rendered(schema) and isinstance(schema.get("$ref"), str):
+        represented.add("$ref")
     if "default" in schema:
         metadata.append(f"Default: `{_inline_json(schema['default'])}`")
         represented.add("default")
