@@ -449,22 +449,36 @@ async def test_endpoint_stream_missing_version_header_preserves_v1(monkeypatch):
     assert '"version":2' not in sse_text
 
 
-@pytest.mark.asyncio
-async def test_endpoint_stream_rejects_unsupported_version_before_work() -> None:
+def test_endpoint_stream_rejects_unsupported_version_before_work() -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
     from app.routers import coach
-    from app.streaming.http_errors import AiStreamHttpException
+    from app.streaming.http_errors import install_ai_stream_http_error_handler
 
-    with pytest.raises(AiStreamHttpException) as raised:
-        await coach.analyze_team(
-            coach.AnalyzeRequest(home_team_id="LG"),
-            object(),
-            None,
-            None,
-            event_version_header="3",
-        )
+    producer_work_started = False
 
-    assert raised.value.status_code == 406
-    assert raised.value.error.model_dump(mode="json") == {
+    class ProducerMustNotStart:
+        def __getattr__(self, _name: str) -> object:
+            nonlocal producer_work_started
+            producer_work_started = True
+            raise AssertionError("producer work must not start for an unsupported version")
+
+    app = FastAPI()
+    install_ai_stream_http_error_handler(app)
+    app.include_router(coach.router)
+    app.dependency_overrides[coach.get_agent] = ProducerMustNotStart
+    app.dependency_overrides[coach.rate_limit_coach_dependency] = lambda: None
+    app.dependency_overrides[coach.require_ai_internal_token] = lambda: None
+
+    response = TestClient(app).post(
+        "/coach/analyze",
+        json={"home_team_id": "LG"},
+        headers={"X-AI-Event-Version": "3"},
+    )
+
+    assert response.status_code == 406
+    assert response.json() == {
         "code": "AI_EVENT_VERSION_UNSUPPORTED",
         "message": "지원하지 않는 AI 이벤트 버전입니다.",
         "detail": None,
@@ -472,7 +486,8 @@ async def test_endpoint_stream_rejects_unsupported_version_before_work() -> None
         "retry_after_seconds": None,
         "supported_versions": ["1", "2"],
     }
-    assert not isinstance(raised.value.error.detail, dict)
+    assert not isinstance(response.json().get("detail"), dict)
+    assert producer_work_started is False
 
 
 # ============================================================
