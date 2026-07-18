@@ -37,6 +37,9 @@ concurrency:
   group: ai-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # Job 1: Lint
   lint:
@@ -124,10 +127,12 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install safety
+          python -m pip install --upgrade pip pip-audit
       
-      - name: Run safety check
-        run: safety check --json || true
+      - name: Audit application dependencies
+        run: |
+          pip-audit -r requirements.txt
+          pip-audit -r requirements-dev
       
       - name: Security Summary
         run: |
@@ -146,7 +151,7 @@ jobs:
         run: docker build -t ai-service:${{ github.sha }} .
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: 'ai-service:${{ github.sha }}'
           format: 'table'

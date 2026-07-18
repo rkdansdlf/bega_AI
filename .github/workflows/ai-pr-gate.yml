@@ -16,6 +16,13 @@ on:
       - 'pytest.ini'
       - '.github/workflows/ai-pr-gate.yml'
 
+concurrency:
+  group: ai-pr-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   ai-pr-gate:
     runs-on: ubuntu-latest
