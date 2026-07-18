@@ -223,6 +223,12 @@ AI_INGEST_LEASE_RECOVERIES_TOTAL = Counter(
     ["result"],
 )
 
+AI_INGEST_HEARTBEATS_TOTAL = Counter(
+    "ai_ingest_heartbeats_total",
+    "Durable ingestion heartbeat outcomes.",
+    ["result"],
+)
+
 AI_INGEST_TABLE_SOURCE_ROWS_TOTAL = Counter(
     "ai_ingest_table_source_rows_total",
     "Source rows processed by configured source table.",

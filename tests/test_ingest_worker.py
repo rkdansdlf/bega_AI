@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,6 +10,7 @@ from uuid import UUID
 import pytest
 
 from app.core.ingest_runs import (
+    IngestLeaseLostError,
     IngestRunRecord,
     IngestRunRequest,
     IngestRunStatus,
@@ -79,7 +81,9 @@ class _Store:
 
     async def heartbeat(self, run_id, owner):
         self.heartbeat_calls += 1
-        return run_id == RUN_ID and owner == "worker-1"
+        if run_id == RUN_ID and owner == "worker-1":
+            return NOW
+        return None
 
     async def finish_success(self, run_id, owner, results, watermarks, scope_key):
         assert owner == "worker-1"
@@ -113,6 +117,29 @@ class _Store:
 
     async def get_latest_watermarks_by_table(self):
         return self.latest_watermarks
+
+
+class _ScriptedHeartbeatStore(_Store):
+    def __init__(self, responses):
+        super().__init__(claimed=None)
+        self.responses = list(responses)
+
+    async def heartbeat(self, run_id, owner):
+        assert run_id == RUN_ID
+        assert owner == "worker-1"
+        self.heartbeat_calls += 1
+        response = self.responses.pop(0) if self.responses else NOW
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+async def _wait_for_heartbeat_calls(store, expected, timeout=0.5):
+    async def reached_expected_calls():
+        while store.heartbeat_calls < expected:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(reached_expected_calls(), timeout=timeout)
 
 
 def test_run_once_finishes_success_and_advances_watermarks(monkeypatch):
@@ -395,6 +422,152 @@ def test_lease_loss_prevents_terminal_success_and_further_tables(monkeypatch):
 
     monkeypatch.setattr(worker, "_heartbeat_loop", lose_lease)
     monkeypatch.setattr(worker, "_execute", complete_after_lease_loss)
+
+    assert asyncio.run(worker.run_once()) is True
+    assert store.successful_run_id is None
+    assert store.failed is None
+
+
+def test_heartbeat_retries_transient_error_without_losing_lease():
+    store = _ScriptedHeartbeatStore([RuntimeError("temporary db failure"), NOW])
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    worker.lease_seconds = 0.1
+    worker.heartbeat_interval_seconds = 0.001
+    worker.heartbeat_safety_margin_seconds = 0.01
+    worker.heartbeat_retry_initial_seconds = 0.001
+    lease_lost = asyncio.Event()
+    retry_before = _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "retry"}
+    )
+    success_before = _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "success"}
+    )
+
+    async def scenario():
+        task = asyncio.create_task(worker._heartbeat_loop(RUN, lease_lost))
+        await _wait_for_heartbeat_calls(store, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert lease_lost.is_set() is False
+    assert store.heartbeat_calls >= 2
+    assert _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "retry"}
+    ) - retry_before == 1
+    assert _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "success"}
+    ) - success_before >= 1
+
+
+def test_heartbeat_exhaustion_marks_lease_lost():
+    store = _ScriptedHeartbeatStore([RuntimeError("db unavailable")] * 20)
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    worker.lease_seconds = 0.02
+    worker.heartbeat_interval_seconds = 0.001
+    worker.heartbeat_safety_margin_seconds = 0.01
+    worker.heartbeat_retry_initial_seconds = 0.001
+    lease_lost = asyncio.Event()
+    exhausted_before = _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "exhausted"}
+    )
+
+    async def scenario():
+        await asyncio.wait_for(worker._heartbeat_loop(RUN, lease_lost), timeout=0.2)
+
+    asyncio.run(scenario())
+
+    assert lease_lost.is_set() is True
+    assert store.heartbeat_calls >= 2
+    assert _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "exhausted"}
+    ) - exhausted_before == 1
+
+
+def test_heartbeat_rejection_marks_lease_lost_without_retry():
+    store = _ScriptedHeartbeatStore([None])
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    worker.heartbeat_interval_seconds = 0.001
+    lease_lost = asyncio.Event()
+    rejected_before = _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "rejected"}
+    )
+
+    asyncio.run(worker._heartbeat_loop(RUN, lease_lost))
+
+    assert lease_lost.is_set() is True
+    assert store.heartbeat_calls == 1
+    assert _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "rejected"}
+    ) - rejected_before == 1
+
+
+def test_heartbeat_cancellation_does_not_mark_lease_lost():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingStore(_Store):
+        async def heartbeat(self, run_id, owner):
+            entered.set()
+            await release.wait()
+            return NOW
+
+    store = _BlockingStore(claimed=None)
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    worker.heartbeat_interval_seconds = 0.001
+    lease_lost = asyncio.Event()
+    exhausted_before = _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "exhausted"}
+    )
+
+    async def scenario():
+        task = asyncio.create_task(worker._heartbeat_loop(RUN, lease_lost))
+        await asyncio.wait_for(entered.wait(), timeout=0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert lease_lost.is_set() is False
+    assert _read_metric_value(
+        "ai_ingest_heartbeats_total", {"result": "exhausted"}
+    ) == exhausted_before
+
+
+def test_long_sync_ingest_keeps_heartbeating_past_lease_interval():
+    store = _Store()
+
+    def slow_ingest(**kwargs):
+        assert kwargs["lease_run_id"] == RUN_ID
+        time.sleep(0.08)
+        return EXECUTION_RESULT
+
+    worker = IngestWorker(
+        store=store,
+        settings=SETTINGS,
+        owner="worker-1",
+        ingest_function=slow_ingest,
+    )
+    worker.lease_seconds = 0.06
+    worker.heartbeat_interval_seconds = 0.01
+    worker.heartbeat_safety_margin_seconds = 0.01
+
+    assert asyncio.run(worker.run_once()) is True
+    assert store.successful_run_id == RUN_ID
+    assert store.heartbeat_calls >= 2
+
+
+def test_expired_lease_during_success_finish_is_left_for_recovery(monkeypatch):
+    class _FinishRaceStore(_Store):
+        async def finish_success(self, *args, **kwargs):
+            raise IngestLeaseLostError
+
+    store = _FinishRaceStore()
+    worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
+    monkeypatch.setattr(worker, "_execute", AsyncMock(return_value=EXECUTION_RESULT))
 
     assert asyncio.run(worker.run_once()) is True
     assert store.successful_run_id is None

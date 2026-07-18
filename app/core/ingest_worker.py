@@ -28,6 +28,7 @@ from .ingest_runs import (
 )
 from ..observability.metrics import (
     AI_INGEST_ACTIVE_RUNS,
+    AI_INGEST_HEARTBEATS_TOTAL,
     AI_INGEST_LEASE_RECOVERIES_TOTAL,
     AI_INGEST_QUEUED_RUNS,
     AI_INGEST_RUN_COMPLETIONS_TOTAL,
@@ -66,6 +67,15 @@ class IngestWorker:
         self.lease_seconds = max(
             3, int(getattr(settings, "ingest_worker_lease_seconds", 120))
         )
+        self.heartbeat_interval_seconds = max(1.0, self.lease_seconds / 3)
+        self.heartbeat_safety_margin_seconds = min(
+            5.0,
+            max(0.25, self.lease_seconds / 6),
+        )
+        self.heartbeat_retry_initial_seconds = min(
+            1.0,
+            self.heartbeat_interval_seconds,
+        )
         self.recovery_seconds = max(1.0, self.lease_seconds / 3)
 
     @staticmethod
@@ -92,12 +102,19 @@ class IngestWorker:
             if lease_lost.is_set():
                 raise IngestLeaseLostError
         except ManualBaseballDataRequiredError as exc:
-            await self.store.finish_manual_data_required(
-                run.run_id,
-                self.owner,
-                exc.contract,
-            )
-            terminal_status = IngestRunStatus.MANUAL_BASEBALL_DATA_REQUIRED
+            try:
+                await self.store.finish_manual_data_required(
+                    run.run_id,
+                    self.owner,
+                    exc.contract,
+                )
+            except IngestLeaseLostError:
+                logger.error(
+                    "Ingestion manual terminal skipped after lease loss run_id=%s",
+                    run.run_id,
+                )
+            else:
+                terminal_status = IngestRunStatus.MANUAL_BASEBALL_DATA_REQUIRED
         except asyncio.CancelledError:
             raise
         except IngestLeaseLostError:
@@ -109,22 +126,42 @@ class IngestWorker:
                 run.run_id,
                 error_type,
             )
-            await self.store.finish_failed(
-                run.run_id,
-                self.owner,
-                error_code="INGEST_EXECUTION_FAILED",
-                error_message=error_type,
-            )
-            terminal_status = IngestRunStatus.FAILED
+            if lease_lost.is_set():
+                logger.error(
+                    "Ingestion failure terminal skipped after lease loss run_id=%s",
+                    run.run_id,
+                )
+            else:
+                try:
+                    await self.store.finish_failed(
+                        run.run_id,
+                        self.owner,
+                        error_code="INGEST_EXECUTION_FAILED",
+                        error_message=error_type,
+                    )
+                except IngestLeaseLostError:
+                    logger.error(
+                        "Ingestion failure terminal rejected after lease loss run_id=%s",
+                        run.run_id,
+                    )
+                else:
+                    terminal_status = IngestRunStatus.FAILED
         else:
-            await self.store.finish_success(
-                run.run_id,
-                self.owner,
-                result.tables,
-                result.watermarks,
-                build_watermark_scope_key(run.request),
-            )
-            terminal_status = IngestRunStatus.SUCCEEDED
+            try:
+                await self.store.finish_success(
+                    run.run_id,
+                    self.owner,
+                    result.tables,
+                    result.watermarks,
+                    build_watermark_scope_key(run.request),
+                )
+            except IngestLeaseLostError:
+                logger.error(
+                    "Ingestion success terminal skipped after lease loss run_id=%s",
+                    run.run_id,
+                )
+            else:
+                terminal_status = IngestRunStatus.SUCCEEDED
         finally:
             heartbeat_task.cancel()
             try:
@@ -255,23 +292,74 @@ class IngestWorker:
         run: IngestRunRecord,
         lease_lost: asyncio.Event,
     ) -> None:
-        interval = max(1.0, self.lease_seconds / 3)
+        loop = asyncio.get_running_loop()
+        last_confirmed = loop.time()
+        interval = max(0.001, float(self.heartbeat_interval_seconds))
+        retry_initial = max(0.001, float(self.heartbeat_retry_initial_seconds))
+        safety_margin = max(
+            0.0,
+            min(float(self.heartbeat_safety_margin_seconds), self.lease_seconds / 2),
+        )
+
         while True:
             await asyncio.sleep(interval)
-            try:
-                owned = await self.store.heartbeat(run.run_id, self.owner)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Ingestion run heartbeat failed run_id=%s error_type=%s",
-                    run.run_id,
-                    type(exc).__name__,
-                )
-                lease_lost.set()
-                return
-            if not owned:
-                logger.error("Ingestion run lease lost run_id=%s", run.run_id)
-                lease_lost.set()
-                return
+            retry_delay = retry_initial
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    lease_expires_at = await self.store.heartbeat(
+                        run.run_id,
+                        self.owner,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    remaining = (
+                        last_confirmed
+                        + float(self.lease_seconds)
+                        - safety_margin
+                        - loop.time()
+                    )
+                    if remaining <= 0:
+                        AI_INGEST_HEARTBEATS_TOTAL.labels(result="exhausted").inc()
+                        logger.error(
+                            "Ingestion heartbeat retry budget exhausted "
+                            "run_id=%s attempts=%d error_type=%s",
+                            run.run_id,
+                            attempt,
+                            type(exc).__name__,
+                        )
+                        lease_lost.set()
+                        return
+                    AI_INGEST_HEARTBEATS_TOTAL.labels(result="retry").inc()
+                    logger.warning(
+                        "Ingestion heartbeat retry scheduled "
+                        "run_id=%s attempt=%d remaining_seconds=%.3f error_type=%s",
+                        run.run_id,
+                        attempt,
+                        remaining,
+                        type(exc).__name__,
+                    )
+                    await asyncio.sleep(min(retry_delay, remaining))
+                    retry_delay = min(
+                        retry_delay * 2,
+                        max(retry_initial, interval),
+                    )
+                    continue
+
+                if lease_expires_at is None:
+                    AI_INGEST_HEARTBEATS_TOTAL.labels(result="rejected").inc()
+                    logger.error(
+                        "Ingestion run lease rejected run_id=%s",
+                        run.run_id,
+                    )
+                    lease_lost.set()
+                    return
+
+                AI_INGEST_HEARTBEATS_TOTAL.labels(result="success").inc()
+                last_confirmed = loop.time()
+                break
 
     async def _execute(
         self,
