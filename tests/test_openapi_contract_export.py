@@ -302,6 +302,7 @@ def test_merges_parameters_and_renders_only_explicit_parameter_examples() -> Non
 
     assert rendered.endpoints.index("| `id` | path") < rendered.endpoints.index("| `search` | query") < rendered.endpoints.index("| `trace` | header")
     assert '`"operation-value"`' in rendered.endpoints
+    assert rendered.endpoints.count('"operation-value"') == 1
     assert "path-value" not in rendered.endpoints
     assert "left\\|right" in rendered.endpoints
     assert "#### Example: request" in rendered.endpoints
@@ -309,6 +310,77 @@ def test_merges_parameters_and_renders_only_explicit_parameter_examples() -> Non
     assert "never-an-example" not in rendered.endpoints
     assert "hidden" not in rendered.endpoints
     assert rendered.endpoints.index("### Response `201`") < rendered.endpoints.index("### Response `404`") < rendered.endpoints.index("### Response `default`")
+
+
+def test_preserves_path_item_and_operation_metadata_without_duplicate_rendered_fields() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Metadata", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "summary": "Path summary",
+                "x-path": {"owner": "widgets"},
+                "parameters": [{"name": "trace", "in": "header", "schema": {"type": "string"}}],
+                "get": {
+                    "tags": ["metadata"],
+                    "summary": "Operation summary",
+                    "operationId": "list_widgets",
+                    "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer"}}],
+                    "callbacks": {"onChange": {"{$request.body#/url}": {"post": {"responses": {"200": {"description": "OK"}}}}}},
+                    "x-operation": {"audit": True},
+                },
+            }
+        },
+        "components": {"schemas": {}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert '"summary": "Path summary"' in rendered.endpoints
+    assert '"x-path": {' in rendered.endpoints
+    assert '"callbacks": {' in rendered.endpoints
+    assert '"x-operation": {' in rendered.endpoints
+    assert '"summary": "Operation summary"' not in rendered.endpoints
+    assert '"operationId": "list_widgets"' not in rendered.endpoints
+    assert '"parameters": [' not in rendered.endpoints
+
+
+def test_renders_reference_only_parameters_with_stable_identity_and_siblings() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "References", "version": "1"},
+        "paths": {
+            "/widgets": {
+                "parameters": [
+                    {"$ref": "#/components/parameters/Shared", "x-path": {"keep": True}},
+                ],
+                "get": {
+                    "tags": ["references"],
+                    "parameters": [
+                        {"$ref": "#/components/parameters/Shared", "x-operation": {"wins": True}},
+                        {"$ref": "#/components/parameters/Trace"},
+                    ],
+                },
+            }
+        },
+        "components": {"schemas": {}},
+    }
+
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command="python scripts/export_openapi_contract.py",
+    )
+
+    assert rendered.endpoints.count("#/components/parameters/Shared") == 1
+    assert rendered.endpoints.index("#/components/parameters/Shared") < rendered.endpoints.index("#/components/parameters/Trace")
+    assert '"x-operation": {' in rendered.endpoints
+    assert '"wins": true' in rendered.endpoints
+    assert '"x-path": {' not in rendered.endpoints
 
 
 def test_preserves_schema_examples_items_and_unsupported_fields_stably() -> None:
@@ -946,17 +1018,44 @@ def test_build_contract_document_uses_documentation_settings_and_restores_enviro
     assert document["components"]["securitySchemes"]["InternalApiKey"]["name"] == (
         "X-Internal-Api-Key"
     )
+    assert document["info"]["title"] == "KBO AI Service"
     assert {key: os.environ[key] for key in caller_environment} == caller_environment
 
     document["paths"].clear()
     assert exporter.build_contract_document()["paths"]
 
 
+def test_hostile_app_name_cannot_change_document_artifacts_or_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact_paths = {
+        "contract": tmp_path / "contracts" / "openapi.json",
+        "endpoints": tmp_path / "docs" / "api-endpoints.md",
+        "schemas": tmp_path / "docs" / "api-schemas.md",
+    }
+    monkeypatch.setenv("APP_NAME", "hostile title")
+    monkeypatch.setattr(exporter, "CONTRACT_PATH", artifact_paths["contract"])
+    monkeypatch.setattr(exporter, "ENDPOINTS_PATH", artifact_paths["endpoints"])
+    monkeypatch.setattr(exporter, "SCHEMAS_PATH", artifact_paths["schemas"])
+
+    assert exporter.DOCUMENTATION_ENV["APP_NAME"] == "KBO AI Service"
+    assert exporter.build_contract_document()["info"]["title"] == "KBO AI Service"
+    assert exporter.main([]) == 0
+    before = {path: path.read_bytes() for path in artifact_paths.values()}
+    assert exporter.main(["--check"]) == 0
+    assert {path: path.read_bytes() for path in artifact_paths.values()} == before
+
+
 def test_build_contract_document_restores_environment_and_settings_cache_after_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app import config as app_config
     from app import main as app_main
-    from app.config import get_settings
+
+    settings_getter = app_config.get_settings
+    cached_settings = settings_getter()
+    cache_info = settings_getter.cache_info()
+    assert app_main.get_settings is settings_getter
 
     caller_environment = {
         key: f"before-failure-{key.lower()}" for key in exporter.DOCUMENTATION_ENV
@@ -973,7 +1072,10 @@ def test_build_contract_document_restores_environment_and_settings_cache_after_f
         exporter.build_contract_document()
 
     assert {key: os.environ[key] for key in caller_environment} == caller_environment
-    assert get_settings.cache_info().currsize == 0
+    assert app_config.get_settings is settings_getter
+    assert app_main.get_settings is settings_getter
+    assert settings_getter.cache_info() == cache_info
+    assert settings_getter() is cached_settings
 
 
 def test_cli_writes_all_artifacts_and_check_reports_every_stale_path_without_writing(
@@ -995,16 +1097,21 @@ def test_cli_writes_all_artifacts_and_check_reports_every_stale_path_without_wri
     assert all(content.endswith(b"\n") and not content.endswith(b"\n\n") for content in generated_bytes.values())
     assert exporter.main(["--check"]) == 0
 
-    artifact_paths["endpoints"].write_bytes(b"stale endpoint bytes\n")
-    artifact_paths["schemas"].unlink()
-    stale_bytes = artifact_paths["endpoints"].read_bytes()
+    for path in artifact_paths.values():
+        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    stale_state = {
+        name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for name, path in artifact_paths.items()
+    }
 
     assert exporter.main(["--check"]) == 1
     output = capsys.readouterr().out
-    assert str(artifact_paths["endpoints"].relative_to(tmp_path)) in output
-    assert str(artifact_paths["schemas"].relative_to(tmp_path)) in output
-    assert artifact_paths["endpoints"].read_bytes() == stale_bytes
-    assert not artifact_paths["schemas"].exists()
+    for path in artifact_paths.values():
+        assert str(path.relative_to(tmp_path)) in output
+    assert {
+        name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for name, path in artifact_paths.items()
+    } == stale_state
 
 
 def _production_subprocess_environment() -> dict[str, str]:
@@ -1110,6 +1217,7 @@ import sys
 
 import app
 app_main = importlib.import_module("app.main")
+app_config = importlib.import_module("app.config")
 from scripts.export_openapi_contract import build_contract_document
 
 modules_before = {
@@ -1121,6 +1229,10 @@ package_app = app.app
 get_app = app.get_app
 cache_info = get_app.cache_info()
 main_app = app_main.app
+settings_getter = app_config.get_settings
+cached_settings = settings_getter()
+settings_cache_info = settings_getter.cache_info()
+assert app_main.get_settings is settings_getter
 
 document = build_contract_document()
 assert document["paths"]
@@ -1136,6 +1248,10 @@ assert app.app is package_app
 assert app.get_app is get_app
 assert get_app.cache_info() == cache_info
 assert app_main.app is main_app
+assert app_config.get_settings is settings_getter
+assert app_main.get_settings is settings_getter
+assert settings_getter.cache_info() == settings_cache_info
+assert settings_getter() is cached_settings
 assert package_app.docs_url is None
 assert package_app.openapi_url is None
 assert main_app.docs_url is None
