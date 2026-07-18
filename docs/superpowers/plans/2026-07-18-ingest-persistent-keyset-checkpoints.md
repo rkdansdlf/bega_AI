@@ -1405,3 +1405,20 @@ Date: 2026-07-18
 - Whitespace check: `git diff --check` exited 0 with no output (non-test gate; pass/skip/fail counts not applicable).
 
 Residual risk: no separately approved local-only disposable live PostgreSQL smoke was run. Therefore real PostgreSQL DDL/transaction behavior remains unverified outside the fake-connection coverage; no shared or production database was contacted.
+
+## Post-Review Verification Evidence
+
+Date: 2026-07-18
+
+- Managed migration contract RED: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ai_schema_migrations.py::test_managed_migration_script_applies_ingest_checkpoint_migration_in_order -q` exited 1: 0 passed, 1 failed, 0 skipped, 0 warnings. The script did not yet include migration 004.
+- Managed migration contract GREEN: the same command exited 0: 1 passed, 0 failed, 0 skipped, 0 warnings. Relevant schema/startup regression `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ai_schema_migrations.py tests/test_db_schema_contract.py tests/test_schema_startup_mode.py -q` exited 0: 20 passed, 0 failed, 0 skipped, 0 warnings.
+- Strengthened runbook contract RED: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ai_schema_migrations.py::test_data_sync_runbook_documents_persistent_checkpoint_operations -q` exited 1: 0 passed, 1 failed, 0 skipped, 0 warnings. It lacked the exact reviewed operational contract statements.
+- Strengthened runbook contract GREEN: the same command exited 0: 1 passed, 0 failed, 0 skipped, 0 warnings.
+- Focused checkpoint regression: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ai_schema_migrations.py tests/test_db_schema_contract.py tests/test_schema_startup_mode.py tests/test_ingest_checkpoints.py tests/test_ingest_checkpoint_integration.py tests/test_ingest_query.py tests/test_ingest_results.py tests/test_ingest_worker.py tests/test_ingest_run_store.py tests/test_observability_metrics.py -q` exited 0: 215 passed, 0 failed, 0 skipped, 17 `datetime.utcnow()` deprecation warnings.
+- Static compile: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m compileall -q app scripts tests` exited 0 with no output (non-test gate; pass/skip/fail counts not applicable).
+- Baseball data policy: `python3 /Users/mac/project/KBO_platform/scripts/validate_baseball_data_policy.py` exited 0: `External baseball data policy OK` (zero violations; non-test gate).
+- OpenAPI contract: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python scripts/export_openapi_contract.py --check` exited 0: artifacts current, 0 failures; one existing `google.generativeai` FutureWarning.
+- Full AI suite: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/ -q` exited 0: 1879 passed, 5 skipped, 0 failed, 25 warnings. The skips require unavailable local operator-data migration, validation report, or handoff reports.
+- Whitespace check: `git diff --check` exited 0 with no output (non-test gate; pass/skip/fail counts not applicable).
+
+Final residual risk: no separately approved local-only disposable live PostgreSQL smoke was run. Real PostgreSQL DDL/transaction behavior therefore remains unverified outside fake-connection coverage; no shared or production database was contacted.

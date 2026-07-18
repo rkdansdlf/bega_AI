@@ -19,7 +19,7 @@
    AI_SCHEMA_DB_URL='postgresql://...' ./scripts/migrate_ai_runtime_schema.sh
    ```
 
-   이 명령은 `001_ai_runtime_cache.sql`, `003_ai_ingest_orchestration.sql`, `004_ai_ingest_checkpoints.sql` 순서로 적용합니다. AI 시작 시 ingest orchestration compatibility migration은 003 다음 004를 적용합니다. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다.
+   Managed migration script applies `001_ai_runtime_cache.sql` -> `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. Compatibility startup applies `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다.
 
 2. AI 서비스를 `AI_DB_SCHEMA_MODE=managed`로 시작합니다. 작업자는 기본 활성화되며 다음 값으로 조정합니다.
 
@@ -103,17 +103,17 @@ heartbeat와 성공·실패·`MANUAL_BASEBALL_DATA_REQUIRED` 종료는 모두 DB
 
 ## Persistent checkpoint resume
 
-Leased database-table ingest는 `ai_ingest_checkpoints`에 `(run_id, source_table)`당 정확히 한 행을 사용합니다. terminal completion 뒤에도 이 audit 행은 보존합니다. 체크포인트가 있으면 source query는 저장된 typed cursor의 모든 필드에 대해 ascending keyset (`>` row-value comparison)으로 재개하며, offset pagination은 사용하지 않습니다. custom query는 명시적 고유 cursor order를, generic PostgreSQL table은 실제 지원되는 primary key를 요구합니다.
+Leased database-table ingest는 `ai_ingest_checkpoints`에 `(run_id, source_table)`당 정확히 한 행을 사용합니다. Exactly one `ai_ingest_checkpoints` row per `(run_id, source_table)` is retained after terminal completion. Resume uses a typed ascending keyset and never an offset. 체크포인트가 있으면 source query는 저장된 typed cursor의 모든 필드에 대해 ascending keyset (`>` row-value comparison)으로 재개합니다. custom query는 명시적 고유 cursor order를, generic PostgreSQL table은 실제 지원되는 primary key를 요구합니다.
 
-청크 upsert/비활성화와 cursor advancement는 같은 destination transaction에서 lease fence 확인 후 함께 commit됩니다. 출력 청크가 0개인 source batch도 cursor progress는 fence 아래 commit되어 재시작 시 같은 행을 무한 재처리하지 않습니다. duplicate 또는 역행 cursor는 다음 행 lookahead가 unsafe boundary를 감지한 뒤 commit 전에 거부합니다. 이미 `completed`인 table checkpoint를 복구하면 source data `SELECT` 없이 누적 결과를 반환합니다.
+Chunks and their cursor commit together under the lease fence. 청크 upsert/비활성화와 cursor advancement는 같은 destination transaction에서 lease fence 확인 후 함께 commit됩니다. 출력 청크가 0개인 source batch도 cursor progress는 fence 아래 commit되어 재시작 시 같은 행을 무한 재처리하지 않습니다. duplicate 또는 역행 cursor는 다음 행 lookahead가 unsafe boundary를 감지한 뒤 commit 전에 거부합니다. 이미 `completed`인 table checkpoint를 복구하면 source data `SELECT` 없이 누적 결과를 반환합니다.
 
-`source_file` 정적 문서 profile은 checkpoint 행을 만들지 않습니다. 정적 문서는 전체 profile을 하나의 atomic transaction으로 다시 시작·commit하므로 database-table cursor resume과 섞지 않습니다.
+`source_file` static documents create no checkpoint row and restart atomically. 정적 문서는 전체 profile을 하나의 atomic transaction으로 다시 시작·commit하므로 database-table cursor resume과 섞지 않습니다.
 
 Checkpointed run은 `limit=None` 및 `row_stale_cleanup=off`여야 합니다. `row_stale_cleanup`의 `dry-run` 또는 `apply`는 checkpointed run에서 허용되지 않습니다.
 
 ### Checkpoint failure contracts
 
-다음 checkpoint 오류는 실행을 실패로 종결할 수 있으므로 code와 source table/run ID를 운영 기록에 남기고, cursor를 수동으로 수정하지 말고 구성 또는 내부 trusted source를 바로잡은 뒤 재시도합니다.
+The generic terminal status error code remains `INGEST_EXECUTION_FAILED`; the five `INGEST_CHECKPOINT_*` identifiers are internal typed exception and metric classifications, not status-payload error codes. `MANUAL_BASEBALL_DATA_REQUIRED` remains the separate operator handoff. 일반 checkpoint 실패의 상태 응답 `error.code`는 `INGEST_EXECUTION_FAILED`이며, worker log의 `run_id`와 `error_type`를 함께 확인합니다. cursor를 수동으로 수정하지 말고 구성 또는 내부 trusted source를 바로잡은 뒤 재시도합니다.
 
 - `INGEST_CHECKPOINT_CURSOR_UNAVAILABLE`: checkpoint 실행에 cursor를 만들 수 없음(예: `limit`이 `None`이 아님, 정적 문서에 checkpoint 요청).
 - `INGEST_CHECKPOINT_INCOMPATIBLE`: 저장된 cursor version/signature/scope 또는 durable checkpoint 상태가 현재 order와 호환되지 않음.
@@ -149,7 +149,7 @@ Checkpointed run은 `limit=None` 및 `row_stale_cleanup=off`여야 합니다. `r
 - `ai_ingest_watermark_lag_seconds{source_table}`: 허용된 테이블별 최근 성공 watermark 지연
 - `ai_ingest_lease_recoveries_total{result}`: 만료 리스 재대기/최종 실패 수
 - `ai_ingest_heartbeats_total{result}`: `success`, `retry`, `rejected`, `exhausted` heartbeat 결과
-- `ai_ingest_checkpoint_events_total{source_table,result}`: durable checkpoint lifecycle. `created`는 첫 checkpoint row 생성, `advanced`는 fenced batch cursor commit, `completed`는 table completion commit, `resumed`는 기존 row 사용, `incompatible`은 compatibility failure, `rejected`는 그 밖의 checkpoint rejection을 뜻합니다. `source_table`과 `result`는 고정된 bounded label 집합입니다.
+- `ai_ingest_checkpoint_events_total{source_table,result}`: durable checkpoint lifecycle. `created`는 첫 checkpoint row 생성, `advanced`는 fenced batch cursor commit, `completed`는 table completion commit, `resumed`는 기존 row 사용, `incompatible`은 `IngestCheckpointIncompatibleError` classification, `rejected`는 그 밖의 `IngestCheckpointError` classification을 뜻합니다. Checkpoint metric results are limited to `created`, `advanced`, `completed`, `resumed`, `incompatible`, and `rejected`. Operators observe checkpoint failures through `ai_ingest_checkpoint_events_total{source_table,result}` and AI worker logs with `run_id` and `error_type`. `source_table`과 `result`는 고정된 bounded label 집합입니다.
 
 Backend Prometheus에서는 다음 지표를 함께 확인합니다.
 
@@ -167,10 +167,10 @@ Backend Prometheus에서는 다음 지표를 함께 확인합니다.
 
 1. `AI_INGEST_ENABLED=false`로 backend를 재배포해 새 반복 제출을 중단합니다.
 2. 이미 생성된 실행은 terminal 상태가 될 때까지 AI worker를 유지합니다. 긴급 중단 시 run ID와 lease 만료 시각을 기록합니다.
-3. 애플리케이션 코드를 롤백하되 003과 `004_ai_ingest_checkpoints.sql`의 테이블·인덱스는 즉시 삭제하지 않습니다. migration 004와 `ai_ingest_checkpoints` audit 행은 보존하며, 이전 코드는 additive checkpoint table을 읽지 않으므로 이를 무시합니다. checkpoint retention을 위한 자동 job은 존재하지 않습니다.
+3. Rollback preserves migration 004 and retained checkpoint audit rows; older code ignores them. 애플리케이션 코드를 롤백하되 003과 `004_ai_ingest_checkpoints.sql`의 테이블·인덱스는 즉시 삭제하지 않습니다. No automatic checkpoint retention job exists.
 4. 캐시가 성공 후 비워졌는지 확인하고, 필요하면 backend의 기존 캐시 운영 절차로만 무효화합니다.
 5. 재활성화 전에 JobRunr에 `ai-rag-ingestion` recurring 작업이 하나뿐인지 확인합니다.
 
 ## 검증 범위와 잔여 위험
 
-이 절차의 unit/integration tests는 disposable fake connection으로 cursor, transaction, lease fence, resume을 검증합니다. 별도 승인을 받은 local-only disposable live PostgreSQL smoke를 실행하지 않은 경우 실제 PostgreSQL transaction/DDL 경로는 잔여 위험입니다. shared 또는 production database에서 이 smoke를 실행하지 않습니다.
+이 절차의 unit/integration tests는 disposable fake connection으로 cursor, transaction, lease fence, resume을 검증합니다. A separately approved local-only disposable live PostgreSQL smoke is required to remove the residual PostgreSQL risk. 별도 승인 없이는 이 smoke를 실행하지 않으며, shared 또는 production database에서 실행하지 않습니다.
