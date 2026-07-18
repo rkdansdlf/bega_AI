@@ -257,7 +257,11 @@ with a null cursor and zero counters.
 The final `IngestTableResult` is built from durable cumulative checkpoint values,
 not only values observed in the current process. Its `max_updated_at` is the
 maximum committed value across all attempts and remains the input to the existing
-success-only watermark update.
+success-only watermark update. The result also carries non-persisted
+`attempt_source_rows` and `attempt_written_chunks` deltas for metrics. A completed
+checkpoint skipped during recovery returns zero attempt deltas, so cumulative
+run summaries remain accurate without double-counting the existing Prometheus
+table totals.
 
 ## Recovery Semantics
 
@@ -353,9 +357,11 @@ Logs include the run ID, normalized source table, event, committed batch count,
 and cumulative source row count. They do not include raw cursor payloads, source
 rows, connection representations, secrets, or baseball facts.
 
-The final per-table run summary retains existing counts and adds sanitized
-checkpoint metadata: whether the table resumed, committed batch count, and
-completion state. API request and response schemas do not change.
+The final per-table run summary retains durable cumulative counts and adds
+sanitized checkpoint metadata: whether the table resumed, committed batch count,
+and completion state. Existing source-row and written-chunk counters increment by
+the current attempt deltas rather than those cumulative values. API request and
+response schemas do not change.
 
 ## Testing Strategy
 
@@ -374,12 +380,14 @@ Implementation follows red-green-refactor cycles. Tests cover:
 10. Completion after an empty suffix and source-query skipping for an already
     completed table.
 11. Cumulative counts and maximum update time across recovery attempts.
-12. Limit and stale-cleanup rejection in checkpointed mode.
-13. Lease loss preventing checkpoint advancement.
-14. Metrics, sanitized summaries, and absence of high-cardinality labels.
-15. `MANUAL_BASEBALL_DATA_REQUIRED` for missing trusted-source cursor fields.
-16. Existing ingestion worker, run-store, migration, and OpenAPI regression tests.
-17. Full AI test suite and `scripts/validate_baseball_data_policy.py`.
+12. Zero attempt deltas when a completed checkpoint is skipped, preventing metric
+    double counting.
+13. Limit and stale-cleanup rejection in checkpointed mode.
+14. Lease loss preventing checkpoint advancement.
+15. Metrics, sanitized summaries, and absence of high-cardinality labels.
+16. `MANUAL_BASEBALL_DATA_REQUIRED` for missing trusted-source cursor fields.
+17. Existing ingestion worker, run-store, migration, and OpenAPI regression tests.
+18. Full AI test suite and `scripts/validate_baseball_data_policy.py`.
 
 No test uses an external baseball source, external embedding call, shared
 database write, or production data. PostgreSQL transaction and keyset syntax use
