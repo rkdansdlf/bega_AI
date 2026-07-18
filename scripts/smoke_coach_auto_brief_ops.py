@@ -188,11 +188,27 @@ async def run_warm_path_smoke(
         headers["X-Internal-Api-Key"] = internal_api_key
 
     started = time.perf_counter()
-    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-        item = await call_analyze(
-            client=client,
-            base_url=base_url,
-            target=target,
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+            item = await asyncio.wait_for(
+                call_analyze(
+                    client=client,
+                    base_url=base_url,
+                    target=target,
+                    wait_for_cache_completion_on_missing_done=False,
+                ),
+                timeout=timeout_seconds,
+            )
+    except TimeoutError:
+        elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+        return WarmPathSmokeResult(
+            attempted=True,
+            ok=False,
+            reason="target_wall_timeout",
+            game_id=target.game_id,
+            cache_key=target.cache_key,
+            status="failed",
+            elapsed_ms=elapsed_ms,
         )
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
 
