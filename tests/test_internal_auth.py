@@ -55,11 +55,11 @@ def _build_client() -> TestClient:
 def test_require_ai_internal_token_rejects_missing_token(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
     monkeypatch.setattr(
-        "app.deps.record_security_event",
+        "app.internal_auth.record_security_event",
         lambda event, **kwargs: events.append((event, kwargs)),
     )
 
@@ -82,11 +82,11 @@ def test_require_ai_internal_token_rejects_missing_token(monkeypatch):
 def test_require_ai_internal_token_accepts_bearer_authorization(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
     monkeypatch.setattr(
-        "app.deps.record_security_event",
+        "app.internal_auth.record_security_event",
         lambda event, **kwargs: events.append((event, kwargs)),
     )
 
@@ -104,11 +104,11 @@ def test_require_ai_internal_token_accepts_bearer_authorization(monkeypatch):
 def test_require_ai_internal_token_returns_503_when_misconfigured(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token=None),
     )
     monkeypatch.setattr(
-        "app.deps.record_security_event",
+        "app.internal_auth.record_security_event",
         lambda event, **kwargs: events.append((event, kwargs)),
     )
 
@@ -130,10 +130,10 @@ def test_require_ai_internal_token_returns_503_when_misconfigured(monkeypatch):
 
 def test_chat_completion_requires_internal_token(monkeypatch):
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.internal_auth.record_security_event", lambda *args, **kwargs: None)
 
     payload = {
         "question": "테스트 질문",
@@ -149,10 +149,10 @@ def test_chat_completion_requires_internal_token(monkeypatch):
 
 def test_chat_completion_accepts_internal_token(monkeypatch):
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.internal_auth.record_security_event", lambda *args, **kwargs: None)
 
     payload = {
         "question": "테스트 질문",
@@ -176,10 +176,10 @@ def test_chat_completion_accepts_internal_token(monkeypatch):
 
 def test_ai_vision_ticket_requires_internal_token(monkeypatch):
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.internal_auth.record_security_event", lambda *args, **kwargs: None)
 
     with _build_client() as client:
         response = client.post(
@@ -196,10 +196,10 @@ def test_ai_vision_ticket_accepts_internal_token(monkeypatch):
         raise HTTPException(status_code=418, detail="vision-auth-passed")
 
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.internal_auth.record_security_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "app.routers.vision._read_ticket_image_with_limit", _sentinel_reader
     )
@@ -217,10 +217,10 @@ def test_ai_vision_ticket_accepts_internal_token(monkeypatch):
 
 def test_ai_coach_analyze_requires_internal_token(monkeypatch):
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.internal_auth.record_security_event", lambda *args, **kwargs: None)
 
     payload = {
         "home_team_id": "LG",
@@ -240,10 +240,10 @@ def test_ai_coach_analyze_accepts_internal_token(monkeypatch):
         raise HTTPException(status_code=418, detail="coach-auth-passed")
 
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.internal_auth.record_security_event", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.routers.coach.get_connection_pool", _sentinel_pool)
 
     payload = {

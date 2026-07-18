@@ -46,10 +46,12 @@ def test_moderation_requires_internal_token(
     secured_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.internal_auth.record_security_event", lambda *args, **kwargs: None
+    )
 
     response = secured_client.post(
         "/moderation/safety-check",
@@ -64,10 +66,12 @@ def test_moderation_accepts_internal_token(
     secured_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token="expected-token"),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.internal_auth.record_security_event", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr("app.routers.moderation.get_settings", lambda: _settings())
 
     response = secured_client.post(
