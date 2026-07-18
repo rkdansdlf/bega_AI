@@ -233,6 +233,17 @@ def _append_parameters(
         if "content" in parameter:
             lines.extend(["", f"#### Parameter content: `{_escape_code(name)}`"])
             _append_content(lines, parameter["content"], schema_anchors)
+        represented = {
+            "name", "in", "required", "description", "schema", "example",
+            "examples", "content",
+        }
+        metadata = {
+            key: value for key, value in parameter.items() if key not in represented
+        }
+        if metadata:
+            _append_unsupported(
+                lines, f"parameter {_escape_code(name)} metadata", metadata
+            )
 
 
 def _append_request_body(
@@ -245,13 +256,21 @@ def _append_request_body(
         _append_unsupported(lines, "request body", request_body)
         return
     lines.append(f"- Required: **{'yes' if request_body.get('required') is True else 'no'}**")
+    represented = {"required", "content"}
     if isinstance(request_body.get("$ref"), str):
         lines.append(
             f"- Reference: {_schema_label({'$ref': request_body['$ref']}, schema_anchors=schema_anchors)}"
         )
+        represented.add("$ref")
     if isinstance(request_body.get("description"), str):
         lines.append(request_body["description"])
+        represented.add("description")
     _append_content(lines, request_body.get("content"), schema_anchors)
+    metadata = {
+        key: value for key, value in request_body.items() if key not in represented
+    }
+    if metadata:
+        _append_unsupported(lines, "request body metadata", metadata)
 
 
 def _append_responses(
@@ -325,6 +344,19 @@ def _append_headers(
             f"{_escape_cell(example)} |"
         )
         _append_examples(lines, header)
+        if "content" in header:
+            lines.extend(["", f"#### Header content: `{_escape_code(str(name))}`"])
+            _append_content(lines, header["content"], schema_anchors)
+        represented = {
+            "description", "schema", "required", "example", "examples", "content",
+        }
+        if isinstance(header.get("$ref"), str):
+            represented.add("$ref")
+        metadata = {key: value for key, value in header.items() if key not in represented}
+        if metadata:
+            _append_unsupported(
+                lines, f"header {_escape_code(str(name))} metadata", metadata
+            )
 
 
 def _append_content(
