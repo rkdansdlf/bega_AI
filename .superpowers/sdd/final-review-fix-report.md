@@ -131,3 +131,55 @@ Result: exit 0 — `85 passed in 1.11s`. `git diff --check` and the staged diff 
 - Confirmed all three terminal mutations exercise a real zero-row store response and assert the domain exception plus sanitized message.
 - Confirmed `run_once` catches `IngestLeaseLostError` independently for success, failure, and manual-data terminal races; existing worker terminal-race coverage passes.
 - Confirmed the production change is limited to one import and one exception substitution, with no data, schema, environment, network, or external-service changes.
+
+## Final Test Re-review Follow-up
+
+### Resolution
+
+- Commit: `c1fd354 test: cover ingest terminal recovery handoff`
+- File: `tests/test_ingest_worker.py`
+- Added independent worker tests proving `finish_failed` and `finish_manual_data_required` lease-loss races return from `run_once` without a terminal record or escaped exception.
+- Replaced the fixed 80 ms sleep in the long synchronous-ingest heartbeat test with `threading.Event` coordination. The fake ingest remains blocked until 32 heartbeat calls complete, which exceeds the configured 0.3-second lease at a 0.01-second heartbeat interval, and is then explicitly released.
+
+### Mutation RED / GREEN Evidence
+
+After adding the recovery-handoff tests, the two corresponding production catches were temporarily changed to re-raise solely to prove the tests detect the regression. This mutation was restored before GREEN and is absent from the committed diff.
+
+RED command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_worker.py::test_expired_lease_during_failure_finish_is_left_for_recovery tests/test_ingest_worker.py::test_expired_lease_during_manual_finish_is_left_for_recovery -q
+```
+
+RED result: exit 1 — `2 failed in 0.62s`; both failures were escaped `IngestLeaseLostError` instances from the deliberately disabled handoff catches.
+
+GREEN targeted command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_worker.py::test_expired_lease_during_failure_finish_is_left_for_recovery tests/test_ingest_worker.py::test_expired_lease_during_manual_finish_is_left_for_recovery tests/test_ingest_worker.py::test_long_sync_ingest_keeps_heartbeating_past_lease_interval -q
+```
+
+Result: exit 0 — `3 passed in 0.53s`.
+
+Worker-file command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_worker.py -q
+```
+
+Result: exit 0 — `27 passed in 1.02s`.
+
+Broader resilience command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_runs.py tests/test_ingest_results.py tests/test_ingest_run_store.py tests/test_ingest_worker.py tests/test_schema_startup_mode.py tests/test_deps_db_pool_observability.py tests/test_observability_metrics.py tests/test_db_schema_contract.py -q
+```
+
+Result: exit 0 — `87 passed in 1.63s`. Working-tree and staged `git diff --check` both exited 0.
+
+### Self-review
+
+- Confirmed the final implementation commit changes tests only; `app/core/ingest_worker.py` has no diff.
+- Confirmed the failure and manual branches each assert no failed, success, or manual terminal record remains after handoff.
+- Confirmed heartbeat stabilization waits on observable call progress and uses five-second timeouts only as deadlock guards, not as pass criteria.
+- Confirmed no unrelated file, external service, shared database, schema, or environment was touched.
