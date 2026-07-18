@@ -137,11 +137,13 @@ def _render_endpoints(
 
 
 def _security_label(definition: Mapping[str, Any]) -> str:
-    security = definition.get("security")
-    if security is None or security == []:
+    if "security" not in definition:
         return "Not specified in OpenAPI"
+    security = definition["security"]
     if not isinstance(security, list):
         raise ValueError("OpenAPI operation security must be an array")
+    if not security:
+        return "None (explicitly public)"
 
     requirements: list[str] = []
     for requirement in security:
