@@ -348,7 +348,7 @@ def test_warm_path_smoke_enforces_wall_deadline_and_fails_closed(
                 internal_api_key="test-internal-token",
                 timeout_seconds=0.01,
             ),
-            timeout=1.0,
+            timeout=5.0,
         )
     )
 
@@ -357,3 +357,5 @@ def test_warm_path_smoke_enforces_wall_deadline_and_fails_closed(
     assert result.status == "failed"
     assert result.cache_state is None
     assert result.cached is None
+    assert result.elapsed_ms is not None
+    assert result.elapsed_ms < 2000

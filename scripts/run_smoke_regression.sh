@@ -368,7 +368,7 @@ from pathlib import Path
 report_path = Path(sys.argv[1])
 payload = json.loads(report_path.read_text(encoding="utf-8"))
 coach_result = next(
-    (item for item in payload.get("results", []) if item.get("endpoint") == "/coach/analyze"),
+    (item for item in payload.get("results", []) if item.get("endpoint") == "/ai/coach/analyze"),
     {},
 )
 status = "PASS" if coach_result.get("ok") else "FAIL"
@@ -448,7 +448,7 @@ llm_stream_first_message_cases = (
 llm_warnings = llm_eval.get("warnings") or []
 
 coach_result = next(
-    (item for item in coach_report.get("results", []) if item.get("endpoint") == "/coach/analyze"),
+    (item for item in coach_report.get("results", []) if item.get("endpoint") == "/ai/coach/analyze"),
     {},
 )
 coach_status = "PASS" if coach_result.get("ok") else "FAIL"

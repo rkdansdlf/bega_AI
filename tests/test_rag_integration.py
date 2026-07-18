@@ -124,10 +124,12 @@ def integration_client(monkeypatch):
     test_app.dependency_overrides[chat_stream.rate_limit_chat_dependency] = lambda: None
 
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token=_AI_TOKEN),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.internal_auth.record_security_event", lambda *args, **kwargs: None
+    )
 
     # completion 엔드포인트가 캐시 확인을 위해 get_connection_pool()을 호출하므로
     # 실제 DB 연결 없이 캐시 미스를 반환하도록 패치
