@@ -48,12 +48,12 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python 3.14
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.14-dev'
+          python-version: '3.14'
           cache: 'pip'
       
       - name: Install linting tools
@@ -69,8 +69,8 @@ jobs:
       
       - name: Lint Summary
         run: |
-          echo "### Linting Check" >> $GITHUB_STEP_SUMMARY
-          echo "Code style verified!" >> $GITHUB_STEP_SUMMARY
+          echo "### Linting Check" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Code style verified!" >> "${GITHUB_STEP_SUMMARY}"
 
   test:
     name: Unit Tests
@@ -79,12 +79,12 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python 3.14
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.14-dev'
+          python-version: '3.14'
           cache: 'pip'
       
       - name: Install dependencies
@@ -108,8 +108,8 @@ jobs:
       
       - name: Test Summary
         run: |
-          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "All tests passed!" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Results" >> "${GITHUB_STEP_SUMMARY}"
+          echo "All tests passed!" >> "${GITHUB_STEP_SUMMARY}"
 
   security:
     name: Security Scan
@@ -118,12 +118,12 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python 3.14
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.14-dev'
+          python-version: '3.14'
       
       - name: Install dependencies
         run: |
@@ -136,8 +136,8 @@ jobs:
       
       - name: Security Summary
         run: |
-          echo "### Security Scan" >> $GITHUB_STEP_SUMMARY
-          echo "Security check completed!" >> $GITHUB_STEP_SUMMARY
+          echo "### Security Scan" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Security check completed!" >> "${GITHUB_STEP_SUMMARY}"
 
   container-scan:
     name: Container Image Scan
@@ -145,7 +145,7 @@ jobs:
     needs: test
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Build Docker Image
         run: docker build -t ai-service:${{ github.sha }} .
