@@ -269,8 +269,21 @@ def build_ingest_lease_guard(
         raise ValueError("ingest lease owner is required")
 
     def check(lock_for_write: bool = False) -> None:
-        lock_clause = " FOR SHARE" if lock_for_write else ""
         with connection.cursor() as cursor:
+            if lock_for_write:
+                cursor.execute(
+                    """
+                    SELECT run_id
+                    FROM ai_ingest_runs
+                    WHERE run_id = %s
+                    FOR SHARE
+                    """,
+                    (run_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise IngestLeaseLostError(
+                        "ingest run lease is no longer owned"
+                    )
             cursor.execute(
                 """
                 SELECT 1
@@ -278,9 +291,8 @@ def build_ingest_lease_guard(
                 WHERE run_id = %s
                   AND status = 'RUNNING'
                   AND lease_owner = %s
-                  AND lease_expires_at > now()
-                """
-                + lock_clause,
+                  AND lease_expires_at > clock_timestamp()
+                """,
                 (run_id, owner),
             )
             if cursor.fetchone() is None:

@@ -10,6 +10,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from app.routers import chat_stream
+from app.streaming.http_errors import install_ai_stream_http_error_handler
 
 
 class _UnusedAgent:
@@ -19,6 +20,7 @@ class _UnusedAgent:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     app = FastAPI()
+    install_ai_stream_http_error_handler(app)
     app.include_router(chat_stream.router)
     app.dependency_overrides[chat_stream.get_agent] = lambda: _UnusedAgent()
     app.dependency_overrides[chat_stream.require_ai_internal_token] = lambda: None
@@ -84,7 +86,12 @@ def test_unsupported_version_fails_before_stream(client: TestClient) -> None:
     )
 
     assert response.status_code == 406
-    assert response.json()["detail"] == {
+    assert response.json() == {
         "code": "AI_EVENT_VERSION_UNSUPPORTED",
+        "message": "지원하지 않는 AI 이벤트 버전입니다.",
+        "detail": None,
+        "retryable": False,
+        "retry_after_seconds": None,
         "supported_versions": ["1", "2"],
     }
+    assert not isinstance(response.json().get("detail"), dict)

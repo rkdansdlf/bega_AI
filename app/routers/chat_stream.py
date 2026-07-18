@@ -2387,7 +2387,7 @@ async def chat_stream_post(
     )
 
 
-@router.get("/stream")
+@router.get("/stream", deprecated=True)
 async def chat_stream_get(
     q: str = Query("", description="질문 텍스트"),
     style: str = Query("markdown", pattern="^(markdown|json|compact)$"),

@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from app.contracts.stream_events_v2 import APPROVED_EVENT_TYPES, parse_v2_event
+from app.contracts.stream_events_v2 import (
+    APPROVED_EVENT_TYPES,
+    AiStreamHttpError,
+    parse_v2_event,
+)
 
 
 def _approved_examples() -> dict[str, dict[str, Any]]:
@@ -119,6 +123,80 @@ def test_chat_delta_has_exact_v2_envelope() -> None:
         "type": "chat.message.delta",
         "data": {"delta": "첫 문장"},
     }
+
+
+def test_ai_stream_http_error_has_exact_canonical_shape() -> None:
+    error = AiStreamHttpError(
+        code="AI_EVENT_VERSION_UNSUPPORTED",
+        message="지원하지 않는 AI 이벤트 버전입니다.",
+        retryable=False,
+        supported_versions=["1", "2"],
+    )
+
+    assert error.model_dump(mode="json") == {
+        "code": "AI_EVENT_VERSION_UNSUPPORTED",
+        "message": "지원하지 않는 AI 이벤트 버전입니다.",
+        "detail": None,
+        "retryable": False,
+        "retry_after_seconds": None,
+        "supported_versions": ["1", "2"],
+    }
+
+
+@pytest.mark.parametrize(
+    "supported_versions",
+    [[], ["1"], ["2"], ["1", "2", "2"], ["2", "1"]],
+)
+def test_ai_stream_http_version_error_requires_exact_supported_versions(
+    supported_versions: list[str],
+) -> None:
+    with pytest.raises(ValidationError):
+        AiStreamHttpError(
+            code="AI_EVENT_VERSION_UNSUPPORTED",
+            message="지원하지 않는 버전입니다.",
+            retryable=False,
+            supported_versions=supported_versions,
+        )
+
+
+@pytest.mark.parametrize("supported_versions", [["1"], ["1", "2"], ["2", "2"]])
+def test_ai_stream_http_non_version_error_requires_no_supported_versions(
+    supported_versions: list[str],
+) -> None:
+    with pytest.raises(ValidationError):
+        AiStreamHttpError(
+            code="AI_UPSTREAM_RATE_LIMITED",
+            message="요청 한도를 초과했습니다.",
+            retryable=True,
+            supported_versions=supported_versions,
+        )
+
+
+def test_ai_stream_http_error_rejects_invalid_retry_and_versions() -> None:
+    with pytest.raises(ValidationError):
+        AiStreamHttpError(
+            code="AI_UPSTREAM_RATE_LIMITED",
+            message="요청 한도를 초과했습니다.",
+            retryable=True,
+            retry_after_seconds=-1,
+        )
+    with pytest.raises(ValidationError):
+        AiStreamHttpError(
+            code="AI_EVENT_VERSION_UNSUPPORTED",
+            message="지원하지 않는 버전입니다.",
+            retryable=False,
+            supported_versions=["3"],
+        )
+
+
+def test_ai_stream_http_error_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        AiStreamHttpError(
+            code="AI_ERROR",
+            message="오류",
+            retryable=False,
+            success=False,
+        )
 
 
 @pytest.mark.parametrize("event_type", sorted(_approved_examples()))
