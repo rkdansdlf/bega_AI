@@ -1281,10 +1281,33 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
                 gs.*,
                 g.game_date,
                 ks.season_year,
-                ks.league_type_code
+                ks.league_type_code,
+                t.team_name
             FROM game_summary gs
             LEFT JOIN game g ON g.game_id = gs.game_id
             LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN teams t ON (t.team_id = g.home_team OR t.team_id = g.away_team)
+            ORDER BY g.game_date DESC, gs.game_id, gs.id
+        """,
+        "checkpoint_select_sql": """
+            SELECT
+                gs.*,
+                g.game_date,
+                ks.season_year,
+                ks.league_type_code,
+                checkpoint_team.team_name
+            FROM game_summary gs
+            LEFT JOIN game g ON g.game_id = gs.game_id
+            LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN LATERAL (
+                SELECT t.team_name
+                FROM teams t
+                WHERE t.team_id = g.home_team OR t.team_id = g.away_team
+                ORDER BY
+                    CASE WHEN t.team_id = g.home_team THEN 0 ELSE 1 END,
+                    t.team_id ASC
+                LIMIT 1
+            ) checkpoint_team ON TRUE
             ORDER BY g.game_date DESC, gs.game_id, gs.id
         """,
         "highlights": [
@@ -2004,7 +2027,10 @@ def _find_top_level_keyword_positions(sql_text: str, keyword: str) -> List[int]:
             idx += 2
             continue
 
-        if char == "$":
+        if char == "$" and (
+            idx == 0
+            or re.fullmatch(r"[A-Za-z0-9_$]", sql_text[idx - 1]) is None
+        ):
             delimiter_match = re.match(
                 r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", sql_text[idx:]
             )
@@ -2081,6 +2107,8 @@ def build_select_query(
     resume_cursor: Optional[CheckpointCursor] = None,
 ):
     custom_sql = profile.get("select_sql")
+    if checkpoint_order is not None:
+        custom_sql = profile.get("checkpoint_select_sql") or custom_sql
     season_filter_column = profile.get("season_filter_column", "season_year")
     since_filter_column = profile.get("since_filter_column", "updated_at")
     date_to_exclusive_filter_column = profile.get("date_to_exclusive_filter_column")

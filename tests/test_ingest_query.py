@@ -19,6 +19,7 @@ except ModuleNotFoundError:
 from scripts.ingest_from_kbo import (
     REQUIRED_SOURCE_COLUMNS,
     TABLE_PROFILES,
+    build_content,
     build_select_query,
 )
 import scripts.ingest_from_kbo as ingest_script
@@ -73,6 +74,41 @@ def test_build_select_query_applies_date_to_exclusive_for_game_summary() -> None
     assert "g.game_date < %s" in query
     assert "ORDER BY g.game_date DESC" in query
     assert params == (2026, datetime(2026, 5, 1).date())
+
+
+def test_game_summary_legacy_query_and_content_keep_team_name_projection():
+    profile = TABLE_PROFILES["game_summary"]
+    legacy_sql = profile["select_sql"]
+
+    assert "t.team_name" in legacy_sql
+    assert (
+        "LEFT JOIN teams t ON (t.team_id = g.home_team OR t.team_id = g.away_team)"
+        in legacy_sql
+    )
+
+    query, params = build_select_query(
+        table="game_summary",
+        profile=profile,
+        pk_columns=["id"],
+        limit=None,
+        season_year=None,
+        since=None,
+    )
+
+    assert "t.team_name" in query
+    assert (
+        "LEFT JOIN teams t ON (t.team_id = g.home_team OR t.team_id = g.away_team)"
+        in query
+    )
+    assert "LEFT JOIN LATERAL" not in query
+    assert params == ()
+    content = build_content(
+        {"id": 7, "game_id": "G7", "team_name": "LG"},
+        "game_summary",
+        "7",
+        profile,
+    )
+    assert "team_name: LG" in content
 
 
 def test_build_select_query_without_alias(sample_since):
@@ -289,12 +325,14 @@ def test_custom_checkpoint_query_wraps_output_aliases(sample_since):
 
 def test_game_summary_checkpoint_source_has_one_logical_row_per_id(sample_since):
     profile = TABLE_PROFILES["game_summary"]
-    source_sql = profile["select_sql"]
+    source_sql = profile["checkpoint_select_sql"]
 
     assert "FROM game_summary gs" in source_sql
-    assert "LEFT JOIN teams" not in source_sql
-    assert "t.team_name" not in source_sql
-    assert " OR " not in source_sql
+    assert "checkpoint_team.team_name" in source_sql
+    assert "LEFT JOIN LATERAL" in source_sql
+    assert "CASE WHEN t.team_id = g.home_team THEN 0 ELSE 1 END" in source_sql
+    assert "t.team_id ASC" in source_sql
+    assert "LIMIT 1" in source_sql
 
     order = ingest_script.resolve_checkpoint_order(None, "game_summary", profile)
     query, params = build_select_query(
@@ -310,6 +348,13 @@ def test_game_summary_checkpoint_source_has_one_logical_row_per_id(sample_since)
     )
 
     assert query.rstrip().endswith('ORDER BY "id" ASC LIMIT %s')
+    assert "checkpoint_team.team_name" in query
+    assert "LEFT JOIN LATERAL" in query
+    assert "LIMIT 1" in query
+    assert (
+        "LEFT JOIN teams t ON (t.team_id = g.home_team OR t.team_id = g.away_team)"
+        not in query
+    )
     assert query.count('ROW("id") > ROW(%s)') == 1
     assert params == (2026, sample_since, datetime(2026, 8, 1).date(), 91, 10)
 
@@ -441,6 +486,41 @@ def test_top_level_order_scanner_ignores_comments_and_quoted_content(sql_text):
     assert ingest_script._find_top_level_keyword_positions(sql_text, "ORDER BY") == [
         expected
     ]
+
+
+def test_dollar_quote_scanner_requires_identifier_boundary():
+    sql_text = "SELECT foo$tag$ FROM sample WHERE active = TRUE ORDER BY id DESC"
+
+    assert ingest_script._find_top_level_keyword_positions(sql_text, "WHERE") == [
+        sql_text.index("WHERE")
+    ]
+    assert ingest_script._find_top_level_keyword_positions(sql_text, "ORDER BY") == [
+        sql_text.index("ORDER BY")
+    ]
+
+    order = CheckpointOrder(
+        "sample",
+        (CheckpointOrderField("id", "integer"),),
+    )
+    query, params = build_select_query(
+        table="sample",
+        profile={
+            "select_sql": sql_text,
+            "season_filter_column": "season",
+            "since_filter_column": None,
+        },
+        pk_columns=["id"],
+        limit=None,
+        season_year=2026,
+        since=None,
+        checkpoint_order=order,
+        resume_cursor=None,
+    )
+
+    assert "WHERE active = TRUE\n   AND season = %s" in query
+    assert "ORDER BY id DESC" not in query
+    assert query.rstrip().endswith('ORDER BY "id" ASC')
+    assert params == (2026,)
 
 
 def test_awards_profile_matches_current_schema() -> None:
