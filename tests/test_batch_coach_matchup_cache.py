@@ -18,6 +18,7 @@ from scripts.batch_coach_matchup_cache import (
     _sort_targets,
     _build_terminal_cache_result_if_available,
     build_prewarm_plan_summary,
+    call_analyze,
     collect_cache_verification_results,
     load_failed_cache_keys,
     MatchupTarget,
@@ -825,6 +826,65 @@ def test_call_analyze_with_deadline_returns_failed_on_wall_timeout(
     assert result["status"] == "failed"
     assert result["reason"] == "target_wall_timeout"
     assert result["meta"]["timeout_seconds"] == 0.01
+
+
+def test_call_analyze_stops_reading_after_done_marker() -> None:
+    target = MatchupTarget(
+        cache_key="completed-stream",
+        game_id="20250310SSHH2",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    class HangingAfterDoneResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def aiter_lines(self):
+            yield "event: meta"
+            yield (
+                'data: {"cache_state":"COMPLETED","cached":true,'
+                '"in_progress":false}'
+            )
+            yield "data: [DONE]"
+            await asyncio.Event().wait()
+
+    class Client:
+        def stream(self, *args, **kwargs):
+            return HangingAfterDoneResponse()
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            call_analyze(
+                client=Client(),
+                base_url="http://127.0.0.1:18080/api/ai",
+                target=target,
+            ),
+            timeout=0.05,
+        )
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "cache_hit"
+    assert result["meta"]["cache_state"] == "COMPLETED"
 
 
 def test_call_analyze_with_deadline_returns_in_progress_when_pending_row_exists(

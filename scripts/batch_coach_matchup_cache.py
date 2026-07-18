@@ -1249,7 +1249,7 @@ async def call_analyze(
                 saw_any_event = True
                 if _is_done_marker(data_str):
                     saw_done = True
-                    continue
+                    break
 
                 if current_event == "meta":
                     try:
