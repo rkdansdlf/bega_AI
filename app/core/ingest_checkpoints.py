@@ -271,30 +271,105 @@ def _stored_cursor_payload(value: Any) -> Mapping[str, Any]:
     return value
 
 
+def _stored_counter(values: Mapping[str, Any], name: str) -> int:
+    value = values[name]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise IngestCheckpointIncompatibleError(
+            f"stored checkpoint {name} is not a nonnegative integer"
+        )
+    return value
+
+
+def _checkpoint_datetime(value: Any, name: str) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise IngestCheckpointIncompatibleError(
+            f"stored checkpoint {name} is not a datetime"
+        )
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def _checkpoint_from_row(order: CheckpointOrder, row: Any) -> IngestCheckpoint:
     values = _checkpoint_row_mapping(row)
     try:
+        run_id = values["run_id"]
+        source_table = values["source_table"]
+        scope_key = values["scope_key"]
+        cursor_version = values["cursor_version"]
+        cursor_signature = values["cursor_signature"]
+        completed = values["completed"]
+        if not isinstance(run_id, UUID):
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint run_id is not a UUID"
+            )
+        if not isinstance(source_table, str) or not source_table.strip():
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint source_table is invalid"
+            )
+        if not isinstance(scope_key, str) or not scope_key.strip():
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint scope_key is invalid"
+            )
+        if not isinstance(cursor_version, int) or isinstance(cursor_version, bool):
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint cursor_version is invalid"
+            )
+        if not isinstance(cursor_signature, str) or not cursor_signature:
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint cursor_signature is invalid"
+            )
+        if not isinstance(completed, bool):
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint completed flag is invalid"
+            )
+
         payload = values["cursor_payload"]
-        cursor = (
-            decode_cursor(order, _stored_cursor_payload(payload))
-            if payload is not None
-            else None
+        try:
+            cursor = (
+                decode_cursor(order, _stored_cursor_payload(payload))
+                if payload is not None
+                else None
+            )
+        except IngestCheckpointError as exc:
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint cursor payload is incompatible"
+            ) from exc
+
+        committed_batches = _stored_counter(values, "committed_batches")
+        source_rows = _stored_counter(values, "source_rows")
+        written_chunks = _stored_counter(values, "written_chunks")
+        reused_embeddings = _stored_counter(values, "reused_embeddings")
+        embedded_chunks = _stored_counter(values, "embedded_chunks")
+        max_updated_at = _checkpoint_datetime(
+            values["max_updated_at"],
+            "max_updated_at",
         )
+        completed_at = _checkpoint_datetime(values["completed_at"], "completed_at")
+        if source_rows > 0 and cursor is None:
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint has source rows without a cursor"
+            )
+        if completed != (completed_at is not None):
+            raise IngestCheckpointIncompatibleError(
+                "stored checkpoint completion state is inconsistent"
+            )
+
         return IngestCheckpoint(
-            run_id=values["run_id"],
-            source_table=str(values["source_table"]),
-            scope_key=str(values["scope_key"]),
-            cursor_version=int(values["cursor_version"]),
-            cursor_signature=str(values["cursor_signature"]),
+            run_id=run_id,
+            source_table=source_table,
+            scope_key=scope_key,
+            cursor_version=cursor_version,
+            cursor_signature=cursor_signature,
             cursor=cursor,
-            committed_batches=int(values["committed_batches"]),
-            source_rows=int(values["source_rows"]),
-            written_chunks=int(values["written_chunks"]),
-            reused_embeddings=int(values["reused_embeddings"]),
-            embedded_chunks=int(values["embedded_chunks"]),
-            max_updated_at=values["max_updated_at"],
-            completed=bool(values["completed"]),
-            completed_at=values["completed_at"],
+            committed_batches=committed_batches,
+            source_rows=source_rows,
+            written_chunks=written_chunks,
+            reused_embeddings=reused_embeddings,
+            embedded_chunks=embedded_chunks,
+            max_updated_at=max_updated_at,
+            completed=completed,
+            completed_at=completed_at,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise IngestCheckpointIncompatibleError(
@@ -306,6 +381,8 @@ def _maximum_updated_at(
     persisted: datetime | None,
     candidate: datetime | None,
 ) -> datetime | None:
+    persisted = _checkpoint_datetime(persisted, "max_updated_at")
+    candidate = _checkpoint_datetime(candidate, "max_updated_at")
     if persisted is None:
         return candidate
     if candidate is None:
@@ -428,6 +505,7 @@ class IngestCheckpointRepository:
                     %s, %s, %s, %s, %s, %s,
                     false, NULL, clock_timestamp()
                 )
+                ON CONFLICT (run_id, source_table) DO NOTHING
                 RETURNING {_CHECKPOINT_SELECT}
                 """,
                 (
@@ -546,6 +624,7 @@ class IngestCheckpointRepository:
                     0, 0, 0, 0, 0, NULL,
                     true, clock_timestamp(), clock_timestamp()
                 )
+                ON CONFLICT (run_id, source_table) DO NOTHING
                 RETURNING {_CHECKPOINT_SELECT}
                 """,
                 (
@@ -678,6 +757,10 @@ class IngestCheckpointSession:
         scope_key: str,
         order: CheckpointOrder,
     ) -> IngestCheckpointSession:
+        if order.source_table != source_table:
+            raise IngestCheckpointIncompatibleError(
+                "checkpoint order does not match the source table"
+            )
         repository = IngestCheckpointRepository(order)
         initial = repository.load(
             db_cursor,
