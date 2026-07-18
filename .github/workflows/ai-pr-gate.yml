@@ -3,6 +3,18 @@ name: ai-pr-gate
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'app/**'
+      - 'contracts/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'main.py'
+      - 'requirements.txt'
+      - 'requirements-dev'
+      - 'Dockerfile'
+      - 'Dockerfile.free_threaded'
+      - 'pytest.ini'
+      - '.github/workflows/ai-pr-gate.yml'
 
 jobs:
   ai-pr-gate:
