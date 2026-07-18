@@ -53,6 +53,38 @@ LOW_DATA_FALLBACK_MARKERS = (
     "지금 일정 조회로는 질문에 바로 꽂히는 경기 데이터가 충분히 안 잡혔습니다.",
     "괜히 아는 척하지 않고 확인된 범위에서만 말씀드리겠습니다.",
 )
+ANSWERABILITY_FAILURE_MARKERS = LOW_DATA_FALLBACK_MARKERS + (
+    "MANUAL_BASEBALL_DATA_REQUIRED",
+    "현재 연결된 자료",
+    "연결된 통계 자료",
+    "직접 확인하지 못했습니다",
+    "직접 확인되지 않습니다",
+    "확인하지 못했습니다",
+    "확인 안 됐",
+    "확인되지 않",
+    "확인할 수 없",
+    "단정하기 어렵",
+    "정확히 말씀드리기 어렵",
+    "정확한 비교는 어렵",
+    "추정해서 답하지",
+    "확인된 범위",
+    "자료만으로는",
+    "정보를 찾지 못했습니다",
+    "찾을 수 없어",
+    "찾을 수 없습니다",
+    "찾지 못했",
+    "데이터가 충분",
+    "데이터가 없",
+    "요청한 선수 기록을 정확히 매칭하지 못했습니다",
+    "없는 기록을 지어내지는 않겠습니다",
+    "미래의 기록",
+    "공식 기록이 제공된 뒤",
+    "제공된 자료에서는",
+    "제공된 데이터에서는",
+    "공개되지 않았",
+    "시즌이 시작되지 않았",
+    "죄송",
+)
 DEFAULT_QUESTION_LIST_PATH = (
     Path(__file__).resolve().with_name("smoke_chatbot_quality_regmix_100.txt")
 )
@@ -62,10 +94,14 @@ DEFAULT_REGULATION_CANARY_PATH = (
 DEFAULT_LLM_CANARY_PATH = (
     Path(__file__).resolve().with_name("smoke_chatbot_quality_llm_canary_20.txt")
 )
+RECOVERED_FAILURE_QUESTION_LIST_PATH = (
+    Path(__file__).resolve().with_name("smoke_chatbot_quality_recovered_6.txt")
+)
 OFFICIAL_QUESTION_LISTS = {
     "regmix_100": DEFAULT_QUESTION_LIST_PATH,
     "regulations_20": DEFAULT_REGULATION_CANARY_PATH,
     "llm_canary_20": DEFAULT_LLM_CANARY_PATH,
+    "recovered_6": RECOVERED_FAILURE_QUESTION_LIST_PATH,
 }
 CONSOLE_FAILED_CASE_PREVIEW_LIMIT = 3
 LATENCY_DIAGNOSTIC_PREVIEW_LIMIT = 5
@@ -330,10 +366,11 @@ def _load_questions(path: str | None, limit: int) -> List[str]:
     if not path:
         questions = _default_questions()
     else:
-        data = Path(path).read_text(encoding="utf-8").splitlines()
+        question_path = OFFICIAL_QUESTION_LISTS.get(path, Path(path))
+        data = Path(question_path).read_text(encoding="utf-8").splitlines()
         questions = [line.strip() for line in data if line.strip()]
         if not questions:
-            raise ValueError(f"No questions found in {path}")
+            raise ValueError(f"No questions found in {question_path}")
     if limit <= 0:
         raise ValueError("chat-batch-size must be greater than 0")
     if len(questions) < limit:
@@ -424,6 +461,63 @@ def _has_low_data_fallback(text: str) -> bool:
     return any(marker in (text or "") for marker in LOW_DATA_FALLBACK_MARKERS)
 
 
+def _answerability_failures(text: str) -> List[str]:
+    value = text or ""
+    failures = [marker for marker in ANSWERABILITY_FAILURE_MARKERS if marker in value]
+    if re.search(r"\bUnknown\b", value):
+        failures.append("Unknown")
+    return failures
+
+
+def _classify_expected_answerability_status(question: str, text: str) -> str:
+    query = (question or "").lower()
+    answer = text or ""
+    if "MANUAL_BASEBALL_DATA_REQUIRED" in answer:
+        return "operator_data_required"
+    if "외부 야구 웹 조회는 사용하지 않습니다" in answer:
+        return "operator_data_required"
+    if any(
+        marker in answer
+        for marker in [
+            "아직 진행 전",
+            "아직 시즌 중",
+            "확정 전",
+            "공식 기록이 제공된 뒤",
+        ]
+    ) and any(token in query for token in ["올스타", "포스트시즌", "한국시리즈", "mvp", "수상", "왕"]):
+        return "future_event_pending"
+    if any(
+        marker in answer
+        for marker in [
+            "팀명을 같이 알려주세요",
+            "두 선수 이름",
+            "두 팀명을 같이 알려주세요",
+            "날짜와 팀명 또는 game_id",
+            "한 번만 더 적어주세요",
+        ]
+    ):
+        return "clarification_required"
+    if any(token in query for token in ["이 팀", "우리 팀", "두 선수", "두 팀"]):
+        return "clarification_required"
+    return "answerable"
+
+
+def _evaluate_answerability(text: str, question: str = "") -> Dict[str, Any]:
+    failure_markers = _answerability_failures(text)
+    status = _classify_expected_answerability_status(question, text)
+    expected_non_answer = status in {
+        "operator_data_required",
+        "clarification_required",
+        "future_event_pending",
+    }
+    return {
+        "answerability_pass": not failure_markers or expected_non_answer,
+        "failure_markers": failure_markers,
+        "status": status if failure_markers or expected_non_answer else "answerable",
+        "expected_non_answer": expected_non_answer,
+    }
+
+
 def _evaluate_quality(text: str) -> Dict[str, bool]:
     no_table_markup = not _has_table(text)
     no_briefing_headers = not _has_section(text)
@@ -457,22 +551,39 @@ def _quality_pass(quality: Dict[str, bool]) -> bool:
     )
 
 
+def _overall_pass(quality: Dict[str, bool], answerability: Dict[str, Any]) -> bool:
+    return _quality_pass(quality) and bool(answerability.get("answerability_pass"))
+
+
 def _is_fallback_answer(text: str) -> bool:
-    return _has_low_data_fallback(text or "")
+    return bool(_answerability_failures(text or ""))
 
 
 def _empty_quality() -> Dict[str, bool]:
     return _evaluate_quality("")
 
 
+def _empty_answerability() -> Dict[str, Any]:
+    return _evaluate_answerability("")
+
+
 def _fallback_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     total = len(items)
-    fallback_count = sum(
-        1 for item in items if _is_fallback_answer(str(item.get("answer", "")))
-    )
-    ratio = (fallback_count / total) if total else 0.0
+    expected_non_answer_count = 0
+    fallback_count = 0
+    for item in items:
+        answerability = item.get("answerability")
+        if isinstance(answerability, dict) and answerability.get("expected_non_answer"):
+            expected_non_answer_count += 1
+            continue
+        if _is_fallback_answer(str(item.get("answer", ""))):
+            fallback_count += 1
+    eligible_total = total - expected_non_answer_count
+    ratio = (fallback_count / eligible_total) if eligible_total else 0.0
     return {
         "total": total,
+        "eligible_total": eligible_total,
+        "expected_non_answer_count": expected_non_answer_count,
         "fallback_count": fallback_count,
         "fallback_ratio": round(ratio, 4),
     }
@@ -524,6 +635,8 @@ def _check_completion(
                     "answer": None,
                     "quality": _empty_quality(),
                     "quality_pass": False,
+                    "answerability": _empty_answerability(),
+                    "answerability_pass": False,
                     "attempt": attempt,
                     "cached": False,
                     "sample_response": body,
@@ -533,16 +646,20 @@ def _check_completion(
             if not isinstance(answer, str):
                 answer = str(answer)
             quality = _evaluate_quality(answer)
+            answerability = _evaluate_answerability(answer, question)
+            overall_ok = _overall_pass(quality, answerability)
             return {
                 "endpoint": "/ai/chat/completion",
                 "question": question,
                 "status_code": response.status_code,
-                "ok": _quality_pass(quality),
+                "ok": overall_ok,
                 "error": None,
                 "latency_ms": round((time.perf_counter() - start) * 1000, 2),
                 "answer": answer,
                 "quality": quality,
                 "quality_pass": _quality_pass(quality),
+                "answerability": answerability,
+                "answerability_pass": bool(answerability["answerability_pass"]),
                 "attempt": attempt,
                 "cached": bool(body.get("cached", False)),
                 "sample_response": body,
@@ -566,6 +683,8 @@ def _check_completion(
         "answer": None,
         "quality": _empty_quality(),
         "quality_pass": False,
+        "answerability": _empty_answerability(),
+        "answerability_pass": False,
         "attempt": attempts,
         "cached": False,
         "sample_response": None,
@@ -634,6 +753,8 @@ def _check_stream(
                         "answer": None,
                         "quality": _empty_quality(),
                         "quality_pass": False,
+                        "answerability": _empty_answerability(),
+                        "answerability_pass": False,
                         "attempt": attempt,
                         "event_order_ok": False,
                         "cached": False,
@@ -680,6 +801,7 @@ def _check_stream(
             if seen_done:
                 text = "".join(message_chunks)
                 quality = _evaluate_quality(text)
+                answerability = _evaluate_answerability(text, question)
                 event_order = event_positions.get("status", 1e9)
                 event_message = event_positions.get("message", 1e9)
                 event_meta = event_positions.get("meta", 1e9)
@@ -693,17 +815,20 @@ def _check_stream(
                     else False
                 )
                 quality_ok = _quality_pass(quality)
+                answerability_ok = bool(answerability["answerability_pass"])
 
                 return {
                     "endpoint": "/ai/chat/stream",
                     "question": question,
                     "status_code": status_code,
-                    "ok": event_order_ok and quality_ok,
+                    "ok": event_order_ok and quality_ok and answerability_ok,
                     "error": None,
                     "latency_ms": round((time.perf_counter() - start) * 1000, 2),
                     "answer": text,
                     "quality": quality,
                     "quality_pass": quality_ok,
+                    "answerability": answerability,
+                    "answerability_pass": answerability_ok,
                     "attempt": attempt,
                     "event_order_ok": event_order_ok,
                     "cached": bool(meta_payload.get("cached", False)),
@@ -734,6 +859,8 @@ def _check_stream(
         "answer": None,
         "quality": _empty_quality(),
         "quality_pass": False,
+        "answerability": _empty_answerability(),
+        "answerability_pass": False,
         "attempt": attempts,
         "event_order_ok": False,
         "cached": False,
@@ -1028,7 +1155,24 @@ def _endpoint_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         "quality_no_low_data_fallback_passed": sum(
             1 for item in items if item.get("quality", {}).get("no_low_data_fallback")
         ),
+        "answerability_passed": sum(
+            1 for item in items if item.get("answerability_pass") is True
+        ),
+        "answerability_failed": sum(
+            1 for item in items if item.get("answerability_pass") is False
+        ),
     }
+
+
+def _answerability_status_distribution(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    distribution: Dict[str, int] = {}
+    for item in items:
+        answerability = item.get("answerability")
+        status = "unknown"
+        if isinstance(answerability, dict):
+            status = str(answerability.get("status") or "answerable")
+        distribution[status] = distribution.get(status, 0) + 1
+    return dict(sorted(distribution.items()))
 
 
 def _extract_planner_mode(item: Dict[str, Any]) -> str:
@@ -1263,6 +1407,22 @@ def _build_failed_cases(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "cached": bool(item.get("cached", False)),
                 "fallback_reason": _extract_meta_payload(item).get("fallback_reason"),
                 "quality_pass": bool(item.get("quality_pass", False)),
+                "answerability_pass": bool(item.get("answerability_pass", False)),
+                "answerability_failure_markers": (
+                    item.get("answerability", {}).get("failure_markers")
+                    if isinstance(item.get("answerability"), dict)
+                    else []
+                ),
+                "answerability_status": (
+                    item.get("answerability", {}).get("status")
+                    if isinstance(item.get("answerability"), dict)
+                    else None
+                ),
+                "expected_non_answer": (
+                    item.get("answerability", {}).get("expected_non_answer")
+                    if isinstance(item.get("answerability"), dict)
+                    else False
+                ),
             }
         )
     return failed_cases
@@ -1300,6 +1460,7 @@ def _build_top_metric_cases(
                 "cached": bool(item.get("cached", False)),
                 "status_code": item.get("status_code"),
                 "quality_pass": bool(item.get("quality_pass", False)),
+                "answerability_pass": bool(item.get("answerability_pass", False)),
                 "error": item.get("error"),
             }
         )
@@ -1413,6 +1574,17 @@ def _summarize_results(
         "quality_no_low_data_fallback_passed": sum(
             1 for item in results if item.get("quality", {}).get("no_low_data_fallback")
         ),
+        "answerability_passed": sum(
+            1 for item in results if item.get("answerability_pass") is True
+        ),
+        "answerability_failed": sum(
+            1 for item in results if item.get("answerability_pass") is False
+        ),
+        "answerability_status_distribution": {
+            "overall": _answerability_status_distribution(results),
+            "completion": _answerability_status_distribution(completion),
+            "stream": _answerability_status_distribution(stream),
+        },
         "completion_metrics": _endpoint_metrics(completion),
         "stream_metrics": _endpoint_metrics(stream),
         "planner_mode_metrics": {

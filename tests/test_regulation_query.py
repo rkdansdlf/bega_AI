@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -23,15 +25,15 @@ class _FakeCursor:
         self._fetchall_results = list(fetchall_results or [])
         self.executed: list[tuple[str, Any]] = []
 
-    def execute(self, query: str, params: Any = None) -> None:
+    async def execute(self, query: str, params: Any = None) -> None:
         self.executed.append((str(query), params))
 
-    def fetchone(self) -> Any:
+    async def fetchone(self) -> Any:
         if self._fetchone_results:
             return self._fetchone_results.pop(0)
         return None
 
-    def fetchall(self) -> list[dict[str, Any]]:
+    async def fetchall(self) -> list[dict[str, Any]]:
         if self._fetchall_results:
             return self._fetchall_results.pop(0)
         return []
@@ -39,10 +41,10 @@ class _FakeCursor:
     def close(self) -> None:
         return None
 
-    def __enter__(self) -> "_FakeCursor":
+    async def __aenter__(self) -> "_FakeCursor":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
 
 
@@ -61,10 +63,10 @@ def _make_pool(connection):
     class _FakePool:
         def connection(self):
             class _Ctx:
-                def __enter__(self_inner):
+                async def __aenter__(self_inner):
                     return connection
 
-                def __exit__(self_inner, exc_type, exc, tb):
+                async def __aexit__(self_inner, exc_type, exc, tb):
                     return False
 
             return _Ctx()
@@ -100,7 +102,7 @@ def test_get_regulation_by_category_accepts_dict_style_exists_row() -> None:
     )
     tool = RegulationQueryTool(_FakeConnection([exists_cursor, search_cursor]))
 
-    result = tool.get_regulation_by_category("player", limit=3)
+    result = asyncio.run(tool.get_regulation_by_category("player", limit=3))
 
     assert set(result.keys()) == {
         "category",
@@ -122,7 +124,7 @@ def test_get_regulation_by_category_returns_error_when_rag_chunks_missing(
     tool = RegulationQueryTool(_FakeConnection([exists_cursor]))
     caplog.set_level(logging.WARNING)
 
-    result = tool.get_regulation_by_category("player", limit=3)
+    result = asyncio.run(tool.get_regulation_by_category("player", limit=3))
 
     assert (
         f"[{REGULATION_QUERY_COMPONENT}] event=dependency_missing action={ACTION_GET_REGULATION_BY_CATEGORY} dependency=rag_chunks"
@@ -140,7 +142,7 @@ def test_get_regulation_by_category_retries_with_fresh_connection(monkeypatch) -
 
     calls = []
 
-    def _fake_lookup(conn, category, limit):
+    async def _fake_lookup(conn, category, limit):
         calls.append((conn, category, limit))
         if conn is primary_conn:
             raise RuntimeError("connection is closed")
@@ -158,7 +160,7 @@ def test_get_regulation_by_category_retries_with_fresh_connection(monkeypatch) -
 
     monkeypatch.setattr(tool, "_get_regulation_by_category_once", _fake_lookup)
 
-    result = tool.get_regulation_by_category("player", limit=2)
+    result = asyncio.run(tool.get_regulation_by_category("player", limit=2))
 
     assert calls == [
         (primary_conn, "player", 2),
@@ -179,7 +181,7 @@ def test_validate_regulation_reference_retries_with_fresh_connection(
 
     calls = []
 
-    def _fake_validate(conn, regulation_code):
+    async def _fake_validate(conn, regulation_code):
         calls.append((conn, regulation_code))
         if conn is primary_conn:
             raise RuntimeError("connection is closed")
@@ -193,7 +195,7 @@ def test_validate_regulation_reference_retries_with_fresh_connection(
 
     monkeypatch.setattr(tool, "_validate_regulation_reference_once", _fake_validate)
 
-    result = tool.validate_regulation_reference("01-1")
+    result = asyncio.run(tool.validate_regulation_reference("01-1"))
 
     assert (
         f"[{REGULATION_QUERY_COMPONENT}] event=query_start action={ACTION_VALIDATE_REGULATION_REFERENCE} value=01-1"

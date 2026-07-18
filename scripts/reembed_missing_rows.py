@@ -32,9 +32,7 @@ from app.core.chunking import smart_chunks
 from scripts.ingest_from_kbo import (
     ChunkPayload,
     TABLE_PROFILES,
-    UPSERT_SQL,
     build_static_profile_chunk_payloads,
-    build_static_source_row_prefix,
     build_content,
     build_select_query,
     build_title,
@@ -43,7 +41,11 @@ from scripts.ingest_from_kbo import (
     flush_chunks,
     get_primary_key_columns,
 )
-from scripts.sync_rag_chunks import _load_settings_from_env_file
+from scripts.sync_rag_chunks import (
+    UPSERT_SQL,
+    _build_upsert_rows,
+    _load_settings_from_env_file,
+)
 
 if TYPE_CHECKING:
     from scripts.verify_embedding_coverage import CoverageTarget
@@ -218,6 +220,21 @@ def _copy_existing_chunk_rows(
             """
             SELECT
                 meta,
+                metadata,
+                source_type,
+                source_uri,
+                topic_key,
+                content_hash,
+                chunk_hash,
+                embedding_model,
+                embedding_dim,
+                embedding_version,
+                chunking_version,
+                quality_score,
+                is_active,
+                valid_from,
+                valid_to,
+                expires_at,
                 season_year,
                 season_id,
                 league_type_code,
@@ -239,30 +256,10 @@ def _copy_existing_chunk_rows(
     if not rows:
         return set()
 
-    payload: List[tuple[Any, ...]] = []
     copied_ids: Set[str] = set()
     for row in rows:
         copied_ids.add(str(row["source_row_id"]))
-        meta = row.get("meta")
-        payload.append(
-            (
-                (
-                    json.dumps(meta, ensure_ascii=False, default=str)
-                    if meta is not None
-                    else None
-                ),
-                row.get("season_year"),
-                row.get("season_id"),
-                row.get("league_type_code"),
-                row.get("team_id"),
-                row.get("player_id"),
-                row.get("source_table"),
-                row.get("source_row_id"),
-                row.get("title"),
-                row.get("content"),
-                row.get("embedding_text"),
-            )
-        )
+    payload = _build_upsert_rows(rows)
 
     with dest_conn.cursor() as write_cur:
         _prepare_dest_cursor(write_cur)
@@ -322,21 +319,8 @@ def reembed_target_missing_rows(
 
     if profile.get("source_file"):
         payloads = build_static_target_payloads(target, settings=settings)
-        static_prefix = build_static_source_row_prefix(table, profile)
         with dest_conn.cursor() as write_cur:
             _prepare_dest_cursor(write_cur)
-            write_cur.execute(
-                """
-                DELETE FROM rag_chunks
-                WHERE source_table = %s
-                  AND (source_row_id = %s OR source_row_id LIKE %s)
-                """,
-                (
-                    target.source_table,
-                    static_prefix,
-                    f"{static_prefix}#part%",
-                ),
-            )
             buffer = list(payloads)
             flushed_chunks = flush_chunks(
                 write_cur,

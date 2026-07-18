@@ -168,8 +168,10 @@ class QueryTransformer:
         """순위/랭킹 관련 쿼리를 확장합니다."""
         variations = []
 
-        # 순위 관련 동의어 확장
-        ranking_synonyms = ["상위", "톱", "best", "최고", "1위", "리더"]
+        # 순위 관련 동의어 확장.
+        # 6개 → 핵심 3개로 축소: "상위/톱/best" 등은 실제 chunk text에 가장 많이 등장하는 표현 위주.
+        # max_variations(기본 3) 상한과 결합하면 retrieval pool size 폭증을 막을 수 있다.
+        ranking_synonyms = ["상위", "최고", "1위"]
         for synonym in ranking_synonyms:
             if synonym not in query:
                 variations.append(QueryVariation(f"{synonym} {query}", "expanded", 0.6))
@@ -281,6 +283,9 @@ async def multi_query_retrieval(
     entity_filter: Optional[Any] = None,
     limit_per_query: int = 5,
     limit: Optional[int] = None,
+    intent: str = "",
+    retrieval_state: Optional[Dict[str, Any]] = None,
+    settings: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     여러 쿼리 변형으로 병렬 검색을 수행하고 결과를 결합합니다.
@@ -299,6 +304,26 @@ async def multi_query_retrieval(
     )
     retrieve_signature = inspect.signature(retrieve_func)
     supports_use_hyde = "use_hyde" in retrieve_signature.parameters
+    supports_retrieval_state = "retrieval_state" in retrieve_signature.parameters
+    supports_intent = "intent" in retrieve_signature.parameters
+
+    # HyDE를 사용하지 않는 variation의 쿼리를 배치 임베딩으로 캐시 워밍
+    # → 이후 retrieve_func 내부의 async_embed_query 호출이 캐시 HIT 처리됨
+    if settings is not None and len(query_variations) > 1:
+        non_hyde_queries = [
+            v.query
+            for v in query_variations
+            if not (supports_use_hyde and v.variation_type == "original")
+        ]
+        if len(non_hyde_queries) > 1:
+            try:
+                from .embeddings import async_embed_queries_batch
+
+                await async_embed_queries_batch(non_hyde_queries, settings)
+            except Exception as _warm_exc:
+                logger.debug(
+                    "[MultiQuery] Cache warming failed (non-fatal): %s", _warm_exc
+                )
 
     # 모든 쿼리 변형에 대한 코루틴 생성 (아직 실행 안 됨)
     coroutines = [
@@ -311,6 +336,10 @@ async def multi_query_retrieval(
                 {"use_hyde": variation.variation_type == "original"}
                 if supports_use_hyde
                 else {}
+            ),
+            **({"intent": intent} if supports_intent and intent else {}),
+            **(
+                {"retrieval_state": retrieval_state} if supports_retrieval_state else {}
             ),
         )
         for variation in query_variations

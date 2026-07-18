@@ -1,5 +1,6 @@
 import pytest
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 from app.tools.database_query import DatabaseQueryTool
 from app.tools.game_query import GameQueryTool
 from app.tools.team_code_resolver import TeamCodeResolver
@@ -19,9 +20,11 @@ class TestTeamMappingRobustness:
     def mock_db_connection(self):
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
+        mock_cursor.execute = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_cursor.fetchone = AsyncMock(return_value=None)
+        mock_cursor.close = AsyncMock()
         mock_conn.cursor.return_value = mock_cursor
-        # Mock fetchall to return empty list for mapping load
-        mock_cursor.fetchall.return_value = []
         return mock_conn
 
     @pytest.fixture
@@ -105,7 +108,7 @@ class TestTeamMappingRobustness:
         mock_cursor = game_tool.connection.cursor.return_value
 
         # Test get_games_by_date
-        game_tool.get_games_by_date("2024-05-01", "SSG")
+        asyncio.run(game_tool.get_games_by_date("2024-05-01", "SSG"))
 
         # Get the arguments passed to execute
         call_args = mock_cursor.execute.call_args
@@ -149,7 +152,7 @@ class TestTeamMappingRobustness:
             ],
         ]
 
-        result = game_tool.get_game_box_score(date="2025-05-01")
+        result = asyncio.run(game_tool.get_game_box_score(date="2025-05-01"))
 
         inning_query = mock_cursor.execute.call_args_list[1][0][0]
         assert "SELECT inning, team_side, runs" in inning_query
@@ -162,7 +165,7 @@ class TestTeamMappingRobustness:
         mock_cursor.execute.reset_mock()
         mock_cursor.fetchall.return_value = []
 
-        game_tool.get_team_recent_games("SSG", limit=3, year=2025)
+        asyncio.run(game_tool.get_team_recent_games("SSG", limit=3, year=2025))
 
         query, params = mock_cursor.execute.call_args[0]
         assert "g.home_team = ANY(%s)" in query
@@ -180,7 +183,7 @@ class TestTeamMappingRobustness:
         mock_cursor = db_tool.connection.cursor.return_value
 
         # Test get_team_leaderboard
-        db_tool.get_team_leaderboard("ops", 2024, "batting", team_filter="KIA")
+        asyncio.run(db_tool.get_team_leaderboard("ops", 2024, "batting", team_filter="KIA"))
 
         call_args = mock_cursor.execute.call_args
         query, params = call_args[0]
@@ -207,7 +210,7 @@ class TestTeamMappingRobustness:
         mock_cursor.execute.reset_mock()
         mock_cursor.fetchall.return_value = []
 
-        db_tool.get_team_summary("SSG", 2024)
+        asyncio.run(db_tool.get_team_summary("SSG", 2024))
 
         calls = mock_cursor.execute.call_args_list
         assert any("psb.team_code = ANY(%s)" in call[0][0] for call in calls)
@@ -239,7 +242,7 @@ class TestTeamMappingRobustness:
         mock_cursor.execute.reset_mock()
         mock_cursor.fetchall.return_value = []
 
-        db_tool.get_team_recent_form("SSG", 2019, limit=10)
+        asyncio.run(db_tool.get_team_recent_form("SSG", 2019, limit=10))
 
         query, params = mock_cursor.execute.call_args[0]
         assert "JOIN kbo_seasons ks ON g.season_id = ks.season_id" in query
@@ -260,7 +263,7 @@ class TestTeamMappingRobustness:
         mock_cursor.execute.reset_mock()
         mock_cursor.fetchone.return_value = {"last_game_date": None}
 
-        game_tool.get_team_last_game_date("SSG", 2024, "regular_season")
+        asyncio.run(game_tool.get_team_last_game_date("SSG", 2024, "regular_season"))
 
         query, params = mock_cursor.execute.call_args[0]
         assert "g.home_team = ANY(%s)" in query
@@ -281,13 +284,13 @@ class TestTeamMappingRobustness:
         mock_cursor.execute.reset_mock()
         mock_cursor.fetchone.return_value = {"last_game_date": None}
 
-        game_tool.get_team_last_game_date("SSG", 2019, "regular_season")
+        asyncio.run(game_tool.get_team_last_game_date("SSG", 2019, "regular_season"))
         _, params = mock_cursor.execute.call_args[0]
         assert "SSG" in params[2]
         assert "SK" in params[2]
 
     def test_db_tool_regular_analysis_rejects_special_team(self, db_tool):
-        result = db_tool.get_team_summary("EA", 2024)
+        result = asyncio.run(db_tool.get_team_summary("EA", 2024))
         assert result["found"] is False
         assert result["error"] == "unsupported_team_for_regular_analysis"
         assert result["reason"] == "unsupported_team_for_regular_analysis"
@@ -310,15 +313,15 @@ class TestTeamMappingRobustness:
         class _FakePool:
             def connection(self):
                 class _Ctx:
-                    def __enter__(self_inner):
+                    async def __aenter__(self_inner):
                         return retry_conn
 
-                    def __exit__(self_inner, exc_type, exc, tb):
+                    async def __aexit__(self_inner, exc_type, exc, tb):
                         return False
 
                 return _Ctx()
 
-        def _fake_fetch(self, connection):
+        async def _fake_fetch(self, connection):
             if connection is mock_db_connection:
                 raise RuntimeError("primary oci unavailable")
             return rows
@@ -332,6 +335,7 @@ class TestTeamMappingRobustness:
 
         tool = DatabaseQueryTool(mock_db_connection)
 
+        asyncio.run(tool._ensure_team_mappings_loaded())
         assert tool.mapping_dependency_degraded is True
         assert tool.mapping_dependency_reason == "oci_retry_recovered"
         assert tool.get_team_code("HT", 2024) == "KIA"
@@ -354,15 +358,15 @@ class TestTeamMappingRobustness:
         class _FakePool:
             def connection(self):
                 class _Ctx:
-                    def __enter__(self_inner):
+                    async def __aenter__(self_inner):
                         return retry_conn
 
-                    def __exit__(self_inner, exc_type, exc, tb):
+                    async def __aexit__(self_inner, exc_type, exc, tb):
                         return False
 
                 return _Ctx()
 
-        def _fake_fetch(self, connection):
+        async def _fake_fetch(self, connection):
             if connection is mock_db_connection:
                 raise RuntimeError("primary oci unavailable")
             return rows
@@ -376,6 +380,7 @@ class TestTeamMappingRobustness:
 
         tool = GameQueryTool(mock_db_connection)
 
+        asyncio.run(tool._ensure_team_mappings_loaded())
         assert tool.mapping_dependency_degraded is True
         assert tool.mapping_dependency_reason == "oci_retry_recovered"
         assert tool.get_team_name("HT") == "해태 타이거즈"
@@ -398,15 +403,15 @@ class TestTeamMappingRobustness:
         class _FakePool:
             def connection(self):
                 class _Ctx:
-                    def __enter__(self_inner):
+                    async def __aenter__(self_inner):
                         return retry_conn
 
-                    def __exit__(self_inner, exc_type, exc, tb):
+                    async def __aexit__(self_inner, exc_type, exc, tb):
                         return False
 
                 return _Ctx()
 
-        def _always_fail(self, _connection):
+        async def _always_fail(self, _connection):
             raise RuntimeError("oci closed")
 
         monkeypatch.setattr(GameQueryTool, "_fetch_team_mapping_rows", _always_fail)
@@ -418,6 +423,7 @@ class TestTeamMappingRobustness:
 
         tool = GameQueryTool(mock_db_connection)
 
+        asyncio.run(tool._ensure_team_mappings_loaded())
         assert tool.mapping_dependency_degraded is True
         assert tool.mapping_dependency_reason == "last_good_snapshot"
         assert tool.get_team_code("SK", 2024) == "SSG"
@@ -440,15 +446,15 @@ class TestTeamMappingRobustness:
         class _FakePool:
             def connection(self):
                 class _Ctx:
-                    def __enter__(self_inner):
+                    async def __aenter__(self_inner):
                         return retry_conn
 
-                    def __exit__(self_inner, exc_type, exc, tb):
+                    async def __aexit__(self_inner, exc_type, exc, tb):
                         return False
 
                 return _Ctx()
 
-        def _always_fail(self, _connection):
+        async def _always_fail(self, _connection):
             raise RuntimeError("oci closed")
 
         monkeypatch.setattr(DatabaseQueryTool, "_fetch_team_mapping_rows", _always_fail)
@@ -460,6 +466,7 @@ class TestTeamMappingRobustness:
 
         tool = DatabaseQueryTool(mock_db_connection)
 
+        asyncio.run(tool._ensure_team_mappings_loaded())
         assert tool.mapping_dependency_degraded is True
         assert tool.mapping_dependency_reason == "last_good_snapshot"
         assert tool.get_team_name("SK") == "SK 와이번스"
@@ -472,15 +479,15 @@ class TestTeamMappingRobustness:
         class _FakePool:
             def connection(self):
                 class _Ctx:
-                    def __enter__(self_inner):
+                    async def __aenter__(self_inner):
                         return retry_conn
 
-                    def __exit__(self_inner, exc_type, exc, tb):
+                    async def __aexit__(self_inner, exc_type, exc, tb):
                         return False
 
                 return _Ctx()
 
-        def _always_fail(self, _connection):
+        async def _always_fail(self, _connection):
             raise RuntimeError("oci closed")
 
         monkeypatch.setattr(DatabaseQueryTool, "_fetch_team_mapping_rows", _always_fail)
@@ -492,6 +499,7 @@ class TestTeamMappingRobustness:
 
         tool = DatabaseQueryTool(mock_db_connection)
 
+        asyncio.run(tool._ensure_team_mappings_loaded())
         assert tool.mapping_dependency_degraded is True
         assert tool.mapping_dependency_reason == "defaults"
         assert tool.get_team_code("KIA", 2024) == "KIA"
@@ -540,3 +548,40 @@ def test_team_code_resolver_sync_preserves_korean_display_name():
 
     assert resolver.code_to_name["KT"] == "KT 위즈"
     assert resolver.display_name("kt wiz") == "KT 위즈"
+
+
+def test_team_code_resolver_sync_does_not_overwrite_modern_ssg_with_dissolved_team():
+    resolver = TeamCodeResolver()
+
+    resolver.sync_from_team_rows(
+        [
+            {
+                "team_id": "SSG",
+                "team_name": "SSG 랜더스",
+                "franchise_id": 8,
+                "founded_year": 2021,
+                "is_active": True,
+                "current_code": "SSG",
+            },
+            {
+                "team_id": "SK",
+                "team_name": "SK 와이번스",
+                "franchise_id": 8,
+                "founded_year": 2000,
+                "is_active": False,
+                "current_code": "SSG",
+            },
+            {
+                "team_id": "SL",
+                "team_name": "쌍방울 레이더스",
+                "franchise_id": 12,
+                "founded_year": 1990,
+                "is_active": False,
+                "current_code": "SL",
+            },
+        ]
+    )
+
+    assert resolver.display_name("SSG") == "SSG 랜더스"
+    assert resolver.display_name("SL") == "쌍방울 레이더스"
+    assert resolver.display_name("SK", 2026) == "SSG 랜더스"

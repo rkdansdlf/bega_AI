@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, ValidationError, field_validator
+from typing import Optional, Type, TypeVar
 import logging
 
 from ..config import get_settings
@@ -21,10 +21,129 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 MAX_TICKET_IMAGE_BYTES = 5 * 1024 * 1024
 ALLOWED_TICKET_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+OPENROUTER_CHAT_COMPLETIONS_PATH = "/chat/completions"
+T = TypeVar("T", bound=BaseModel)
 
 
 def _normalize_content_type(content_type: Optional[str]) -> str:
     return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _build_data_url(contents: bytes, content_type: str) -> str:
+    base64_image = base64.b64encode(contents).decode("utf-8")
+    return f"data:{content_type};base64,{base64_image}"
+
+
+def _clean_model_json_text(response_text: str) -> str:
+    response_text = response_text.strip()
+    if response_text.startswith("```json"):
+        return response_text[7:-3].strip()
+    if response_text.startswith("```"):
+        return response_text[3:-3].strip()
+    return response_text
+
+
+def _parse_model_json_response(response_text: str, response_model: Type[T]) -> T:
+    data = json.loads(_clean_model_json_text(response_text))
+    return response_model(**data)
+
+
+def _resolve_vision_model_candidates() -> list[str]:
+    configured_fallbacks = getattr(settings, "vision_fallback_models", [])
+    if not isinstance(configured_fallbacks, (list, tuple)):
+        configured_fallbacks = []
+
+    candidates: list[str] = []
+    for model in [settings.vision_model, *configured_fallbacks]:
+        model_id = (model or "").strip()
+        if model_id and model_id not in candidates:
+            candidates.append(model_id)
+    return candidates
+
+
+async def _request_openrouter_vision_json(
+    *,
+    prompt: str,
+    image_url: str,
+    max_tokens: int,
+    app_title: str,
+    response_model: Type[T],
+) -> T:
+    if not settings.openrouter_api_key:
+        raise RuntimeError("OpenRouter API key not configured")
+
+    candidates = _resolve_vision_model_candidates()
+    if not candidates:
+        raise RuntimeError("Vision model is not configured")
+
+    client = get_shared_httpx_client(
+        "openrouter",
+        timeout=httpx.Timeout(120.0, connect=10.0, read=60.0, pool=10.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+    )
+    endpoint = (
+        f"{settings.openrouter_base_url.rstrip('/')}{OPENROUTER_CHAT_COMPLETIONS_PATH}"
+    )
+    last_error: Exception | None = None
+
+    for index, model_id in enumerate(candidates):
+        try:
+            response = await client.post(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": settings.openrouter_referer
+                    or "https://kbo-platform.com",
+                    "X-Title": settings.openrouter_app_title or app_title,
+                },
+                json={
+                    "model": model_id,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": image_url},
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": max_tokens,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            response_text = result["choices"][0]["message"]["content"]
+            if not isinstance(response_text, str) or not response_text.strip():
+                raise RuntimeError("OpenRouter vision response content is empty")
+            parsed = _parse_model_json_response(response_text, response_model)
+            if index > 0:
+                logger.info("OpenRouter vision fallback succeeded: model=%s", model_id)
+            return parsed
+        except (
+            httpx.HTTPError,
+            json.JSONDecodeError,
+            ValidationError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+        ) as exc:
+            last_error = exc
+            if index >= len(candidates) - 1:
+                break
+            logger.warning(
+                "OpenRouter vision model failed; trying fallback: model=%s next_model=%s error=%s",
+                model_id,
+                candidates[index + 1],
+                exc,
+            )
+
+    raise last_error or RuntimeError("All OpenRouter vision models failed")
 
 
 async def _read_ticket_image_with_limit(
@@ -70,6 +189,40 @@ class TicketInfo(BaseModel):
     peopleCount: Optional[int] = None
     price: Optional[int] = None
     reservationNumber: Optional[str] = None
+
+    @field_validator(
+        "date",
+        "time",
+        "stadium",
+        "homeTeam",
+        "awayTeam",
+        "section",
+        "row",
+        "seat",
+        "reservationNumber",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_optional_string(cls, value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("peopleCount", "price", mode="before")
+    @classmethod
+    def _coerce_optional_int(cls, value):
+        if value is None or value == "":
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        if not digits:
+            return None
+        return int(digits)
 
 
 class SeatViewClassification(BaseModel):
@@ -132,52 +285,15 @@ async def analyze_ticket_image(
 
         else:
             # OpenRouter Implementation
-            base64_image = base64.b64encode(contents).decode("utf-8")
-
-            client = get_shared_httpx_client(
-                "openrouter",
-                timeout=httpx.Timeout(120.0, connect=10.0, read=60.0, pool=10.0),
-                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            return await _request_openrouter_vision_json(
+                prompt=prompt,
+                image_url=_build_data_url(contents, content_type),
+                max_tokens=1000,
+                app_title="KBO Platform Ticket OCR",
+                response_model=TicketInfo,
             )
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.openrouter_api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://kbo-platform.com",
-                    "X-Title": "KBO Platform Ticket OCR",
-                },
-                json={
-                    "model": settings.vision_model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{content_type};base64,{base64_image}"
-                                    },
-                                },
-                            ],
-                        }
-                    ],
-                    "max_tokens": 1000,
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-            response_text = result["choices"][0]["message"]["content"].strip()
 
-        # Clean up response text (remove markdown code blocks if present)
-        if response_text.startswith("```json"):
-            response_text = response_text[7:-3]
-        elif response_text.startswith("```"):
-            response_text = response_text[3:-3]
-
-        data = json.loads(response_text)
-        return TicketInfo(**data)
+        return _parse_model_json_response(response_text, TicketInfo)
 
     except HTTPException as exc:
         logger.warning(
@@ -248,51 +364,15 @@ async def classify_seat_view_image(
             response = await run_in_threadpool(model.generate_content, [prompt, image])
             response_text = response.text.strip()
         else:
-            base64_image = base64.b64encode(contents).decode("utf-8")
-
-            client = get_shared_httpx_client(
-                "openrouter",
-                timeout=httpx.Timeout(120.0, connect=10.0, read=60.0, pool=10.0),
-                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            return await _request_openrouter_vision_json(
+                prompt=prompt,
+                image_url=_build_data_url(contents, content_type),
+                max_tokens=500,
+                app_title="KBO Platform Seat View Classification",
+                response_model=SeatViewClassification,
             )
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.openrouter_api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://kbo-platform.com",
-                    "X-Title": "KBO Platform Seat View Classification",
-                },
-                json={
-                    "model": settings.vision_model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{content_type};base64,{base64_image}"
-                                    },
-                                },
-                            ],
-                        }
-                    ],
-                    "max_tokens": 500,
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-            response_text = result["choices"][0]["message"]["content"].strip()
 
-        if response_text.startswith("```json"):
-            response_text = response_text[7:-3]
-        elif response_text.startswith("```"):
-            response_text = response_text[3:-3]
-
-        data = json.loads(response_text)
-        return SeatViewClassification(**data)
+        return _parse_model_json_response(response_text, SeatViewClassification)
 
     except HTTPException as exc:
         logger.warning(

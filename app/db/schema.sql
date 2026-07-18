@@ -13,14 +13,58 @@ create table if not exists rag_chunks (
   title text,
   content text not null,
   content_tsv tsvector generated always as (to_tsvector('simple', coalesce(content, ''))) stored,
-  embedding vector(1536),
+  embedding vector(256),
   meta jsonb default '{}'::jsonb,
+  metadata jsonb default '{}'::jsonb,
+  source_type text,
+  source_uri text,
+  topic_key text,
+  content_hash text,
+  chunk_hash text,
+  embedding_model text,
+  embedding_dim int,
+  embedding_version int default 2,
+  chunking_version int default 1,
+  quality_score numeric default 0.50,
+  is_active boolean default true,
+  valid_from timestamptz,
+  valid_to timestamptz,
+  expires_at timestamptz,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
 
+-- Additive migration path for existing rag_chunks deployments.
+alter table rag_chunks add column if not exists metadata jsonb default '{}'::jsonb;
+alter table rag_chunks add column if not exists source_type text;
+alter table rag_chunks add column if not exists source_uri text;
+alter table rag_chunks add column if not exists topic_key text;
+alter table rag_chunks add column if not exists content_hash text;
+alter table rag_chunks add column if not exists chunk_hash text;
+alter table rag_chunks add column if not exists embedding_model text;
+alter table rag_chunks add column if not exists embedding_dim int;
+alter table rag_chunks add column if not exists embedding_version int default 2;
+alter table rag_chunks add column if not exists chunking_version int default 1;
+alter table rag_chunks add column if not exists quality_score numeric default 0.50;
+alter table rag_chunks add column if not exists is_active boolean default true;
+alter table rag_chunks add column if not exists valid_from timestamptz;
+alter table rag_chunks add column if not exists valid_to timestamptz;
+alter table rag_chunks add column if not exists expires_at timestamptz;
+
+update rag_chunks
+set metadata = coalesce(meta, '{}'::jsonb)
+where (metadata is null or metadata = '{}'::jsonb)
+  and meta is not null
+  and meta <> '{}'::jsonb;
+
 -- Vector and text search indexes
-create index if not exists idx_rag_chunks_embedding on rag_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 644);
+-- halfvec HNSW 인덱스 (신규 설치 기본). 운영 마이그레이션은 scripts/create_vector_index.py 사용.
+-- pgvector >= 0.7.0 필요. m=16: 레이어당 최대 연결 수, ef_construction=64: 빌드 정확도.
+create index if not exists idx_rag_chunks_embedding_halfvec_hnsw on rag_chunks using hnsw ((embedding::halfvec(256)) halfvec_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
+-- vector HNSW 인덱스는 halfvec 전환 후 운영 cleanup 대상입니다.
+-- create index if not exists idx_rag_chunks_embedding_hnsw on rag_chunks using hnsw (embedding vector_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
+-- 기존 IVFFlat 인덱스 (레거시, 운영 마이그레이션 후 scripts/create_vector_index.py --drop-ivfflat 으로 제거)
+-- create index if not exists idx_rag_chunks_embedding on rag_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 644);
 create index if not exists idx_rag_chunks_content_tsv on rag_chunks using gin (content_tsv);
 
 -- Metadata filtering indexes for performance
@@ -28,11 +72,29 @@ create index if not exists idx_rag_chunks_season_year on rag_chunks (season_year
 create index if not exists idx_rag_chunks_team_id on rag_chunks (team_id);
 create index if not exists idx_rag_chunks_source_table on rag_chunks (source_table);
 create index if not exists idx_rag_chunks_meta_league on rag_chunks ((meta->>'league'));
+create index if not exists idx_rag_chunks_active on rag_chunks (is_active);
+create index if not exists idx_rag_chunks_source_type on rag_chunks (source_type);
+create index if not exists idx_rag_chunks_topic_key on rag_chunks (topic_key);
+create index if not exists idx_rag_chunks_content_hash on rag_chunks (content_hash);
+create index if not exists idx_rag_chunks_chunk_hash on rag_chunks (chunk_hash);
+create index if not exists idx_rag_chunks_embedding_model on rag_chunks (embedding_model);
+create index if not exists idx_rag_chunks_embedding_reuse
+  on rag_chunks (content_hash, embedding_model, embedding_dim, embedding_version, chunking_version)
+  where embedding is not null;
+create index if not exists idx_rag_chunks_metadata on rag_chunks using gin (metadata);
 
 -- Composite indexes for common filter combinations
 create index if not exists idx_rag_chunks_season_team on rag_chunks (season_year, team_id);
 create index if not exists idx_rag_chunks_season_source on rag_chunks (season_year, source_table);
 create index if not exists idx_rag_chunks_team_source on rag_chunks (team_id, source_table);
+create index if not exists idx_rag_chunks_active_source_type_season on rag_chunks (source_type, season_year)
+  where is_active = true;
+create index if not exists idx_rag_chunks_active_team_season on rag_chunks (team_id, season_year)
+  where is_active = true;
+create index if not exists idx_rag_chunks_active_source_season on rag_chunks (source_table, season_year)
+  where is_active = true;
+create index if not exists idx_rag_chunks_active_topic_key on rag_chunks (topic_key)
+  where is_active = true;
 
 -- New indexes for awards, movements, and game queries
 create index if not exists idx_rag_chunks_award_type on rag_chunks ((meta->>'award_type'));
@@ -47,13 +109,136 @@ create index if not exists idx_rag_chunks_season_award on rag_chunks (season_yea
 -- Unique constraint for data integrity and upserts
 create unique index if not exists idx_rag_chunks_source on rag_chunks (source_table, source_row_id);
 
+create table if not exists rag_retrieval_events (
+  event_id bigserial primary key,
+  user_query text not null,
+  intent text,
+  rewritten_queries jsonb default '[]'::jsonb,
+  metadata_filter jsonb default '{}'::jsonb,
+  retrieved_chunk_ids jsonb default '[]'::jsonb,
+  selected_chunk_ids jsonb default '[]'::jsonb,
+  scores jsonb default '[]'::jsonb,
+  latency_ms integer,
+  success boolean not null default true,
+  error_type text,
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_rag_retrieval_events_created_at on rag_retrieval_events (created_at);
+create index if not exists idx_rag_retrieval_events_success_error on rag_retrieval_events (success, error_type);
+
+create table if not exists rag_ingest_jobs (
+  job_id bigserial primary key,
+  job_type text not null,
+  source_tables jsonb default '[]'::jsonb,
+  status text not null default 'running',
+  chunk_count integer not null default 0,
+  skipped_count integer not null default 0,
+  reembedded_count integer not null default 0,
+  error text,
+  started_at timestamptz default now(),
+  finished_at timestamptz
+);
+
+create index if not exists idx_rag_ingest_jobs_started_at on rag_ingest_jobs (started_at);
+create index if not exists idx_rag_ingest_jobs_status on rag_ingest_jobs (status);
+
+create table if not exists operator_data_items (
+  queue_id text primary key,
+  priority text,
+  domain text not null,
+  contract_code text not null,
+  question text not null,
+  operator_status text not null,
+  validation_status text not null,
+  apply_target text,
+  payload jsonb not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_data_items_domain on operator_data_items (domain);
+create index if not exists idx_operator_data_items_payload_hash on operator_data_items (payload_hash);
+create index if not exists idx_operator_data_items_applied_at on operator_data_items (applied_at);
+
+create table if not exists operator_season_events (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  season_year int not null,
+  event_name text not null,
+  event_date date not null,
+  stadium_name text,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_season_events_lookup
+  on operator_season_events (season_year, event_date);
+
+create table if not exists operator_schedule_items (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  game_date date not null,
+  game_id text not null,
+  home_team text not null,
+  away_team text not null,
+  stadium_name text,
+  start_time text not null,
+  game_status text not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_schedule_items_date
+  on operator_schedule_items (game_date, start_time);
+create index if not exists idx_operator_schedule_items_game_id
+  on operator_schedule_items (game_id);
+create index if not exists idx_operator_schedule_items_teams
+  on operator_schedule_items (home_team, away_team);
+
+create table if not exists operator_roster_events (
+  queue_id text primary key references operator_data_items(queue_id) on delete cascade,
+  season_year int not null,
+  team_code text not null,
+  player_name text not null,
+  roster_event_type text not null,
+  effective_date date not null,
+  status_text text not null,
+  payload_hash text not null,
+  source_name text not null,
+  source_checked_at timestamptz not null,
+  is_verified boolean not null,
+  confidence numeric not null,
+  applied_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists idx_operator_roster_events_lookup
+  on operator_roster_events (season_year, team_code, effective_date);
+create index if not exists idx_operator_roster_events_player
+  on operator_roster_events (player_name);
+
 -- Coach Analysis Cache Table
 create table if not exists coach_analysis_cache (
   cache_key varchar(64) primary key,  -- SHA256 Hash of (team_id, year, focus, question)
   team_id varchar(10) not null,
   year int not null,
   prompt_version varchar(32) not null, -- e.g. "v2"
-  model_name varchar(50) not null,     -- e.g. "upstage/solar-pro-3:free"
+  model_name varchar(50) not null,     -- e.g. "openrouter/free"
   status varchar(20) not null check (status in ('PENDING', 'COMPLETED', 'FAILED')),
   response_json jsonb,                 -- Completed analysis result
   error_message text,                  -- Failure reason

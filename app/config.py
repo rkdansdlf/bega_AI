@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.chat_model_usage import ModelPricingCatalog
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CORS_ORIGINS = [
@@ -23,6 +25,8 @@ DEFAULT_CORS_ORIGINS = [
 ]
 LOCAL_DEV_AI_INTERNAL_TOKEN = "local-dev-ai-internal-token"
 LOCAL_DEV_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "host.docker.internal"}
+DEFAULT_VISION_MODEL = "google/gemma-4-31b-it:free"
+DEFAULT_VISION_FALLBACK_MODELS = "mistralai/mistral-small-3.2-24b-instruct"
 
 
 class Settings(BaseSettings):
@@ -37,25 +41,51 @@ class Settings(BaseSettings):
         extra="ignore",
         env_file=".env",
         env_file_encoding="utf-8",
+        hide_input_in_errors=True,
         populate_by_name=True,
     )
 
     # --- 기본 애플리케이션 설정 ---
     app_name: str = "KBO AI Service"
     debug: bool = False
+    # 배포 환경 명시 신호. prod 배포에서 APP_ENV=production 으로 설정하면
+    # 로컬 전용 내부 토큰 폴백이 비활성화되고 기동 시 토큰 검증 가드가 작동한다.
+    # 미설정(빈 값)이면 CORS origin 휴리스틱으로 로컬 여부를 추론한다(기존 동작 유지).
+    app_env: str = Field("", validation_alias="APP_ENV")
     # CORS 설정(자격 증명 쿠키 사용 시 '* '는 허용되지 않음)
     # 로컬 개발 기준 기본값은 Vite/개발 서버에서 사용되는 대표 도메인으로 제한
     cors_origins_raw: str = Field(
         default=",".join(DEFAULT_CORS_ORIGINS),
         validation_alias="CORS_ORIGINS",
     )
+    ai_docs_enabled: Optional[bool] = Field(None, validation_alias="AI_DOCS_ENABLED")
+    ai_metrics_enabled: Optional[bool] = Field(
+        None, validation_alias="AI_METRICS_ENABLED"
+    )
 
     # --- 데이터베이스 설정 ---
-    # 운영 기본 경로
+    # 운영 Source DB 경로
+    oci_db_url: Optional[str] = Field(None, validation_alias="OCI_DB_URL")
+    # RAG/로컬 fallback 경로
     postgres_db_url: Optional[str] = Field(None, validation_alias="POSTGRES_DB_URL")
     # 하위 호환 경로 (deprecated)
     legacy_source_db_url: Optional[str] = Field(
         None, validation_alias="SUPABASE_DB_URL"
+    )
+    # `auto` keeps local/dev startup compatibility. `managed` requires the
+    # migration role to provision the schema before the AI process starts.
+    ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
+    ingest_worker_enabled: bool = Field(
+        True, validation_alias="AI_INGEST_WORKER_ENABLED"
+    )
+    ingest_worker_poll_seconds: float = Field(
+        2.0, validation_alias="AI_INGEST_WORKER_POLL_SECONDS"
+    )
+    ingest_worker_lease_seconds: int = Field(
+        120, validation_alias="AI_INGEST_WORKER_LEASE_SECONDS"
+    )
+    ingest_worker_max_recovery_attempts: int = Field(
+        1, validation_alias="AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS"
     )
     _legacy_source_db_warned: bool = PrivateAttr(default=False)
 
@@ -75,7 +105,7 @@ class Settings(BaseSettings):
     # --- LLM / 임베딩 프로바이더 설정 ---
     # LLM(거대 언어 모델) 및 임베딩 생성을 위해 사용할 서비스를 지정합니다.
     llm_provider: str = Field("gemini", validation_alias="LLM_PROVIDER")
-    embed_provider: str = Field("gemini", validation_alias="EMBED_PROVIDER")
+    embed_provider: str = Field("openrouter", validation_alias="EMBED_PROVIDER")
     embed_model: str = Field(
         "", validation_alias="EMBED_MODEL"
     )  # 특정 모델을 지정할 때 사용
@@ -128,10 +158,12 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_APP_TITLE"
     )
     openrouter_embed_model: Optional[str] = Field(
-        None, validation_alias="OPENROUTER_EMBED_MODEL"
+        "openai/text-embedding-3-small", validation_alias="OPENROUTER_EMBED_MODEL"
     )
-    vision_model: str = Field(
-        "google/gemini-2.0-flash-001", validation_alias="VISION_MODEL"
+    vision_model: str = Field(DEFAULT_VISION_MODEL, validation_alias="VISION_MODEL")
+    vision_fallback_models_raw: str = Field(
+        DEFAULT_VISION_FALLBACK_MODELS,
+        validation_alias="VISION_FALLBACK_MODELS",
     )
 
     # --- Coach LLM 설정 ---
@@ -150,8 +182,8 @@ class Settings(BaseSettings):
 
     coach_llm_provider: str = Field("openrouter", validation_alias="COACH_LLM_PROVIDER")
     coach_max_output_tokens: int = Field(
-        2000, validation_alias="COACH_MAX_OUTPUT_TOKENS"
-    )  # 2000 tokens recommended per COACH_PROMPT_V2
+        2500, validation_alias="COACH_MAX_OUTPUT_TOKENS"
+    )  # 2500 tokens: detailed_markdown 900자 + coach_note 200자 허용에 맞춰 상향
     coach_openrouter_model: str = Field(
         "openrouter/free", validation_alias="COACH_OPENROUTER_MODEL"
     )
@@ -161,6 +193,23 @@ class Settings(BaseSettings):
     )
     coach_brief_max_output_tokens: int = Field(
         8000, validation_alias="COACH_BRIEF_MAX_OUTPUT_TOKENS"
+    )
+
+    # --- Coach FAILED_LOCKED 자동 복구 루프 ---
+    # 기본 비활성: 운영자가 명시적으로 켤 때만 백그라운드 자동 삭제가 동작한다.
+    coach_failed_recovery_enabled: bool = Field(
+        False, validation_alias="COACH_FAILED_RECOVERY_ENABLED"
+    )
+    coach_failed_recovery_interval_seconds: int = Field(
+        1800, validation_alias="COACH_FAILED_RECOVERY_INTERVAL_SECONDS"
+    )
+    # 재시도 가능 오류로 잠긴 row를 풀기 전 최소 경과 시간(쿨다운).
+    coach_failed_recovery_cooldown_seconds: int = Field(
+        3600, validation_alias="COACH_FAILED_RECOVERY_COOLDOWN_SECONDS"
+    )
+    # 한 사이클당 처리 상한(무한 재생성/LLM 비용 폭주 방지).
+    coach_failed_recovery_max_rows_per_cycle: int = Field(
+        50, validation_alias="COACH_FAILED_RECOVERY_MAX_ROWS_PER_CYCLE"
     )
 
     @property
@@ -181,11 +230,50 @@ class Settings(BaseSettings):
     chatbot_model_name: Optional[str] = Field(
         None, validation_alias="CHATBOT_MODEL_NAME"
     )
+    chat_planner_model_name: Optional[str] = Field(
+        None, validation_alias="CHAT_PLANNER_MODEL_NAME"
+    )
+    chat_answer_model_name: Optional[str] = Field(
+        None, validation_alias="CHAT_ANSWER_MODEL_NAME"
+    )
+    chat_model_pricing_json: Optional[str] = Field(
+        None, validation_alias="CHAT_MODEL_PRICING_JSON"
+    )
     chat_cache_admin_enabled: bool = Field(
         False, validation_alias="CHAT_CACHE_ADMIN_ENABLED"
     )
     chat_cache_admin_token: Optional[str] = Field(
         None, validation_alias="CHAT_CACHE_ADMIN_TOKEN"
+    )
+    chat_semantic_cache_enabled: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_ENABLED"
+    )
+    chat_semantic_cache_shadow_enabled: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_SHADOW_ENABLED"
+    )
+    chat_semantic_cache_rollout_percent: int = Field(
+        0, validation_alias="CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT"
+    )
+    chat_semantic_cache_kill_switch: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_KILL_SWITCH"
+    )
+    chat_semantic_cache_min_similarity: float = Field(
+        0.93, validation_alias="CHAT_SEMANTIC_CACHE_MIN_SIMILARITY"
+    )
+    chat_semantic_cache_candidate_limit: int = Field(
+        3, validation_alias="CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT"
+    )
+    chat_semantic_cache_vector_index_enabled: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED"
+    )
+    chat_semantic_cache_hnsw_ef_search: int = Field(
+        0, validation_alias="CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH"
+    )
+    chat_cost_input_usd_per_1m_tokens: float = Field(
+        0.0, validation_alias="CHAT_COST_INPUT_USD_PER_1M_TOKENS"
+    )
+    chat_cost_output_usd_per_1m_tokens: float = Field(
+        0.0, validation_alias="CHAT_COST_OUTPUT_USD_PER_1M_TOKENS"
     )
 
     # --- Moderation 설정 ---
@@ -211,7 +299,12 @@ class Settings(BaseSettings):
     )
 
     # --- 검색(Retrieval) 관련 설정 ---
-    default_search_limit: int = Field(3, validation_alias="DEFAULT_SEARCH_LIMIT")
+    # 200,000+ chunk 환경에서 top-k=3은 recall이 낮아 오답률을 높인다.
+    # 운영(.env)은 24로 오버라이드되어 있고, 본 기본값은 dev/test 시 합리적인 동작을 보장.
+    default_search_limit: int = Field(10, validation_alias="DEFAULT_SEARCH_LIMIT")
+    default_kbo_season_year: Optional[int] = Field(
+        None, validation_alias="DEFAULT_KBO_SEASON_YEAR"
+    )
     retrieval_single_query_for_strict_entity: bool = Field(
         True, validation_alias="RETRIEVAL_SINGLE_QUERY_FOR_STRICT_ENTITY"
     )
@@ -227,8 +320,21 @@ class Settings(BaseSettings):
     retrieval_fallback_limit_minimal: int = Field(
         25, validation_alias="RETRIEVAL_FALLBACK_LIMIT_MINIMAL"
     )
+    # 벡터 인덱스 타입 선택:
+    #   "hnsw"     - HNSW 세션 GUC(hnsw.ef_search)만 설정. 운영 HNSW 인덱스가 있을 때 사용.
+    #   "ivfflat"  - IVFFlat 세션 GUC(ivfflat.probes)만 설정. 레거시 인덱스 유지 시 사용.
+    #   "auto"     - 기동 시 pg_indexes에서 HNSW 존재 여부를 감지하여 자동 선택(기본값).
+    # 운영 전환 흐름: 256-prefix migration → create_vector_index.py 실행(HNSW 생성)
+    # → AI_VECTOR_INDEX=hnsw 배포(halfvec 사용 시 AI_VECTOR_QUANTIZATION=halfvec) → ivfflat 제거.
+    ai_vector_index: str = Field("auto", validation_alias="AI_VECTOR_INDEX")
+    ai_vector_quantization: str = Field(
+        "none", validation_alias="AI_VECTOR_QUANTIZATION"
+    )
+    # IVFFlat 인덱스(`idx_rag_chunks_embedding`, lists=644) 기준 probes=512는 79% 버킷 스캔을
+    # 의미하여 사실상 시퀀셜 스캔에 가깝다. 권장 운영치는 24~64 범위. dev/test 기본을 보수적으로
+    # 32로 설정하고, 정확도 회귀가 발견되면 RETRIEVAL_IVFFLAT_PROBES 환경변수로 조정한다.
     retrieval_ivfflat_probes: int = Field(
-        512, validation_alias="RETRIEVAL_IVFFLAT_PROBES"
+        32, validation_alias="RETRIEVAL_IVFFLAT_PROBES"
     )
     retrieval_hnsw_ef_search: int = Field(
         100, validation_alias="RETRIEVAL_HNSW_EF_SEARCH"
@@ -240,6 +346,23 @@ class Settings(BaseSettings):
     rag_chunk_max_chars: int = Field(900, validation_alias="RAG_CHUNK_MAX_CHARS")
     rag_chunk_min_chars: int = Field(180, validation_alias="RAG_CHUNK_MIN_CHARS")
     rag_chunk_overlap_chars: int = Field(80, validation_alias="RAG_CHUNK_OVERLAP_CHARS")
+    rag_storage_dedup_enabled: bool = Field(
+        True, validation_alias="RAG_STORAGE_DEDUP_ENABLED"
+    )
+    rag_quality_min_chars: int = Field(50, validation_alias="RAG_QUALITY_MIN_CHARS")
+    rag_embedding_version: int = Field(2, validation_alias="RAG_EMBEDDING_VERSION")
+    rag_chunking_version: int = Field(1, validation_alias="RAG_CHUNKING_VERSION")
+    rag_retrieval_active_filter_enabled: bool = Field(
+        True, validation_alias="RAG_RETRIEVAL_ACTIVE_FILTER_ENABLED"
+    )
+    rag_retrieval_event_logging_enabled: bool = Field(
+        True, validation_alias="RAG_RETRIEVAL_EVENT_LOGGING_ENABLED"
+    )
+    rag_rerank_enabled: bool = Field(False, validation_alias="RAG_RERANK_ENABLED")
+    rag_rerank_candidate_limit: int = Field(
+        20, validation_alias="RAG_RERANK_CANDIDATE_LIMIT"
+    )
+    rag_context_limit: int = Field(10, validation_alias="RAG_CONTEXT_LIMIT")
 
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
@@ -250,6 +373,18 @@ class Settings(BaseSettings):
     chat_sse_ping_seconds: int = Field(15, validation_alias="CHAT_SSE_PING_SECONDS")
     chat_cached_stream_chunk_size: int = Field(
         200, validation_alias="CHAT_CACHED_STREAM_CHUNK_SIZE"
+    )
+    chat_queue_enabled: bool = Field(True, validation_alias="CHAT_QUEUE_ENABLED")
+    chat_queue_rpm_limit: int = Field(18, validation_alias="CHAT_QUEUE_RPM_LIMIT")
+    chat_queue_window_seconds: int = Field(
+        60, validation_alias="CHAT_QUEUE_WINDOW_SECONDS"
+    )
+    chat_queue_max_size: int = Field(60, validation_alias="CHAT_QUEUE_MAX_SIZE")
+    chat_queue_max_wait_seconds: int = Field(
+        180, validation_alias="CHAT_QUEUE_MAX_WAIT_SECONDS"
+    )
+    chat_queue_status_interval_seconds: int = Field(
+        1, validation_alias="CHAT_QUEUE_STATUS_INTERVAL_SECONDS"
     )
     chat_dynamic_token_enabled: bool = Field(
         True, validation_alias="CHAT_DYNAMIC_TOKEN_ENABLED"
@@ -316,8 +451,14 @@ class Settings(BaseSettings):
     chat_fast_path_fallback_on_empty: bool = Field(
         True, validation_alias="CHAT_FAST_PATH_FALLBACK_ON_EMPTY"
     )
+    operator_data_fast_path_enabled: bool = Field(
+        False, validation_alias="OPERATOR_DATA_FAST_PATH_ENABLED"
+    )
     chat_planner_cache_ttl_seconds: int = Field(
-        60, validation_alias="CHAT_PLANNER_CACHE_TTL_SECONDS"
+        300, validation_alias="CHAT_PLANNER_CACHE_TTL_SECONDS"
+    )
+    chat_planner_cache_history_ttl_seconds: int = Field(
+        60, validation_alias="CHAT_PLANNER_CACHE_HISTORY_TTL_SECONDS"
     )
     chat_planner_cache_max_entries: int = Field(
         512, validation_alias="CHAT_PLANNER_CACHE_MAX_ENTRIES"
@@ -352,7 +493,7 @@ class Settings(BaseSettings):
 
     # --- 임베딩 설정 ---
     embed_batch_size: int = Field(32, validation_alias="EMBED_BATCH_SIZE")
-    embed_dim: int = Field(1536, validation_alias="EMBED_DIM")
+    embed_dim: int = Field(256, validation_alias="EMBED_DIM")
     hf_embed_model: str = Field(
         "intfloat/multilingual-e5-large", validation_alias="HF_EMBED_MODEL"
     )
@@ -371,6 +512,33 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"지원되지 않는 EMBED_PROVIDER '{value}'입니다. 다음 중에서 선택하세요: {sorted(allowed)}"
             )
+        return value
+
+    @field_validator("ai_db_schema_mode")
+    def _validate_ai_db_schema_mode(cls, value: str) -> str:
+        allowed = {"auto", "managed"}
+        if value not in allowed:
+            raise ValueError(
+                f"AI_DB_SCHEMA_MODE must be one of {sorted(allowed)}"
+            )
+        return value
+
+    @field_validator("ingest_worker_poll_seconds")
+    def _validate_ingest_worker_poll_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("AI_INGEST_WORKER_POLL_SECONDS must be > 0")
+        return value
+
+    @field_validator("ingest_worker_lease_seconds")
+    def _validate_ingest_worker_lease_seconds(cls, value: int) -> int:
+        if value < 3:
+            raise ValueError("AI_INGEST_WORKER_LEASE_SECONDS must be >= 3")
+        return value
+
+    @field_validator("ingest_worker_max_recovery_attempts")
+    def _validate_ingest_worker_max_recovery_attempts(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS must be >= 0")
         return value
 
     @field_validator("chat_openrouter_empty_chunk_retries")
@@ -455,6 +623,7 @@ class Settings(BaseSettings):
         "chat_answer_max_tokens_long",
         "chat_tool_result_max_chars",
         "chat_tool_result_max_items",
+        "chat_semantic_cache_candidate_limit",
         "chat_tool_parallel_max_concurrency",
         "chat_fast_path_tool_cap",
         "chat_planner_cache_ttl_seconds",
@@ -471,6 +640,11 @@ class Settings(BaseSettings):
         "rag_chunk_max_chars",
         "rag_chunk_min_chars",
         "rag_chunk_overlap_chars",
+        "rag_quality_min_chars",
+        "rag_embedding_version",
+        "rag_chunking_version",
+        "rag_rerank_candidate_limit",
+        "rag_context_limit",
         "chat_sse_ping_seconds",
         "chat_cached_stream_chunk_size",
         "chat_team_answer_cap_base",
@@ -491,6 +665,53 @@ class Settings(BaseSettings):
     def _validate_chat_positive_threshold(cls, value: int) -> int:
         if value < 1:
             raise ValueError("Chat optimization threshold 값은 1 이상이어야 합니다.")
+        return value
+
+    @field_validator("chat_semantic_cache_min_similarity")
+    def _validate_chat_semantic_cache_min_similarity(cls, value: float) -> float:
+        if value <= 0 or value > 1:
+            raise ValueError("CHAT_SEMANTIC_CACHE_MIN_SIMILARITY must be > 0 and <= 1")
+        return value
+
+    @field_validator("chat_semantic_cache_candidate_limit")
+    def _validate_chat_semantic_cache_candidate_limit(cls, value: int) -> int:
+        if value > 10:
+            raise ValueError("CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT must be <= 10")
+        return value
+
+    @field_validator("chat_semantic_cache_rollout_percent")
+    def _validate_chat_semantic_cache_rollout_percent(cls, value: int) -> int:
+        if value < 0 or value > 100:
+            raise ValueError(
+                "CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT must be between 0 and 100"
+            )
+        return value
+
+    @field_validator("chat_semantic_cache_hnsw_ef_search")
+    def _validate_chat_semantic_cache_hnsw_ef_search(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH must be >= 0")
+        if value > 1000:
+            raise ValueError("CHAT_SEMANTIC_CACHE_HNSW_EF_SEARCH must be <= 1000")
+        return value
+
+    @field_validator(
+        "chat_cost_input_usd_per_1m_tokens",
+        "chat_cost_output_usd_per_1m_tokens",
+    )
+    def _validate_chat_cost_rates(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("Chat cost rate values must be >= 0")
+        return value
+
+    @field_validator("chat_model_pricing_json")
+    def _validate_chat_model_pricing_json(
+        cls, value: Optional[str]
+    ) -> Optional[str]:
+        try:
+            ModelPricingCatalog.from_json(value)
+        except ValueError as exc:
+            raise ValueError(f"CHAT_MODEL_PRICING_JSON is invalid: {exc}") from exc
         return value
 
     @field_validator("rag_chunk_overlap_chars")
@@ -519,6 +740,10 @@ class Settings(BaseSettings):
         return self._parse_string_list(self.chat_tool_parallel_serial_tools_raw)
 
     @property
+    def vision_fallback_models(self) -> List[str]:
+        return self._parse_string_list(self.vision_fallback_models_raw)
+
+    @property
     def cors_allowed_origins(self) -> List[str]:
         """CORS 정책에 따라 허용된 출처 목록을 반환합니다."""
         origins = self.cors_origins
@@ -540,13 +765,63 @@ class Settings(BaseSettings):
         return all(self._is_local_origin(origin) for origin in origins)
 
     @property
+    def is_production_environment(self) -> bool:
+        """배포가 운영(production)인지 판별한다.
+
+        APP_ENV이 명시되면 그 값을 신뢰하고, 미설정이면 CORS origin이 모두
+        로컬인지로 추론한다(기존 휴리스틱).
+        """
+        env = (self.app_env or "").strip().lower()
+        if env in {"prod", "production"}:
+            return True
+        if env in {"local", "dev", "development", "test", "testing", "ci"}:
+            return False
+        return not self.is_local_dev_environment
+
+    @property
+    def api_docs_enabled(self) -> bool:
+        if self.ai_docs_enabled is not None:
+            return self.ai_docs_enabled
+        return not self.is_production_environment
+
+    @property
+    def metrics_enabled(self) -> bool:
+        if self.ai_metrics_enabled is not None:
+            return self.ai_metrics_enabled
+        return not self.is_production_environment
+
+    @property
     def resolved_ai_internal_token(self) -> Optional[str]:
         configured = (self.ai_internal_token or "").strip()
         if configured:
             return configured
-        if self.is_local_dev_environment:
+        # 로컬 개발 편의 폴백 — 운영 환경에서는 절대 사용하지 않는다.
+        if self.is_local_dev_environment and not self.is_production_environment:
             return LOCAL_DEV_AI_INTERNAL_TOKEN
         return None
+
+    def validate_internal_token_security(self) -> None:
+        """운영 배포(APP_ENV=production)에서 내부 토큰 설정이 안전한지 기동 시 검증한다.
+
+        - 토큰 미설정: 공개 폴백으로 빠질 위험을 막기 위해 기동을 거부한다.
+        - 토큰이 공개된 로컬 기본값과 동일: 명백한 오설정이므로 기동을 거부한다.
+
+        로컬/개발/테스트 및 미설정 환경에서는 편의 폴백을 유지하기 위해 통과시킨다.
+        """
+        env = (self.app_env or "").strip().lower()
+        if env not in {"prod", "production"}:
+            return
+        configured = (self.ai_internal_token or "").strip()
+        if not configured:
+            raise RuntimeError(
+                "AI_INTERNAL_TOKEN must be configured when APP_ENV=production; "
+                "the local-dev fallback token is disabled in production."
+            )
+        if configured == LOCAL_DEV_AI_INTERNAL_TOKEN:
+            raise RuntimeError(
+                "AI_INTERNAL_TOKEN must not be set to the local-dev default value "
+                "when APP_ENV=production."
+            )
 
     @staticmethod
     def _parse_string_list(raw_value: str) -> List[str]:
@@ -586,9 +861,13 @@ class Settings(BaseSettings):
         """배치/마이그레이션 스크립트용 Source DB URL을 반환합니다.
 
         우선순위:
-        1) POSTGRES_DB_URL
-        2) SUPABASE_DB_URL (deprecated fallback)
+        1) OCI_DB_URL
+        2) POSTGRES_DB_URL
+        3) SUPABASE_DB_URL (deprecated fallback)
         """
+        if self.oci_db_url:
+            return self.oci_db_url
+
         if self.postgres_db_url:
             return self.postgres_db_url
 
@@ -600,7 +879,7 @@ class Settings(BaseSettings):
                 self._legacy_source_db_warned = True
             return self.legacy_source_db_url
 
-        raise RuntimeError("POSTGRES_DB_URL is not configured.")
+        raise RuntimeError("OCI_DB_URL or POSTGRES_DB_URL is not configured.")
 
     @property
     def function_calling_model(self) -> str:
