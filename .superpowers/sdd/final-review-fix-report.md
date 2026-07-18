@@ -88,3 +88,46 @@ A timing-sensitive retry-count assertion failed once under full-suite load. Its 
 - No live PostgreSQL integration test was run by design; SQL ordering and predicates are covered by deterministic unit/contract tests.
 - The full suite retains five environment-dependent skips and eight pre-existing warnings; neither is introduced by this patch.
 - No external baseball-data fallback or repair path was added. Missing baseball data continues to require the established `MANUAL_BASEBALL_DATA_REQUIRED` operator flow.
+
+## Important Re-review Follow-up: Terminal Lease-loss Exception
+
+### Resolution
+
+- Commit: `38b8533 fix: surface ingest lease loss races`
+- Files: `app/core/ingest_run_store.py`, `tests/test_ingest_run_store.py`
+- `IngestRunStore._require_owned_run` now raises the existing domain-level `IngestLeaseLostError` with the constant sanitized message `ingest run lease is not owned`.
+- Zero-row success, failure, and `MANUAL_BASEBALL_DATA_REQUIRED` terminal updates now enter the recovery-handoff branches already present in `IngestWorker.run_once` instead of escaping as plain `RuntimeError`.
+
+### Strict TDD Evidence
+
+RED command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_run_store.py -q
+```
+
+RED result: exit 1 — `3 failed, 11 passed in 2.79s`. The three new zero-row terminal tests each failed because `_require_owned_run` raised plain `RuntimeError` rather than `IngestLeaseLostError`.
+
+GREEN command (same command after the minimal implementation): exit 0 — `14 passed in 0.35s`.
+
+Covering store/worker command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_run_store.py tests/test_ingest_worker.py -q
+```
+
+The first covering run had one unrelated scheduler-sensitive failure in `test_long_sync_ingest_keeps_heartbeating_past_lease_interval` (`1 failed, 38 passed in 3.86s`). Its isolated rerun passed (`1 passed in 3.38s`), and the fresh complete covering rerun exited 0 with `39 passed in 1.93s`.
+
+Broader resilience command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_runs.py tests/test_ingest_results.py tests/test_ingest_run_store.py tests/test_ingest_worker.py tests/test_schema_startup_mode.py tests/test_deps_db_pool_observability.py tests/test_observability_metrics.py tests/test_db_schema_contract.py -q
+```
+
+Result: exit 0 — `85 passed in 1.11s`. `git diff --check` and the staged diff check both exited 0.
+
+### Self-review
+
+- Confirmed all three terminal mutations exercise a real zero-row store response and assert the domain exception plus sanitized message.
+- Confirmed `run_once` catches `IngestLeaseLostError` independently for success, failure, and manual-data terminal races; existing worker terminal-race coverage passes.
+- Confirmed the production change is limited to one import and one exception substitution, with no data, schema, environment, network, or external-service changes.
