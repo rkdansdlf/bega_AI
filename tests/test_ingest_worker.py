@@ -22,6 +22,11 @@ from app.core.ingest_runs import (
     build_watermark_scope_key,
 )
 from app.core.ingest_worker import IngestWorker
+from app.core.ingest_checkpoints import (
+    IngestCheckpointCursorUnavailableError,
+    IngestCheckpointIncompatibleError,
+)
+from scripts import ingest_from_kbo as ingest_module
 from scripts.ingest_from_kbo import (
     IngestExecutionResult,
     ManualBaseballDataRequiredError,
@@ -241,6 +246,7 @@ def test_execute_uses_incremental_watermark_for_each_table():
     assert calls[0]["since"] == NOW
     assert calls[0]["lease_run_id"] == RUN_ID
     assert calls[0]["lease_owner"] == "worker-1"
+    assert calls[0]["checkpoint_scope_key"] == build_watermark_scope_key(REQUEST)
     assert worker.store.watermark_requests == [
         ("game", build_watermark_scope_key(REQUEST))
     ]
@@ -253,6 +259,137 @@ def test_execute_uses_incremental_watermark_for_each_table():
     assert _read_metric_value(
         "ai_ingest_table_written_chunks_total", {"source_table": "game"}
     ) - chunks_before == TABLE_RESULT.written_chunks
+
+
+def test_checkpoint_result_keeps_cumulative_and_attempt_counts_separate():
+    result = IngestTableResult(
+        "game",
+        10,
+        20,
+        3,
+        7,
+        NOW,
+        checkpoint_resumed=True,
+        checkpoint_committed_batches=4,
+        checkpoint_completed=True,
+        attempt_source_rows=2,
+        attempt_written_chunks=1,
+    )
+
+    assert result.source_rows == 20
+    assert result.written_chunks == 10
+    assert result.attempt_source_rows == 2
+    assert result.attempt_written_chunks == 1
+
+
+def test_table_metrics_use_current_attempt_deltas_for_resumed_checkpoint():
+    worker = IngestWorker(store=_Store(), settings=SETTINGS, owner="worker-1")
+    result = IngestTableResult(
+        "game",
+        10,
+        20,
+        3,
+        7,
+        NOW,
+        checkpoint_resumed=True,
+        checkpoint_committed_batches=4,
+        checkpoint_completed=True,
+        attempt_source_rows=2,
+        attempt_written_chunks=1,
+    )
+    rows_before = _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "game"}
+    )
+    chunks_before = _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "game"}
+    )
+
+    worker._record_table_result_metrics(
+        IngestExecutionResult(tables={"game": result})
+    )
+
+    assert _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "game"}
+    ) - rows_before == 2
+    assert _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "game"}
+    ) - chunks_before == 1
+
+
+def test_table_metrics_do_not_repeat_completed_checkpoint_cumulative_counts():
+    worker = IngestWorker(store=_Store(), settings=SETTINGS, owner="worker-1")
+    result = IngestTableResult(
+        "game",
+        10,
+        20,
+        3,
+        7,
+        NOW,
+        checkpoint_resumed=True,
+        checkpoint_committed_batches=4,
+        checkpoint_completed=True,
+        attempt_source_rows=0,
+        attempt_written_chunks=0,
+    )
+    rows_before = _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "game"}
+    )
+    chunks_before = _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "game"}
+    )
+
+    worker._record_table_result_metrics(
+        IngestExecutionResult(tables={"game": result})
+    )
+
+    assert _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "game"}
+    ) == rows_before
+    assert _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "game"}
+    ) == chunks_before
+
+
+@pytest.mark.parametrize(
+    "result",
+    ["created", "advanced", "completed", "resumed"],
+)
+def test_checkpoint_lifecycle_event_increments_exactly_once(result):
+    before = _read_metric_value(
+        "ai_ingest_checkpoint_events_total",
+        {"source_table": "game", "result": result},
+    )
+
+    ingest_module._record_checkpoint_event("game", result)
+
+    assert _read_metric_value(
+        "ai_ingest_checkpoint_events_total",
+        {"source_table": "game", "result": result},
+    ) - before == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "result"),
+    [
+        (IngestCheckpointIncompatibleError("stored state changed"), "incompatible"),
+        (IngestCheckpointCursorUnavailableError("no stable cursor"), "rejected"),
+    ],
+)
+def test_checkpoint_rejection_event_classifies_exception_without_error_labels(
+    error,
+    result,
+):
+    before = _read_metric_value(
+        "ai_ingest_checkpoint_events_total",
+        {"source_table": "game", "result": result},
+    )
+
+    ingest_module._record_checkpoint_rejection("game", error)
+
+    assert _read_metric_value(
+        "ai_ingest_checkpoint_events_total",
+        {"source_table": "game", "result": result},
+    ) - before == 1
 
 
 def test_execute_records_completed_table_counts_before_later_table_failure():

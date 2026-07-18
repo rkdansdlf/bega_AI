@@ -89,6 +89,7 @@ def test_ingest_metrics_use_only_bounded_labels() -> None:
     from app.observability import metrics as metrics_module
     from app.observability.metrics import (
         AI_INGEST_ACTIVE_RUNS,
+        AI_INGEST_CHECKPOINT_EVENTS_TOTAL,
         AI_INGEST_HEARTBEATS_TOTAL,
         AI_INGEST_LEASE_RECOVERIES_TOTAL,
         AI_INGEST_QUEUED_RUNS,
@@ -118,10 +119,23 @@ def test_ingest_metrics_use_only_bounded_labels() -> None:
     assert AI_INGEST_LEASE_RECOVERIES_TOTAL._labelnames == ("result",)
     assert AI_INGEST_HEARTBEATS_TOTAL._labelnames == ("result",)
     assert "AI_INGEST_HEARTBEATS_TOTAL" in metrics_module.__all__
+    assert AI_INGEST_CHECKPOINT_EVENTS_TOTAL._labelnames == (
+        "source_table",
+        "result",
+    )
+    assert "AI_INGEST_CHECKPOINT_EVENTS_TOTAL" in metrics_module.__all__
     assert AI_INGEST_TABLE_DURATION_SECONDS._labelnames == ("source_table",)
     assert AI_INGEST_TABLE_SOURCE_ROWS_TOTAL._labelnames == ("source_table",)
     assert AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL._labelnames == ("source_table",)
     assert AI_INGEST_WATERMARK_LAG_SECONDS._labelnames == ("source_table",)
+
+
+def test_ingest_source_table_labels_are_allowlisted() -> None:
+    from app.core.ingest_sources import normalize_ingest_source_table
+
+    assert normalize_ingest_source_table("game") == "game"
+    assert normalize_ingest_source_table("untrusted") == "other"
+    assert normalize_ingest_source_table(None) == "other"
 
 
 def test_rag_total_decorator_observes_total_stage() -> None:
