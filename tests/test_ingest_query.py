@@ -234,6 +234,37 @@ def test_every_custom_database_profile_declares_checkpoint_order():
     assert missing == []
 
 
+def test_custom_checkpoint_registry_is_exact_and_static_profiles_are_isolated():
+    assert ingest_script.CUSTOM_CHECKPOINT_ORDERS == {
+        "player_season_batting": (("id", "integer"),),
+        "player_season_pitching": (("id", "integer"),),
+        "game": (("id", "integer"),),
+        "game_flow_summary": (("game_id", "text"),),
+        "game_batting_stats": (("id", "integer"),),
+        "game_pitching_stats": (("id", "integer"),),
+        "game_inning_scores": (("id", "integer"),),
+        "game_lineups": (("id", "integer"),),
+        "game_metadata": (("game_id", "text"),),
+        "team_history": (("id", "integer"),),
+        "awards": (("id", "integer"),),
+        "player_movements": (("id", "integer"),),
+        "team_franchises": (("id", "integer"),),
+        "player_basic": (("player_id", "text"),),
+        "team_name_mapping": (("full_name", "text"),),
+        "team_profiles": (("team_id", "text"),),
+        "team_season_batting": (("id", "integer"),),
+        "team_season_pitching": (("id", "integer"),),
+        "stat_rankings": (("id", "integer"),),
+        "game_summary": (("id", "integer"),),
+    }
+    static_profiles = [
+        profile for profile in TABLE_PROFILES.values() if "source_file" in profile
+    ]
+    assert static_profiles
+    assert all("checkpoint_order" not in profile for profile in static_profiles)
+    assert all("checkpoint_query_version" not in profile for profile in static_profiles)
+
+
 def test_custom_checkpoint_query_wraps_output_aliases(sample_since):
     profile = TABLE_PROFILES["game"]
     order = ingest_script.resolve_checkpoint_order(None, "game", profile)
@@ -254,6 +285,56 @@ def test_custom_checkpoint_query_wraps_output_aliases(sample_since):
     assert 'ROW("id") > ROW(%s)' in query
     assert query.rstrip().endswith('ORDER BY "id" ASC')
     assert params == (2026, sample_since, 41)
+
+
+def test_game_summary_checkpoint_source_has_one_logical_row_per_id(sample_since):
+    profile = TABLE_PROFILES["game_summary"]
+    source_sql = profile["select_sql"]
+
+    assert "FROM game_summary gs" in source_sql
+    assert "LEFT JOIN teams" not in source_sql
+    assert "t.team_name" not in source_sql
+    assert " OR " not in source_sql
+
+    order = ingest_script.resolve_checkpoint_order(None, "game_summary", profile)
+    query, params = build_select_query(
+        table="game_summary",
+        profile=profile,
+        pk_columns=["id"],
+        limit=10,
+        season_year=2026,
+        since=sample_since,
+        date_to_exclusive=datetime(2026, 8, 1).date(),
+        checkpoint_order=order,
+        resume_cursor=CheckpointCursor((91,)),
+    )
+
+    assert query.rstrip().endswith('ORDER BY "id" ASC LIMIT %s')
+    assert query.count('ROW("id") > ROW(%s)') == 1
+    assert params == (2026, sample_since, datetime(2026, 8, 1).date(), 91, 10)
+
+
+def test_game_flow_checkpoint_preserves_nested_order_and_strips_final_order():
+    profile = TABLE_PROFILES["game_flow_summary"]
+    order = ingest_script.resolve_checkpoint_order(
+        None, "game_flow_summary", profile
+    )
+
+    query, params = build_select_query(
+        table="game_flow_summary",
+        profile=profile,
+        pk_columns=["game_id"],
+        limit=None,
+        season_year=None,
+        since=None,
+        checkpoint_order=order,
+        resume_cursor=None,
+    )
+
+    assert query.count("ORDER BY ip.inning") == 1
+    assert "ORDER BY game_date DESC, game_id" not in query
+    assert query.rstrip().endswith('ORDER BY "game_id" ASC')
+    assert params == ()
 
 
 def test_generic_checkpoint_query_uses_composite_primary_key():
@@ -280,6 +361,49 @@ def test_generic_checkpoint_query_uses_composite_primary_key():
     assert params == (2025, "P100")
 
 
+def test_generic_checkpoint_query_has_exact_order_limit_and_parameter_order(
+    sample_since,
+):
+    order = CheckpointOrder(
+        "plain_table",
+        (
+            CheckpointOrderField("season", "integer"),
+            CheckpointOrderField("entity_id", "text"),
+        ),
+    )
+    date_to_exclusive = datetime(2026, 8, 1).date()
+
+    query, params = build_select_query(
+        table="plain_table",
+        profile={
+            "season_filter_column": "season",
+            "since_filter_column": "updated_at",
+            "date_to_exclusive_filter_column": "game_date",
+        },
+        pk_columns=["legacy_id"],
+        limit=25,
+        season_year=2026,
+        since=sample_since,
+        date_to_exclusive=date_to_exclusive,
+        checkpoint_order=order,
+        resume_cursor=CheckpointCursor((2025, "P100")),
+    )
+
+    assert query.as_string() == (
+        'SELECT * FROM "plain_table" WHERE "season" = %s AND "updated_at" >= %s '
+        'AND "game_date" < %s AND ROW("season", "entity_id") > ROW(%s, %s) '
+        'ORDER BY "season" ASC, "entity_id" ASC LIMIT %s'
+    )
+    assert params == (
+        2026,
+        sample_since,
+        date_to_exclusive,
+        2025,
+        "P100",
+        25,
+    )
+
+
 def test_checkpoint_query_rejects_unsafe_order_field():
     order = CheckpointOrder(
         "plain_table",
@@ -297,6 +421,26 @@ def test_checkpoint_query_rejects_unsafe_order_field():
             checkpoint_order=order,
             resume_cursor=CheckpointCursor((1,)),
         )
+
+
+@pytest.mark.parametrize(
+    "sql_text",
+    [
+        "SELECT * FROM sample ORDER BY id -- ORDER BY ignored",
+        "SELECT * FROM sample ORDER BY id /* ORDER BY ignored */",
+        "SELECT $$ ORDER BY ignored $$ AS payload ORDER BY id",
+        "SELECT $body$ ORDER BY ignored $body$ AS payload ORDER BY id",
+        r"SELECT E'it\'s ORDER BY ignored' AS payload ORDER BY id",
+        "SELECT 'it''s ORDER BY ignored' AS payload ORDER BY id",
+        'SELECT "odd"" ORDER BY ignored" FROM sample ORDER BY id',
+    ],
+)
+def test_top_level_order_scanner_ignores_comments_and_quoted_content(sql_text):
+    expected = sql_text.rfind("ORDER BY id")
+
+    assert ingest_script._find_top_level_keyword_positions(sql_text, "ORDER BY") == [
+        expected
+    ]
 
 
 def test_awards_profile_matches_current_schema() -> None:

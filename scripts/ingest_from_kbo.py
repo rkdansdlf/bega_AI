@@ -1281,12 +1281,10 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
                 gs.*,
                 g.game_date,
                 ks.season_year,
-                ks.league_type_code,
-                t.team_name
+                ks.league_type_code
             FROM game_summary gs
             LEFT JOIN game g ON g.game_id = gs.game_id
             LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
-            LEFT JOIN teams t ON (t.team_id = g.home_team OR t.team_id = g.away_team)
             ORDER BY g.game_date DESC, gs.game_id, gs.id
         """,
         "highlights": [
@@ -1453,17 +1451,17 @@ def resolve_checkpoint_order(
     table_name: str,
     profile: Dict[str, Any],
 ) -> CheckpointOrder:
-    configured_order = profile.get("checkpoint_order")
-    if configured_order:
-        return CheckpointOrder(
-            source_table=table_name,
-            fields=tuple(
-                CheckpointOrderField(name, scalar_type)
-                for name, scalar_type in configured_order
-            ),
-            query_version=str(profile.get("checkpoint_query_version", "1")),
-        )
     if profile.get("select_sql"):
+        configured_order = profile.get("checkpoint_order")
+        if configured_order:
+            return CheckpointOrder(
+                source_table=table_name,
+                fields=tuple(
+                    CheckpointOrderField(name, scalar_type)
+                    for name, scalar_type in configured_order
+                ),
+                query_version=str(profile.get("checkpoint_query_version", "1")),
+            )
         raise IngestCheckpointCursorUnavailableError(
             f"custom source query has no checkpoint order: {table_name}"
         )
@@ -1934,29 +1932,101 @@ def _find_top_level_keyword_positions(sql_text: str, keyword: str) -> List[int]:
     keyword_len = len(keyword_upper)
     depth = 0
     in_single_quote = False
+    single_quote_backslash_escapes = False
     in_double_quote = False
+    in_line_comment = False
+    block_comment_depth = 0
+    dollar_quote_delimiter: Optional[str] = None
     idx = 0
 
     while idx < len(sql_text):
         char = sql_text[idx]
 
+        if in_line_comment:
+            if char in "\r\n":
+                in_line_comment = False
+            idx += 1
+            continue
+
+        if block_comment_depth:
+            if sql_text.startswith("/*", idx):
+                block_comment_depth += 1
+                idx += 2
+                continue
+            if sql_text.startswith("*/", idx):
+                block_comment_depth -= 1
+                idx += 2
+                continue
+            idx += 1
+            continue
+
+        if dollar_quote_delimiter is not None:
+            if sql_text.startswith(dollar_quote_delimiter, idx):
+                idx += len(dollar_quote_delimiter)
+                dollar_quote_delimiter = None
+            else:
+                idx += 1
+            continue
+
         if in_single_quote:
+            if (
+                single_quote_backslash_escapes
+                and char == "\\"
+                and idx + 1 < len(sql_text)
+            ):
+                idx += 2
+                continue
             if char == "'" and idx + 1 < len(sql_text) and sql_text[idx + 1] == "'":
                 idx += 2
                 continue
             if char == "'":
                 in_single_quote = False
+                single_quote_backslash_escapes = False
             idx += 1
             continue
 
         if in_double_quote:
+            if char == '"' and idx + 1 < len(sql_text) and sql_text[idx + 1] == '"':
+                idx += 2
+                continue
             if char == '"':
                 in_double_quote = False
             idx += 1
             continue
 
+        if sql_text.startswith("--", idx):
+            in_line_comment = True
+            idx += 2
+            continue
+
+        if sql_text.startswith("/*", idx):
+            block_comment_depth = 1
+            idx += 2
+            continue
+
+        if char == "$":
+            delimiter_match = re.match(
+                r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", sql_text[idx:]
+            )
+            if delimiter_match is not None:
+                dollar_quote_delimiter = delimiter_match.group(0)
+                idx += len(dollar_quote_delimiter)
+                continue
+
         if char == "'":
             in_single_quote = True
+            prefix_idx = idx - 1
+            single_quote_backslash_escapes = (
+                prefix_idx >= 0
+                and sql_text[prefix_idx] in {"e", "E"}
+                and (
+                    prefix_idx == 0
+                    or not (
+                        sql_text[prefix_idx - 1].isalnum()
+                        or sql_text[prefix_idx - 1] in {"_", "$"}
+                    )
+                )
+            )
             idx += 1
             continue
 
