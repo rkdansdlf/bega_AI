@@ -1152,3 +1152,106 @@ assert main_app.openapi_url is None
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_build_contract_document_serializes_concurrent_clean_process_builds() -> None:
+    script = """
+import importlib
+import os
+import sys
+import threading
+
+from scripts import export_openapi_contract as exporter
+
+original_environment = {
+    key: os.environ.get(key) for key in exporter.DOCUMENTATION_ENV
+}
+original_update = type(os.environ).update
+original_require_mapping = exporter._require_mapping
+first_documentation_env = threading.Event()
+second_documentation_env = threading.Event()
+second_validation = threading.Event()
+allow_first = threading.Event()
+allow_second = threading.Event()
+first_finished = threading.Event()
+results = {}
+errors = []
+
+def controlled_update(self, values, *args, **kwargs):
+    if self is os.environ and values == exporter.DOCUMENTATION_ENV:
+        original_update(self, values, *args, **kwargs)
+        if threading.current_thread().name == "contract-one":
+            first_documentation_env.set()
+            assert allow_first.wait(15)
+        elif threading.current_thread().name == "contract-two":
+            second_documentation_env.set()
+        return None
+    return original_update(self, values, *args, **kwargs)
+
+def controlled_require_mapping(parent, field):
+    if threading.current_thread().name == "contract-two" and not second_validation.is_set():
+        second_validation.set()
+        assert allow_second.wait(15)
+    return original_require_mapping(parent, field)
+
+type(os.environ).update = controlled_update
+exporter._require_mapping = controlled_require_mapping
+
+def build(name):
+    try:
+        results[name] = exporter.build_contract_document()
+    except BaseException as error:
+        errors.append(error)
+    finally:
+        if name == "contract-one":
+            first_finished.set()
+
+first = threading.Thread(target=build, args=("contract-one",), name="contract-one")
+second = threading.Thread(target=build, args=("contract-two",), name="contract-two")
+first.start()
+assert first_documentation_env.wait(5)
+second.start()
+
+overlapped = second_documentation_env.wait(2)
+if overlapped:
+    assert second_validation.wait(15)
+    allow_first.set()
+    assert first_finished.wait(15)
+    allow_second.set()
+else:
+    allow_second.set()
+    allow_first.set()
+
+first.join(20)
+second.join(20)
+type(os.environ).update = original_update
+exporter._require_mapping = original_require_mapping
+
+assert not first.is_alive()
+assert not second.is_alive()
+assert not errors
+assert set(results) == {"contract-one", "contract-two"}
+assert all(document["paths"] for document in results.values())
+assert {key: os.environ.get(key) for key in original_environment} == original_environment
+assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
+assert overlapped is False
+
+import app
+assert app.app is app.get_app()
+assert app.app.docs_url is None
+assert app.app.openapi_url is None
+app_main = importlib.import_module("app.main")
+assert app_main.app.docs_url is None
+assert app_main.app.openapi_url is None
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=_production_subprocess_environment(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr

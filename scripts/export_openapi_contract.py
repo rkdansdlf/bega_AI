@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
 from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,7 @@ DOCUMENTATION_ENV = {
     "CORS_ORIGINS": "[]",
     "BEGA_SKIP_APP_INIT": "1",
 }
+_CONTRACT_GENERATION_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -921,6 +923,11 @@ def _remove_transient_app_modules(existing_modules: Mapping[str, object]) -> Non
 def build_contract_document() -> dict[str, Any]:
     """Build a detached OpenAPI document with fixed documentation settings."""
 
+    with _CONTRACT_GENERATION_LOCK:
+        return _build_contract_document()
+
+
+def _build_contract_document() -> dict[str, Any]:
     existing_app_modules = _snapshot_app_modules()
     prometheus_collectors = _snapshot_prometheus_collectors()
     previous = {key: os.environ.get(key) for key in DOCUMENTATION_ENV}
