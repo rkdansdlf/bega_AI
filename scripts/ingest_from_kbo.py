@@ -44,7 +44,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from pathlib import Path
 import sys
 
@@ -64,10 +64,12 @@ except ModuleNotFoundError as exc:
 
 # get_settings().database_url로 Postgres 연결을 열고 쿼리 타임아웃을 막기 위해 SET statement_timeout TO 0; 적용. 각 테이블을 순서대로 처리.
 from app.config import get_settings
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.core.chunking import smart_chunks
 from app.core.embeddings import embed_texts
+from app.core.ingest_runs import IngestLeaseLostError, IngestTableResult
+from app.core.ingest_sources import TRUSTED_INGEST_SOURCE_TABLES
 
 _ingest_logger = _logging.getLogger(__name__)
 
@@ -156,6 +158,191 @@ class ChunkPayload:
     valid_to: Any = None
     expires_at: Any = None
     quality_score: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class IngestExecutionResult:
+    """Structured result returned by a complete ingestion invocation."""
+
+    tables: Mapping[str, IngestTableResult]
+
+    @property
+    def total_written_chunks(self) -> int:
+        return sum(result.written_chunks for result in self.tables.values())
+
+    @property
+    def watermarks(self) -> Dict[str, datetime]:
+        return {
+            table: result.max_updated_at
+            for table, result in self.tables.items()
+            if result.max_updated_at is not None
+        }
+
+
+class ManualBaseballDataRequiredError(RuntimeError):
+    """Raised when trusted internal source data needs operator repair."""
+
+    def __init__(self, contract: Mapping[str, Any]) -> None:
+        self.contract = dict(contract)
+        super().__init__(str(self.contract.get("operator_message") or self.contract["code"]))
+
+
+REQUIRED_SOURCE_COLUMNS: Mapping[str, frozenset[str]] = {
+    "game": frozenset({"game_id", "game_date"}),
+    "game_metadata": frozenset({"game_id"}),
+    "game_summary": frozenset({"game_id", "game_date"}),
+}
+
+
+def validate_required_source_columns(
+    table_name: str,
+    actual_columns: Iterable[str],
+    required_columns: Iterable[str],
+) -> None:
+    """Enforce configured source fields without treating zero rows as missing data."""
+
+    actual = {str(column).strip().lower() for column in actual_columns}
+    required = {str(column).strip().lower() for column in required_columns}
+    missing = sorted(required - actual)
+    if not missing:
+        return
+    _raise_manual_source_schema(table_name, missing)
+
+
+def _raise_manual_source_schema(
+    table_name: str,
+    missing_fields: Iterable[str],
+) -> None:
+    missing = sorted(
+        {str(field).strip() for field in missing_fields if str(field).strip()}
+    )
+    contract = {
+        "code": "MANUAL_BASEBALL_DATA_REQUIRED",
+        "scope": "ai_ingest_source_schema",
+        "entity": table_name,
+        "range": None,
+        "missing_fields": missing,
+        "import_source": "operator_manual_data",
+        "blocking": True,
+        "operator_message": (
+            f"Internal source '{table_name}' is missing required fields: "
+            + ", ".join(missing)
+            + ". Provide operator-verified data or repair the trusted internal sync."
+        ),
+    }
+    raise ManualBaseballDataRequiredError(contract)
+
+
+def execute_source_select(
+    cursor: Any,
+    query: Any,
+    params: Sequence[Any],
+    *,
+    table_name: str,
+    required_columns: Iterable[str],
+) -> None:
+    """Execute a trusted-source query and map structural gaps to manual repair."""
+
+    try:
+        cursor.execute(query, params)
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "sqlstate", None) in {"42P01", "42703"}:
+            required = tuple(required_columns)
+            _raise_manual_source_schema(
+                table_name,
+                required if required else ("source_table",),
+            )
+        raise
+
+
+IngestLeaseGuard = Callable[[bool], None]
+
+
+def build_ingest_lease_guard(
+    connection: Any,
+    run_id: Any,
+    owner: str,
+) -> IngestLeaseGuard:
+    """Build a synchronous DB fence for each leased write batch."""
+
+    if not owner.strip():
+        raise ValueError("ingest lease owner is required")
+
+    def check(lock_for_write: bool = False) -> None:
+        lock_clause = " FOR SHARE" if lock_for_write else ""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM ai_ingest_runs
+                WHERE run_id = %s
+                  AND status = 'RUNNING'
+                  AND lease_owner = %s
+                  AND lease_expires_at > now()
+                """
+                + lock_clause,
+                (run_id, owner),
+            )
+            if cursor.fetchone() is None:
+                raise IngestLeaseLostError("ingest run lease is no longer owned")
+
+    return check
+
+
+def load_static_profile_payloads(
+    table_name: str,
+    profile: Mapping[str, Any],
+    *,
+    settings: Any,
+) -> List[ChunkPayload]:
+    """Load a trusted static source or require operator-provided repair."""
+
+    try:
+        payloads = build_static_profile_chunk_payloads(
+            table_name,
+            profile,
+            settings=settings,
+        )
+    except RuntimeError:
+        _raise_manual_source_schema(table_name, ("source_file",))
+    if not payloads:
+        _raise_manual_source_schema(table_name, ("source_content",))
+    return payloads
+
+
+def _cursor_column_names(cursor: Any) -> Set[str]:
+    names: Set[str] = set()
+    for column in cursor.description or ():
+        name = getattr(column, "name", None)
+        if name is None and isinstance(column, Sequence) and column:
+            name = column[0]
+        if name:
+            names.add(str(name))
+    return names
+
+
+def _row_updated_at(row: Mapping[str, Any], profile: Mapping[str, Any]) -> datetime | None:
+    configured = profile.get("watermark_fields") or ()
+    fields = tuple(configured) + (
+        "updated_at",
+        "game_updated_at",
+        "latest_updated_at",
+    )
+    for field in fields:
+        value = row.get(str(field))
+        if value is None:
+            continue
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
 
 
 # TABLE_PROFILES에 테이블별 메타가 있음: 설명, select_sql, 제목 구성용 필드(title_fields), 본문 하이라이트(highlights), 기본키 힌트(pk_hint), 전용 렌더러(renderer).
@@ -1096,49 +1283,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
 
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
 # team_daily_roster는 데이터가 많아 스킵
-DEFAULT_TABLES = [
-    # 기본 정보 테이블
-    "teams",
-    "team_franchises",
-    "team_history",
-    "stadiums",
-    "kbo_seasons",
-    "player_basic",
-    # 수상/이적 기록
-    "awards",
-    "player_movements",
-    # 시즌 통계
-    "player_season_batting",
-    "player_season_pitching",
-    # 팀 시즌 통계 + 랭킹
-    "team_season_batting",
-    "team_season_pitching",
-    "stat_rankings",
-    # 경기 정보
-    "game",
-    "game_metadata",
-    "game_flow_summary",
-    "game_lineups",
-    # 경기별 기록 (가장 많은 데이터)
-    "game_batting_stats",
-    "game_pitching_stats",
-    "game_summary",
-    # 정적 문서
-    "kbo_metrics_explained",
-    "markdown_docs_rules_terms",
-    "markdown_docs_strategy_metrics",
-    "markdown_docs_culture_history",
-    "markdown_docs_2025_storylines",
-    "markdown_docs_chatbot_kb_v2",
-    "kbo_regulations_basic",
-    "kbo_regulations_player",
-    "kbo_regulations_game",
-    "kbo_regulations_technical",
-    "kbo_regulations_discipline",
-    "kbo_regulations_postseason",
-    "kbo_regulations_special",
-    "kbo_regulations_terms",
-]
+DEFAULT_TABLES = list(TRUSTED_INGEST_SOURCE_TABLES)
 
 TARGET_RPM = 10
 MIN_DELAY_SECONDS = 60 / TARGET_RPM
@@ -2083,9 +2228,12 @@ def flush_chunks(
     commit_interval: int,
     stats: Dict[str, Any],
     skip_embedding: bool,
+    lease_guard: Optional[IngestLeaseGuard] = None,
 ) -> int:
     if not buffer:
         return 0
+    if lease_guard is not None:
+        lease_guard(False)
 
     stats["batches"] = stats.get("batches", 0) + 1
     embedding_model = resolve_embedding_model(settings)
@@ -2235,6 +2383,8 @@ def flush_chunks(
         return 0
 
     # Bulk upsert using executemany.
+    if lease_guard is not None:
+        lease_guard(True)
     cur.executemany(
         UPSERT_SQL,
         data,
@@ -2256,7 +2406,10 @@ def flush_chunks(
 
     flushed = len(stored_items)
     stats["since_commit"] = stats.get("since_commit", 0) + flushed
-    if commit_interval and stats["since_commit"] >= commit_interval:
+    if lease_guard is not None:
+        cur.connection.commit()
+        stats["since_commit"] = 0
+    elif commit_interval and stats["since_commit"] >= commit_interval:
         cur.connection.commit()
         stats["since_commit"] = 0
 
@@ -2285,10 +2438,11 @@ def ingest_table(
     row_stale_cleanup: str,
     stats: Dict[str, Any],
     date_to_exclusive: Optional[Any] = None,
-) -> int:
+    lease_guard: Optional[IngestLeaseGuard] = None,
+) -> IngestTableResult:
     if table_name == "rag_chunks":
         print("경고: rag_chunks 테이블은 처리 대상에서 제외됩니다.")
-        return 0
+        return IngestTableResult(table_name, 0, 0, 0, 0, None)
 
     profile = TABLE_PROFILES.get(table_name, {})
     target_source_table = str(profile.get("source_table", table_name))
@@ -2297,6 +2451,8 @@ def ingest_table(
     seen_source_row_ids: Set[str] = set()
     settings = get_settings()
     processed_chunks = 0
+    fetched_rows = 0
+    max_updated_at: Optional[datetime] = None
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     effective_parallel_engine = parallel_engine
 
@@ -2309,25 +2465,17 @@ def ingest_table(
         dest_conn.cursor() as write_cur,
     ):
         write_cur.execute("SET statement_timeout TO 0;")
+        if lease_guard is not None:
+            lease_guard(False)
 
         # --- NEW LOGIC FOR STATIC FILE ---
         if "source_file" in profile:
             print(f"      정적 파일 '{profile['source_file']}'을(를) 수집 중입니다...")
-            try:
-                payloads = build_static_profile_chunk_payloads(
-                    table_name,
-                    profile,
-                    settings=settings,
-                )
-            except RuntimeError as exc:
-                print(f"오류: {exc}")
-                return 0
-
-            if not payloads:
-                print(
-                    f"오류: '{profile['source_file']}' 파일 내용에서 청크를 생성할 수 없습니다."
-                )
-                return 0
+            payloads = load_static_profile_payloads(
+                table_name,
+                profile,
+                settings=settings,
+            )
 
             static_prefix = build_static_source_row_prefix(table_name, profile)
             buffer.extend(payloads)
@@ -2339,12 +2487,20 @@ def ingest_table(
                 commit_interval=commit_interval,
                 stats=stats,
                 skip_embedding=skip_embedding,
+                lease_guard=lease_guard,
             )
             total_chunks = flushed
             dest_conn.commit()  # Commit after static file ingestion
             if flushed > 0:
                 print(f"      총 {flushed}개 청크를 처리했습니다.", flush=True)
-            return total_chunks
+            return IngestTableResult(
+                table_name,
+                total_chunks,
+                1,
+                int(stats.get("embedding_reused", 0)),
+                int(stats.get("reembedded_count", 0)),
+                None,
+            )
         # --- END NEW LOGIC ---
 
         pk_columns = resolve_primary_key_columns(source_conn, table_name, profile)
@@ -2358,10 +2514,22 @@ def ingest_table(
             date_to_exclusive=date_to_exclusive,
         )
 
-        fetched_rows = 0
-        read_cur.execute(query, params)
+        execute_source_select(
+            read_cur,
+            query,
+            params,
+            table_name=table_name,
+            required_columns=REQUIRED_SOURCE_COLUMNS.get(table_name, ()),
+        )
+        validate_required_source_columns(
+            table_name,
+            _cursor_column_names(read_cur),
+            REQUIRED_SOURCE_COLUMNS.get(table_name, ()),
+        )
 
         while True:
+            if lease_guard is not None:
+                lease_guard(False)
             rows = read_cur.fetchmany(read_batch_size)
             if not rows:
                 break
@@ -2373,6 +2541,11 @@ def ingest_table(
             row_tasks: List[RowPrepareTask] = []
             for raw_row in rows:
                 row = dict(raw_row)
+                row_updated_at = _row_updated_at(row, profile)
+                if row_updated_at is not None and (
+                    max_updated_at is None or row_updated_at > max_updated_at
+                ):
+                    max_updated_at = row_updated_at
                 source_row_id = build_source_row_id(
                     row, table_name, pk_columns, profile.get("pk_hint", [])
                 )
@@ -2415,6 +2588,7 @@ def ingest_table(
                         commit_interval=commit_interval,
                         stats=stats,
                         skip_embedding=skip_embedding,
+                        lease_guard=lease_guard,
                     )
                     total_chunks += flushed
                     processed_chunks += flushed
@@ -2431,6 +2605,7 @@ def ingest_table(
             commit_interval=commit_interval,
             stats=stats,
             skip_embedding=skip_embedding,
+            lease_guard=lease_guard,
         )
         total_chunks += flushed
         processed_chunks += flushed
@@ -2444,6 +2619,8 @@ def ingest_table(
             limit=limit,
             row_stale_cleanup=row_stale_cleanup,
         ):
+            if lease_guard is not None:
+                lease_guard(True)
             dry_run = row_stale_cleanup != "apply"
             stale_count = soft_deactivate_missing_source_rows(
                 write_cur,
@@ -2469,7 +2646,14 @@ def ingest_table(
     if processed_chunks:
         print(f"      총 {processed_chunks}개 청크를 처리했습니다.", flush=True)
 
-    return total_chunks
+    return IngestTableResult(
+        table_name,
+        total_chunks,
+        fetched_rows,
+        int(stats.get("embedding_reused", 0)),
+        int(stats.get("reembedded_count", 0)),
+        max_updated_at,
+    )
 
 
 def ingest(
@@ -2489,7 +2673,9 @@ def ingest(
     workers: int,
     row_stale_cleanup: str = "off",
     date_to_exclusive: Optional[Any] = None,
-) -> None:
+    lease_run_id: Any = None,
+    lease_owner: Optional[str] = None,
+) -> IngestExecutionResult:
     _require_psycopg()
     settings = get_settings()
 
@@ -2509,8 +2695,17 @@ def ingest(
         cur.execute("SET statement_timeout TO 0;")
         cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
     dest_conn.autocommit = original_autocommit
+    lease_guard = None
+    if lease_run_id is not None or lease_owner is not None:
+        if lease_run_id is None or not lease_owner:
+            raise ValueError("lease_run_id and lease_owner must be provided together")
+        lease_guard = build_ingest_lease_guard(
+            dest_conn,
+            lease_run_id,
+            lease_owner,
+        )
 
-    ingested_total = 0
+    table_results: Dict[str, IngestTableResult] = {}
     try:
         for table in tables:
             print(f" 테이블 '{table}'을(를) 수집 중입니다 ...")
@@ -2522,7 +2717,7 @@ def ingest(
                 "effective_parallel_engine": parallel_engine,
                 "parallel_engine_fallbacks": 0,
             }
-            chunks = ingest_table(
+            result = ingest_table(
                 source_conn,  # Read from Source
                 dest_conn,  # Write to Dest
                 table,
@@ -2540,10 +2735,11 @@ def ingest(
                 workers=workers,
                 row_stale_cleanup=row_stale_cleanup,
                 stats=stats,
+                lease_guard=lease_guard,
             )
-            ingested_total += chunks
+            table_results[table] = result
             print(
-                f"   -> 테이블 '{table}'에서 {chunks}개 청크를 작성했습니다 "
+                f"   -> 테이블 '{table}'에서 {result.written_chunks}개 청크를 작성했습니다 "
                 f"(배치={stats['batches']}, 임베딩 호출={stats['embedding_calls']}, "
                 f"민감정보 skip={stats.get('sensitive_skipped', 0)}, "
                 f"row stale 후보={stats.get('row_stale_cleanup_candidates', 0)}, "
@@ -2554,7 +2750,9 @@ def ingest(
     finally:
         source_conn.close()
         dest_conn.close()
-    print(f"총 {ingested_total}개 청크 수집을 완료했습니다.")
+    execution_result = IngestExecutionResult(tables=table_results)
+    print(f"총 {execution_result.total_written_chunks}개 청크 수집을 완료했습니다.")
+    return execution_result
 
 
 def parse_args() -> argparse.Namespace:

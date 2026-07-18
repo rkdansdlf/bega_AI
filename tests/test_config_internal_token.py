@@ -23,6 +23,59 @@ def test_settings_default_vision_fallback_models_uses_mistral_vision(monkeypatch
     assert settings.vision_fallback_models == [MISTRAL_VISION_FALLBACK_MODEL]
 
 
+def test_ai_db_schema_mode_defaults_to_auto(monkeypatch):
+    monkeypatch.delenv("AI_DB_SCHEMA_MODE", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.ai_db_schema_mode == "auto"
+
+
+def test_ai_db_schema_mode_accepts_managed(monkeypatch):
+    monkeypatch.setenv("AI_DB_SCHEMA_MODE", "managed")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.ai_db_schema_mode == "managed"
+
+
+def test_ai_db_schema_mode_rejects_unknown_values(monkeypatch):
+    monkeypatch.setenv("AI_DB_SCHEMA_MODE", "unsafe")
+
+    with pytest.raises(ValueError, match="AI_DB_SCHEMA_MODE"):
+        Settings(_env_file=None)
+
+
+def test_chat_model_pricing_json_is_validated(monkeypatch):
+    monkeypatch.setenv(
+        "CHAT_MODEL_PRICING_JSON",
+        '{"openrouter":{"vendor/planner":{"input_usd_per_1m_tokens":"1.00","output_usd_per_1m_tokens":"2.00"}}}',
+    )
+
+    settings = Settings(_env_file=None)
+
+    assert settings.chat_model_pricing_json is not None
+
+    monkeypatch.setenv("CHAT_MODEL_PRICING_JSON", "not-json")
+
+    with pytest.raises(ValueError, match="CHAT_MODEL_PRICING_JSON"):
+        Settings(_env_file=None)
+
+
+def test_invalid_pricing_catalog_is_hidden_in_validation_errors(monkeypatch):
+    marker = "SENSITIVE_PRICING_MARKER"
+    raw = f'{{"{marker}":{{"model":{{"input_usd_per_1m_tokens":"invalid"}}}}}}'
+    monkeypatch.setenv("CHAT_MODEL_PRICING_JSON", raw)
+
+    with pytest.raises(ValueError) as caught:
+        Settings(_env_file=None)
+
+    rendered = " ".join((str(caught.value), repr(caught.value)))
+    assert Settings.model_config["hide_input_in_errors"] is True
+    assert marker not in rendered
+    assert raw not in rendered
+
+
 def test_resolved_ai_internal_token_prefers_explicit_value(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "explicit-token")
     monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
@@ -214,6 +267,27 @@ def test_chat_semantic_cache_shadow_can_be_enabled(monkeypatch):
     settings = Settings()
 
     assert settings.chat_semantic_cache_shadow_enabled is True
+
+
+def test_chat_semantic_cache_rollout_defaults_to_safe_off(monkeypatch):
+    monkeypatch.delenv("CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT", raising=False)
+    monkeypatch.delenv("CHAT_SEMANTIC_CACHE_KILL_SWITCH", raising=False)
+
+    settings = Settings()
+
+    assert settings.chat_semantic_cache_rollout_percent == 0
+    assert settings.chat_semantic_cache_kill_switch is False
+
+
+@pytest.mark.parametrize("rollout_percent", ["-1", "101"])
+def test_chat_semantic_cache_rollout_must_be_percentage(
+    monkeypatch,
+    rollout_percent,
+):
+    monkeypatch.setenv("CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT", rollout_percent)
+
+    with pytest.raises(ValueError, match="CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT"):
+        Settings()
 
 
 def test_chat_semantic_cache_vector_index_defaults_to_safe_off(monkeypatch):

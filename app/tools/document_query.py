@@ -13,7 +13,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from ..config import Settings
-from ..core.embeddings import embed_texts
+from ..core.embeddings import async_embed_query
 from ..core.exceptions import DBRetrievalError
 from ..core.retrieval import similarity_search_with_fallback
 from .query_logging import (
@@ -321,7 +321,7 @@ class DocumentQueryTool:
         normalized["_score"] = self._score_document(query_lower, normalized)
         return normalized
 
-    def _embed_query(self, query: str) -> list[float]:
+    async def _embed_query(self, query: str) -> list[float]:
         normalized_query = _QUERY_WHITESPACE_RE.sub(" ", query).strip().casefold()
         cache_key = f"{self.settings.embed_provider}:{normalized_query}"
 
@@ -331,11 +331,11 @@ class DocumentQueryTool:
                 _QUERY_EMBED_CACHE.move_to_end(cache_key)
                 return list(cached)
 
-        embeddings = embed_texts([query], self.settings)
-        if not embeddings:
+        embedding = await async_embed_query(query, self.settings)
+        if not embedding:
             raise RuntimeError("질문을 임베딩하는 데 실패했습니다.")
 
-        embedding = list(embeddings[0])
+        embedding = list(embedding)
         with _QUERY_EMBED_CACHE_LOCK:
             _QUERY_EMBED_CACHE[cache_key] = embedding
             _QUERY_EMBED_CACHE.move_to_end(cache_key)
@@ -388,7 +388,7 @@ class DocumentQueryTool:
     async def _search_documents_once(
         self, conn: psycopg.AsyncConnection, query: str, limit: int
     ) -> list[Dict[str, Any]]:
-        embedding = self._embed_query(query)
+        embedding = await self._embed_query(query)
         query_lower = query.lower()
         candidate_limit = max(limit * 4, 12)
         collected: List[Dict[str, Any]] = await self._search_similarity_documents(

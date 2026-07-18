@@ -1,10 +1,18 @@
 import asyncio
-from types import ModuleType
+import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
-import sys
+from uuid import UUID, uuid4
 
-from fastapi import BackgroundTasks
+import pytest
+from fastapi import HTTPException
 
+from app.core.ingest_runs import (
+    IngestRunRecord,
+    IngestRunRequest,
+    IngestRunStatus,
+    build_request_key,
+)
 from app.routers import ingest
 
 
@@ -213,54 +221,107 @@ def test_ingest_document_returns_zero_when_all_chunks_sensitive(monkeypatch) -> 
     assert result == {"status": "ok", "chunks": 0, "skipped": 2}
 
 
-def test_run_ingestion_job_forwards_incremental_parallel_options(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+RUN_ID = UUID("44444444-4444-4444-8444-444444444444")
+REQUESTED_AT = datetime(2026, 7, 15, 4, 30, tzinfo=UTC)
 
-    def fake_ingest(**kwargs) -> None:
-        captured.update(kwargs)
 
-    fake_module = ModuleType("scripts.ingest_from_kbo")
-    fake_module.ingest = fake_ingest
-    fake_module.DEFAULT_TABLES = ["teams", "rag_chunks", "game"]
-    monkeypatch.setitem(sys.modules, "scripts.ingest_from_kbo", fake_module)
+def _run_record(status=IngestRunStatus.QUEUED, *, table_summary=None):
+    request = IngestRunRequest(
+        tables=("game", "game_metadata"),
+        season_year=2026,
+        trigger_source="BACKEND_SCHEDULED",
+    )
+    return IngestRunRecord(
+        run_id=RUN_ID,
+        request_key=build_request_key(request),
+        request=request,
+        status=status,
+        requested_at=REQUESTED_AT,
+        finished_at=REQUESTED_AT if status not in {IngestRunStatus.QUEUED, IngestRunStatus.RUNNING} else None,
+        error_code=(
+            "MANUAL_BASEBALL_DATA_REQUIRED"
+            if status is IngestRunStatus.MANUAL_BASEBALL_DATA_REQUIRED
+            else None
+        ),
+        error_message=None,
+        table_summary=table_summary or {},
+    )
 
+
+class _RunStore:
+    def __init__(self, record=None, *, deduplicated=False):
+        self.record = record
+        self.deduplicated = deduplicated
+        self.request = None
+
+    async def create_or_get_active(self, request):
+        self.request = request
+        return self.record, self.deduplicated
+
+    async def get(self, run_id):
+        return self.record if self.record and self.record.run_id == run_id else None
+
+
+def test_run_ingestion_job_persists_queue_request_without_background_task() -> None:
+    store = _RunStore(_run_record())
     payload = ingest.RunIngestPayload(
-        tables=None,
-        season_year=2025,
-        since="2025-03-22T09:00:00Z",
-        read_batch_size=250,
-        embed_batch_size=16,
-        max_concurrency=3,
-        commit_interval=200,
-        parallel_engine="subinterp",
-        workers=6,
-        no_embed=True,
-    )
-    settings = SimpleNamespace(source_db_url="postgresql://source-db")
-    background_tasks = BackgroundTasks()
-
-    result = asyncio.run(
-        ingest.run_ingestion_job(payload, background_tasks, settings, None, None)
+        tables=["game_metadata", "game"],
+        season_year=2026,
+        mode="incremental",
+        trigger_source="backend_scheduled",
     )
 
-    assert result == {
-        "status": "accepted",
-        "message": "Ingestion job started in background.",
-        "tables": ["teams", "game"],
+    response = asyncio.run(
+        ingest.run_ingestion_job(payload, store, None, None)
+    )
+
+    assert response.status_code == 202
+    assert json.loads(response.body) == {
+        "run_id": str(RUN_ID),
+        "status": "QUEUED",
+        "deduplicated": False,
     }
-    assert len(background_tasks.tasks) == 1
+    assert store.request.tables == ("game", "game_metadata")
+    assert store.request.mode.value == "INCREMENTAL"
+    assert store.request.trigger_source == "BACKEND_SCHEDULED"
 
-    task = background_tasks.tasks[0]
-    task.func(*task.args, **task.kwargs)
 
-    assert captured["source_db_url"] == "postgresql://source-db"
-    assert captured["tables"] == ["teams", "game"]
-    assert captured["season_year"] == 2025
-    assert captured["read_batch_size"] == 250
-    assert captured["embed_batch_size"] == 16
-    assert captured["max_concurrency"] == 3
-    assert captured["commit_interval"] == 200
-    assert captured["skip_embedding"] is True
-    assert captured["parallel_engine"] == "subinterp"
-    assert captured["workers"] == 6
-    assert str(captured["since"]) == "2025-03-22 09:00:00+00:00"
+def test_run_ingestion_job_rejects_non_allowlisted_source_table() -> None:
+    payload = ingest.RunIngestPayload(tables=["users"])
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(ingest.run_ingestion_job(payload, _RunStore(), None, None))
+
+    assert raised.value.status_code == 422
+    assert "trusted ingestion source" in str(raised.value.detail)
+
+
+def test_get_ingestion_run_returns_sanitized_manual_contract() -> None:
+    contract = {
+        "code": "MANUAL_BASEBALL_DATA_REQUIRED",
+        "entity": "game",
+        "missing_fields": ["game_date"],
+        "import_source": "operator_manual_data",
+    }
+    store = _RunStore(
+        _run_record(
+            IngestRunStatus.MANUAL_BASEBALL_DATA_REQUIRED,
+            table_summary={"error_contract": contract},
+        )
+    )
+
+    result = asyncio.run(ingest.get_ingestion_run(RUN_ID, store, None, None))
+
+    assert result["status"] == "MANUAL_BASEBALL_DATA_REQUIRED"
+    assert result["error"] == contract
+    assert "request_key" not in result
+    assert "request_payload" not in result
+
+
+def test_get_ingestion_run_returns_404_for_unknown_run() -> None:
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            ingest.get_ingestion_run(uuid4(), _RunStore(record=None), None, None)
+        )
+
+    assert raised.value.status_code == 404

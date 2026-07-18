@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.chat_model_usage import ModelPricingCatalog
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CORS_ORIGINS = [
@@ -39,6 +41,7 @@ class Settings(BaseSettings):
         extra="ignore",
         env_file=".env",
         env_file_encoding="utf-8",
+        hide_input_in_errors=True,
         populate_by_name=True,
     )
 
@@ -68,6 +71,21 @@ class Settings(BaseSettings):
     # 하위 호환 경로 (deprecated)
     legacy_source_db_url: Optional[str] = Field(
         None, validation_alias="SUPABASE_DB_URL"
+    )
+    # `auto` keeps local/dev startup compatibility. `managed` requires the
+    # migration role to provision the schema before the AI process starts.
+    ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
+    ingest_worker_enabled: bool = Field(
+        True, validation_alias="AI_INGEST_WORKER_ENABLED"
+    )
+    ingest_worker_poll_seconds: float = Field(
+        2.0, validation_alias="AI_INGEST_WORKER_POLL_SECONDS"
+    )
+    ingest_worker_lease_seconds: int = Field(
+        120, validation_alias="AI_INGEST_WORKER_LEASE_SECONDS"
+    )
+    ingest_worker_max_recovery_attempts: int = Field(
+        1, validation_alias="AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS"
     )
     _legacy_source_db_warned: bool = PrivateAttr(default=False)
 
@@ -218,6 +236,9 @@ class Settings(BaseSettings):
     chat_answer_model_name: Optional[str] = Field(
         None, validation_alias="CHAT_ANSWER_MODEL_NAME"
     )
+    chat_model_pricing_json: Optional[str] = Field(
+        None, validation_alias="CHAT_MODEL_PRICING_JSON"
+    )
     chat_cache_admin_enabled: bool = Field(
         False, validation_alias="CHAT_CACHE_ADMIN_ENABLED"
     )
@@ -229,6 +250,12 @@ class Settings(BaseSettings):
     )
     chat_semantic_cache_shadow_enabled: bool = Field(
         False, validation_alias="CHAT_SEMANTIC_CACHE_SHADOW_ENABLED"
+    )
+    chat_semantic_cache_rollout_percent: int = Field(
+        0, validation_alias="CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT"
+    )
+    chat_semantic_cache_kill_switch: bool = Field(
+        False, validation_alias="CHAT_SEMANTIC_CACHE_KILL_SWITCH"
     )
     chat_semantic_cache_min_similarity: float = Field(
         0.93, validation_alias="CHAT_SEMANTIC_CACHE_MIN_SIMILARITY"
@@ -487,6 +514,33 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("ai_db_schema_mode")
+    def _validate_ai_db_schema_mode(cls, value: str) -> str:
+        allowed = {"auto", "managed"}
+        if value not in allowed:
+            raise ValueError(
+                f"AI_DB_SCHEMA_MODE must be one of {sorted(allowed)}"
+            )
+        return value
+
+    @field_validator("ingest_worker_poll_seconds")
+    def _validate_ingest_worker_poll_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("AI_INGEST_WORKER_POLL_SECONDS must be > 0")
+        return value
+
+    @field_validator("ingest_worker_lease_seconds")
+    def _validate_ingest_worker_lease_seconds(cls, value: int) -> int:
+        if value < 3:
+            raise ValueError("AI_INGEST_WORKER_LEASE_SECONDS must be >= 3")
+        return value
+
+    @field_validator("ingest_worker_max_recovery_attempts")
+    def _validate_ingest_worker_max_recovery_attempts(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS must be >= 0")
+        return value
+
     @field_validator("chat_openrouter_empty_chunk_retries")
     def _validate_chat_openrouter_empty_chunk_retries(cls, value: int) -> int:
         if value < 0:
@@ -625,6 +679,14 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_SEMANTIC_CACHE_CANDIDATE_LIMIT must be <= 10")
         return value
 
+    @field_validator("chat_semantic_cache_rollout_percent")
+    def _validate_chat_semantic_cache_rollout_percent(cls, value: int) -> int:
+        if value < 0 or value > 100:
+            raise ValueError(
+                "CHAT_SEMANTIC_CACHE_ROLLOUT_PERCENT must be between 0 and 100"
+            )
+        return value
+
     @field_validator("chat_semantic_cache_hnsw_ef_search")
     def _validate_chat_semantic_cache_hnsw_ef_search(cls, value: int) -> int:
         if value < 0:
@@ -640,6 +702,16 @@ class Settings(BaseSettings):
     def _validate_chat_cost_rates(cls, value: float) -> float:
         if value < 0:
             raise ValueError("Chat cost rate values must be >= 0")
+        return value
+
+    @field_validator("chat_model_pricing_json")
+    def _validate_chat_model_pricing_json(
+        cls, value: Optional[str]
+    ) -> Optional[str]:
+        try:
+            ModelPricingCatalog.from_json(value)
+        except ValueError as exc:
+            raise ValueError(f"CHAT_MODEL_PRICING_JSON is invalid: {exc}") from exc
         return value
 
     @field_validator("rag_chunk_overlap_chars")

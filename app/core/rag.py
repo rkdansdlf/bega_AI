@@ -34,7 +34,10 @@ from .query_transformer import QueryTransformer, multi_query_retrieval
 from .context_formatter import ContextFormatter
 from ..agents.baseball_agent import BaseballAgentRuntime
 from ..agents.shared_runtime import initialize_shared_baseball_agent_runtime
-from ..tools.operator_data_query import try_build_operator_fast_path_result
+from ..tools.operator_data_query import (
+    is_operator_data_query,
+    try_build_operator_fast_path_result,
+)
 from .wpa_calculator import WPACalculator
 from .retry_utils import llm_retry
 from .exceptions import DBRetrievalError
@@ -872,6 +875,17 @@ def _manual_baseball_data_required_answer(query: str) -> str:
         "MANUAL_BASEBALL_DATA_REQUIRED: 이 질문은 경기 당일 또는 시즌 중 변동 데이터가 필요합니다. "
         "운영자가 기준 날짜, 경기 ID, 팀명, 경기 상태, 점수, 선발, 라인업, 엔트리 변동, 관련 기록 범위를 "
         "내부 DB에 제공한 뒤 답변해야 합니다."
+    )
+
+
+def _build_manual_baseball_data_required_result(query: str) -> Dict[str, Any]:
+    return _build_static_kbo_result(
+        _manual_baseball_data_required_answer(query),
+        intent="manual_data_request",
+        strategy="manual_baseball_data_required",
+        grounding_mode="manual_data_request",
+        source_tier="none",
+        fallback_reason="manual_baseball_data_required",
     )
 
 
@@ -2545,7 +2559,12 @@ class RAGPipeline:
                     return result
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[RAG] Operator data fast-path skipped: %s", exc)
-        return _build_static_kbo_faq_result(query)
+        static_result = _build_static_kbo_faq_result(query)
+        if static_result is not None:
+            return static_result
+        if bool(getattr(self.settings, "operator_data_fast_path_enabled", False)) and is_operator_data_query(query):
+            return _build_manual_baseball_data_required_result(query)
+        return None
 
     async def _process_and_enrich_docs(
         self, docs: List[Dict[str, Any]], year: int

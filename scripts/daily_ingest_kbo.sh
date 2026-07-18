@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
 # daily_ingest_kbo.sh
-# KBO 신규 경기 데이터 일별 자동 인제스트 (local 임베딩)
+# MANUAL RECOVERY ONLY - KBO 내부 DB 데이터를 수동으로 재인제스트
 #
-# 용도: 매일 새로 완료된 KBO 경기 데이터를 bega_backend에서 rag_chunks로 반영.
+# 운영 정기 실행은 backend JobRunr의 ai-rag-ingestion 작업 하나만 사용합니다.
+# DO NOT install a second cron for this script.
+#
+# 용도: 운영자가 확인한 복구 창에서 내부 DB 데이터를 rag_chunks로 반영.
 #       local(pseudo-vector) 임베딩으로 즉시 저장하고,
 #       월말 monthly_embed_upgrade.sh 에서 openrouter로 업그레이드.
-#
-# crontab 예시 (매일 오전 9시 KST = 0시 UTC):
-#   0 0 * * * /Users/mac/project/KBO_platform/bega_AI/scripts/daily_ingest_kbo.sh >> /tmp/daily_ingest.log 2>&1
 # =============================================================================
 set -euo pipefail
 

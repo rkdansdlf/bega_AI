@@ -277,7 +277,14 @@ def test_ingest_sets_pgvector_search_path_on_destination_connection(
     monkeypatch.setattr(
         ingest_script,
         "ingest_table",
-        lambda *_args, **_kwargs: 0,
+        lambda *_args, **_kwargs: ingest_script.IngestTableResult(
+            source_table="teams",
+            written_chunks=0,
+            source_rows=0,
+            reused_embeddings=0,
+            embedded_chunks=0,
+            max_updated_at=None,
+        ),
     )
 
     ingest_script.ingest(

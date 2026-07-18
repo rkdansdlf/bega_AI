@@ -30,7 +30,7 @@ from typing import (
     Sequence,
 )
 from zoneinfo import ZoneInfo
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, model_validator
 
 import psycopg
@@ -47,6 +47,7 @@ from ..deps import (
 )
 from ..config import get_settings
 from ..agents.baseball_agent import BaseballStatisticsAgent
+from ..contracts.stream_requests import CoachAnalyzeRequest
 from ..core.coach_grounding import (
     CoachFactSheet,
     collect_numeric_tokens,
@@ -80,6 +81,10 @@ from ..observability.metrics import (
     AI_COACH_REQUEST_TOTAL,
 )
 from ..schemas.coach_tool_payload import CoachTeamPayload
+from ..streaming.versioned_sse import (
+    negotiate_event_version,
+    versioned_event_source,
+)
 from ..tools.database_query import DatabaseQueryTool
 from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
@@ -3221,7 +3226,9 @@ def _cache_error_message_for_user(code: str) -> str:
 
 def _coach_public_error_payload(
     code: str = COACH_INTERNAL_ERROR_CODE,
-) -> Dict[str, str]:
+    *,
+    retryable: bool = False,
+) -> Dict[str, Any]:
     normalized = _sanitize_cache_error_code(code)
     message = (
         COACH_INTERNAL_ERROR_MESSAGE
@@ -3231,6 +3238,7 @@ def _coach_public_error_payload(
     return {
         "code": normalized,
         "message": message,
+        "retryable": retryable,
     }
 
 
@@ -11327,84 +11335,7 @@ def _format_coach_context(
     return "\n".join(parts)
 
 
-class AnalyzeRequest(BaseModel):
-    team_id: Optional[str] = None  # deprecated — use home_team_id
-    home_team_id: Optional[str] = None
-    away_team_id: Optional[str] = None
-    league_context: Optional[Dict[str, Any]] = None
-    focus: List[str] = []
-    game_id: Optional[str] = None
-    request_mode: Literal[COACH_REQUEST_MODE_AUTO, COACH_REQUEST_MODE_MANUAL] = (
-        COACH_REQUEST_MODE_MANUAL
-    )
-    analysis_type: Optional[
-        Literal[COACH_ANALYSIS_TYPE_REVIEW, COACH_ANALYSIS_TYPE_PREVIEW]
-    ] = None
-    question_override: Optional[str] = None
-    starter_signature: Optional[str] = None
-    lineup_signature: Optional[str] = None
-    expected_cache_key: Optional[str] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def backfill_home_team_id(cls, values: Any) -> Any:
-        """team_id만 보내는 기존 호출을 home_team_id로 매핑"""
-        if isinstance(values, dict):
-            if "analysisType" in values and "analysis_type" not in values:
-                values["analysis_type"] = values["analysisType"]
-            analysis_type = values.get("analysis_type")
-            if isinstance(analysis_type, str):
-                values["analysis_type"] = (
-                    _normalize_analysis_type(analysis_type) or analysis_type
-                )
-
-            focus = values.get("focus")
-            if (
-                focus is not None
-                and isinstance(focus, list)
-                and len(focus) > MAX_COACH_FOCUS_ITEMS
-            ):
-                raise ValueError(
-                    f"focus 항목은 최대 {MAX_COACH_FOCUS_ITEMS}개까지 허용됩니다."
-                )
-
-            question_override = values.get("question_override")
-            if isinstance(question_override, str):
-                question_override_trimmed = question_override.strip()
-                if not question_override_trimmed:
-                    values["question_override"] = None
-                elif (
-                    len(question_override_trimmed) > MAX_COACH_QUESTION_OVERRIDE_LENGTH
-                ):
-                    raise ValueError(
-                        "question_override가 너무 깁니다. "
-                        f"최대 {MAX_COACH_QUESTION_OVERRIDE_LENGTH}자까지 허용됩니다."
-                    )
-                else:
-                    values["question_override"] = question_override_trimmed
-
-            request_mode = values.get("request_mode")
-            if (
-                request_mode == COACH_REQUEST_MODE_AUTO
-                and values.get("question_override") is not None
-            ):
-                raise ValueError(
-                    "auto_brief 모드에서는 question_override를 사용할 수 없습니다."
-                )
-
-            if not values.get("home_team_id") and values.get("team_id"):
-                values["home_team_id"] = values["team_id"]
-
-            for signature_key in (
-                "starter_signature",
-                "lineup_signature",
-                "expected_cache_key",
-            ):
-                signature_value = values.get(signature_key)
-                if isinstance(signature_value, str):
-                    trimmed = signature_value.strip()
-                    values[signature_key] = trimmed or None
-        return values
+AnalyzeRequest = CoachAnalyzeRequest
 
 
 class CoachCacheResetRequest(BaseModel):
@@ -11482,11 +11413,18 @@ async def analyze_team(
     agent: BaseballStatisticsAgent = Depends(get_agent),
     __: None = Depends(rate_limit_coach_dependency),
     _: None = Depends(require_ai_internal_token),
+    event_version_header: str | None = Header(
+        default=None,
+        alias="X-AI-Event-Version",
+    ),
 ):
     """
     특정 팀(들)에 대한 심층 분석을 요청합니다. 'The Coach' 페르소나가 적용됩니다.
     """
-    from sse_starlette.sse import EventSourceResponse
+    event_version = negotiate_event_version(
+        event_version_header,
+        endpoint="coach",
+    )
 
     route_prepare_started = perf_counter()
 
@@ -13733,7 +13671,10 @@ async def analyze_team(
                 yield {
                     "event": "error",
                     "data": json.dumps(
-                        _coach_public_error_payload(masked_error_code),
+                        _coach_public_error_payload(
+                            masked_error_code,
+                            retryable=retryable_failure,
+                        ),
                         ensure_ascii=False,
                     ),
                 }
@@ -13741,8 +13682,10 @@ async def analyze_team(
             finally:
                 await _cancel_heartbeat_task(heartbeat_task)
 
-        return EventSourceResponse(
+        return versioned_event_source(
             event_generator(),
+            endpoint="coach",
+            version=event_version,
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
