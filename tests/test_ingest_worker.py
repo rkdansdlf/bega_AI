@@ -536,7 +536,10 @@ def test_heartbeat_retries_recognized_transient_error_without_losing_lease(
 ):
     store = _ScriptedHeartbeatStore([transient_error, NOW])
     worker = IngestWorker(store=store, settings=SETTINGS, owner="worker-1")
-    worker.lease_seconds = 0.1
+    # This case verifies retry recovery, not deadline exhaustion. Keep enough
+    # lease budget that a loaded full-suite event loop cannot consume it before
+    # the scripted immediate retry runs.
+    worker.lease_seconds = 5.0
     worker.heartbeat_interval_seconds = 0.001
     worker.heartbeat_safety_margin_seconds = 0.01
     worker.heartbeat_retry_initial_seconds = 0.001
