@@ -129,6 +129,20 @@ def test_claim_next_uses_skip_locked_and_assigns_lease_owner():
     assert pool.connection_instance.transaction_entries == 1
 
 
+def test_heartbeat_requires_unexpired_owner_and_returns_new_expiry():
+    pool = _Pool([{"lease_expires_at": WATERMARK}])
+    store = IngestRunStore(pool, lease_seconds=120)
+
+    lease_expires_at = asyncio.run(store.heartbeat(RUN_ID, "worker-1"))
+
+    sql = pool.connection_instance.executed[0][0]
+    assert "status = 'RUNNING'" in sql
+    assert "lease_owner = %s" in sql
+    assert "lease_expires_at > now()" in sql
+    assert "RETURNING lease_expires_at" in sql
+    assert lease_expires_at == WATERMARK
+
+
 def test_finish_success_advances_only_committed_table_watermarks():
     pool = _Pool([(RUN_ID,), None])
     store = IngestRunStore(pool)
@@ -150,6 +164,7 @@ def test_finish_success_advances_only_committed_table_watermarks():
     assert "ON CONFLICT (source_table, scope_key)" in sql
     assert "GREATEST" in sql
     assert "lease_owner = %s" in sql
+    assert "lease_expires_at > now()" in sql
     assert pool.connection_instance.transaction_entries == 1
 
 
@@ -171,6 +186,29 @@ def test_finish_failed_never_advances_watermarks_and_sanitizes_error():
     assert params[0] == "FAILED"
     assert "ai_ingest_watermarks" not in sql
     assert len(params[2]) == 1000
+    assert "lease_expires_at > now()" in sql
+
+
+def test_manual_data_terminal_requires_unexpired_owned_lease():
+    pool = _Pool([(RUN_ID,)])
+    store = IngestRunStore(pool)
+
+    asyncio.run(
+        store.finish_manual_data_required(
+            RUN_ID,
+            "worker-1",
+            {
+                "code": "MANUAL_BASEBALL_DATA_REQUIRED",
+                "entity": "game",
+                "missing_fields": ["game_date"],
+            },
+        )
+    )
+
+    sql = pool.connection_instance.executed[0][0]
+    assert "status = 'RUNNING'" in sql
+    assert "lease_owner = %s" in sql
+    assert "lease_expires_at > now()" in sql
 
 
 def test_recover_expired_increments_before_requeue_and_fails_exhausted_runs():
