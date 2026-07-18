@@ -3706,7 +3706,7 @@ async def _generate_auto_brief_cache_background(
     """
     lease_lost_event = asyncio.Event()
     heartbeat_task: Optional[asyncio.Task] = asyncio.create_task(
-        await _heartbeat_cache_lease(
+        _heartbeat_cache_lease(
             pool=pool,
             cache_key=cache_key,
             lease_owner=lease_owner,
@@ -11923,7 +11923,7 @@ async def analyze_team(
                         auto_brief_data_quality,
                     )
                     asyncio.create_task(
-                        await _generate_auto_brief_cache_background(
+                        _generate_auto_brief_cache_background(
                             pool=pool,
                             cache_key=cache_key,
                             lease_owner=cache_lease_owner,
@@ -12326,7 +12326,7 @@ async def analyze_team(
                         return
 
                 heartbeat_task = asyncio.create_task(
-                    await _heartbeat_cache_lease(
+                    _heartbeat_cache_lease(
                         pool=pool,
                         cache_key=cache_key,
                         lease_owner=cache_lease_owner,
