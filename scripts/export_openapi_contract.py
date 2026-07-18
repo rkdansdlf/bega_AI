@@ -491,14 +491,61 @@ def _schema_is_rendered(schema: object) -> bool:
     return True
 
 
-def _append_reference_siblings(lines: list[str], label: str, schema: object) -> bool:
+def _append_reference_siblings(
+    lines: list[str],
+    label: str,
+    schema: object,
+    rendered_keys: set[str] | frozenset[str] = frozenset(),
+) -> bool:
     if not isinstance(schema, Mapping) or not isinstance(schema.get("$ref"), str):
         return False
-    siblings = {key: value for key, value in schema.items() if key != "$ref"}
+    siblings = {
+        key: value
+        for key, value in schema.items()
+        if key != "$ref" and key not in rendered_keys
+    }
     if not siblings:
         return False
     _append_unsupported(lines, label, siblings)
     return True
+
+
+def _root_schema_rendered_keys(schema: Mapping[str, Any]) -> set[str]:
+    rendered: set[str] = set()
+    if isinstance(schema.get("description"), str):
+        rendered.add("description")
+    if "required" in schema and schema["required"] is not None:
+        rendered.add("required")
+    rendered.update(
+        key
+        for key in (
+            "minLength", "maxLength", "pattern", "minimum", "maximum",
+            "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minItems",
+            "maxItems", "uniqueItems", "minProperties", "maxProperties",
+        )
+        if key in schema
+    )
+    rendered.update(
+        key
+        for key in ("default", "enum", "const", "example", "examples", "items")
+        if key in schema
+    )
+    rendered.update(
+        key
+        for key in ("nullable", "readOnly", "writeOnly", "deprecated")
+        if schema.get(key) is True
+    )
+    rendered.update(
+        key
+        for key in (
+            "properties", "allOf", "anyOf", "oneOf", "not", "discriminator",
+            "additionalProperties",
+        )
+        if key in schema
+    )
+    if not isinstance(schema.get("$ref"), str):
+        rendered.update(key for key in ("type", "format") if key in schema)
+    return rendered
 
 
 def _stable_json(value: object) -> str:
@@ -625,7 +672,12 @@ def _append_schema(
     }
     if _schema_is_rendered(schema) and isinstance(schema.get("$ref"), str):
         known.add("$ref")
-    if _append_reference_siblings(lines, "schema reference siblings", schema):
+    if _append_reference_siblings(
+        lines,
+        "schema reference siblings",
+        schema,
+        _root_schema_rendered_keys(schema),
+    ):
         known.update(schema)
     unsupported = {key: value for key, value in schema.items() if key not in known}
     if unsupported:
@@ -673,6 +725,8 @@ def _append_property_metadata(
     }
     if _schema_is_rendered(schema) and isinstance(schema.get("$ref"), str):
         represented.add("$ref")
+        represented.discard("type")
+        represented.discard("format")
     if "default" in schema:
         metadata.append(f"Default: `{_inline_json(schema['default'])}`")
         represented.add("default")
@@ -707,7 +761,10 @@ def _append_property_metadata(
     if metadata:
         lines.append(f"- `{_escape_code(name)}`: {'; '.join(metadata)}")
     if _append_reference_siblings(
-        lines, f"property {_escape_code(name)} schema siblings", schema
+        lines,
+        f"property {_escape_code(name)} schema siblings",
+        schema,
+        represented,
     ):
         represented.update(schema)
     remaining = {key: value for key, value in schema.items() if key not in represented}

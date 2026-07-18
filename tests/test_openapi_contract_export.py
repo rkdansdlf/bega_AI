@@ -845,6 +845,8 @@ def test_retains_valid_reference_siblings_for_parameter_header_and_media_schemas
     assert '"default": "not-an-example"' in rendered.endpoints
     assert '"x-header": {' in rendered.endpoints
     assert '"x-media": {' in rendered.endpoints
+    assert rendered.endpoints.count('"x-header": {') == 1
+    assert rendered.endpoints.count('"x-media": {') == 1
     assert 'Example: `"not-an-example"`' not in rendered.endpoints
     assert rendered.endpoints.count("Unsupported media schema siblings:") == 1
 
@@ -896,3 +898,9 @@ def test_retains_reference_siblings_in_component_and_nested_property_schemas() -
     assert '"format": "nested-format"' in rendered.schemas
     assert '"$ref": "#/components/schemas/S"' not in rendered.schemas
     assert 'Example: `"nested default"`' not in rendered.schemas
+    assert rendered.schemas.count("root keep") == 1
+    assert rendered.schemas.count("nested keep") == 1
+    assert rendered.schemas.count("Default: `false`") == 1
+    assert rendered.schemas.count('Default: `"nested default"`') == 1
+    assert rendered.schemas.count('"x-root": {') == 1
+    assert rendered.schemas.count('"x-nested": {') == 1
