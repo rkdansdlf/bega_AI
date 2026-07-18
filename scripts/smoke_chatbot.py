@@ -25,33 +25,33 @@ def parse_args() -> argparse.Namespace:
         "--season-year",
         type=int,
         default=datetime.now().year,
-        help="Season year for /coach/analyze smoke payload.",
+        help="Season year for /ai/coach/analyze smoke payload.",
     )
     parser.add_argument(
         "--coach-home-team",
         default="LG",
-        help="home_team_id for /coach/analyze.",
+        help="home_team_id for /ai/coach/analyze.",
     )
     parser.add_argument(
         "--coach-away-team",
         default="SSG",
-        help="away_team_id for /coach/analyze.",
+        help="away_team_id for /ai/coach/analyze.",
     )
     parser.add_argument(
         "--coach-request-mode",
         default="auto_brief",
         choices=["auto_brief", "manual_detail"],
-        help="Request mode for /coach/analyze.",
+        help="Request mode for /ai/coach/analyze.",
     )
     parser.add_argument(
         "--coach-focus",
         default=None,
-        help="Comma-separated focus list for /coach/analyze (manual_detail only).",
+        help="Comma-separated focus list for /ai/coach/analyze (manual_detail only).",
     )
     parser.add_argument(
         "--coach-question-override",
         default=None,
-        help="Optional question_override for /coach/analyze (manual_detail).",
+        help="Optional question_override for /ai/coach/analyze (manual_detail).",
     )
     parser.add_argument(
         "--timeout",
@@ -467,8 +467,8 @@ def check_coach_stream(
         payload["question_override"] = question_override
     return _check_stream_endpoint(
         client,
-        endpoint_url=f"{base_url}/coach/analyze",
-        endpoint_name="/coach/analyze",
+        endpoint_url=f"{base_url}/ai/coach/analyze",
+        endpoint_name="/ai/coach/analyze",
         payload=payload,
         require_order=require_order,
         require_message=False,

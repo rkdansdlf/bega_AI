@@ -618,7 +618,7 @@ def call_coach(
     try:
         with client.stream(
             "POST",
-            f"{base_url.rstrip('/')}/coach/analyze",
+            f"{base_url.rstrip('/')}/ai/coach/analyze",
             json=payload,
             headers=headers,
         ) as response:

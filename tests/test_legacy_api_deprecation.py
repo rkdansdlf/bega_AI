@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, Response
@@ -28,6 +30,15 @@ EXPECTED_DEPRECATED_OPERATIONS = {
 }
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
+
+AI_ROOT = Path(__file__).resolve().parents[1]
+CANONICAL_COACH_CALLERS = (
+    AI_ROOT / "scripts" / "batch_coach_matchup_cache.py",
+    AI_ROOT / "scripts" / "smoke_chatbot.py",
+    AI_ROOT / "scripts" / "coach_backfill_audit.py",
+    AI_ROOT / "scripts" / "run_smoke_regression.sh",
+)
+LEGACY_COACH_ANALYZE = re.compile(r"(?<!/ai)/coach/analyze(?!-legacy)")
 
 
 def _operation_tuple(operation):
@@ -140,3 +151,15 @@ def test_openapi_marks_exactly_seven_deprecated_operations() -> None:
         (method, path)
         for method, path, _, _ in EXPECTED_DEPRECATED_OPERATIONS
     }
+
+
+def test_internal_coach_callers_do_not_use_legacy_analyze_path() -> None:
+    findings = {
+        path.relative_to(AI_ROOT).as_posix(): sorted(
+            set(LEGACY_COACH_ANALYZE.findall(path.read_text(encoding="utf-8")))
+        )
+        for path in CANONICAL_COACH_CALLERS
+        if LEGACY_COACH_ANALYZE.search(path.read_text(encoding="utf-8"))
+    }
+
+    assert findings == {}
