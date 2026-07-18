@@ -21,6 +21,7 @@ from .routers import (
     moderation,
     release_decision,
 )
+from .streaming.http_errors import install_ai_stream_http_error_handler
 
 
 def create_app() -> FastAPI:
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
         redoc_url="/redoc" if api_docs_enabled else None,
         openapi_url="/openapi.json" if api_docs_enabled else None,
     )
+    install_ai_stream_http_error_handler(app)
     app.add_middleware(LegacyApiDeprecationMiddleware)
 
     # CORS(Cross-Origin Resource Sharing) 미들웨어 추가
