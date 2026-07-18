@@ -204,26 +204,32 @@ output aliases:
 
 ```sql
 WITH checkpoint_source AS (
-    <custom base query with season/since/date filters>
+    <custom base query with season/since/date and source-cutoff filters>
 )
 SELECT *
 FROM checkpoint_source
-WHERE updated_at <= source_updated_before
-  AND ROW("cursor_field_1", "cursor_field_2") > ROW(%s, %s)
+WHERE ROW("cursor_field_1", "cursor_field_2") > ROW(%s, %s)
 ORDER BY "cursor_field_1" ASC, "cursor_field_2" ASC
 ```
 
 The same canonical `ORDER BY` is used on the first attempt when no cursor exists.
 This guarantees that initial execution and recovery share one order contract.
 
-For every checkpointed profile with `since_filter_column`, a new incomplete
-table reads `clock_timestamp()` from the trusted source database before its data
-SELECT. That exact value is the run-local `source_updated_before` cutoff. The
-custom and generic builders apply the lower successful-watermark predicate when
-present, then `updated_at <= source_updated_before`, then the resume predicate,
-all against the configured update-filter column. The first progress commit or a
-zero-row completion persists the cutoff. Recovery reuses the stored value and
-does not sample the source clock again.
+Checkpoint session startup and query construction use one update-filter resolver.
+Incremental runs retain the legacy default `updated_at` filter when a profile has
+no `since_filter_column`; FULL runs are cutoff-eligible only when the profile
+explicitly declares a nonempty column. Every eligible new table reads
+`clock_timestamp()` from the trusted source database before its data SELECT. That
+exact value is the run-local `source_updated_before` cutoff. Incremental builders
+apply inclusive lower and upper predicates to the same effective update column,
+so NULL values remain excluded. FULL builders use
+`(column IS NULL OR column <= source_updated_before)` before the resume predicate,
+so a nullable or left-joined timestamp does not remove the source row. The
+`teams` and `stadiums` profiles explicitly use `updated_at` for both cutoff
+filtering and watermark extraction. The timestamp-free `kbo_seasons` profile
+uses neither. The first progress commit or a zero-row completion persists the
+cutoff. Recovery reuses the stored value and does not sample the source clock
+again.
 
 Checkpointed orchestration requires `limit=None`. A leased checkpointed call with
 a limit is rejected because a per-attempt limit would not represent a stable
@@ -280,12 +286,19 @@ success-only watermark update. The result also carries non-persisted
 `attempt_source_rows` and `attempt_written_chunks` deltas for metrics. A completed
 checkpoint skipped during recovery returns zero attempt deltas, so cumulative
 run summaries remain accurate without double-counting the existing Prometheus
-table totals.
+table totals. Configured `watermark_fields` are exclusive: only those output
+fields are inspected in declared order, and all NULL or missing configured values
+produce no row watermark. Generic `updated_at`, `game_updated_at`, and
+`latest_updated_at` fallbacks apply only when the profile does not declare
+`watermark_fields`.
 
-The success watermark remains the maximum committed update timestamp. This is
-safe for update-filtered profiles because every committed source row is bounded
-by the fixed source cutoff. Watermark ownership remains success-only and does not
-move to checkpoint advancement.
+The success watermark remains the maximum committed non-NULL update timestamp
+from the field paired with the query cutoff. This is safe for update-filtered
+profiles because every committed non-NULL source timestamp is bounded by the
+fixed source cutoff. A FULL row with a NULL configured timestamp remains
+ingestable but cannot advance the watermark from a different projected timestamp.
+Watermark ownership remains success-only and does not move to checkpoint
+advancement.
 
 ## Recovery Semantics
 
@@ -296,14 +309,14 @@ from the destination connection.
 - Compatible incomplete checkpoint: add the keyset predicate and start strictly
   after its cursor.
 - Compatible completed checkpoint: return its durable result without executing
-  the source timestamp or data SELECT.
+  the source timestamp or data SELECT, after required cutoff compatibility passes.
 - Incompatible checkpoint: fail explicitly; never reset or ignore it.
 
-An incomplete legacy checkpoint with committed progress but no required
-`source_updated_before` fails closed with `INGEST_CHECKPOINT_INCOMPATIBLE`. A
-zero-progress incomplete row may initialize the cutoff on its first subsequent
-progress or completion commit. A completed legacy row remains skippable because
-it executes neither source query.
+Any eligible legacy checkpoint with committed progress but no required
+`source_updated_before` fails closed with `INGEST_CHECKPOINT_INCOMPATIBLE`, whether
+incomplete or completed. A zero-progress incomplete row may initialize the cutoff
+on its first subsequent progress or completion commit. A zero-progress completed
+legacy row remains skippable because it executes neither source query.
 
 Crash behavior is deterministic:
 

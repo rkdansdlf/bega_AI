@@ -437,12 +437,18 @@ def _cursor_column_names(cursor: Any) -> Set[str]:
 
 
 def _row_updated_at(row: Mapping[str, Any], profile: Mapping[str, Any]) -> datetime | None:
-    configured = profile.get("watermark_fields") or ()
-    fields = tuple(configured) + (
-        "updated_at",
-        "game_updated_at",
-        "latest_updated_at",
-    )
+    if "watermark_fields" in profile:
+        configured = profile.get("watermark_fields")
+        if isinstance(configured, str):
+            fields = (configured,)
+        else:
+            fields = tuple(configured or ())
+    else:
+        fields = (
+            "updated_at",
+            "game_updated_at",
+            "latest_updated_at",
+        )
     for field in fields:
         value = row.get(str(field))
         if value is None:
@@ -1101,6 +1107,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["stadium_id"],
         "season_filter_column": None,
+        "since_filter_column": "updated_at",
     },
     "teams": {
         "description": "KBO 구단 기본 정보",
@@ -1119,6 +1126,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["team_id"],
         "season_filter_column": None,
+        "since_filter_column": "updated_at",
     },
     "team_history": {
         "description": "KBO 구단 변천사",
@@ -1433,6 +1441,35 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "date_to_exclusive_filter_column": "g.game_date",
     },
 }
+
+DATABASE_WATERMARK_FIELDS = {
+    "player_season_batting": ("updated_at",),
+    "player_season_pitching": ("updated_at",),
+    "game": ("game_updated_at",),
+    "game_flow_summary": ("latest_updated_at",),
+    "game_batting_stats": ("updated_at",),
+    "game_pitching_stats": ("updated_at",),
+    "game_inning_scores": ("updated_at",),
+    "game_lineups": ("updated_at",),
+    "game_metadata": ("updated_at",),
+    "kbo_seasons": (),
+    "stadiums": ("updated_at",),
+    "teams": ("updated_at",),
+    "team_history": ("updated_at",),
+    "team_name_mapping": (),
+    "awards": ("updated_at",),
+    "player_movements": ("updated_at",),
+    "team_franchises": ("updated_at",),
+    "player_basic": (),
+    "team_profiles": (),
+    "team_season_batting": ("updated_at",),
+    "team_season_pitching": ("updated_at",),
+    "stat_rankings": ("updated_at",),
+    "game_summary": ("updated_at",),
+}
+
+for source_table, watermark_fields in DATABASE_WATERMARK_FIELDS.items():
+    TABLE_PROFILES[source_table]["watermark_fields"] = watermark_fields
 
 CUSTOM_CHECKPOINT_ORDERS = {
     "player_season_batting": (("id", "integer"),),

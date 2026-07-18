@@ -320,8 +320,8 @@ def test_full_cutoff_eligibility_is_exact_for_every_trusted_database_profile():
         "game_lineups": "gl.updated_at",
         "game_metadata": "gm.updated_at",
         "kbo_seasons": None,
-        "stadiums": None,
-        "teams": None,
+        "stadiums": "updated_at",
+        "teams": "updated_at",
         "team_history": "th.updated_at",
         "team_name_mapping": None,
         "awards": "a.updated_at",
@@ -342,6 +342,64 @@ def test_full_cutoff_eligibility_is_exact_for_every_trusted_database_profile():
     }
 
     assert actual == expected
+
+
+def test_database_profile_cutoffs_match_exclusive_watermark_fields_exactly():
+    expected = {
+        "player_season_batting": ("bs.updated_at", "updated_at"),
+        "player_season_pitching": ("ps.updated_at", "updated_at"),
+        "game": ("gm.updated_at", "game_updated_at"),
+        "game_flow_summary": ("latest_updated_at", "latest_updated_at"),
+        "game_batting_stats": ("gbs.updated_at", "updated_at"),
+        "game_pitching_stats": ("gps.updated_at", "updated_at"),
+        "game_inning_scores": ("gis.updated_at", "updated_at"),
+        "game_lineups": ("gl.updated_at", "updated_at"),
+        "game_metadata": ("gm.updated_at", "updated_at"),
+        "kbo_seasons": (None, None),
+        "stadiums": ("updated_at", "updated_at"),
+        "teams": ("updated_at", "updated_at"),
+        "team_history": ("th.updated_at", "updated_at"),
+        "team_name_mapping": (None, None),
+        "awards": ("a.updated_at", "updated_at"),
+        "player_movements": ("pm.updated_at", "updated_at"),
+        "team_franchises": ("tf.updated_at", "updated_at"),
+        "player_basic": (None, None),
+        "team_profiles": (None, None),
+        "team_season_batting": ("tsb.updated_at", "updated_at"),
+        "team_season_pitching": ("tsp.updated_at", "updated_at"),
+        "stat_rankings": ("sr.updated_at", "updated_at"),
+        "game_summary": ("gs.updated_at", "updated_at"),
+    }
+    candidate_fields = ("updated_at", "game_updated_at", "latest_updated_at")
+    timestamp = datetime(2026, 7, 18, 4, 0)
+    normalized = timestamp.replace(tzinfo=ingest_script.timezone.utc)
+
+    database_profiles = {
+        table: profile
+        for table, profile in TABLE_PROFILES.items()
+        if "source_file" not in profile
+    }
+    assert set(database_profiles) == set(expected)
+
+    for table, profile in database_profiles.items():
+        cutoff_column, watermark_field = expected[table]
+        assert ingest_script.resolve_update_filter_column(
+            profile,
+            since=None,
+        ) == cutoff_column
+        assert profile["watermark_fields"] == (
+            () if watermark_field is None else (watermark_field,)
+        )
+
+        for candidate in candidate_fields:
+            value = ingest_script._row_updated_at(
+                {candidate: timestamp},
+                profile,
+            )
+            if candidate == watermark_field:
+                assert value == normalized, table
+            else:
+                assert value is None, table
 
 
 def test_incremental_update_filter_is_exact_for_every_trusted_database_profile(
@@ -485,6 +543,42 @@ def test_generic_full_checkpoint_includes_null_updates_with_cutoff(sample_cutoff
     assert query.as_string() == (
         'SELECT * FROM "plain_table" WHERE '
         '("updated_at" IS NULL OR "updated_at" <= %s) ORDER BY "id" ASC'
+    )
+    assert params == (sample_cutoff,)
+
+
+@pytest.mark.parametrize(
+    ("table", "cursor_field"),
+    (("teams", "team_id"), ("stadiums", "stadium_id")),
+)
+def test_reference_profile_full_checkpoint_bounds_its_updated_at(
+    table,
+    cursor_field,
+    sample_cutoff,
+):
+    profile = TABLE_PROFILES[table]
+    order = CheckpointOrder(
+        table,
+        (CheckpointOrderField(cursor_field, "text"),),
+    )
+
+    query, params = build_select_query(
+        table=table,
+        profile=profile,
+        pk_columns=[cursor_field],
+        limit=None,
+        season_year=None,
+        since=None,
+        source_updated_before=sample_cutoff,
+        checkpoint_order=order,
+        resume_cursor=None,
+    )
+
+    assert profile["since_filter_column"] == "updated_at"
+    assert query.as_string() == (
+        f'SELECT * FROM "{table}" WHERE '
+        f'("updated_at" IS NULL OR "updated_at" <= %s) '
+        f'ORDER BY "{cursor_field}" ASC'
     )
     assert params == (sample_cutoff,)
 
@@ -951,6 +1045,48 @@ def test_game_watermark_uses_the_same_timestamp_as_its_incremental_filter():
             "game_updated_at": game_updated_at,
         },
         profile,
+    )
+
+    assert value == game_updated_at.replace(tzinfo=ingest_script.timezone.utc)
+
+
+def test_game_configured_watermark_does_not_fall_through_when_alias_is_null():
+    profile = TABLE_PROFILES["game"]
+
+    value = ingest_script._row_updated_at(
+        {
+            "game_updated_at": None,
+            "updated_at": datetime(2026, 7, 18, 5, 0),
+            "latest_updated_at": datetime(2026, 7, 18, 6, 0),
+        },
+        profile,
+    )
+
+    assert value is None
+
+
+def test_configured_watermark_fields_use_declared_order():
+    first = datetime(2026, 7, 18, 4, 0)
+    second = datetime(2026, 7, 18, 5, 0)
+    profile = {"watermark_fields": ("first_updated_at", "second_updated_at")}
+
+    value = ingest_script._row_updated_at(
+        {
+            "first_updated_at": first,
+            "second_updated_at": second,
+        },
+        profile,
+    )
+
+    assert value == first.replace(tzinfo=ingest_script.timezone.utc)
+
+
+def test_unconfigured_watermark_fields_keep_generic_alias_fallback():
+    game_updated_at = datetime(2026, 7, 18, 4, 0)
+
+    value = ingest_script._row_updated_at(
+        {"game_updated_at": game_updated_at},
+        {},
     )
 
     assert value == game_updated_at.replace(tzinfo=ingest_script.timezone.utc)

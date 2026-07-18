@@ -202,20 +202,27 @@ class _EventCursor:
             resume = self.connection.selected_resume
             cutoff = self.connection.selected_cutoff
             since = self.connection.selected_since
+
+            def _update_value(row):
+                field = self.connection.selected_update_field
+                if field in row:
+                    return row[field]
+                return row.get("updated_at")
+
             self.rows = [
                 row
                 for row in self.rows
                 if (resume is None or row["id"] > resume.values[0])
                 and (
                     cutoff is None
-                    or row.get("updated_at") is None
-                    or row["updated_at"] <= cutoff
+                    or _update_value(row) is None
+                    or _update_value(row) <= cutoff
                 )
                 and (
                     since is None
                     or (
-                        row.get("updated_at") is not None
-                        and row["updated_at"] >= since
+                        _update_value(row) is not None
+                        and _update_value(row) >= since
                     )
                 )
             ]
@@ -256,6 +263,7 @@ class _EventConnection:
         self.selected_resume = None
         self.selected_cutoff = None
         self.selected_since = None
+        self.selected_update_field = "updated_at"
 
     def cursor(self, *_args, **_kwargs):
         return _EventCursor(
@@ -343,6 +351,9 @@ def _run_fake_checkpoint_ingest(
             [CUTOFF] if source_clock_values is None else source_clock_values
         ),
     )
+    source.selected_update_field = (
+        "game_updated_at" if table_name == "game" else "updated_at"
+    )
     destination = _EventConnection(
         events,
         state,
@@ -367,7 +378,14 @@ def _run_fake_checkpoint_ingest(
         cutoff = kwargs.get("source_updated_before")
         captured_cutoffs.append(cutoff)
         source.selected_resume = kwargs.get("resume_cursor")
-        source.selected_cutoff = cutoff
+        source.selected_cutoff = (
+            cutoff
+            if module.resolve_update_filter_column(
+                module.TABLE_PROFILES[table_name],
+                since=kwargs.get("since"),
+            )
+            else None
+        )
         source.selected_since = kwargs.get("since")
         return "SELECT id FROM teams", ()
 
@@ -921,6 +939,7 @@ def test_last_data_commit_crash_resumes_with_completion_only(monkeypatch):
         committed_batches=1,
         source_rows=1,
         written_chunks=1,
+        source_updated_before=CUTOFF,
     )
     assert first_events[-2:] == ["checkpoint.complete", "destination.commit"]
     assert first_events.count("metric.checkpoint:teams:created") == 1
@@ -1025,6 +1044,66 @@ def test_kbo_seasons_full_checkpoint_skips_source_cutoff_sampling(monkeypatch):
     assert result.attempt_source_rows == 0
 
 
+@pytest.mark.parametrize("table_name", ["teams", "stadiums"])
+def test_reference_profile_full_checkpoint_samples_and_persists_cutoff(
+    monkeypatch,
+    table_name,
+):
+    state = _CheckpointState()
+    captured_cutoffs: list[datetime | None] = []
+
+    result, events = _run_fake_checkpoint_ingest(
+        monkeypatch,
+        table_name=table_name,
+        rows=[],
+        state=state,
+        captured_cutoffs=captured_cutoffs,
+        source_clock_values=[CUTOFF],
+    )
+
+    assert events.index("source.clock") < events.index("source.execute")
+    assert captured_cutoffs == [CUTOFF]
+    assert state.durable is not None
+    assert state.durable.source_updated_before == CUTOFF
+    assert result.attempt_source_rows == 0
+
+
+@pytest.mark.parametrize("table_name", ["teams", "stadiums"])
+def test_reference_profile_cutoff_blocks_behind_cursor_and_suffix_updates(
+    monkeypatch,
+    table_name,
+):
+    previous_max = CUTOFF - timedelta(hours=1)
+    safe_update = CUTOFF - timedelta(minutes=30)
+    state = _CheckpointState(
+        durable=_CheckpointRecord(
+            source_table=table_name,
+            cursor=CheckpointCursor((1,)),
+            committed_batches=1,
+            source_rows=1,
+            written_chunks=1,
+            max_updated_at=previous_max,
+            source_updated_before=CUTOFF,
+        )
+    )
+
+    result, events = _run_fake_checkpoint_ingest(
+        monkeypatch,
+        table_name=table_name,
+        rows=[
+            {"id": 1, "updated_at": CUTOFF + timedelta(minutes=1)},
+            {"id": 2, "updated_at": CUTOFF + timedelta(minutes=2)},
+            {"id": 3, "updated_at": safe_update},
+        ],
+        state=state,
+    )
+
+    assert "source.clock" not in events
+    assert result.attempt_source_rows == 1
+    assert result.source_rows == 2
+    assert result.max_updated_at == safe_update
+
+
 def test_game_full_checkpoint_keeps_null_updates_and_excludes_late_updates(
     monkeypatch,
 ):
@@ -1044,6 +1123,32 @@ def test_game_full_checkpoint_keeps_null_updates_and_excludes_late_updates(
     assert events.count("source.clock") == 1
     assert captured_cutoffs == [CUTOFF]
     assert result.attempt_source_rows == 1
+
+
+def test_game_full_null_metadata_update_is_ingested_without_advancing_watermark(
+    monkeypatch,
+):
+    state = _CheckpointState()
+    unrelated_game_update = CUTOFF + timedelta(hours=1)
+
+    result, _events = _run_fake_checkpoint_ingest(
+        monkeypatch,
+        table_name="game",
+        rows=[
+            {
+                "id": 1,
+                "game_updated_at": None,
+                "updated_at": unrelated_game_update,
+            }
+        ],
+        state=state,
+        source_clock_values=[CUTOFF],
+    )
+
+    assert result.attempt_source_rows == 1
+    assert result.max_updated_at is None
+    assert state.durable is not None
+    assert state.durable.max_updated_at is None
 
 
 def test_completed_progressed_checkpoint_without_cutoff_fails_before_source_query(
@@ -1172,7 +1277,13 @@ def test_next_normal_run_sees_updates_deferred_by_prior_cutoff(monkeypatch):
     result, events = _run_fake_checkpoint_ingest(
         monkeypatch,
         table_name="game",
-        rows=[{"id": 1, "updated_at": deferred}],
+        rows=[
+            {
+                "id": 1,
+                "updated_at": deferred,
+                "game_updated_at": deferred,
+            }
+        ],
         state=_CheckpointState(),
         since=previous_watermark,
         source_clock_values=[CUTOFF + timedelta(hours=1)],
