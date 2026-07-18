@@ -29,6 +29,34 @@ from .http_clients import get_shared_httpx_client
 
 logger = logging.getLogger(__name__)
 
+# HuggingFace SentenceTransformer 모델 인스턴스 캐시.
+# `_embed_hf` 가 매 호출마다 SentenceTransformer(model_name) 으로 모델을 새로 만들면
+# 디스크 로드 + GPU/CPU 초기화 비용(수백ms~수초)이 매 요청에 발생한다.
+# 모델명이 동일하면 같은 인스턴스를 재사용하도록 모듈 레벨에서 캐싱한다.
+# 동시 초기화 race를 막기 위해 동기 lock을 둔다 (모델 로드는 sync 작업).
+import threading
+
+_HF_MODEL_CACHE: Dict[str, "object"] = {}
+_HF_MODEL_CACHE_LOCK = threading.Lock()
+
+
+def _get_hf_model(model_name: str):
+    """SentenceTransformer 모델을 캐시에서 반환하거나, 없으면 로드 후 캐싱한다."""
+    cached = _HF_MODEL_CACHE.get(model_name)
+    if cached is not None:
+        return cached
+    with _HF_MODEL_CACHE_LOCK:
+        cached = _HF_MODEL_CACHE.get(model_name)
+        if cached is not None:
+            return cached
+        from sentence_transformers import SentenceTransformer  # type: ignore
+
+        logger.info("[Embeddings] Loading HF model %s (cached for reuse)", model_name)
+        model = SentenceTransformer(model_name)
+        _HF_MODEL_CACHE[model_name] = model
+        return model
+
+
 _QUERY_WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -96,11 +124,14 @@ async def _get_cached_query_embedding(cache_key: str) -> Optional[List[float]]:
     return await backend.get(cache_key)
 
 
-async def _set_cached_query_embedding(cache_key: str, embedding: List[float]) -> None:
-    from .embedding_cache import get_backend
+async def _set_cached_query_embedding(
+    cache_key: str, embedding: List[float], *, query: str = ""
+) -> None:
+    from .embedding_cache import get_backend, _calculate_embedding_ttl
 
     backend = await get_backend()
-    await backend.set(cache_key, embedding)
+    ttl = _calculate_embedding_ttl(query) if query else None
+    await backend.set(cache_key, embedding, ttl=ttl)
 
 
 def _ensure_dimension(
@@ -117,6 +148,50 @@ def _ensure_dimension(
             expected,
             sorted(list(mismatched))[:3],
         )
+
+
+def _is_text_embedding_3_model(model: str) -> bool:
+    return "text-embedding-3" in (model or "").lower()
+
+
+def _fit_embedding_dimensions(
+    vectors: Sequence[Sequence[float]],
+    expected: Optional[int],
+    *,
+    allow_truncate: bool = False,
+) -> List[List[float]]:
+    """Return vectors at the expected dimension, raising before DB writes on mismatch."""
+    if not vectors:
+        return []
+    if not expected:
+        return [list(map(float, vec)) for vec in vectors]
+
+    fitted: List[List[float]] = []
+    mismatched: set[int] = set()
+    truncated = 0
+    for vec in vectors:
+        vector = list(map(float, vec))
+        actual = len(vector)
+        if actual == expected:
+            fitted.append(vector)
+            continue
+        if allow_truncate and actual > expected:
+            fitted.append(vector[:expected])
+            truncated += 1
+            continue
+        mismatched.add(actual)
+
+    if mismatched:
+        raise EmbeddingError(
+            f"임베딩 차원 불일치: 기대값={expected}, 실제값={sorted(mismatched)[:3]}"
+        )
+    if truncated:
+        logger.info(
+            "Matryoshka 임베딩 %d건을 앞 %d차원으로 축소했습니다.",
+            truncated,
+            expected,
+        )
+    return fitted
 
 
 async def _embed_local(texts: Sequence[str], settings: Settings) -> List[List[float]]:
@@ -140,7 +215,8 @@ async def _embed_hf(
 ) -> List[List[float]]:
     """HuggingFace의 Sentence-Transformers 모델을 사용하여 텍스트를 임베딩합니다."""
     try:
-        from sentence_transformers import SentenceTransformer
+        # 패키지 존재만 빠르게 확인하고, 실제 모델 로드는 _get_hf_model 캐시로 위임한다.
+        import sentence_transformers  # noqa: F401
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise EmbeddingError(
             "sentence-transformers 패키지가 필요합니다. `pip install sentence-transformers` 후 다시 시도하세요."
@@ -152,8 +228,9 @@ async def _embed_hf(
     if batch_size <= 0:
         batch_size = len(texts) or 1
 
-    # 모델을 로드하고 임베딩을 생성합니다.
-    model = SentenceTransformer(model_name)
+    # 모델 로드는 캐싱: 첫 호출만 로드, 이후 캐시 인스턴스 재사용.
+    # 첫 로드 시 수백ms~수초 블로킹이 발생하므로 to_thread로 이벤트 루프 보호.
+    model = await asyncio.to_thread(_get_hf_model, model_name)
     embeddings = await asyncio.to_thread(
         model.encode,
         list(texts),
@@ -323,8 +400,7 @@ async def _embed_gemini(
         raise EmbeddingError(
             f"Gemini 응답 수가 입력 수와 일치하지 않습니다. 입력={len(texts)}, 출력={len(results)}"
         )
-    _ensure_dimension(results, embed_dim)
-    return results
+    return _fit_embedding_dimensions(results, embed_dim)
 
 
 async def _embed_openai(
@@ -340,6 +416,7 @@ async def _embed_openai(
     model = (
         settings.openai_embed_model or settings.embed_model or "text-embedding-3-small"
     )
+    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
     url = "https://api.openai.com/v1/embeddings"
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
@@ -366,6 +443,8 @@ async def _embed_openai(
             "model": model,
             "input": list(chunk),
         }
+        if expected_dim and _is_text_embedding_3_model(model):
+            payload["dimensions"] = expected_dim
         response = await client.post(url, json=payload, headers=headers)
 
         if response.status_code != 200:
@@ -449,9 +528,11 @@ async def _embed_openai(
             f"OpenAI 응답 수가 입력 수와 일치하지 않습니다. 입력={len(texts)}, 출력={len(results)}"
         )
 
-    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
-    _ensure_dimension(results, expected_dim)
-    return results
+    return _fit_embedding_dimensions(
+        results,
+        expected_dim,
+        allow_truncate=_is_text_embedding_3_model(model),
+    )
 
 
 async def _embed_openrouter(
@@ -469,6 +550,7 @@ async def _embed_openrouter(
         or settings.embed_model
         or "openai/text-embedding-3-small"
     )
+    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
     base_url = settings.openrouter_base_url.rstrip("/")
     url = f"{base_url}/embeddings"
     headers = {
@@ -509,6 +591,8 @@ async def _embed_openrouter(
             "model": model,
             "input": list(chunk),
         }
+        if expected_dim and _is_text_embedding_3_model(model):
+            payload["dimensions"] = expected_dim
         response = await client.post(url, json=payload, headers=headers)
 
         content_type = response.headers.get("content-type", "")
@@ -580,9 +664,11 @@ async def _embed_openrouter(
     for i in range(len(batches)):
         results.extend(results_map[i])
 
-    expected_dim = int(settings.embed_dim) if settings.embed_dim else None
-    _ensure_dimension(results, expected_dim)
-    return results
+    return _fit_embedding_dimensions(
+        results,
+        expected_dim,
+        allow_truncate=_is_text_embedding_3_model(model),
+    )
 
 
 async def async_embed_texts(
@@ -600,8 +686,7 @@ async def async_embed_texts(
     if provider == "hf":
         vectors = await _embed_hf(texts, settings, max_concurrency=max_concurrency)
         expected_dim = int(settings.embed_dim) if settings.embed_dim else None
-        _ensure_dimension(vectors, expected_dim)
-        return vectors
+        return _fit_embedding_dimensions(vectors, expected_dim)
     if provider == "gemini":
         return await _embed_gemini(texts, settings, max_concurrency=max_concurrency)
     if provider == "openai":
@@ -641,8 +726,54 @@ async def async_embed_query(
         return []
 
     embedding = vectors[0]
-    await _set_cached_query_embedding(cache_key, embedding)
+    await _set_cached_query_embedding(cache_key, embedding, query=query)
     return embedding
+
+
+async def async_embed_queries_batch(
+    queries: Sequence[str],
+    settings: Settings,
+    max_concurrency: int = 1,
+) -> List[List[float]]:
+    """여러 쿼리를 배치로 임베딩합니다.
+
+    각 쿼리에 대해 캐시를 먼저 확인하고, 캐시 미스분만 1회 배치 API 호출로 처리합니다.
+    결과를 캐시에 등록하여 이후 async_embed_query 호출이 캐시 히트하도록 합니다.
+    """
+    if not queries:
+        return []
+
+    sig = _embed_signature(settings)
+    normalized = [_normalize_query(q) for q in queries]
+    cache_keys = [f"{sig}:{n}" for n in normalized]
+
+    cached_results: List[Optional[List[float]]] = list(
+        await asyncio.gather(*[_get_cached_query_embedding(k) for k in cache_keys])
+    )
+
+    miss_indices = [i for i, c in enumerate(cached_results) if c is None]
+
+    if miss_indices:
+        miss_texts = [queries[i] for i in miss_indices]
+        start_time = time.perf_counter()
+        miss_vectors = await async_embed_texts(
+            miss_texts, settings, max_concurrency=max_concurrency
+        )
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(
+            "[Embeddings] Batch query embedding: %d texts in %.2fms",
+            len(miss_texts),
+            elapsed_ms,
+        )
+        for list_idx, vec in zip(miss_indices, miss_vectors):
+            cached_results[list_idx] = vec
+            asyncio.create_task(
+                _set_cached_query_embedding(
+                    cache_keys[list_idx], vec, query=queries[list_idx]
+                )
+            )
+
+    return [c if c is not None else [] for c in cached_results]
 
 
 def embed_texts(
@@ -670,10 +801,27 @@ def embed_texts(
             )
             return future.result()
     else:
-        # 실행 중인 루프가 없으면 바로 실행
-        return asyncio.run(
-            async_embed_texts(texts, settings, max_concurrency=max_concurrency)
-        )
+        # 실행 중인 루프가 없으면 새 루프를 명시적으로 생성하여 실행
+        # Python 3.12+ 에서 asyncio.run() 호출 후 루프가 닫힌 상태로 남아
+        # 다음 호출 시 "Event loop is closed" 오류가 발생하는 경우를 방지한다.
+        # 또한 공유 httpx 클라이언트가 이전 루프에 묶여 있으면 오류가 발생하므로,
+        # 루프를 닫기 전에 공유 클라이언트를 먼저 정리한다.
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        try:
+            return new_loop.run_until_complete(
+                async_embed_texts(texts, settings, max_concurrency=max_concurrency)
+            )
+        finally:
+            # 공유 httpx 클라이언트를 현재 루프에서 정리하여 다음 루프가 깨끗하게 시작
+            from app.core.http_clients import close_shared_httpx_clients
+
+            try:
+                new_loop.run_until_complete(close_shared_httpx_clients())
+            except Exception:
+                pass
+            new_loop.close()
+            asyncio.set_event_loop(None)
 
 
 def _estimate_tokens(text: str) -> int:

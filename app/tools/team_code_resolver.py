@@ -37,6 +37,19 @@ LEGACY_TO_CANONICAL = {
     "LOT": "LT",
 }
 
+MODERN_CODE_TO_NAME = {
+    "KIA": "KIA 타이거즈",
+    "LG": "LG 트윈스",
+    "SSG": "SSG 랜더스",
+    "NC": "NC 다이노스",
+    "DB": "두산 베어스",
+    "KT": "KT 위즈",
+    "LT": "롯데 자이언츠",
+    "SS": "삼성 라이온즈",
+    "HH": "한화 이글스",
+    "KH": "키움 히어로즈",
+}
+
 
 class TeamCodeResolver:
     """Canonical + legacy dual-read team resolver."""
@@ -275,9 +288,18 @@ class TeamCodeResolver:
     def variants(self, team_input: str, season_year: int | None = None) -> List[str]:
         return self.query_variants(team_input, season_year)
 
-    def display_name(self, team_code: str) -> str:
+    def display_name(self, team_code: str, season_year: int | None = None) -> str:
         if not team_code:
             return team_code
+        if season_year is not None:
+            seasonal_code = self.resolve_canonical(team_code, season_year)
+            seasonal_cleaned = self._clean(seasonal_code)
+            if seasonal_cleaned in CANONICAL_CODES:
+                return MODERN_CODE_TO_NAME.get(
+                    seasonal_cleaned,
+                    self.code_to_name.get(seasonal_cleaned, seasonal_code),
+                )
+            return self.code_to_name.get(seasonal_cleaned, seasonal_code)
         cleaned = self._clean(team_code)
         if cleaned in self.code_to_name:
             return self.code_to_name[cleaned]
@@ -297,6 +319,18 @@ class TeamCodeResolver:
 
             preferred = members[0]
             current_code = preferred.get("current_code")
+            current_code_cleaned = self._clean(str(current_code or ""))
+            if current_code_cleaned and current_code_cleaned not in CANONICAL_CODES:
+                for member in members:
+                    team_id = str(member["team_id"]).upper()
+                    team_name = member["team_name"]
+                    self.name_to_canonical[team_id] = team_id
+                    self.name_to_canonical[team_name] = team_id
+                    short_name = team_name.split()[0]
+                    self.name_to_canonical[short_name] = team_id
+                    self.code_to_name[team_id] = team_name
+                continue
+
             canonical = self.resolve_canonical(current_code or preferred["team_id"])
             if canonical not in CANONICAL_CODES:
                 canonical = self.resolve_canonical(preferred["team_id"])

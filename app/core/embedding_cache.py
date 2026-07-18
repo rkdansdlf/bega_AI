@@ -13,41 +13,80 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections import OrderedDict
-from typing import List, Optional, Protocol
+from datetime import datetime
+from typing import List, Optional, Protocol, Tuple
+
+from app.observability.metrics import AI_EMBEDDING_CACHE_TOTAL
 
 logger = logging.getLogger(__name__)
+
+
+def _record_cache_result(backend: str, hit: bool) -> None:
+    try:
+        AI_EMBEDDING_CACHE_TOTAL.labels(
+            backend=backend, result="hit" if hit else "miss"
+        ).inc()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _calculate_embedding_ttl(query: str) -> Optional[int]:
+    """활성 시즌(현재 연도) 쿼리는 3시간 TTL, 역사 데이터는 None(백엔드 기본값 사용)."""
+    if str(datetime.now().year) in query:
+        return 3 * 3600
+    return None
 
 
 class EmbeddingCacheBackend(Protocol):
     async def get(self, key: str) -> Optional[List[float]]: ...
 
-    async def set(self, key: str, embedding: List[float]) -> None: ...
+    async def set(
+        self, key: str, embedding: List[float], *, ttl: Optional[int] = None
+    ) -> None: ...
 
 
 class InMemoryLRUBackend:
-    """프로세스 로컬 OrderedDict LRU 캐시."""
+    """프로세스 로컬 OrderedDict LRU 캐시 (TTL 만료 + LRU eviction)."""
+
+    backend_label = "memory"
 
     def __init__(self, max_size: int) -> None:
         self._max_size = max(0, int(max_size))
-        self._store: "OrderedDict[str, List[float]]" = OrderedDict()
+        # 값은 (embedding, expires_at) 튜플. expires_at이 None이면 무기한(LRU만 적용).
+        self._store: "OrderedDict[str, Tuple[List[float], Optional[float]]]" = (
+            OrderedDict()
+        )
         self._lock = asyncio.Lock()
 
     async def get(self, key: str) -> Optional[List[float]]:
         if self._max_size <= 0:
+            _record_cache_result(self.backend_label, hit=False)
             return None
         async with self._lock:
-            value = self._store.get(key)
-            if value is None:
+            entry = self._store.get(key)
+            if entry is None:
+                _record_cache_result(self.backend_label, hit=False)
+                return None
+            embedding, expires_at = entry
+            if expires_at is not None and time.monotonic() >= expires_at:
+                # TTL 만료 → 삭제하고 miss로 처리
+                del self._store[key]
+                _record_cache_result(self.backend_label, hit=False)
                 return None
             self._store.move_to_end(key)
-            return value
+        _record_cache_result(self.backend_label, hit=True)
+        return embedding
 
-    async def set(self, key: str, embedding: List[float]) -> None:
+    async def set(
+        self, key: str, embedding: List[float], *, ttl: Optional[int] = None
+    ) -> None:
         if self._max_size <= 0:
             return
+        expires_at = time.monotonic() + ttl if ttl is not None and ttl > 0 else None
         async with self._lock:
-            self._store[key] = embedding
+            self._store[key] = (embedding, expires_at)
             self._store.move_to_end(key)
             while len(self._store) > self._max_size:
                 self._store.popitem(last=False)
@@ -55,6 +94,8 @@ class InMemoryLRUBackend:
 
 class RedisEmbeddingBackend:
     """Redis 기반 임베딩 캐시. ``redis.asyncio.Redis`` 클라이언트 사용."""
+
+    backend_label = "redis"
 
     def __init__(self, client, ttl_seconds: int, key_prefix: str = "embed") -> None:
         self._client = client
@@ -69,19 +110,27 @@ class RedisEmbeddingBackend:
             raw = await self._client.get(self._full_key(key))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[EmbedCache] Redis GET failed key=%s err=%s", key, exc)
+            _record_cache_result(self.backend_label, hit=False)
             return None
         if raw is None:
+            _record_cache_result(self.backend_label, hit=False)
             return None
         try:
-            return json.loads(raw)
+            value = json.loads(raw)
         except (TypeError, ValueError) as exc:
             logger.warning("[EmbedCache] Redis decode failed key=%s err=%s", key, exc)
+            _record_cache_result(self.backend_label, hit=False)
             return None
+        _record_cache_result(self.backend_label, hit=True)
+        return value
 
-    async def set(self, key: str, embedding: List[float]) -> None:
+    async def set(
+        self, key: str, embedding: List[float], *, ttl: Optional[int] = None
+    ) -> None:
         try:
             payload = json.dumps(embedding)
-            await self._client.set(self._full_key(key), payload, ex=self._ttl)
+            effective_ttl = ttl if ttl is not None else self._ttl
+            await self._client.set(self._full_key(key), payload, ex=effective_ttl)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[EmbedCache] Redis SET failed key=%s err=%s", key, exc)
 

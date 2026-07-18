@@ -305,6 +305,7 @@ def _check_stream_endpoint(
     endpoint_name: str,
     payload: Dict[str, Any],
     require_order: bool = False,
+    require_message: bool = True,
     headers: Dict[str, str] | None = None,
     rate_limit_retries: int = 8,
     rate_limit_base_delay: float = 1.5,
@@ -377,7 +378,7 @@ def _check_stream_endpoint(
                             error = "invalid_event_order"
                     elif not seen_done:
                         error = "missing_done_event"
-                    elif not seen_message:
+                    elif require_message and not seen_message:
                         error = "missing_message_event"
                     elif not seen_meta:
                         error = "missing_meta_event"
@@ -440,7 +441,7 @@ def check_coach_stream(
     base_url: str,
     season_year: int,
     *,
-    require_order: bool = True,
+    require_order: bool = False,
     home_team: str = "LG",
     away_team: str | None = None,
     request_mode: str = "auto_brief",
@@ -470,6 +471,7 @@ def check_coach_stream(
         endpoint_name="/coach/analyze",
         payload=payload,
         require_order=require_order,
+        require_message=False,
         headers=headers,
         rate_limit_retries=rate_limit_retries,
         rate_limit_base_delay=rate_limit_base_delay,

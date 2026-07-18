@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_TEAMS = ["SS", "LT", "LG", "DB", "KIA", "KH", "HH", "SSG", "NC", "KT"]
 PROMPT_VERSION = "v5_focus"
-MODEL_NAME = "upstage/solar-pro-3:free"
+MODEL_NAME = "openrouter/free"
 CACHE_SCHEMA_VERSION = "v3"
 COACH_YEAR_MIN = 1982
 FOCUS_SECTION_HEADERS: Dict[str, str] = {

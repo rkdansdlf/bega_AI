@@ -96,6 +96,8 @@ def test_summarize_results_includes_planner_distribution_and_failed_cases() -> N
             "status_code": 200,
             "cached": False,
             "quality_pass": True,
+            "answerability_pass": True,
+            "answerability": {"answerability_pass": True, "failure_markers": []},
             "quality": {},
             "sample_response": {
                 "planner_mode": "default_llm_planner",
@@ -116,6 +118,11 @@ def test_summarize_results_includes_planner_distribution_and_failed_cases() -> N
             "status_code": 500,
             "cached": False,
             "quality_pass": False,
+            "answerability_pass": False,
+            "answerability": {
+                "answerability_pass": False,
+                "failure_markers": ["현재 연결된 자료"],
+            },
             "quality": {},
             "meta": {
                 "planner_mode": "fast_path",
@@ -145,6 +152,10 @@ def test_summarize_results_includes_planner_distribution_and_failed_cases() -> N
     assert failed_case["planner_mode"] == "fast_path"
     assert failed_case["planner_cache_hit"] is False
     assert failed_case["tool_execution_mode"] == "sequential"
+    assert failed_case["answerability_pass"] is False
+    assert failed_case["answerability_failure_markers"] == ["현재 연결된 자료"]
+    assert summary["answerability_passed"] == 1
+    assert summary["answerability_failed"] == 1
 
 
 def test_summarize_results_includes_latency_diagnostics() -> None:
@@ -641,3 +652,37 @@ def test_main_includes_memory_metrics_in_summary_output(tmp_path, monkeypatch) -
     assert summary_payload["summary"]["memory_metrics"]["service"] == "ai-chatbot"
     assert summary_payload["summary"]["memory_metrics"]["peak_mb"] == 256.0
     assert "latency_diagnostics" in summary_payload["summary"]
+
+
+def test_manual_baseball_data_contract_counts_as_operator_data_required() -> None:
+    answerability = smoke._evaluate_answerability(
+        "MANUAL_BASEBALL_DATA_REQUIRED: 기준 날짜와 경기 ID가 필요합니다."
+    )
+
+    assert answerability["answerability_pass"] is True
+    assert answerability["status"] == "operator_data_required"
+    assert answerability["expected_non_answer"] is True
+    assert "MANUAL_BASEBALL_DATA_REQUIRED" in answerability["failure_markers"]
+
+
+def test_future_event_pending_answer_counts_as_answerable() -> None:
+    answerability = smoke._evaluate_answerability(
+        "2026년 올스타전은 기준일(2026-05-31) 현재 아직 진행 전인 이벤트로 분류합니다. "
+        "따라서 올스타전 결과와 MVP는 아직 확정 전입니다.",
+        "2026년 올스타전 MVP는 누구야?",
+    )
+
+    assert answerability["answerability_pass"] is True
+    assert answerability["status"] == "future_event_pending"
+    assert answerability["failure_markers"] == []
+
+
+def test_clarification_answer_counts_as_expected_non_answer() -> None:
+    answerability = smoke._evaluate_answerability(
+        "어떤 팀 기준인지 팀명을 같이 알려주세요.",
+        "이 팀 최근 10경기 성적 알려줘.",
+    )
+
+    assert answerability["answerability_pass"] is True
+    assert answerability["status"] == "clarification_required"
+    assert answerability["expected_non_answer"] is True

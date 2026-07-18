@@ -2,7 +2,7 @@ import asyncio
 from datetime import date, datetime
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -36,12 +36,12 @@ from app.config import get_settings
 def _make_pool(fetchone_result):
     conn = MagicMock()
     execute_result = MagicMock()
-    execute_result.fetchone.return_value = fetchone_result
-    conn.execute.return_value = execute_result
+    execute_result.fetchone = AsyncMock(return_value=fetchone_result)
+    conn.execute = AsyncMock(return_value=execute_result)
 
     context = MagicMock()
-    context.__enter__.return_value = conn
-    context.__exit__.return_value = False
+    context.__aenter__ = AsyncMock(return_value=conn)
+    context.__aexit__ = AsyncMock(return_value=False)
 
     pool = MagicMock()
     pool.connection.return_value = context
@@ -55,7 +55,7 @@ def test_resolve_target_year_prefers_season_year():
         league_context={"season_year": 2024, "season": 20255},
     )
 
-    year, source = _resolve_target_year(payload, pool)
+    year, source = asyncio.run(_resolve_target_year(payload, pool))
 
     assert year == 2024
     assert source == "league_context.season_year"
@@ -69,7 +69,7 @@ def test_resolve_target_year_from_season_id_lookup():
         league_context={"season": 20225},
     )
 
-    year, source = _resolve_target_year(payload, pool)
+    year, source = asyncio.run(_resolve_target_year(payload, pool))
 
     assert year == 2022
     assert source == "league_context.season->kbo_seasons"
@@ -84,7 +84,7 @@ def test_resolve_target_year_falls_back_to_game_date_context():
         league_context={"season": "invalid", "game_date": "2023-08-11"},
     )
 
-    year, source = _resolve_target_year(payload, pool)
+    year, source = asyncio.run(_resolve_target_year(payload, pool))
 
     assert year == 2023
     assert source == "game_date"
@@ -98,7 +98,7 @@ def test_resolve_target_year_falls_back_to_game_id_lookup():
         game_id="20200401OBLG0",
     )
 
-    year, source = _resolve_target_year(payload, pool)
+    year, source = asyncio.run(_resolve_target_year(payload, pool))
 
     assert year == 2020
     assert source == "game_date"
@@ -112,7 +112,7 @@ def test_resolve_target_year_rejects_invalid_season_year():
     )
 
     with pytest.raises(HTTPException) as exc:
-        _resolve_target_year(payload, pool)
+        asyncio.run(_resolve_target_year(payload, pool))
 
     assert exc.value.status_code == 400
     assert exc.value.detail == "invalid_season_year_for_analysis"
@@ -123,7 +123,7 @@ def test_resolve_target_year_raises_when_unresolvable():
     payload = AnalyzeRequest(home_team_id="SSG", league_context={})
 
     with pytest.raises(HTTPException) as exc:
-        _resolve_target_year(payload, pool)
+        asyncio.run(_resolve_target_year(payload, pool))
 
     assert exc.value.status_code == 400
     assert exc.value.detail == "unable_to_resolve_analysis_year"
@@ -182,9 +182,9 @@ def test_analyze_team_configures_sse_ping(monkeypatch):
     agent._convert_team_id_to_name.side_effect = lambda team_id: team_id
 
     monkeypatch.setattr("app.routers.coach.get_connection_pool", lambda: MagicMock())
-    monkeypatch.setattr(
-        "app.routers.coach._collect_game_evidence",
-        lambda *args, **kwargs: types.SimpleNamespace(
+
+    async def _fake_collect_game_evidence(*args, **kwargs):
+        return types.SimpleNamespace(
             home_team_code="SSG",
             away_team_code="LG",
             home_team_name="SSG",
@@ -199,7 +199,10 @@ def test_analyze_team_configures_sse_ping(monkeypatch):
             away_pitcher=None,
             home_lineup=[],
             away_lineup=[],
-        ),
+        )
+
+    monkeypatch.setattr(
+        "app.routers.coach._collect_game_evidence", _fake_collect_game_evidence
     )
     monkeypatch.setattr(
         "app.routers.coach._build_effective_league_context",
@@ -219,7 +222,7 @@ def test_analyze_team_configures_sse_ping(monkeypatch):
     )
     monkeypatch.setattr(
         "app.routers.coach.assess_game_evidence",
-        lambda game_evidence: types.SimpleNamespace(root_causes=[]),
+        lambda game_evidence, **kwargs: types.SimpleNamespace(root_causes=[]),
     )
 
     response = asyncio.run(analyze_team(payload, agent=agent, _=None))

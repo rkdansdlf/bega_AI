@@ -34,20 +34,19 @@ Docker/compose 환경에서는 `working_dir=/app` 상태에서 동일한 명령�
 
 from __future__ import annotations
 
-import os
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import hashlib
 import json
+import logging as _logging
+import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from pathlib import Path
 import sys
-
-os.environ.setdefault("PYTEST_CURRENT_TEST", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -65,10 +64,60 @@ except ModuleNotFoundError as exc:
 
 # get_settings().database_url로 Postgres 연결을 열고 쿼리 타임아웃을 막기 위해 SET statement_timeout TO 0; 적용. 각 테이블을 순서대로 처리.
 from app.config import get_settings
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.core.chunking import smart_chunks
 from app.core.embeddings import embed_texts
+from app.core.ingest_runs import IngestLeaseLostError, IngestTableResult
+from app.core.ingest_sources import TRUSTED_INGEST_SOURCE_TABLES
+
+_ingest_logger = _logging.getLogger(__name__)
+
+
+def _embed_with_retry(
+    texts: List[str],
+    settings,
+    *,
+    max_concurrency: int = 1,
+    max_attempts: int = 3,
+) -> List[List[float]]:
+    """embed_texts() 호출에 지수 백오프 재시도를 적용한다.
+
+    임베딩 API 일시 장애 시 배치 전체 손실을 방지한다.
+    """
+    for attempt in range(max_attempts):
+        try:
+            return embed_texts(texts, settings, max_concurrency=max_concurrency)
+        except Exception as exc:
+            if attempt == max_attempts - 1:
+                raise
+            wait = 2**attempt + random.uniform(0, 1)
+            _ingest_logger.warning(
+                "Embed batch failed (attempt %d/%d), retrying in %.1fs: %s",
+                attempt + 1,
+                max_attempts,
+                wait,
+                exc,
+            )
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
+
+
+from app.core.rag_storage import (
+    RAG_CHUNKS_UPSERT_SQL,
+    base_source_row_id,
+    build_chunk_storage_fields,
+    build_upsert_tuple,
+    fetch_existing_embedding_texts,
+    infer_quality_score,
+    is_search_worthy_content,
+    scan_sensitive_content,
+    resolve_embedding_model,
+    resolve_embedding_version,
+    soft_deactivate_missing_parts,
+    soft_deactivate_missing_source_rows,
+    vector_literal,
+)
 from app.core.renderers.baseball import (
     render_batting_season,
     render_game_flow_summary,
@@ -102,6 +151,198 @@ class ChunkPayload:
     team_id: Optional[str]
     player_id: Optional[str]
     meta: Optional[Dict[str, Any]]
+    source_type: Optional[str] = None
+    source_uri: Optional[str] = None
+    topic_key: Optional[str] = None
+    valid_from: Any = None
+    valid_to: Any = None
+    expires_at: Any = None
+    quality_score: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class IngestExecutionResult:
+    """Structured result returned by a complete ingestion invocation."""
+
+    tables: Mapping[str, IngestTableResult]
+
+    @property
+    def total_written_chunks(self) -> int:
+        return sum(result.written_chunks for result in self.tables.values())
+
+    @property
+    def watermarks(self) -> Dict[str, datetime]:
+        return {
+            table: result.max_updated_at
+            for table, result in self.tables.items()
+            if result.max_updated_at is not None
+        }
+
+
+class ManualBaseballDataRequiredError(RuntimeError):
+    """Raised when trusted internal source data needs operator repair."""
+
+    def __init__(self, contract: Mapping[str, Any]) -> None:
+        self.contract = dict(contract)
+        super().__init__(str(self.contract.get("operator_message") or self.contract["code"]))
+
+
+REQUIRED_SOURCE_COLUMNS: Mapping[str, frozenset[str]] = {
+    "game": frozenset({"game_id", "game_date"}),
+    "game_metadata": frozenset({"game_id"}),
+    "game_summary": frozenset({"game_id", "game_date"}),
+}
+
+
+def validate_required_source_columns(
+    table_name: str,
+    actual_columns: Iterable[str],
+    required_columns: Iterable[str],
+) -> None:
+    """Enforce configured source fields without treating zero rows as missing data."""
+
+    actual = {str(column).strip().lower() for column in actual_columns}
+    required = {str(column).strip().lower() for column in required_columns}
+    missing = sorted(required - actual)
+    if not missing:
+        return
+    _raise_manual_source_schema(table_name, missing)
+
+
+def _raise_manual_source_schema(
+    table_name: str,
+    missing_fields: Iterable[str],
+) -> None:
+    missing = sorted(
+        {str(field).strip() for field in missing_fields if str(field).strip()}
+    )
+    contract = {
+        "code": "MANUAL_BASEBALL_DATA_REQUIRED",
+        "scope": "ai_ingest_source_schema",
+        "entity": table_name,
+        "range": None,
+        "missing_fields": missing,
+        "import_source": "operator_manual_data",
+        "blocking": True,
+        "operator_message": (
+            f"Internal source '{table_name}' is missing required fields: "
+            + ", ".join(missing)
+            + ". Provide operator-verified data or repair the trusted internal sync."
+        ),
+    }
+    raise ManualBaseballDataRequiredError(contract)
+
+
+def execute_source_select(
+    cursor: Any,
+    query: Any,
+    params: Sequence[Any],
+    *,
+    table_name: str,
+    required_columns: Iterable[str],
+) -> None:
+    """Execute a trusted-source query and map structural gaps to manual repair."""
+
+    try:
+        cursor.execute(query, params)
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "sqlstate", None) in {"42P01", "42703"}:
+            required = tuple(required_columns)
+            _raise_manual_source_schema(
+                table_name,
+                required if required else ("source_table",),
+            )
+        raise
+
+
+IngestLeaseGuard = Callable[[bool], None]
+
+
+def build_ingest_lease_guard(
+    connection: Any,
+    run_id: Any,
+    owner: str,
+) -> IngestLeaseGuard:
+    """Build a synchronous DB fence for each leased write batch."""
+
+    if not owner.strip():
+        raise ValueError("ingest lease owner is required")
+
+    def check(lock_for_write: bool = False) -> None:
+        lock_clause = " FOR SHARE" if lock_for_write else ""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM ai_ingest_runs
+                WHERE run_id = %s
+                  AND status = 'RUNNING'
+                  AND lease_owner = %s
+                  AND lease_expires_at > now()
+                """
+                + lock_clause,
+                (run_id, owner),
+            )
+            if cursor.fetchone() is None:
+                raise IngestLeaseLostError("ingest run lease is no longer owned")
+
+    return check
+
+
+def load_static_profile_payloads(
+    table_name: str,
+    profile: Mapping[str, Any],
+    *,
+    settings: Any,
+) -> List[ChunkPayload]:
+    """Load a trusted static source or require operator-provided repair."""
+
+    try:
+        payloads = build_static_profile_chunk_payloads(
+            table_name,
+            profile,
+            settings=settings,
+        )
+    except RuntimeError:
+        _raise_manual_source_schema(table_name, ("source_file",))
+    if not payloads:
+        _raise_manual_source_schema(table_name, ("source_content",))
+    return payloads
+
+
+def _cursor_column_names(cursor: Any) -> Set[str]:
+    names: Set[str] = set()
+    for column in cursor.description or ():
+        name = getattr(column, "name", None)
+        if name is None and isinstance(column, Sequence) and column:
+            name = column[0]
+        if name:
+            names.add(str(name))
+    return names
+
+
+def _row_updated_at(row: Mapping[str, Any], profile: Mapping[str, Any]) -> datetime | None:
+    configured = profile.get("watermark_fields") or ()
+    fields = tuple(configured) + (
+        "updated_at",
+        "game_updated_at",
+        "latest_updated_at",
+    )
+    for field in fields:
+        value = row.get(str(field))
+        if value is None:
+            continue
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
 
 
 # TABLE_PROFILES에 테이블별 메타가 있음: 설명, select_sql, 제목 구성용 필드(title_fields), 본문 하이라이트(highlights), 기본키 힌트(pk_hint), 전용 렌더러(renderer).
@@ -804,28 +1045,28 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
     "player_movements": {
         "description": "선수 이동 기록 (FA, 트레이드, 드래프트)",
         "title_fields": [
-            ["movement_date"],
+            ["date"],
             ["section"],
             ["player_name"],
         ],
         "select_sql": """
             SELECT
                 pm.*,
-                EXTRACT(YEAR FROM pm.movement_date) AS season_year,
+                EXTRACT(YEAR FROM pm.date) AS season_year,
                 t.team_name
             FROM player_movements pm
             LEFT JOIN teams t ON t.team_id = pm.team_code
-            ORDER BY pm.movement_date DESC, pm.player_name
+            ORDER BY pm.date DESC, pm.player_name
         """,
         "highlights": [
-            ("날짜", ["movement_date"]),
+            ("날짜", ["date"]),
             ("이동 유형", ["section"]),
             ("선수", ["player_name"]),
             ("팀", ["team_name", "team_code"]),
             ("비고", ["remarks"]),
         ],
-        "pk_hint": ["id", "movement_date", "player_name"],
-        "season_filter_column": "EXTRACT(YEAR FROM pm.movement_date)",
+        "pk_hint": ["id", "date", "player_name"],
+        "season_filter_column": "EXTRACT(YEAR FROM pm.date)",
         "since_filter_column": "pm.updated_at",
     },
     "team_franchises": {
@@ -916,7 +1157,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["team_id", "id"],
         "season_filter_column": None,
-        "since_filter_column": "tp.updated_at",
+        "since_filter_column": None,
     },
     "team_season_batting": {
         "description": "KBO 팀 시즌 타격 기록",
@@ -1036,54 +1277,13 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["id"],
         "season_filter_column": "ks.season_year",
         "since_filter_column": "gs.updated_at",
+        "date_to_exclusive_filter_column": "g.game_date",
     },
 }
 
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
 # team_daily_roster는 데이터가 많아 스킵
-DEFAULT_TABLES = [
-    # 기본 정보 테이블
-    "teams",
-    "team_franchises",
-    "team_history",
-    "stadiums",
-    "kbo_seasons",
-    "player_basic",
-    # 수상/이적 기록
-    "awards",
-    "player_movements",
-    # 시즌 통계
-    "player_season_batting",
-    "player_season_pitching",
-    # 팀 시즌 통계 + 랭킹
-    "team_season_batting",
-    "team_season_pitching",
-    "stat_rankings",
-    # 경기 정보
-    "game",
-    "game_metadata",
-    "game_flow_summary",
-    "game_lineups",
-    # 경기별 기록 (가장 많은 데이터)
-    "game_batting_stats",
-    "game_pitching_stats",
-    "game_summary",
-    # 정적 문서
-    "kbo_metrics_explained",
-    "markdown_docs_rules_terms",
-    "markdown_docs_strategy_metrics",
-    "markdown_docs_culture_history",
-    "markdown_docs_2025_storylines",
-    "markdown_docs_chatbot_kb_v2",
-    "kbo_regulations_basic",
-    "kbo_regulations_player",
-    "kbo_regulations_game",
-    "kbo_regulations_technical",
-    "kbo_regulations_discipline",
-    "kbo_regulations_postseason",
-    "kbo_regulations_special",
-    "kbo_regulations_terms",
-]
+DEFAULT_TABLES = list(TRUSTED_INGEST_SOURCE_TABLES)
 
 TARGET_RPM = 10
 MIN_DELAY_SECONDS = 60 / TARGET_RPM
@@ -1125,35 +1325,7 @@ CANONICAL_SOURCE_ROW_KEYS: Dict[str, Sequence[str]] = {
 }
 
 
-UPSERT_SQL = """
-INSERT INTO rag_chunks (
-    meta,
-    season_year,
-    season_id,
-    league_type_code,
-    team_id,
-    player_id,
-    source_table,
-    source_row_id,
-    title,
-    content,
-    embedding
-) VALUES (
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector
-)
-ON CONFLICT (source_table, source_row_id)
-DO UPDATE SET
-    meta = EXCLUDED.meta,
-    content = EXCLUDED.content,
-    embedding = COALESCE(EXCLUDED.embedding, rag_chunks.embedding),
-    season_year = COALESCE(EXCLUDED.season_year, rag_chunks.season_year),
-    season_id = COALESCE(EXCLUDED.season_id, rag_chunks.season_id),
-    league_type_code = COALESCE(EXCLUDED.league_type_code, rag_chunks.league_type_code),
-    team_id = COALESCE(EXCLUDED.team_id, rag_chunks.team_id),
-    player_id = COALESCE(EXCLUDED.player_id, rag_chunks.player_id),
-    title = EXCLUDED.title,
-    updated_at = now();
-"""
+UPSERT_SQL = RAG_CHUNKS_UPSERT_SQL
 
 
 def first_value(row: Dict[str, Any], keys: Sequence[str]) -> Optional[Any]:
@@ -1168,6 +1340,15 @@ def coerce_int(value: Any) -> Optional[int]:
         return None
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def coerce_float(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -1279,9 +1460,17 @@ def build_static_chunk_meta(
 ) -> Dict[str, Any]:
     source_table = str(profile.get("source_table", profile_key))
     relative_path = _relative_source_file_path(Path(profile["source_file"]))
+    source_type = _static_source_type(source_table, relative_path, profile)
+    source_uri = str(profile.get("source_uri") or f"file:{relative_path}")
+    topic_key = str(
+        profile.get("topic_key") or build_static_source_row_prefix(profile_key, profile)
+    )
     return {
         "source_file": str(Path(profile["source_file"]).resolve()),
         "source_path": relative_path,
+        "source_uri": source_uri,
+        "source_type": source_type,
+        "topic_key": topic_key,
         "source_profile": profile_key,
         "chunk_index": chunk_index,
         "league_scope": profile.get(
@@ -1293,7 +1482,66 @@ def build_static_chunk_meta(
             _default_static_knowledge_type(source_table),
         ),
         "freshness": profile.get("freshness", "evergreen"),
+        "source_version": profile.get("source_version", "v1"),
+        "visibility": profile.get("visibility", "public"),
+        "valid_from": profile.get("valid_from"),
+        "valid_to": profile.get("valid_to"),
+        "expires_at": profile.get("expires_at"),
     }
+
+
+def _static_source_type(
+    source_table: str,
+    relative_path: str,
+    profile: Dict[str, Any],
+) -> str:
+    explicit = profile.get("source_type")
+    if explicit:
+        return str(explicit)
+    normalized = relative_path.lower()
+    if source_table in {"kbo_regulations", "kbo_definitions"}:
+        return "official_rulebook"
+    if "kbo_rulebook" in normalized or "rulebook" in normalized:
+        return "official_rulebook"
+    return "markdown_doc"
+
+
+def _static_quality_score(source_type: str, profile: Dict[str, Any]) -> float:
+    return infer_quality_score(
+        source_type,
+        str(profile.get("source_table") or ""),
+        meta=profile,
+        explicit=profile.get("quality_score"),
+    )
+
+
+def _kbo_topic_key(source_table: str, source_row_id: str) -> str:
+    return f"{source_table}:{base_source_row_id(source_row_id)}"
+
+
+def _manual_lineup_notes_meta(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw_notes = row.get("notes")
+    if not raw_notes:
+        return {}
+    if isinstance(raw_notes, dict):
+        parsed = raw_notes
+    else:
+        try:
+            parsed = json.loads(str(raw_notes))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+    if not isinstance(parsed, dict):
+        return {}
+    if parsed.get("source_type") != "manual_lineup":
+        return {}
+    return dict(parsed)
+
+
+def _manual_lineup_quality_score(manual_meta: Dict[str, Any]) -> float:
+    confidence = coerce_float(manual_meta.get("confidence"))
+    if confidence is None:
+        confidence = 0.50
+    return max(0.0, min(confidence, 0.70))
 
 
 def read_static_profile_content(profile_key: str, profile: Dict[str, Any]) -> str:
@@ -1333,6 +1581,11 @@ def build_static_profile_chunk_payloads(
     source_table = str(profile.get("source_table", profile_key))
     season_year = int(profile.get("season_year", 0) or 0)
     title = str(profile.get("title") or profile_key)
+    first_meta = build_static_chunk_meta(profile_key, profile, chunk_index=1)
+    source_type = str(first_meta["source_type"])
+    source_uri = str(first_meta["source_uri"])
+    topic_key = str(first_meta["topic_key"])
+    quality_score = _static_quality_score(source_type, profile)
 
     return [
         ChunkPayload(
@@ -1355,6 +1608,13 @@ def build_static_profile_chunk_payloads(
                 profile,
                 chunk_index=idx,
             ),
+            source_type=source_type,
+            source_uri=source_uri,
+            topic_key=topic_key,
+            valid_from=profile.get("valid_from"),
+            valid_to=profile.get("valid_to"),
+            expires_at=profile.get("expires_at"),
+            quality_score=quality_score,
         )
         for idx, chunk in enumerate(chunks, start=1)
     ]
@@ -1613,10 +1873,12 @@ def build_select_query(
     limit: Optional[int],
     season_year: Optional[int],
     since: Optional[datetime],
+    date_to_exclusive: Optional[Any] = None,
 ):
     custom_sql = profile.get("select_sql")
     season_filter_column = profile.get("season_filter_column", "season_year")
     since_filter_column = profile.get("since_filter_column", "updated_at")
+    date_to_exclusive_filter_column = profile.get("date_to_exclusive_filter_column")
     params: List[Any] = []
     if custom_sql:
         stripped = custom_sql.strip()
@@ -1636,6 +1898,9 @@ def build_select_query(
         if since is not None and since_filter_column:
             where_clauses.append(f"{since_filter_column} >= %s")
             params.append(since)
+        if date_to_exclusive is not None and date_to_exclusive_filter_column:
+            where_clauses.append(f"{date_to_exclusive_filter_column} < %s")
+            params.append(date_to_exclusive)
 
         if where_clauses:
             has_where = bool(_find_top_level_keyword_positions(base_sql, "WHERE"))
@@ -1659,9 +1924,14 @@ def build_select_query(
             sql.SQL("{} = %s").format(sql.Identifier(season_filter_column))
         )
         params.append(season_year)
-    if since is not None:
-        where_parts.append(sql.SQL("updated_at >= %s"))
+    if since is not None and since_filter_column:
+        column_name = str(since_filter_column).split(".")[-1]
+        where_parts.append(sql.SQL("{} >= %s").format(sql.Identifier(column_name)))
         params.append(since)
+    if date_to_exclusive is not None and date_to_exclusive_filter_column:
+        column_name = str(date_to_exclusive_filter_column).split(".")[-1]
+        where_parts.append(sql.SQL("{} < %s").format(sql.Identifier(column_name)))
+        params.append(date_to_exclusive)
     if where_parts:
         query = query + sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
     if pk_columns:
@@ -1679,6 +1949,15 @@ def batched(
     total = len(iterable)
     for idx in range(0, total, size):
         yield list(iterable[idx : idx + size])
+
+
+def should_run_row_stale_cleanup(
+    *,
+    since: Optional[datetime],
+    limit: Optional[int],
+    row_stale_cleanup: str,
+) -> bool:
+    return row_stale_cleanup in {"dry-run", "apply"} and since is None and limit is None
 
 
 RowPrepareTask = Tuple[str, Dict[str, Any], str, bool, str]
@@ -1734,6 +2013,46 @@ def _build_chunk_payload_dicts_for_row(
     if not chunks:
         return []
 
+    manual_meta = (
+        _manual_lineup_notes_meta(row) if target_source_table == "game_lineups" else {}
+    )
+    source_type = str(profile.get("source_type") or "kbo_db_table")
+    source_uri = str(
+        profile.get("source_uri") or f"db:{target_source_table}:{source_row_id}"
+    )
+    if manual_meta:
+        source_type = "manual_lineup"
+        source_uri = str(manual_meta.get("source_url") or source_uri)
+    topic_key = str(
+        profile.get("topic_key") or _kbo_topic_key(target_source_table, source_row_id)
+    )
+    if manual_meta:
+        quality_score = _manual_lineup_quality_score(manual_meta)
+    else:
+        quality_score = infer_quality_score(
+            source_type,
+            target_source_table,
+            meta=profile,
+            explicit=profile.get("quality_score"),
+        )
+    valid_from = profile.get("valid_from")
+    valid_to = profile.get("valid_to")
+    expires_at = profile.get("expires_at")
+    meta = dict(row)
+    meta.setdefault("source_type", source_type)
+    meta.setdefault("source_uri", source_uri)
+    meta.setdefault("topic_key", topic_key)
+    meta.setdefault("source_version", str(profile.get("source_version", "v1")))
+    meta.setdefault("visibility", str(profile.get("visibility", "public")))
+    meta.setdefault("valid_from", valid_from)
+    meta.setdefault("valid_to", valid_to)
+    meta.setdefault("expires_at", expires_at)
+    if manual_meta:
+        meta.update(manual_meta)
+        meta["source_type"] = source_type
+        meta["source_uri"] = source_uri
+        meta["quality_score"] = quality_score
+
     payloads: List[Dict[str, Any]] = []
     if len(chunks) == 1:
         payloads.append(
@@ -1747,7 +2066,14 @@ def _build_chunk_payload_dicts_for_row(
                 "league_type_code": league_type_code,
                 "team_id": str(team_id) if team_id is not None else None,
                 "player_id": str(player_id) if player_id is not None else None,
-                "meta": row,
+                "meta": meta,
+                "source_type": source_type,
+                "source_uri": source_uri,
+                "topic_key": topic_key,
+                "valid_from": valid_from,
+                "valid_to": valid_to,
+                "expires_at": expires_at,
+                "quality_score": quality_score,
             }
         )
     else:
@@ -1763,7 +2089,14 @@ def _build_chunk_payload_dicts_for_row(
                     "league_type_code": league_type_code,
                     "team_id": str(team_id) if team_id is not None else None,
                     "player_id": str(player_id) if player_id is not None else None,
-                    "meta": row,
+                    "meta": meta,
+                    "source_type": source_type,
+                    "source_uri": source_uri,
+                    "topic_key": topic_key,
+                    "valid_from": valid_from,
+                    "valid_to": valid_to,
+                    "expires_at": expires_at,
+                    "quality_score": quality_score,
                 }
             )
     return payloads
@@ -1895,61 +2228,188 @@ def flush_chunks(
     commit_interval: int,
     stats: Dict[str, Any],
     skip_embedding: bool,
+    lease_guard: Optional[IngestLeaseGuard] = None,
 ) -> int:
     if not buffer:
         return 0
+    if lease_guard is not None:
+        lease_guard(False)
 
     stats["batches"] = stats.get("batches", 0) + 1
-    vector_literals: List[Optional[str]]
+    embedding_model = resolve_embedding_model(settings)
+    embedding_version = resolve_embedding_version(settings)
+    min_chars = int(getattr(settings, "rag_quality_min_chars", 50) or 50)
+    filtered_items: List[Tuple[ChunkPayload, Dict[str, Any]]] = []
+
+    def _record_sensitive_skip(findings: Sequence[str]) -> None:
+        stats["sensitive_skipped"] = stats.get("sensitive_skipped", 0) + 1
+        for finding in findings:
+            key = f"sensitive_{finding}"
+            stats[key] = stats.get(key, 0) + 1
+
+    def _findings_from_error(exc: ValueError) -> List[str]:
+        message = str(exc)
+        if "sensitive content:" not in message:
+            raise exc
+        raw_findings = message.rsplit(":", 1)[-1]
+        return [
+            finding.strip() for finding in raw_findings.split(",") if finding.strip()
+        ]
+
+    for item in buffer:
+        sensitive_findings = sorted(
+            set(
+                scan_sensitive_content(item.content) + scan_sensitive_content(item.meta)
+            )
+        )
+        if sensitive_findings:
+            _record_sensitive_skip(sensitive_findings)
+            continue
+        if not is_search_worthy_content(item.content, min_chars=min_chars):
+            stats["quality_skipped"] = stats.get("quality_skipped", 0) + 1
+            continue
+        try:
+            storage_fields = build_chunk_storage_fields(
+                settings=settings,
+                source_table=item.table,
+                source_row_id=item.source_row_id,
+                content=item.content,
+                meta=item.meta,
+                source_type=item.source_type,
+                source_uri=item.source_uri,
+                topic_key=item.topic_key,
+                valid_from=item.valid_from,
+                valid_to=item.valid_to,
+                expires_at=item.expires_at,
+                embedding_model=embedding_model,
+                embedding_version=embedding_version,
+                quality_score=item.quality_score,
+            )
+        except ValueError as exc:
+            _record_sensitive_skip(_findings_from_error(exc))
+            continue
+        filtered_items.append((item, storage_fields))
+
+    buffer.clear()
+    if not filtered_items:
+        return 0
+
+    vector_literals: List[Optional[str]] = [None] * len(filtered_items)
     embeddings: Optional[List[List[float]]] = None
 
     if skip_embedding:
-        vector_literals = [None] * len(buffer)
+        vector_literals = [None] * len(filtered_items)
     else:
-        stats["embedding_calls"] = stats.get("embedding_calls", 0) + 1
-        start = time.perf_counter()
-        embeddings = embed_texts(
-            [item.content for item in buffer],
-            settings,
-            max_concurrency=max_concurrency,
-        )
-        elapsed = time.perf_counter() - start
-        stats["sleep_seconds"] = stats.get("sleep_seconds", 0.0) + elapsed
-        vector_literals = [
-            "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
-            for embedding in embeddings
-        ]
+        existing_embeddings: Dict[str, str] = {}
+        if bool(getattr(settings, "rag_storage_dedup_enabled", True)):
+            existing_embeddings = fetch_existing_embedding_texts(
+                cur,
+                content_hashes=(
+                    storage["content_hash"] for _, storage in filtered_items
+                ),
+                embedding_model=embedding_model,
+                embedding_dim=filtered_items[0][1]["embedding_dim"],
+                embedding_version=embedding_version,
+                chunking_version=filtered_items[0][1]["chunking_version"],
+            )
+        to_embed_indices: List[int] = []
+        to_embed_texts: List[str] = []
+        pending_hashes: Dict[str, int] = {}
+        duplicate_links: List[Tuple[int, int]] = []
+        for idx, (item, storage) in enumerate(filtered_items):
+            existing = existing_embeddings.get(storage["content_hash"])
+            if existing:
+                vector_literals[idx] = existing
+                stats["embedding_reused"] = stats.get("embedding_reused", 0) + 1
+                continue
+            pending_idx = pending_hashes.get(storage["content_hash"])
+            if pending_idx is not None:
+                duplicate_links.append((idx, pending_idx))
+                stats["embedding_reused"] = stats.get("embedding_reused", 0) + 1
+                continue
+            pending_hashes[storage["content_hash"]] = idx
+            to_embed_indices.append(idx)
+            to_embed_texts.append(item.content)
 
-    if vector_literals:
-        # Prepare data for execute_values
-        data = []
-        for item, vector_literal in zip(buffer, vector_literals):
-            data.append(
-                (
-                    json.dumps(item.meta, default=str) if item.meta else None,
-                    item.season_year,
-                    item.season_id,
-                    item.league_type_code,
-                    item.team_id,
-                    item.player_id,
-                    item.table,
-                    item.source_row_id,
-                    item.title,
-                    item.content,
-                    vector_literal,
-                )
+        if to_embed_texts:
+            stats["embedding_calls"] = stats.get("embedding_calls", 0) + 1
+            stats["reembedded_count"] = stats.get("reembedded_count", 0) + len(
+                to_embed_texts
+            )
+            start = time.perf_counter()
+            embeddings = _embed_with_retry(
+                to_embed_texts,
+                settings,
+                max_concurrency=max_concurrency,
+            )
+            elapsed = time.perf_counter() - start
+            stats["sleep_seconds"] = stats.get("sleep_seconds", 0.0) + elapsed
+            for idx, embedding in zip(to_embed_indices, embeddings):
+                vector_literals[idx] = vector_literal(embedding)
+            for duplicate_idx, original_idx in duplicate_links:
+                vector_literals[duplicate_idx] = vector_literals[original_idx]
+        else:
+            stats["embedding_calls_skipped"] = (
+                stats.get("embedding_calls_skipped", 0) + 1
             )
 
-        # Bulk upsert using executemany
-        cur.executemany(
-            UPSERT_SQL,
-            data,
+    # Prepare data for executemany.
+    data = []
+    stored_items: List[Tuple[ChunkPayload, Dict[str, Any]]] = []
+    for (item, storage_fields), vector_text in zip(filtered_items, vector_literals):
+        try:
+            data.append(
+                build_upsert_tuple(
+                    meta=item.meta,
+                    storage_fields=storage_fields,
+                    season_year=item.season_year,
+                    season_id=item.season_id,
+                    league_type_code=item.league_type_code,
+                    team_id=item.team_id,
+                    player_id=item.player_id,
+                    source_table=item.table,
+                    source_row_id=item.source_row_id,
+                    title=item.title,
+                    content=item.content,
+                    embedding_text=vector_text,
+                )
+            )
+        except ValueError as exc:
+            _record_sensitive_skip(_findings_from_error(exc))
+            continue
+        stored_items.append((item, storage_fields))
+
+    if not data:
+        return 0
+
+    # Bulk upsert using executemany.
+    if lease_guard is not None:
+        lease_guard(True)
+    cur.executemany(
+        UPSERT_SQL,
+        data,
+    )
+
+    grouped_source_rows: Dict[Tuple[str, str], List[str]] = {}
+    for item, _storage_fields in stored_items:
+        source_prefix = base_source_row_id(item.source_row_id)
+        grouped_source_rows.setdefault((item.table, source_prefix), []).append(
+            item.source_row_id
+        )
+    for (source_table, source_prefix), active_ids in grouped_source_rows.items():
+        soft_deactivate_missing_parts(
+            cur,
+            source_table=source_table,
+            source_prefix=source_prefix,
+            active_source_row_ids=active_ids,
         )
 
-    flushed = len(buffer)
-    buffer.clear()
+    flushed = len(stored_items)
     stats["since_commit"] = stats.get("since_commit", 0) + flushed
-    if commit_interval and stats["since_commit"] >= commit_interval:
+    if lease_guard is not None:
+        cur.connection.commit()
+        stats["since_commit"] = 0
+    elif commit_interval and stats["since_commit"] >= commit_interval:
         cur.connection.commit()
         stats["since_commit"] = 0
 
@@ -1975,18 +2435,24 @@ def ingest_table(
     commit_interval: int,
     parallel_engine: str,
     workers: int,
+    row_stale_cleanup: str,
     stats: Dict[str, Any],
-) -> int:
+    date_to_exclusive: Optional[Any] = None,
+    lease_guard: Optional[IngestLeaseGuard] = None,
+) -> IngestTableResult:
     if table_name == "rag_chunks":
         print("경고: rag_chunks 테이블은 처리 대상에서 제외됩니다.")
-        return 0
+        return IngestTableResult(table_name, 0, 0, 0, 0, None)
 
     profile = TABLE_PROFILES.get(table_name, {})
+    target_source_table = str(profile.get("source_table", table_name))
     total_chunks = 0
     buffer: List[ChunkPayload] = []
     seen_source_row_ids: Set[str] = set()
     settings = get_settings()
     processed_chunks = 0
+    fetched_rows = 0
+    max_updated_at: Optional[datetime] = None
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     effective_parallel_engine = parallel_engine
 
@@ -1999,40 +2465,19 @@ def ingest_table(
         dest_conn.cursor() as write_cur,
     ):
         write_cur.execute("SET statement_timeout TO 0;")
+        if lease_guard is not None:
+            lease_guard(False)
 
         # --- NEW LOGIC FOR STATIC FILE ---
         if "source_file" in profile:
             print(f"      정적 파일 '{profile['source_file']}'을(를) 수집 중입니다...")
-            try:
-                payloads = build_static_profile_chunk_payloads(
-                    table_name,
-                    profile,
-                    settings=settings,
-                )
-            except RuntimeError as exc:
-                print(f"오류: {exc}")
-                return 0
-
-            if not payloads:
-                print(
-                    f"오류: '{profile['source_file']}' 파일 내용에서 청크를 생성할 수 없습니다."
-                )
-                return 0
-
-            static_prefix = build_static_source_row_prefix(table_name, profile)
-            write_cur.execute(
-                """
-                DELETE FROM rag_chunks
-                WHERE source_table = %s
-                  AND (source_row_id = %s OR source_row_id LIKE %s)
-                """,
-                (
-                    profile["source_table"],
-                    static_prefix,
-                    f"{static_prefix}#part%",
-                ),
+            payloads = load_static_profile_payloads(
+                table_name,
+                profile,
+                settings=settings,
             )
 
+            static_prefix = build_static_source_row_prefix(table_name, profile)
             buffer.extend(payloads)
             flushed = flush_chunks(
                 write_cur,
@@ -2042,12 +2487,20 @@ def ingest_table(
                 commit_interval=commit_interval,
                 stats=stats,
                 skip_embedding=skip_embedding,
+                lease_guard=lease_guard,
             )
             total_chunks = flushed
             dest_conn.commit()  # Commit after static file ingestion
             if flushed > 0:
                 print(f"      총 {flushed}개 청크를 처리했습니다.", flush=True)
-            return total_chunks
+            return IngestTableResult(
+                table_name,
+                total_chunks,
+                1,
+                int(stats.get("embedding_reused", 0)),
+                int(stats.get("reembedded_count", 0)),
+                None,
+            )
         # --- END NEW LOGIC ---
 
         pk_columns = resolve_primary_key_columns(source_conn, table_name, profile)
@@ -2058,12 +2511,25 @@ def ingest_table(
             limit,
             season_year,
             since,
+            date_to_exclusive=date_to_exclusive,
         )
 
-        fetched_rows = 0
-        read_cur.execute(query, params)
+        execute_source_select(
+            read_cur,
+            query,
+            params,
+            table_name=table_name,
+            required_columns=REQUIRED_SOURCE_COLUMNS.get(table_name, ()),
+        )
+        validate_required_source_columns(
+            table_name,
+            _cursor_column_names(read_cur),
+            REQUIRED_SOURCE_COLUMNS.get(table_name, ()),
+        )
 
         while True:
+            if lease_guard is not None:
+                lease_guard(False)
             rows = read_cur.fetchmany(read_batch_size)
             if not rows:
                 break
@@ -2075,6 +2541,11 @@ def ingest_table(
             row_tasks: List[RowPrepareTask] = []
             for raw_row in rows:
                 row = dict(raw_row)
+                row_updated_at = _row_updated_at(row, profile)
+                if row_updated_at is not None and (
+                    max_updated_at is None or row_updated_at > max_updated_at
+                ):
+                    max_updated_at = row_updated_at
                 source_row_id = build_source_row_id(
                     row, table_name, pk_columns, profile.get("pk_hint", [])
                 )
@@ -2117,6 +2588,7 @@ def ingest_table(
                         commit_interval=commit_interval,
                         stats=stats,
                         skip_embedding=skip_embedding,
+                        lease_guard=lease_guard,
                     )
                     total_chunks += flushed
                     processed_chunks += flushed
@@ -2133,6 +2605,7 @@ def ingest_table(
             commit_interval=commit_interval,
             stats=stats,
             skip_embedding=skip_embedding,
+            lease_guard=lease_guard,
         )
         total_chunks += flushed
         processed_chunks += flushed
@@ -2141,12 +2614,46 @@ def ingest_table(
                 f"      현재까지 {processed_chunks}개 청크를 처리했습니다...",
                 flush=True,
             )
+        if should_run_row_stale_cleanup(
+            since=since,
+            limit=limit,
+            row_stale_cleanup=row_stale_cleanup,
+        ):
+            if lease_guard is not None:
+                lease_guard(True)
+            dry_run = row_stale_cleanup != "apply"
+            stale_count = soft_deactivate_missing_source_rows(
+                write_cur,
+                source_table=target_source_table,
+                active_source_row_ids=seen_source_row_ids,
+                dry_run=dry_run,
+            )
+            if dry_run:
+                stats["row_stale_cleanup_candidates"] = stale_count
+                print(
+                    f"      row-level stale cleanup dry-run: {stale_count}개 후보",
+                    flush=True,
+                )
+            else:
+                stats["row_stale_cleanup_deactivated"] = stale_count
+                print(
+                    f"      row-level stale cleanup apply: {stale_count}개 비활성화",
+                    flush=True,
+                )
+
         dest_conn.commit()  # Commit on dest_conn
 
     if processed_chunks:
         print(f"      총 {processed_chunks}개 청크를 처리했습니다.", flush=True)
 
-    return total_chunks
+    return IngestTableResult(
+        table_name,
+        total_chunks,
+        fetched_rows,
+        int(stats.get("embedding_reused", 0)),
+        int(stats.get("reembedded_count", 0)),
+        max_updated_at,
+    )
 
 
 def ingest(
@@ -2164,7 +2671,11 @@ def ingest(
     commit_interval: int,
     parallel_engine: str,
     workers: int,
-) -> None:
+    row_stale_cleanup: str = "off",
+    date_to_exclusive: Optional[Any] = None,
+    lease_run_id: Any = None,
+    lease_owner: Optional[str] = None,
+) -> IngestExecutionResult:
     _require_psycopg()
     settings = get_settings()
 
@@ -2184,8 +2695,17 @@ def ingest(
         cur.execute("SET statement_timeout TO 0;")
         cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
     dest_conn.autocommit = original_autocommit
+    lease_guard = None
+    if lease_run_id is not None or lease_owner is not None:
+        if lease_run_id is None or not lease_owner:
+            raise ValueError("lease_run_id and lease_owner must be provided together")
+        lease_guard = build_ingest_lease_guard(
+            dest_conn,
+            lease_run_id,
+            lease_owner,
+        )
 
-    ingested_total = 0
+    table_results: Dict[str, IngestTableResult] = {}
     try:
         for table in tables:
             print(f" 테이블 '{table}'을(를) 수집 중입니다 ...")
@@ -2197,7 +2717,7 @@ def ingest(
                 "effective_parallel_engine": parallel_engine,
                 "parallel_engine_fallbacks": 0,
             }
-            chunks = ingest_table(
+            result = ingest_table(
                 source_conn,  # Read from Source
                 dest_conn,  # Write to Dest
                 table,
@@ -2207,24 +2727,32 @@ def ingest(
                 season_year=season_year,
                 use_legacy_renderer=use_legacy_renderer,
                 since=since,
+                date_to_exclusive=date_to_exclusive,
                 skip_embedding=skip_embedding,
                 max_concurrency=max_concurrency,
                 commit_interval=commit_interval,
                 parallel_engine=parallel_engine,
                 workers=workers,
+                row_stale_cleanup=row_stale_cleanup,
                 stats=stats,
+                lease_guard=lease_guard,
             )
-            ingested_total += chunks
+            table_results[table] = result
             print(
-                f"   -> 테이블 '{table}'에서 {chunks}개 청크를 작성했습니다 "
+                f"   -> 테이블 '{table}'에서 {result.written_chunks}개 청크를 작성했습니다 "
                 f"(배치={stats['batches']}, 임베딩 호출={stats['embedding_calls']}, "
+                f"민감정보 skip={stats.get('sensitive_skipped', 0)}, "
+                f"row stale 후보={stats.get('row_stale_cleanup_candidates', 0)}, "
+                f"row stale 비활성화={stats.get('row_stale_cleanup_deactivated', 0)}, "
                 f"대기 시간={stats['sleep_seconds']:.2f}초, 엔진={stats['effective_parallel_engine']}, "
                 f"fallback={stats['parallel_engine_fallbacks']})"
             )
     finally:
         source_conn.close()
         dest_conn.close()
-    print(f"총 {ingested_total}개 청크 수집을 완료했습니다.")
+    execution_result = IngestExecutionResult(tables=table_results)
+    print(f"총 {execution_result.total_written_chunks}개 청크 수집을 완료했습니다.")
+    return execution_result
 
 
 def parse_args() -> argparse.Namespace:
@@ -2297,10 +2825,28 @@ def parse_args() -> argparse.Namespace:
         help="updated_at 기준 ISO8601 타임스탬프 이후 변경분만 처리합니다 (예: 2025-05-01T00:00:00).",
     )
     parser.add_argument(
+        "--date-to-exclusive",
+        type=str,
+        default=None,
+        help=(
+            "날짜 컬럼 기준 배타적 상한입니다. 현재는 game_summary의 g.game_date에 적용됩니다 "
+            "(예: 2026-05-01)."
+        ),
+    )
+    parser.add_argument(
         "--commit-interval",
         type=int,
         default=500,
         help="이 수만큼 청크를 쓰면 커밋을 수행합니다.",
+    )
+    parser.add_argument(
+        "--row-stale-cleanup",
+        choices=("off", "dry-run", "apply"),
+        default="off",
+        help=(
+            "full ingest에서 source DB에 더 이상 없는 row의 rag_chunks를 soft deactivate합니다. "
+            "dry-run은 후보 수만 출력하고, apply만 실제 비활성화합니다. --since/--limit에서는 실행하지 않습니다."
+        ),
     )
     parser.add_argument(
         "--source-db-url",
@@ -2336,9 +2882,15 @@ if __name__ == "__main__":
         season_year=args.season_year,
         use_legacy_renderer=args.use_legacy_renderer,
         since=datetime.fromisoformat(args.since) if args.since else None,
+        date_to_exclusive=(
+            datetime.fromisoformat(args.date_to_exclusive).date()
+            if args.date_to_exclusive
+            else None
+        ),
         skip_embedding=args.no_embed,
         max_concurrency=max(1, args.max_concurrency),
         commit_interval=max(1, args.commit_interval),
         parallel_engine=args.parallel_engine,
         workers=max(1, args.workers),
+        row_stale_cleanup=args.row_stale_cleanup,
     )

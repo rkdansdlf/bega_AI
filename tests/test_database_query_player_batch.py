@@ -1,4 +1,5 @@
-from unittest.mock import Mock
+import asyncio
+from unittest.mock import AsyncMock, Mock
 
 from app.tools.database_query import DatabaseQueryTool
 
@@ -6,6 +7,10 @@ from app.tools.database_query import DatabaseQueryTool
 def test_get_player_season_stats_batch_preserves_order_and_partial_miss() -> None:
     mock_connection = Mock()
     mock_cursor = Mock()
+    mock_cursor.execute = AsyncMock()
+    mock_cursor.fetchall = AsyncMock()
+    mock_cursor.fetchone = AsyncMock(return_value=None)
+    mock_cursor.close = AsyncMock()
     mock_connection.cursor.return_value = mock_cursor
     mock_cursor.fetchall.side_effect = [
         [
@@ -50,11 +55,11 @@ def test_get_player_season_stats_batch_preserves_order_and_partial_miss() -> Non
     tool = DatabaseQueryTool.__new__(DatabaseQueryTool)
     tool.connection = mock_connection
 
-    results = tool.get_player_season_stats_batch(
+    results = asyncio.run(tool.get_player_season_stats_batch(
         ["안현민", "윤도현", "김도영"],
         2025,
         "both",
-    )
+    ))
 
     assert [result["requested_player_name"] for result in results] == [
         "안현민",
@@ -76,13 +81,17 @@ def test_get_player_season_stats_batch_preserves_order_and_partial_miss() -> Non
 def test_get_player_season_stats_batch_sets_error_on_query_failure() -> None:
     mock_connection = Mock()
     mock_cursor = Mock()
+    mock_cursor.execute = AsyncMock()
+    mock_cursor.fetchall = AsyncMock()
+    mock_cursor.fetchone = AsyncMock(return_value=None)
+    mock_cursor.close = AsyncMock()
     mock_connection.cursor.return_value = mock_cursor
     mock_cursor.execute.side_effect = RuntimeError("db down")
 
     tool = DatabaseQueryTool.__new__(DatabaseQueryTool)
     tool.connection = mock_connection
 
-    results = tool.get_player_season_stats_batch(["문동주", "김택연"], 2025, "pitching")
+    results = asyncio.run(tool.get_player_season_stats_batch(["문동주", "김택연"], 2025, "pitching"))
 
     assert len(results) == 2
     assert all(result["found"] is False for result in results)

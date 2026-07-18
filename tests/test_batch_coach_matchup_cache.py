@@ -17,6 +17,8 @@ from scripts.batch_coach_matchup_cache import (
     _postseason_mismatch_error_message,
     _sort_targets,
     _build_terminal_cache_result_if_available,
+    build_prewarm_plan_summary,
+    call_analyze,
     collect_cache_verification_results,
     load_failed_cache_keys,
     MatchupTarget,
@@ -803,6 +805,16 @@ def test_call_analyze_with_deadline_returns_failed_on_wall_timeout(
         return {"status": "generated", "reason": "generated", "meta": {}}
 
     monkeypatch.setattr(batch_module, "call_analyze", _stuck_call)
+    # Patch DB-dependent helpers so _fetch_cache_state (and _get_connection_pool)
+    # are not called during the timeout path — keeps the test offline and fast.
+    monkeypatch.setattr(
+        batch_module, "_build_terminal_cache_result_if_available", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        batch_module,
+        "_build_in_progress_cache_result_if_available",
+        lambda *a, **kw: None,
+    )
 
     result = asyncio.run(
         call_analyze_with_deadline(
@@ -816,6 +828,64 @@ def test_call_analyze_with_deadline_returns_failed_on_wall_timeout(
     assert result["status"] == "failed"
     assert result["reason"] == "target_wall_timeout"
     assert result["meta"]["timeout_seconds"] == 0.01
+
+
+def test_call_analyze_stops_reading_after_done_marker() -> None:
+    target = MatchupTarget(
+        cache_key="completed-stream",
+        game_id="20250310SSHH2",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    class HangingAfterDoneResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def aiter_lines(self):
+            yield "event: meta"
+            yield (
+                'data: {"cache_state":"COMPLETED","cached":true,' '"in_progress":false}'
+            )
+            yield "data: [DONE]"
+            await asyncio.Event().wait()
+
+    class Client:
+        def stream(self, *args, **kwargs):
+            return HangingAfterDoneResponse()
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            call_analyze(
+                client=Client(),
+                base_url="http://127.0.0.1:18080/api/ai",
+                target=target,
+            ),
+            timeout=0.05,
+        )
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "cache_hit"
+    assert result["meta"]["cache_state"] == "COMPLETED"
 
 
 def test_call_analyze_with_deadline_returns_in_progress_when_pending_row_exists(
@@ -1100,7 +1170,7 @@ def test_force_rebuild_delete_blocks_active_pending_but_deletes_terminal(
             return _Ctx(self._conn)
 
     conn = _FakeConn()
-    monkeypatch.setattr(batch_module, "get_connection_pool", lambda: _FakePool(conn))
+    monkeypatch.setattr(batch_module, "_get_connection_pool", lambda: _FakePool(conn))
 
     stats = batch_module.force_rebuild_delete(
         ["pending-key", "completed-key", "missing-key"]
@@ -1110,3 +1180,68 @@ def test_force_rebuild_delete_blocks_active_pending_but_deletes_terminal(
     assert stats["unsafe_force_rebuild_blocked_count"] == 1
     assert stats["missing_cache_row_count"] == 1
     assert conn.deleted_keys == ["completed-key"]
+
+
+def test_build_prewarm_plan_summary_estimates_api_calls_and_cache_savings() -> None:
+    plan = build_prewarm_plan_summary(
+        [
+            {
+                "status": "skipped",
+                "reason": "cache_hit",
+                "meta": {"cached": True},
+            },
+            {
+                "status": "failed",
+                "reason": "missing_cache_row",
+                "meta": {"cache_row_missing": True},
+            },
+            {
+                "status": "failed",
+                "reason": "empty_response",
+                "meta": {
+                    "failure_class": "retryable_failed",
+                    "retryable_failure": True,
+                },
+            },
+            {
+                "status": "in_progress",
+                "reason": "pending_wait",
+                "meta": {"in_progress": True},
+            },
+            {
+                "status": "failed",
+                "reason": "failed_cache_row",
+                "meta": {"failure_class": "locked_terminal"},
+            },
+            {
+                "status": "failed",
+                "reason": "db_unavailable",
+                "meta": {"db_unavailable": True},
+            },
+        ]
+    )
+
+    assert plan["target_count"] == 6
+    assert plan["cache_hit_count"] == 1
+    assert plan["cache_hit_rate"] == 0.1667
+    assert plan["estimated_api_call_count"] == 2
+    assert plan["estimated_api_call_rate"] == 0.3333
+    assert plan["estimated_cache_hit_savings_count"] == 1
+    assert plan["missing_cache_row_count"] == 1
+    assert plan["retryable_failure_count"] == 1
+    assert plan["pending_count"] == 1
+    assert plan["locked_terminal_count"] == 1
+    assert plan["db_unavailable_count"] == 1
+    assert plan["blocked_count"] == 3
+
+
+def test_parse_args_accepts_dry_run(monkeypatch) -> None:
+    monkeypatch.setattr(
+        batch_module.sys,
+        "argv",
+        ["batch_coach_matchup_cache.py", "--dry-run", "--years", "2025"],
+    )
+
+    options = batch_module.parse_args()
+
+    assert options.dry_run is True

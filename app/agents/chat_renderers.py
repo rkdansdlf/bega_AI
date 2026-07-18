@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..core.renderers.baseball import render_game_flow_summary
@@ -16,10 +17,17 @@ METRIC_LABELS = {
     "avg": "타율",
     "battingavg": "타율",
     "ops": "OPS",
+    "obp": "출루율",
+    "slg": "장타율",
     "hr": "홈런",
     "homeruns": "홈런",
     "home_runs": "홈런",
+    "hits": "안타",
+    "안타": "안타",
+    "runs": "득점",
     "rbi": "타점",
+    "stolen_bases": "도루",
+    "sb_success_rate": "도루 성공률",
     "wins": "다승",
     "win": "다승",
     "whip": "WHIP",
@@ -29,6 +37,11 @@ METRIC_LABELS = {
     "hold": "홀드",
     "strikeouts": "탈삼진",
     "so": "탈삼진",
+    "innings_pitched": "이닝",
+    "complete_games": "완투",
+    "shutouts": "완봉",
+    "avg_against": "피안타율",
+    "gdp": "병살타",
     "war": "WAR",
 }
 
@@ -176,10 +189,26 @@ class ChatRendererRegistry:
         raw_stat_name = resolved_agent._format_deterministic_metric(
             data.get("stat_name")
         )
+        position = str(data.get("position") or "").lower()
+        stat_key = re.sub(r"[^a-z0-9가-힣_]+", "", str(raw_stat_name).lower())
         stat_name = self._metric_label(raw_stat_name)
+        if stat_key == "strikeouts" and position == "batting":
+            stat_name = "삼진"
         season_label = f"{year}년" if year != "확인 불가" else "해당 시즌"
         top_entry = leaderboard[0]
         top_player = self._player_label(top_entry, agent=resolved_agent)
+        top_value = resolved_agent._format_deterministic_metric(
+            resolved_agent._extract_leaderboard_value(top_entry, raw_stat_name)
+        )
+        top_value_label = self._metric_value_label(stat_key, stat_name, top_value)
+
+        if self._is_current_season_home_run_king_query(query, year, stat_key):
+            return (
+                f"{season_label}은 아직 시즌 중이라 최종 홈런왕은 확정 전이고, 현재 홈런 선두는 {top_player}입니다.\n\n"
+                f"현재 확인된 수치는 {top_value_label}입니다.\n\n"
+                "시즌이 끝나기 전에는 '홈런왕'을 확정 타이틀이 아니라 현재 리더 의미로 보는 게 정확합니다."
+            )
+
         if decision and decision.intent == ChatIntent.AMBIGUOUS_SUPERLATIVE:
             if decision.subject_type == "pitcher":
                 return self._render_pitcher_superlative(
@@ -201,8 +230,9 @@ class ChatRendererRegistry:
             stat_value = resolved_agent._format_deterministic_metric(
                 resolved_agent._extract_leaderboard_value(entry, raw_stat_name)
             )
+            stat_value_label = self._metric_value_label(stat_key, stat_name, stat_value)
             lines.append(
-                f"{index}위는 {player_name}이고, {stat_name}은 {stat_value}입니다."
+                f"{index}위는 {player_name}이고, {stat_name} 기록은 {stat_value_label}입니다."
             )
         return "\n\n".join(lines[:4])
 
@@ -419,6 +449,41 @@ class ChatRendererRegistry:
     def _metric_label(self, raw_name: Any) -> str:
         stat_key = re.sub(r"[^a-z0-9가-힣_]+", "", str(raw_name).lower())
         return METRIC_LABELS.get(stat_key, str(raw_name))
+
+    def _metric_value_label(self, stat_key: str, stat_name: str, value: str) -> str:
+        if value == "확인 불가":
+            return value
+        if stat_key in {"hits", "안타"}:
+            return f"{value}안타"
+        if stat_key in {"home_runs", "homeruns", "hr", "홈런"}:
+            return f"{value}개"
+        if stat_key in {"home_runs", "homeruns", "hr", "stolen_bases"}:
+            return f"{value}개"
+        if stat_name in {
+            "타점",
+            "탈삼진",
+            "세이브",
+            "홀드",
+            "다승",
+            "득점",
+            "완투",
+            "완봉",
+        }:
+            return f"{value}"
+        return value
+
+    def _is_current_season_home_run_king_query(
+        self, query: str, year: str, stat_key: str
+    ) -> bool:
+        if stat_key not in {"home_runs", "homeruns", "hr", "홈런"}:
+            return False
+        if "홈런왕" not in query and "홈런 왕" not in query:
+            return False
+        try:
+            query_year = int(str(year).strip())
+        except (TypeError, ValueError):
+            return False
+        return query_year >= datetime.now().year
 
     def _build_game_flow_row_from_box_score(
         self,

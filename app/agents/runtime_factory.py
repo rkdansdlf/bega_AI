@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Optional
 
 import httpx
@@ -16,10 +18,13 @@ from tenacity import (
 
 from ..config import get_settings
 from ..core.http_clients import get_shared_httpx_client
+from ..core.chat_model_usage import ModelCallOutcome
+from ..observability.metrics import AI_LLM_FALLBACK_TOTAL
 from .baseball_agent import BaseballAgentRuntime
 
 logger = logging.getLogger(__name__)
 _gemini_configured = False
+OPENROUTER_BLOCKED_MODELS = {"openrouter/auto"}
 
 
 def _ensure_gemini_configured(settings: Any) -> None:
@@ -87,6 +92,71 @@ def _parse_openrouter_stream_delta(payload: Any) -> tuple[str, str]:
     return "", "empty_content"
 
 
+def resolve_openrouter_model_candidates(
+    primary_model: str, fallback_models: list[str]
+) -> list[str]:
+    candidates: list[str] = []
+    for model in [primary_model] + list(fallback_models):
+        normalized = str(model or "").strip()
+        if not normalized:
+            continue
+        if normalized in OPENROUTER_BLOCKED_MODELS:
+            logger.warning("[LLM] Skipping blocked model: %s", normalized)
+            continue
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    if candidates:
+        return candidates
+
+    if primary_model:
+        normalized_primary = str(primary_model).strip()
+        logger.warning(
+            "[LLM] All configured models are blocked; fallback to primary: %s",
+            normalized_primary,
+        )
+        return [normalized_primary]
+
+    return [str(model).strip() for model in fallback_models if str(model or "").strip()]
+
+
+def _classify_openrouter_fallback_reason(exception: Exception | None) -> str:
+    if isinstance(exception, httpx.HTTPStatusError):
+        return f"http_status_{exception.response.status_code}"
+    if exception is None:
+        return "unknown"
+    return exception.__class__.__name__
+
+
+def _notify_usage_observer(
+    observer: Any,
+    *,
+    provider: str,
+    model: str,
+    messages: Sequence[Mapping[str, Any]],
+    output_text: str,
+    outcome: ModelCallOutcome,
+) -> None:
+    if observer is None:
+        return
+    try:
+        messages_snapshot = deepcopy(messages)
+    except BaseException:  # noqa: BLE001
+        logger.exception("[LLM] Usage observer message snapshot failed")
+        messages_snapshot = []
+
+    try:
+        observer(
+            provider=provider,
+            model=model,
+            messages=messages_snapshot,
+            output_text=output_text,
+            outcome=outcome,
+        )
+    except BaseException:  # noqa: BLE001
+        logger.exception("[LLM] Usage observer failed")
+
+
 def build_baseball_llm_generator(settings: Any):
     llm_logger = logging.getLogger("BaseballAgent")
 
@@ -95,32 +165,6 @@ def build_baseball_llm_generator(settings: Any):
             isinstance(exception, httpx.HTTPStatusError)
             and exception.response.status_code >= 500
         )
-
-    def _resolve_model_candidates(
-        primary_model: str, fallback_models: list[str]
-    ) -> list[str]:
-        blocked = {"openrouter/auto"}
-        candidates: list[str] = []
-        for model in [primary_model] + list(fallback_models):
-            if not model:
-                continue
-            if model in blocked:
-                llm_logger.warning("[LLM] Skipping blocked model: %s", model)
-                continue
-            if model not in candidates:
-                candidates.append(model)
-
-        if candidates:
-            return candidates
-
-        if primary_model:
-            llm_logger.warning(
-                "[LLM] All configured models are blocked; fallback to primary: %s",
-                primary_model,
-            )
-            return [primary_model]
-
-        return [model for model in fallback_models if model]
 
     @retry(
         stop=stop_after_attempt(2),
@@ -151,25 +195,33 @@ def build_baseball_llm_generator(settings: Any):
             async for line in response.aiter_lines():
                 yield line
 
-    async def openrouter_generator(messages, max_tokens=None):
+    async def openrouter_generator(
+        messages,
+        max_tokens=None,
+        model_override=None,
+        usage_observer=None,
+    ):
         if not settings.openrouter_api_key:
             raise RuntimeError("OpenRouter API key is required.")
 
         effective_max_tokens = max_tokens or settings.max_output_tokens
+        primary_model = str(model_override or settings.openrouter_model or "").strip()
+        fallback_models = [] if model_override else settings.openrouter_fallback_models
         headers = {
             "Authorization": f"Bearer {settings.openrouter_api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": settings.openrouter_referer or "",
             "X-Title": settings.openrouter_app_title or "",
         }
-        models_to_try = _resolve_model_candidates(
-            settings.openrouter_model,
-            settings.openrouter_fallback_models,
+        models_to_try = resolve_openrouter_model_candidates(
+            primary_model,
+            fallback_models,
         )
         llm_logger.info(
-            "[LLM] Models to try (filtered): %s, max_tokens=%s",
+            "[LLM] Models to try (filtered): %s, max_tokens=%s override=%s",
             models_to_try,
             effective_max_tokens,
+            bool(model_override),
         )
 
         last_exception = None
@@ -180,6 +232,10 @@ def build_baseball_llm_generator(settings: Any):
 
         for index, model in enumerate(models_to_try):
             if index > 0:
+                AI_LLM_FALLBACK_TOTAL.labels(
+                    provider="openrouter",
+                    reason=_classify_openrouter_fallback_reason(last_exception),
+                ).inc()
                 llm_logger.warning(
                     "[LLM Fallback] Trying model %d/%d: %s",
                     index + 1,
@@ -190,7 +246,7 @@ def build_baseball_llm_generator(settings: Any):
                 llm_logger.info(
                     "[LLM] Primary: %s, Fallbacks available: %s",
                     model,
-                    settings.openrouter_fallback_models,
+                    fallback_models,
                 )
 
             for retry_index in range(empty_chunk_retries + 1):
@@ -202,6 +258,8 @@ def build_baseball_llm_generator(settings: Any):
                     "max_tokens": effective_max_tokens,
                 }
 
+                attempt_chunks: list[str] = []
+                attempt_observed = False
                 try:
                     chunk_count = 0
                     empty_choice_count = 0
@@ -229,6 +287,7 @@ def build_baseball_llm_generator(settings: Any):
                                     malformed_chunk_count += 1
                                 if delta:
                                     chunk_count += 1
+                                    attempt_chunks.append(delta)
                                     yield delta
                             except json.JSONDecodeError:
                                 llm_logger.warning("[LLM] JSON decode failed for chunk")
@@ -240,6 +299,15 @@ def build_baseball_llm_generator(settings: Any):
                         and empty_choice_count > 0
                     )
                     if should_retry_empty:
+                        _notify_usage_observer(
+                            usage_observer,
+                            provider="openrouter",
+                            model=model,
+                            messages=messages,
+                            output_text="".join(attempt_chunks),
+                            outcome="failed",
+                        )
+                        attempt_observed = True
                         llm_logger.warning(
                             "[LLM] Empty completion chunk set detected for %s "
                             "(attempt %d/%d, empty_choice_count=%d malformed=%d)",
@@ -252,15 +320,43 @@ def build_baseball_llm_generator(settings: Any):
                         await asyncio.sleep(empty_chunk_backoff_ms / 1000.0)
                         continue
 
+                    _notify_usage_observer(
+                        usage_observer,
+                        provider="openrouter",
+                        model=model,
+                        messages=messages,
+                        output_text="".join(attempt_chunks),
+                        outcome="success",
+                    )
+                    attempt_observed = True
                     llm_logger.info(
                         "[LLM] Success: %d chunks from %s", chunk_count, model
                     )
                     return
 
                 except Exception as exc:  # noqa: BLE001
+                    _notify_usage_observer(
+                        usage_observer,
+                        provider="openrouter",
+                        model=model,
+                        messages=messages,
+                        output_text="".join(attempt_chunks),
+                        outcome="failed",
+                    )
+                    attempt_observed = True
                     llm_logger.error("[LLM] Model %s failed: %s", model, exc)
                     last_exception = exc
                     break
+                finally:
+                    if not attempt_observed:
+                        _notify_usage_observer(
+                            usage_observer,
+                            provider="openrouter",
+                            model=model,
+                            messages=messages,
+                            output_text="".join(attempt_chunks),
+                            outcome="failed",
+                        )
 
         llm_logger.error(
             "[LLM] All %d models failed. Last error: %s",
@@ -269,7 +365,12 @@ def build_baseball_llm_generator(settings: Any):
         )
         raise last_exception or RuntimeError("All models failed")
 
-    async def gemini_generator(messages, max_tokens=None):
+    async def gemini_generator(
+        messages,
+        max_tokens=None,
+        model_override=None,
+        usage_observer=None,
+    ):
         import google.generativeai as genai
         from google.generativeai.types import GenerationConfig
 
@@ -278,7 +379,8 @@ def build_baseball_llm_generator(settings: Any):
 
         effective_max_tokens = max_tokens or settings.max_output_tokens
         _ensure_gemini_configured(settings)
-        model = genai.GenerativeModel(settings.gemini_model)
+        model_name = str(model_override or settings.gemini_model)
+        model = genai.GenerativeModel(model_name)
 
         gemini_messages = []
         system_instruction = ""
@@ -293,10 +395,12 @@ def build_baseball_llm_generator(settings: Any):
 
         if system_instruction:
             model = genai.GenerativeModel(
-                model_name=settings.gemini_model,
+                model_name=model_name,
                 system_instruction=system_instruction,
             )
 
+        attempt_chunks: list[str] = []
+        attempt_observed = False
         try:
             response = await model.generate_content_async(
                 gemini_messages,
@@ -308,10 +412,40 @@ def build_baseball_llm_generator(settings: Any):
             )
             async for chunk in response:
                 if chunk.text:
+                    attempt_chunks.append(chunk.text)
                     yield chunk.text
         except Exception as exc:  # noqa: BLE001
+            _notify_usage_observer(
+                usage_observer,
+                provider="gemini",
+                model=model_name,
+                messages=messages,
+                output_text="".join(attempt_chunks),
+                outcome="failed",
+            )
+            attempt_observed = True
             llm_logger.error("Gemini generation failed: %s", exc)
             raise
+        else:
+            _notify_usage_observer(
+                usage_observer,
+                provider="gemini",
+                model=model_name,
+                messages=messages,
+                output_text="".join(attempt_chunks),
+                outcome="success",
+            )
+            attempt_observed = True
+        finally:
+            if not attempt_observed:
+                _notify_usage_observer(
+                    usage_observer,
+                    provider="gemini",
+                    model=model_name,
+                    messages=messages,
+                    output_text="".join(attempt_chunks),
+                    outcome="failed",
+                )
 
     if settings.llm_provider == "gemini":
         return gemini_generator

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import math
 import openai
 import os
 import re
@@ -36,13 +38,24 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from ..config import get_settings
-from ..deps import get_agent, get_connection_pool, require_ai_internal_token
+from ..contracts.stream_requests import ChatStreamRequest
+from ..deps import (
+    get_agent,
+    get_connection_pool,
+    get_rag_pipeline,
+    require_ai_internal_token,
+)
 from ..agents.baseball_agent import BaseballStatisticsAgent
 from ..core.ratelimit import (
     rate_limit_chat_dependency,
     rate_limit_chat_voice_dependency,
 )
-from ..core.chat_cache_key import build_chat_cache_key, has_temporal_keyword
+from ..core.chat_queue import ChatQueueFull, ChatQueueReservation, get_chat_queue
+from ..core.chat_cache_key import (
+    CHAT_CACHE_SCHEMA_VERSION,
+    build_chat_cache_key,
+    has_temporal_keyword,
+)
 from ..core.chat_cache import (
     get_cached_response,
     save_to_cache,
@@ -51,6 +64,45 @@ from ..core.chat_cache import (
     delete_by_intent,
     delete_by_key,
 )
+from ..core.chat_cost_metrics import (
+    classify_chat_question_type,
+    record_chat_token_estimate,
+)
+from ..core.chat_semantic_cache import (
+    complete_semantic_shadow_observation,
+    delete_semantic_by_key,
+    get_semantic_cached_response,
+    record_semantic_shadow_decision,
+    record_semantic_shadow_observation,
+    save_semantic_cache,
+    update_semantic_hit_count,
+)
+from ..core.embeddings import async_embed_query
+from ..core.entity_extractor import extract_player_names
+from ..core.rag import (
+    _build_manual_baseball_data_required_result,
+    _build_static_kbo_faq_result,
+)
+from ..tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
+from ..tools.operator_data_query import (
+    is_operator_data_query,
+    try_build_operator_fast_path_result,
+)
+from ..observability.metrics import AI_RESPONSE_CACHE_BY_INTENT
+from ..streaming.versioned_sse import (
+    negotiate_event_version,
+    versioned_event_source,
+)
+
+
+def _record_cache_by_intent(intent: str, result: str) -> None:
+    try:
+        AI_RESPONSE_CACHE_BY_INTENT.labels(
+            intent=intent or "unknown", result=result
+        ).inc()
+    except Exception:  # noqa: BLE001
+        pass
+
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -58,9 +110,6 @@ router = APIRouter(prefix="/ai/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준
 
-# 캐시 스키마 버전. 프롬프트 또는 정규화 방식 변경 시 올리면
-# 기존 캐시가 자동으로 미스 처리됩니다.
-CHAT_CACHE_SCHEMA_VERSION = "v9"
 MAX_CHAT_QUESTION_LENGTH = 1200
 MAX_CHAT_HISTORY_ENTRY_LENGTH = 2000
 MAX_CHAT_REQUEST_BYTES = 12 * 1024
@@ -85,6 +134,15 @@ _NON_CACHEABLE_RESPONSE_MARKERS = (
     "답변 생성 중 오류가 발생했습니다",
     "서버 오류가 발생했습니다",
     "잠시 후 다시 시도해주세요",
+    # 제로히트/정보없음 응답: 데이터가 나중에 인제스트되면 캐시된 정보없음 응답이
+    # 계속 서빙되는 stale cache 문제를 방지한다. 서빙 시점에도 감지되면 캐시를 자동 삭제.
+    "저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다",
+    "현재 연결된 자료만으로는 질문에 대해 확인된 답을 만들지 못했습니다",
+    "추정하지 않고 확인된 범위에서만 말씀드리겠습니다",
+    "현재 연결된 자료",
+    "자료만으로는",
+    "단정하기 어렵",
+    "Unknown",
 )
 
 
@@ -332,6 +390,110 @@ def _ensure_quality_answer_text(answer: str) -> str:
     return _normalize_chatbot_answer_text(answer or "")
 
 
+async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
+    settings = get_settings()
+    if settings.operator_data_fast_path_enabled:
+        try:
+            pool = get_connection_pool()
+            async with pool.connection() as conn:
+                result = await try_build_operator_fast_path_result(conn, question)
+            if result is not None:
+                payload = dict(result)
+                payload["answer"] = _ensure_quality_answer_text(
+                    str(payload.get("answer") or "")
+                )
+                payload["cached"] = False
+                payload["model_usage"] = []
+                payload["model_usage_complete"] = True
+                payload["fallback_triggered"] = bool(
+                    payload.get("fallback_triggered", False)
+                )
+                payload["fallback_answer_used"] = bool(
+                    payload.get("fallback_answer_used", False)
+                )
+                return payload
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ChatStatic] operator data fast-path skipped: %s", exc)
+
+        if is_operator_data_query(question):
+            return _build_manual_baseball_data_required_result(question)
+
+    result = _build_static_kbo_faq_result(question)
+    if result is None:
+        return None
+    payload = dict(result)
+    payload["answer"] = _ensure_quality_answer_text(str(payload.get("answer") or ""))
+    payload["cached"] = False
+    payload["model_usage"] = []
+    payload["model_usage_complete"] = True
+    payload["fallback_triggered"] = bool(payload.get("fallback_triggered", False))
+    payload["fallback_answer_used"] = bool(
+        payload.get("fallback_answer_used", False)
+    )
+    return payload
+
+
+async def _make_static_sse_response(
+    result: Dict[str, Any], style: str, event_version: int = 1
+) -> EventSourceResponse:
+    async def static_generator():
+        answer = await _render_answer(result, style)
+        answer = _ensure_quality_answer_text(answer)
+        yield {
+            "event": "status",
+            "data": json.dumps({"message": "답변을 준비했습니다."}, ensure_ascii=False),
+        }
+        yield {
+            "event": "message",
+            "data": json.dumps({"delta": answer}, ensure_ascii=False),
+        }
+        yield {
+            "event": "meta",
+            "data": json.dumps(
+                {
+                    "tool_calls": result.get("tool_calls", []),
+                    "tool_results": result.get("tool_results", []),
+                    "data_sources": result.get("data_sources", []),
+                    "verified": bool(result.get("verified", True)),
+                    "visualizations": result.get("visualizations", []),
+                    "style": style,
+                    "cached": False,
+                    "intent": result.get("intent"),
+                    "planner_mode": result.get("planner_mode", "fast_path"),
+                    "planner_cache_hit": bool(result.get("planner_cache_hit", False)),
+                    "tool_execution_mode": result.get("tool_execution_mode", "none"),
+                    "fallback_triggered": bool(result.get("fallback_triggered", False)),
+                    "fallback_answer_used": bool(
+                        result.get("fallback_answer_used", False)
+                    ),
+                    "grounding_mode": result.get("grounding_mode"),
+                    "source_tier": result.get("source_tier"),
+                    "answer_sources": result.get("answer_sources", []),
+                    "as_of_date": result.get("as_of_date"),
+                    "fallback_reason": result.get("fallback_reason"),
+                    "model_usage": result.get("model_usage", []),
+                    "model_usage_complete": bool(
+                        result.get("model_usage_complete", True)
+                    ),
+                    "perf": result.get("perf", {}),
+                },
+                ensure_ascii=False,
+            ),
+        }
+        yield {"event": "done", "data": "[DONE]"}
+
+    return versioned_event_source(
+        static_generator(),
+        endpoint="chat",
+        version=event_version,
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+        ping=max(1, int(get_settings().chat_sse_ping_seconds)),
+    )
+
+
 def _is_non_cacheable_response(response_text: str) -> bool:
     normalized = _normalize_cache_guard_text(response_text)
     if not normalized:
@@ -345,9 +507,209 @@ def _is_non_cacheable_response(response_text: str) -> bool:
     ) or any(marker in normalized for marker in compact_markers)
 
 
+_TEAM_RESOLVER: TeamCodeResolver | None = None
+
+
+def _get_team_resolver() -> TeamCodeResolver:
+    global _TEAM_RESOLVER
+    if _TEAM_RESOLVER is None:
+        _TEAM_RESOLVER = TeamCodeResolver()
+    return _TEAM_RESOLVER
+
+
+def _coerce_filters_dict(filters: Any) -> Dict[str, Any]:
+    if isinstance(filters, dict):
+        return dict(filters)
+    if isinstance(filters, str):
+        try:
+            parsed = json.loads(filters)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _extract_semantic_guard_years(text: str, filters: Dict[str, Any]) -> set[int]:
+    years = {
+        int(match) for match in re.findall(r"(?<!\d)(19[8-9]\d|20[0-5]\d)(?!\d)", text)
+    }
+    for key, value in filters.items():
+        if "year" not in str(key).lower() and "season" not in str(key).lower():
+            continue
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            try:
+                year = int(str(item).strip())
+            except (TypeError, ValueError):
+                continue
+            if 1982 <= year <= 2059:
+                years.add(year)
+    return years
+
+
+def _extract_semantic_guard_game_types(text: str, filters: Dict[str, Any]) -> set[str]:
+    normalized = text.upper()
+    game_types: set[str] = set()
+    if any(token in normalized for token in ("REGULAR", "정규", "페넌트")):
+        game_types.add("REGULAR")
+    if any(token in normalized for token in ("PRE", "시범")):
+        game_types.add("PRE")
+    if any(
+        token in normalized for token in ("POST", "포스트", "가을", "KS", "한국시리즈")
+    ):
+        game_types.add("POST")
+
+    for key, value in filters.items():
+        lowered_key = str(key).lower()
+        if "game_type" not in lowered_key and "league_type" not in lowered_key:
+            continue
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            raw = str(item or "").strip().upper()
+            if raw in {"REGULAR", "PRE", "POST"}:
+                game_types.add(raw)
+            elif raw in {"0", "REG"}:
+                game_types.add("REGULAR")
+            elif raw == "1":
+                game_types.add("PRE")
+            elif raw in {"2", "3", "4", "5"}:
+                game_types.add("POST")
+    return game_types
+
+
+def _extract_semantic_guard_teams(text: str, filters: Dict[str, Any]) -> set[str]:
+    resolver = _get_team_resolver()
+    teams: set[str] = set()
+    text_upper = text.upper()
+
+    for raw_name, canonical in resolver.name_to_canonical.items():
+        if canonical not in CANONICAL_CODES:
+            continue
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if re.search(r"[가-힣\s]", name):
+            if name in text:
+                teams.add(canonical)
+            continue
+        pattern = rf"(?<![A-Z0-9]){re.escape(name.upper())}(?![A-Z0-9])"
+        if re.search(pattern, text_upper):
+            teams.add(canonical)
+
+    for key, value in filters.items():
+        if "team" not in str(key).lower():
+            continue
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            canonical = resolver.resolve_canonical(str(item or ""))
+            if canonical in CANONICAL_CODES:
+                teams.add(canonical)
+    return teams
+
+
+def _extract_semantic_guard_players(
+    text: str, filters: Dict[str, Any], *, question_type: str
+) -> set[str]:
+    players = (
+        set(extract_player_names(text, limit=8))
+        if question_type in {"player_analysis", "multi_player_narrative"}
+        else set()
+    )
+    for key, value in filters.items():
+        if "player" not in str(key).lower():
+            continue
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            normalized = str(item or "").strip()
+            if normalized:
+                players.add(normalized)
+    return players
+
+
+def _extract_semantic_guard_source_tier(
+    filters: Dict[str, Any], source_tier: Any = None
+) -> Optional[str]:
+    raw = source_tier
+    if raw is None:
+        raw = filters.get("source_tier") or filters.get("expected_source_tier")
+    normalized = str(raw or "").strip().lower()
+    return normalized or None
+
+
+def _build_semantic_guard_signature(
+    *,
+    question: str,
+    filters: Any,
+    source_tier: Any = None,
+) -> Dict[str, Any]:
+    filters_dict = _coerce_filters_dict(filters)
+    question_type = classify_chat_question_type(question)
+    return {
+        "teams": sorted(_extract_semantic_guard_teams(question, filters_dict)),
+        "players": sorted(
+            _extract_semantic_guard_players(
+                question,
+                filters_dict,
+                question_type=question_type,
+            )
+        ),
+        "years": sorted(_extract_semantic_guard_years(question, filters_dict)),
+        "game_types": sorted(
+            _extract_semantic_guard_game_types(question, filters_dict)
+        ),
+        "source_tier": _extract_semantic_guard_source_tier(filters_dict, source_tier),
+        "question_type": question_type,
+    }
+
+
+def _semantic_guard_dimension_matches(left: List[Any], right: List[Any]) -> bool:
+    if not left and not right:
+        return True
+    return left == right
+
+
+def _semantic_cache_quality_gate(
+    *,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    cached: Dict[str, Any],
+) -> tuple[bool, Optional[str]]:
+    current = _build_semantic_guard_signature(
+        question=question,
+        filters=filters,
+    )
+    cached_signature = _build_semantic_guard_signature(
+        question=str(cached.get("question_text") or ""),
+        filters=cached.get("filters_json"),
+        source_tier=cached.get("source_tier"),
+    )
+
+    for key in ("teams", "players", "years", "game_types"):
+        if not _semantic_guard_dimension_matches(current[key], cached_signature[key]):
+            return False, f"{key}_mismatch"
+
+    if current["question_type"] != cached_signature["question_type"]:
+        return False, "question_type_mismatch"
+
+    current_source_tier = current.get("source_tier")
+    cached_source_tier = cached_signature.get("source_tier")
+    if cached_source_tier in {"cache", "semantic_cache"}:
+        return False, "source_tier_cache_reuse"
+    if (
+        current_source_tier
+        and cached_source_tier
+        and current_source_tier != cached_source_tier
+    ):
+        return False, "source_tier_mismatch"
+
+    return True, None
+
+
 def _safe_serialize(obj: Any) -> Any:
     """JSON 직렬화 가능한 형태로 객체를 변환합니다."""
     if obj is None:
+        return None
+    if isinstance(obj, float) and not math.isfinite(obj):
         return None
     if isinstance(obj, (str, int, float, bool)):
         return obj
@@ -364,11 +726,21 @@ def _safe_serialize(obj: Any) -> Any:
     return str(obj)
 
 
+def _result_model_name(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+    perf = payload.get("perf")
+    if not isinstance(perf, dict):
+        return None
+    model = str(perf.get("model") or "").strip()
+    return model or None
+
+
 async def _async_update_hit_count(cache_key: str) -> None:
     """백그라운드에서 hit_count를 업데이트합니다 (응답 지연 없음)."""
     try:
         pool = get_connection_pool()
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             await update_hit_count(conn, cache_key)
     except Exception as exc:
         logger.warning("[ChatCache] hit_count background update failed: %s", exc)
@@ -378,7 +750,7 @@ async def _async_delete_cache_key(cache_key: str) -> None:
     """백그라운드에서 stale 캐시를 삭제합니다."""
     try:
         pool = get_connection_pool()
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             deleted = await delete_by_key(conn, cache_key)
         if deleted:
             logger.info("[ChatCache] Deleted stale key=%s...", cache_key[:8])
@@ -386,8 +758,337 @@ async def _async_delete_cache_key(cache_key: str) -> None:
         logger.warning("[ChatCache] stale cache delete failed: %s", exc)
 
 
+async def _async_delete_semantic_cache_key(cache_key: str) -> None:
+    """백그라운드에서 stale semantic cache를 삭제합니다."""
+    try:
+        pool = get_connection_pool()
+        async with pool.connection() as conn:
+            deleted = await delete_semantic_by_key(conn, cache_key)
+        if deleted:
+            logger.info("[ChatSemanticCache] Deleted stale key=%s...", cache_key[:8])
+    except Exception as exc:
+        logger.warning("[ChatSemanticCache] stale cache delete failed: %s", exc)
+
+
+async def _async_update_semantic_hit_count(cache_key: str) -> None:
+    """백그라운드에서 semantic cache hit_count를 업데이트합니다."""
+    try:
+        pool = get_connection_pool()
+        async with pool.connection() as conn:
+            await update_semantic_hit_count(conn, cache_key)
+    except Exception as exc:
+        logger.warning(
+            "[ChatSemanticCache] hit_count background update failed: %s", exc
+        )
+
+
+def _is_semantic_cache_shadow_enabled(settings: Any) -> bool:
+    return bool(getattr(settings, "chat_semantic_cache_shadow_enabled", False))
+
+
+def _semantic_cache_rollout_percent(settings: Any) -> int:
+    try:
+        return max(
+            0,
+            min(100, int(getattr(settings, "chat_semantic_cache_rollout_percent", 100))),
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _semantic_cache_rollout_selected(cache_key: str, rollout_percent: int) -> bool:
+    percent = max(0, min(100, int(rollout_percent)))
+    if percent <= 0:
+        return False
+    if percent >= 100:
+        return True
+    digest = hashlib.sha256(str(cache_key).encode("utf-8")).digest()
+    bucket = int.from_bytes(digest[:4], byteorder="big") % 100
+    return bucket < percent
+
+
+def _is_semantic_cache_lookup_enabled(settings: Any) -> bool:
+    if bool(getattr(settings, "chat_semantic_cache_kill_switch", False)):
+        return False
+    if _is_semantic_cache_shadow_enabled(settings):
+        return True
+    return bool(getattr(settings, "chat_semantic_cache_enabled", False)) and (
+        _semantic_cache_rollout_percent(settings) > 0
+    )
+
+
+def _is_semantic_cache_serving_enabled(settings: Any) -> bool:
+    return (
+        bool(getattr(settings, "chat_semantic_cache_enabled", False))
+        and not _is_semantic_cache_shadow_enabled(settings)
+        and not bool(getattr(settings, "chat_semantic_cache_kill_switch", False))
+        and _semantic_cache_rollout_percent(settings) > 0
+    )
+
+
+async def _get_semantic_cache_hit(
+    question: str,
+    filters: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    settings = get_settings()
+    if not _is_semantic_cache_lookup_enabled(settings):
+        return None
+
+    try:
+        question_embedding = await async_embed_query(question, settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ChatSemanticCache] embedding lookup failed: %s", exc)
+        return None
+
+    if not question_embedding:
+        return None
+
+    pool = get_connection_pool()
+    async with pool.connection() as conn:
+        return await get_semantic_cached_response(
+            conn,
+            question_embedding=question_embedding,
+            filters_json=filters,
+            settings=settings,
+            threshold=float(
+                getattr(settings, "chat_semantic_cache_min_similarity", 0.93)
+            ),
+            limit=int(getattr(settings, "chat_semantic_cache_candidate_limit", 3)),
+        )
+
+
+async def _prepare_semantic_cache_hit_for_response(
+    *,
+    route: str,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    cache_key: str,
+    history: Optional[List[Dict[str, str]]],
+) -> Optional[tuple[Dict[str, Any], str]]:
+    settings = get_settings()
+    shadow_enabled = _is_semantic_cache_shadow_enabled(settings)
+    serving_enabled = _is_semantic_cache_serving_enabled(settings)
+    if serving_enabled and not _semantic_cache_rollout_selected(
+        cache_key,
+        _semantic_cache_rollout_percent(settings),
+    ):
+        logger.info(
+            "[ChatSemanticCache] ROLLOUT_SKIP key=%s... percent=%d route=%s",
+            cache_key[:8],
+            _semantic_cache_rollout_percent(settings),
+            route,
+        )
+        return None
+    semantic_cached = await _get_semantic_cache_hit(question, filters)
+
+    if not semantic_cached:
+        if shadow_enabled:
+            record_semantic_shadow_decision(route=route, result="miss")
+        return None
+
+    semantic_text = semantic_cached.get("response_text", "")
+    semantic_key = str(semantic_cached.get("cache_key") or cache_key)
+    similarity = float(semantic_cached.get("similarity") or 0.0)
+
+    if _is_non_cacheable_response(semantic_text):
+        logger.info(
+            "[ChatSemanticCache] BYPASS stale key=%s... reason=non_cacheable_response",
+            semantic_key[:8],
+        )
+        if shadow_enabled:
+            record_semantic_shadow_decision(route=route, result="stale")
+        asyncio.create_task(_async_delete_semantic_cache_key(semantic_key))
+        return None
+
+    quality_ok, quality_reason = _semantic_cache_quality_gate(
+        question=question,
+        filters=filters,
+        cached=semantic_cached,
+    )
+    if not quality_ok:
+        logger.info(
+            "[ChatSemanticCache] REJECT key=%s... reason=%s similarity=%.3f",
+            semantic_key[:8],
+            quality_reason,
+            similarity,
+        )
+        if shadow_enabled:
+            record_semantic_shadow_decision(route=route, result="quality_reject")
+        return None
+
+    if shadow_enabled:
+        logger.info(
+            "[ChatSemanticCache] SHADOW_HIT key=%s... similarity=%.3f route=%s",
+            semantic_key[:8],
+            similarity,
+            route,
+        )
+        record_semantic_shadow_decision(route=route, result="hit")
+        observation_recorded = False
+        try:
+            pool = get_connection_pool()
+            async with pool.connection() as conn:
+                observation_recorded = await record_semantic_shadow_observation(
+                    conn,
+                    request_cache_key=cache_key,
+                    candidate_cache_key=semantic_key,
+                    route=route,
+                    question_text=question,
+                    filters_json=filters,
+                    cached_answer=str(semantic_text),
+                    similarity=similarity,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ChatSemanticCache] shadow observation connection failed: %s",
+                exc,
+            )
+        record_semantic_shadow_decision(
+            route=route,
+            result="sample_recorded" if observation_recorded else "sample_error",
+        )
+        record_chat_token_estimate(
+            settings,
+            route=route,
+            cache_state="semantic_cache_shadow_hit_potential_saved",
+            question=question,
+            answer=str(semantic_text),
+            history=history,
+            planner_mode=str(semantic_cached.get("planner_mode") or "unknown"),
+        )
+        return None
+
+    if not serving_enabled:
+        return None
+
+    logger.info(
+        "[ChatSemanticCache] HIT key=%s... similarity=%.3f",
+        semantic_key[:8],
+        similarity,
+    )
+    _record_cache_by_intent(semantic_cached.get("intent", "unknown"), "hit")
+    asyncio.create_task(_async_update_semantic_hit_count(semantic_key))
+    record_chat_token_estimate(
+        settings,
+        route=route,
+        cache_state="semantic_cache_hit_saved",
+        question=question,
+        answer=str(semantic_text),
+        history=history,
+        planner_mode=str(semantic_cached.get("planner_mode") or "unknown"),
+    )
+    return semantic_cached, semantic_key
+
+
+async def _save_chat_response_caches(
+    *,
+    cache_key: str,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    intent: Optional[str],
+    source_tier: Optional[str],
+    response_text: str,
+    model_name: Optional[str],
+) -> None:
+    settings = get_settings()
+    pool = get_connection_pool()
+    async with pool.connection() as conn:
+        await save_to_cache(
+            conn,
+            cache_key=cache_key,
+            question_text=question,
+            filters_json=filters,
+            intent=intent,
+            response_text=response_text,
+            model_name=model_name,
+        )
+        if _is_semantic_cache_shadow_enabled(settings):
+            await complete_semantic_shadow_observation(
+                conn,
+                request_cache_key=cache_key,
+                fresh_answer=response_text,
+            )
+
+    if not _is_semantic_cache_lookup_enabled(settings):
+        return
+
+    try:
+        question_embedding = await async_embed_query(question, settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ChatSemanticCache] embedding save failed: %s", exc)
+        return
+    if not question_embedding:
+        return
+
+    async with pool.connection() as conn:
+        await save_semantic_cache(
+            conn,
+            cache_key=cache_key,
+            question_text=question,
+            question_embedding=question_embedding,
+            filters_json=filters,
+            intent=intent,
+            source_tier=source_tier,
+            response_text=response_text,
+            model_name=model_name,
+            settings=settings,
+        )
+
+
+def _build_cached_completion_payload(
+    cached: Dict[str, Any],
+    *,
+    cache_key: str,
+    semantic_cached: bool = False,
+) -> Dict[str, Any]:
+    cache_mode = "semantic_cache" if semantic_cached else "cache"
+    cached_text = _ensure_quality_answer_text(cached.get("response_text", ""))
+    payload: Dict[str, Any] = {
+        "answer": cached_text,
+        "tool_calls": [],
+        "tool_results": [],
+        "data_sources": [],
+        "verified": True,
+        "visualizations": [],
+        "intent": cached.get("intent"),
+        "cached": True,
+        "semantic_cached": semantic_cached,
+        "planner_mode": cache_mode,
+        "planner_cache_hit": False,
+        "tool_execution_mode": "none",
+        "grounding_mode": cache_mode,
+        "source_tier": cache_mode,
+        "answer_sources": [],
+        "as_of_date": None,
+        "fallback_reason": None,
+        "model_usage": [],
+        "model_usage_complete": True,
+        "cache_key_prefix": cache_key[:8],
+        "perf": {
+            "total_ms": 0.0,
+            "analysis_ms": 0.0,
+            "tool_ms": 0.0,
+            "answer_ms": 0.0,
+            "first_token_ms": 0.0,
+            "tool_count": 0,
+            "tool_execution_mode": "none",
+            "planner_cache_hit": False,
+            "planner_mode": cache_mode,
+            "model": cache_mode,
+        },
+    }
+    if semantic_cached:
+        payload["cache_similarity"] = float(cached.get("similarity") or 0.0)
+    return payload
+
+
 def _make_cached_sse_response(
-    cached: dict, style: str, cache_key: str
+    cached: dict,
+    style: str,
+    cache_key: str,
+    *,
+    event_version: int = 1,
+    semantic_cached: bool = False,
 ) -> EventSourceResponse:
     """캐시된 응답을 SSE 형식으로 재스트리밍합니다.
 
@@ -398,6 +1099,7 @@ def _make_cached_sse_response(
     async def cached_generator():
         response_text = _ensure_quality_answer_text(cached["response_text"])
         settings = get_settings()
+        cache_mode = "semantic_cache" if semantic_cached else "cache"
 
         # status 이벤트: 캐시 히트 표시 (번개 이모지로 빠른 응답임을 암시)
         yield {
@@ -426,18 +1128,26 @@ def _make_cached_sse_response(
                     "visualizations": [],
                     "style": style,
                     "cached": True,
+                    "semantic_cached": semantic_cached,
                     "intent": cached.get("intent"),
-                    "planner_mode": "cache",
+                    "planner_mode": cache_mode,
                     "planner_cache_hit": False,
                     "tool_execution_mode": "none",
-                    "grounding_mode": "cache",
-                    "source_tier": "cache",
+                    "grounding_mode": cache_mode,
+                    "source_tier": cache_mode,
                     "answer_sources": [],
                     "as_of_date": None,
                     "fallback_reason": None,
+                    "model_usage": [],
+                    "model_usage_complete": True,
                     "finish_reason": "completed",
                     "cancelled": False,
                     "cache_key_prefix": cache_key[:8],
+                    "cache_similarity": (
+                        float(cached.get("similarity") or 0.0)
+                        if semantic_cached
+                        else None
+                    ),
                     "perf": {
                         "total_ms": 0.0,
                         "analysis_ms": 0.0,
@@ -448,8 +1158,8 @@ def _make_cached_sse_response(
                         "tool_count": 0,
                         "tool_execution_mode": "none",
                         "planner_cache_hit": False,
-                        "planner_mode": "cache",
-                        "model": "cache",
+                        "planner_mode": cache_mode,
+                        "model": cache_mode,
                     },
                 },
                 ensure_ascii=False,
@@ -457,8 +1167,10 @@ def _make_cached_sse_response(
         }
         yield {"event": "done", "data": "[DONE]"}
 
-    return EventSourceResponse(
+    return versioned_event_source(
         cached_generator(),
+        endpoint="chat",
+        version=event_version,
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -499,6 +1211,20 @@ def _finalize_stream_perf_payload(
         perf_payload["first_token_ms"] = first_message_ms
     perf_payload["stream_first_message_ms"] = first_message_ms
     return perf_payload
+
+
+def _temporary_generation_error_event() -> Dict[str, str]:
+    return {
+        "event": "error",
+        "data": json.dumps(
+            {
+                "message": "temporary_generation_issue",
+                "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
+                "retryable": True,
+            },
+            ensure_ascii=False,
+        ),
+    }
 
 
 async def _chat_event_generator(
@@ -594,16 +1320,7 @@ async def _chat_event_generator(
                 "event": "message",
                 "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
             }
-            yield {
-                "event": "error",
-                "data": json.dumps(
-                    {
-                        "message": "temporary_generation_issue",
-                        "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
+            yield _temporary_generation_error_event()
     else:
         if await _request_is_disconnected(request):
             stream_cancelled = True
@@ -670,6 +1387,8 @@ async def _chat_event_generator(
         "fallback_reason": result.get("fallback_reason"),
         "fallback_answer_used": bool(result.get("fallback_answer_used", False))
         or bool(answer_stream_error),
+        "model_usage": result.get("model_usage", []),
+        "model_usage_complete": not stream_cancelled and answer_stream_error is None,
         "perf": _finalize_stream_perf_payload(
             result.get("perf"),
             first_message_ms=first_message_ms,
@@ -719,24 +1438,33 @@ async def _chat_event_generator(
             or "unknown"
         )
         try:
-            pool = get_connection_pool()
-            with pool.connection() as conn:
-                await save_to_cache(
-                    conn,
-                    cache_key=cache_key,
-                    question_text=question,
-                    filters_json=filters,
-                    intent=intent,
-                    response_text=full_response_text,
-                    model_name=model_name,
-                )
+            await _save_chat_response_caches(
+                cache_key=cache_key,
+                question=question,
+                filters=filters,
+                intent=intent,
+                source_tier=result.get("source_tier"),
+                response_text=full_response_text,
+                model_name=model_name,
+            )
             logger.info(
                 "[ChatCache] SAVED key=%s... intent=%s",
                 cache_key[:8],
                 intent,
             )
+            _record_cache_by_intent(intent, "miss")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatCache] save failed: %s", exc)
+    if full_response_text and not result_error and not public_error:
+        record_chat_token_estimate(
+            get_settings(),
+            route="stream",
+            cache_state="generated",
+            question=question,
+            answer=full_response_text,
+            planner_mode=str(result.get("planner_mode") or "unknown"),
+            model_name=_result_model_name(result),
+        )
     elif cache_key and full_response_text:
         if result_error:
             reason = "result_error"
@@ -852,16 +1580,7 @@ async def _chat_live_event_generator(
             "event": "message",
             "data": json.dumps({"delta": fallback_text}, ensure_ascii=False),
         }
-        yield {
-            "event": "error",
-            "data": json.dumps(
-                {
-                    "message": "temporary_generation_issue",
-                    "detail": "답변 생성이 잠깐 끊겨 재시도가 필요합니다.",
-                },
-                ensure_ascii=False,
-            ),
-        }
+        yield _temporary_generation_error_event()
 
     full_response_text = "".join(full_response_chunks)
     if not stream_cancelled and await _request_is_disconnected(request):
@@ -915,6 +1634,8 @@ async def _chat_live_event_generator(
         "fallback_reason": buffered_meta.get("fallback_reason"),
         "fallback_answer_used": bool(buffered_meta.get("fallback_answer_used", False))
         or bool(answer_stream_error),
+        "model_usage": buffered_meta.get("model_usage", []),
+        "model_usage_complete": not stream_cancelled and answer_stream_error is None,
         "perf": _finalize_stream_perf_payload(
             buffered_meta.get("perf"),
             first_message_ms=first_message_ms,
@@ -962,24 +1683,33 @@ async def _chat_live_event_generator(
             or "unknown"
         )
         try:
-            pool = get_connection_pool()
-            with pool.connection() as conn:
-                await save_to_cache(
-                    conn,
-                    cache_key=cache_key,
-                    question_text=question,
-                    filters_json=filters,
-                    intent=intent,
-                    response_text=full_response_text,
-                    model_name=model_name,
-                )
+            await _save_chat_response_caches(
+                cache_key=cache_key,
+                question=question,
+                filters=filters,
+                intent=intent,
+                source_tier=buffered_meta.get("source_tier"),
+                response_text=full_response_text,
+                model_name=model_name,
+            )
             logger.info(
                 "[ChatCache] SAVED key=%s... intent=%s",
                 cache_key[:8],
                 intent,
             )
+            _record_cache_by_intent(intent, "miss")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ChatCache] save failed: %s", exc)
+    if full_response_text and not result_error and not public_error:
+        record_chat_token_estimate(
+            settings,
+            route="stream",
+            cache_state="generated",
+            question=question,
+            answer=full_response_text,
+            planner_mode=str(buffered_meta.get("planner_mode") or "unknown"),
+            model_name=_result_model_name(buffered_meta),
+        )
     elif cache_key and full_response_text:
         if result_error:
             reason = "result_error"
@@ -1004,17 +1734,51 @@ async def _stream_response(
     style: str,
     history: Optional[List[Dict[str, str]]],
     agent: BaseballStatisticsAgent,
+    pipeline: Any = None,
     cache_key: Optional[str] = None,
+    event_version: int = 1,
 ):
     """질문에 대한 답변을 생성하고 SSE 스트림으로 반환하는 핵심 로직입니다.
 
     cache_key가 전달된 경우, 스트리밍 완료 후 응답 텍스트를 DB 캐시에 저장합니다.
     캐싱 조건(history-free & 실시간 키워드 없음)은 호출자(chat_stream_post)에서 판단합니다.
     """
+    del pipeline
+
     if not question.strip():
         raise HTTPException(status_code=400, detail="질문을 입력해주세요.")
 
     settings = get_settings()
+    return versioned_event_source(
+        _chat_stream_event_generator(
+            request=request,
+            question=question,
+            filters=filters,
+            style=style,
+            history=history,
+            agent=agent,
+            cache_key=cache_key,
+        ),
+        endpoint="chat",
+        version=event_version,
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Nginx 등 프록시에서 버퍼링 방지
+        },
+        ping=max(1, int(settings.chat_sse_ping_seconds)),
+    )
+
+
+async def _chat_stream_event_generator(
+    *,
+    request: Request,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    style: str,
+    history: Optional[List[Dict[str, str]]],
+    agent: BaseballStatisticsAgent,
+    cache_key: Optional[str],
+) -> AsyncGenerator[Dict[str, str], None]:
     context_messages = history if history else [{"role": "user", "content": question}]
     agent_context = {
         "filters": filters,
@@ -1031,21 +1795,16 @@ async def _stream_response(
             logger.exception("chat_stream live stream initialization failed.")
             live_stream = None
         else:
-            return EventSourceResponse(
-                _chat_live_event_generator(
-                    request=request,
-                    question=question,
-                    filters=filters,
-                    style=style,
-                    cache_key=cache_key,
-                    stream=live_stream,
-                ),
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-                ping=max(1, int(settings.chat_sse_ping_seconds)),
-            )
+            async for event in _chat_live_event_generator(
+                request=request,
+                question=question,
+                filters=filters,
+                style=style,
+                cache_key=cache_key,
+                stream=live_stream,
+            ):
+                yield event
+            return
 
     result: Optional[Dict[str, Any]] = None
     error_payload: Optional[Dict[str, Any]] = None
@@ -1067,19 +1826,90 @@ async def _stream_response(
             "detail": "지금은 응답 템포가 잠깐 흔들리고 있어요. 같은 질문을 다시 보내주세요.",
         }
 
-    return EventSourceResponse(
-        _chat_event_generator(
+    async for event in _chat_event_generator(
+        request=request,
+        question=question,
+        filters=filters,
+        style=style,
+        result=result,
+        error_payload=error_payload,
+        cache_key=cache_key,
+    ):
+        yield event
+
+
+async def _queued_chat_stream_event_generator(
+    *,
+    request: Request,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    style: str,
+    history: Optional[List[Dict[str, str]]],
+    agent: BaseballStatisticsAgent,
+    cache_key: Optional[str],
+    reservation: ChatQueueReservation,
+) -> AsyncGenerator[Dict[str, str], None]:
+    async def is_disconnected() -> bool:
+        return await _request_is_disconnected(request)
+
+    if not reservation.admitted:
+        async for status in reservation.iter_statuses(
+            disconnect_checker=is_disconnected
+        ):
+            yield {
+                "event": "queue",
+                "data": json.dumps(status.to_payload(), ensure_ascii=False),
+            }
+            if status.state == "processing":
+                break
+
+    if not reservation.admitted:
+        return
+
+    try:
+        async for event in _chat_stream_event_generator(
             request=request,
             question=question,
             filters=filters,
             style=style,
-            result=result,
-            error_payload=error_payload,
+            history=history,
+            agent=agent,
             cache_key=cache_key,
+        ):
+            yield event
+    finally:
+        await reservation.release()
+
+
+def _make_queued_stream_response(
+    *,
+    request: Request,
+    question: str,
+    filters: Optional[Dict[str, Any]],
+    style: str,
+    history: Optional[List[Dict[str, str]]],
+    agent: BaseballStatisticsAgent,
+    cache_key: Optional[str],
+    reservation: ChatQueueReservation,
+    event_version: int = 1,
+) -> EventSourceResponse:
+    settings = get_settings()
+    return versioned_event_source(
+        _queued_chat_stream_event_generator(
+            request=request,
+            question=question,
+            filters=filters,
+            style=style,
+            history=history,
+            agent=agent,
+            cache_key=cache_key,
+            reservation=reservation,
         ),
+        endpoint="chat",
+        version=event_version,
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # Nginx 등 프록시에서 버퍼링 방지
+            "X-Accel-Buffering": "no",
         },
         ping=max(1, int(settings.chat_sse_ping_seconds)),
     )
@@ -1157,7 +1987,16 @@ async def chat_completion(
 
     filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
-    cacheable = (history is None) and (not has_temporal_keyword(question))
+    cache_bypass = bool(payload.get("cache_bypass"))
+
+    static_result = await _build_static_chat_result(question)
+    if static_result is not None:
+        logger.info("[ChatStatic] completion fast-path question=%s", question[:120])
+        return JSONResponse(_safe_serialize(static_result))
+
+    cacheable = (
+        not cache_bypass and (history is None) and (not has_temporal_keyword(question))
+    )
     cache_key: Optional[str] = None
 
     if cacheable:
@@ -1167,7 +2006,7 @@ async def chat_completion(
             schema_version=CHAT_CACHE_SCHEMA_VERSION,
         )
         pool = get_connection_pool()
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             cached = await get_cached_response(conn, cache_key)
 
         if cached:
@@ -1184,40 +2023,40 @@ async def chat_completion(
                     cache_key[:8],
                     cached["hit_count"],
                 )
+                _record_cache_by_intent(cached.get("intent", "unknown"), "hit")
                 asyncio.create_task(_async_update_hit_count(cache_key))
-                return JSONResponse(
-                    {
-                        "answer": _ensure_quality_answer_text(cached_text),
-                        "tool_calls": [],
-                        "tool_results": [],
-                        "data_sources": [],
-                        "verified": True,
-                        "visualizations": [],
-                        "intent": cached.get("intent"),
-                        "cached": True,
-                        "planner_mode": "cache",
-                        "planner_cache_hit": False,
-                        "tool_execution_mode": "none",
-                        "grounding_mode": "cache",
-                        "source_tier": "cache",
-                        "answer_sources": [],
-                        "as_of_date": None,
-                        "fallback_reason": None,
-                        "cache_key_prefix": cache_key[:8],
-                        "perf": {
-                            "total_ms": 0.0,
-                            "analysis_ms": 0.0,
-                            "tool_ms": 0.0,
-                            "answer_ms": 0.0,
-                            "first_token_ms": 0.0,
-                            "tool_count": 0,
-                            "tool_execution_mode": "none",
-                            "planner_cache_hit": False,
-                            "planner_mode": "cache",
-                            "model": "cache",
-                        },
-                    }
+                record_chat_token_estimate(
+                    get_settings(),
+                    route="completion",
+                    cache_state="exact_cache_hit_saved",
+                    question=question,
+                    answer=cached_text,
+                    history=history,
+                    planner_mode=str(cached.get("planner_mode") or "unknown"),
                 )
+                return JSONResponse(
+                    _build_cached_completion_payload(
+                        cached,
+                        cache_key=cache_key,
+                        semantic_cached=False,
+                    )
+                )
+        semantic_hit = await _prepare_semantic_cache_hit_for_response(
+            route="completion",
+            question=question,
+            filters=filters,
+            cache_key=cache_key,
+            history=history,
+        )
+        if semantic_hit:
+            semantic_cached, semantic_key = semantic_hit
+            return JSONResponse(
+                _build_cached_completion_payload(
+                    semantic_cached,
+                    cache_key=semantic_key,
+                    semantic_cached=True,
+                )
+            )
 
     settings = get_settings()
     completion_timeout_seconds = max(
@@ -1262,7 +2101,9 @@ async def chat_completion(
     import inspect
 
     answer_obj = result.get("answer")
+    model_usage_complete = True
     if inspect.isasyncgen(answer_obj) or hasattr(answer_obj, "__aiter__"):
+        model_usage_complete = False
         full_answer_chunks: List[str] = []
         public_error: Optional[str] = None
         try:
@@ -1279,6 +2120,7 @@ async def chat_completion(
                     if chunk:
                         full_answer_chunks.append(chunk)
             result["answer"] = "".join(full_answer_chunks)
+            model_usage_complete = True
         except TimeoutError as exc:
             logger.warning(
                 "chat_completion timeout while consuming stream: question=%s timeout=%.1fs",
@@ -1298,6 +2140,7 @@ async def chat_completion(
                 result["answer"] = _build_completion_fallback_answer(str(e))
         if public_error:
             result["error"] = public_error
+            result["verified"] = False
 
     if isinstance(result.get("answer"), str):
         result["answer"] = _ensure_quality_answer_text(result["answer"])
@@ -1321,26 +2164,38 @@ async def chat_completion(
                 or "unknown"
             )
             try:
-                pool = get_connection_pool()
-                with pool.connection() as conn:
-                    await save_to_cache(
-                        conn,
-                        cache_key=cache_key,
-                        question_text=question,
-                        filters_json=filters,
-                        intent=intent,
-                        response_text=full_response_text,
-                        model_name=model_name,
-                    )
+                await _save_chat_response_caches(
+                    cache_key=cache_key,
+                    question=question,
+                    filters=filters,
+                    intent=intent,
+                    source_tier=result.get("source_tier"),
+                    response_text=full_response_text,
+                    model_name=model_name,
+                )
                 logger.info(
                     "[ChatCache] SAVED key=%s... intent=%s (completion)",
                     cache_key[:8],
                     intent,
                 )
+                _record_cache_by_intent(intent, "miss")
             except Exception as exc:
                 logger.warning("[ChatCache] completion save failed: %s", exc)
+        if full_response_text and not result_error:
+            record_chat_token_estimate(
+                settings,
+                route="completion",
+                cache_state="generated",
+                question=question,
+                answer=full_response_text,
+                history=history,
+                planner_mode=str(result.get("planner_mode") or "unknown"),
+                model_name=_result_model_name(result),
+            )
 
     if isinstance(result, dict):
+        result.setdefault("model_usage", [])
+        result["model_usage_complete"] = model_usage_complete
         payload_serialized = _safe_serialize(result)
         if isinstance(payload_serialized, dict):
             answer_text = payload_serialized.get("answer")
@@ -1385,26 +2240,56 @@ async def chat_completion(
 async def chat_stream_post(
     payload: Dict[str, Any] = Body(...),
     style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
+    event_version_header: str | None = Header(
+        default=None,
+        alias="X-AI-Event-Version",
+    ),
     agent: BaseballStatisticsAgent = Depends(get_agent),
-    __: None = Depends(rate_limit_chat_dependency),
     _: None = Depends(require_ai_internal_token),
     request: Request = None,
 ):
     """POST 요청을 통해 질문을 받고, 답변을 SSE 스트림으로 반환합니다."""
     _validate_chat_payload(payload)
+    event_version = negotiate_event_version(
+        event_version_header,
+        endpoint="chat",
+    )
     question = _validate_chat_question(payload.get("question", ""))
     filters = payload.get("filters")
     history = _decode_history_payload(payload.get("history"))
+    cache_bypass = bool(payload.get("cache_bypass"))
 
     # payload에 style이 지정된 경우, 쿼리 파라미터보다 우선 적용합니다.
     style_override = payload.get("style")
     if style_override in {"markdown", "json", "compact"}:
         style = style_override
 
+    typed_payload = ChatStreamRequest.model_validate(
+        {
+            "question": question,
+            "filters": filters if isinstance(filters, dict) else None,
+            "history": history,
+            "cache_bypass": bool(payload.get("cache_bypass")),
+            "style": style,
+        }
+    )
+    filters = typed_payload.filters
+
+    static_result = await _build_static_chat_result(question)
+    if static_result is not None:
+        logger.info("[ChatStatic] stream fast-path question=%s", question[:120])
+        return await _make_static_sse_response(
+            static_result,
+            style,
+            event_version,
+        )
+
     # 캐시 적용 조건: history-free 쿼리이고 실시간 키워드 없음
     # history가 있으면 대화 맥락이 있으므로 캐싱 불가
     # 실시간 키워드("오늘", "지금" 등)가 있으면 최신성이 중요하므로 캐싱 불가
-    cacheable = (history is None) and (not has_temporal_keyword(question))
+    cacheable = (
+        not cache_bypass and (history is None) and (not has_temporal_keyword(question))
+    )
     cache_key: Optional[str] = None
 
     if cacheable:
@@ -1414,7 +2299,7 @@ async def chat_stream_post(
             schema_version=CHAT_CACHE_SCHEMA_VERSION,
         )
         pool = get_connection_pool()
-        with pool.connection() as conn:
+        async with pool.connection() as conn:
             cached = await get_cached_response(conn, cache_key)
 
         if cached:
@@ -1431,9 +2316,64 @@ async def chat_stream_post(
                     cache_key[:8],
                     cached["hit_count"],
                 )
+                _record_cache_by_intent(cached.get("intent", "unknown"), "hit")
                 # hit_count는 background에서 업데이트 (응답 지연 없음)
                 asyncio.create_task(_async_update_hit_count(cache_key))
-                return _make_cached_sse_response(cached, style, cache_key)
+                record_chat_token_estimate(
+                    get_settings(),
+                    route="stream",
+                    cache_state="exact_cache_hit_saved",
+                    question=question,
+                    answer=cached_text,
+                    history=history,
+                    planner_mode=str(cached.get("planner_mode") or "unknown"),
+                )
+                return _make_cached_sse_response(
+                    cached,
+                    style,
+                    cache_key,
+                    event_version=event_version,
+                )
+        semantic_hit = await _prepare_semantic_cache_hit_for_response(
+            route="stream",
+            question=question,
+            filters=filters,
+            cache_key=cache_key,
+            history=history,
+        )
+        if semantic_hit:
+            semantic_cached, semantic_key = semantic_hit
+            return _make_cached_sse_response(
+                semantic_cached,
+                style,
+                semantic_key,
+                event_version=event_version,
+                semantic_cached=True,
+            )
+
+    settings = get_settings()
+    if bool(getattr(settings, "chat_queue_enabled", True)):
+        queue = get_chat_queue(settings)
+        try:
+            reservation = await queue.reserve()
+        except ChatQueueFull as exc:
+            raise HTTPException(
+                status_code=429,
+                detail="요청이 많아 잠시 후 다시 시도해주세요.",
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
+
+        return _make_queued_stream_response(
+            request=request,
+            question=question,
+            filters=filters,
+            style=style,
+            history=history,
+            agent=agent,
+            cache_key=cache_key,
+            reservation=reservation,
+            event_version=event_version,
+        )
 
     return await _stream_response(
         request,
@@ -1443,6 +2383,7 @@ async def chat_stream_post(
         history=history,
         agent=agent,
         cache_key=cache_key,  # None이면 _stream_response 내에서 캐시 저장 건너뜀
+        event_version=event_version,
     )
 
 
@@ -1451,6 +2392,7 @@ async def chat_stream_get(
     q: str = Query("", description="질문 텍스트"),
     style: str = Query("markdown", pattern="^(markdown|json|compact)$"),
     agent: BaseballStatisticsAgent = Depends(get_agent),
+    pipeline: Any = Depends(get_rag_pipeline),
     __: None = Depends(rate_limit_chat_dependency),
     _: None = Depends(require_ai_internal_token),
     request: Request = None,
@@ -1472,7 +2414,9 @@ async def chat_stream_get(
         style=style,
         history=history,
         agent=agent,
+        pipeline=pipeline,
         cache_key=None,
+        event_version=1,
     )
 
 
@@ -1572,7 +2516,7 @@ async def _require_chat_cache_admin(
 async def chat_cache_stats(_: None = Depends(_require_chat_cache_admin)):
     """캐시 현황 통계를 반환합니다."""
     pool = get_connection_pool()
-    with pool.connection() as conn:
+    async with pool.connection() as conn:
         stats = await get_stats(conn)
     return {"stats": stats}
 
@@ -1584,7 +2528,7 @@ async def flush_cache_by_intent(
 ):
     """특정 intent의 캐시 항목을 모두 삭제합니다."""
     pool = get_connection_pool()
-    with pool.connection() as conn:
+    async with pool.connection() as conn:
         deleted = await delete_by_intent(conn, intent)
     return {"deleted": deleted, "intent": intent}
 
@@ -1596,6 +2540,6 @@ async def invalidate_cache_entry(
 ):
     """특정 캐시 키를 무효화합니다."""
     pool = get_connection_pool()
-    with pool.connection() as conn:
+    async with pool.connection() as conn:
         deleted = await delete_by_key(conn, cache_key)
     return {"deleted": deleted, "cache_key": cache_key}

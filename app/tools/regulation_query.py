@@ -5,7 +5,7 @@ KBO 규정 검색을 위한 전용 도구입니다.
 정확하고 신뢰할 수 있는 규정 정보를 제공합니다.
 """
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 import logging
 from typing import Dict, Any, List
 import psycopg
@@ -42,7 +42,7 @@ class RegulationQueryTool:
 
     COMPONENT = REGULATION_QUERY_COMPONENT
 
-    def __init__(self, connection: psycopg.Connection):
+    def __init__(self, connection: psycopg.AsyncConnection):
         self.connection = connection
 
         # 규정 카테고리별 키워드 매핑
@@ -85,9 +85,9 @@ class RegulationQueryTool:
             "terms": ["용어정의", "타율", "방어율", "포지션", "심판판정", "기록용어"],
         }
 
-    @contextmanager
-    def _connection_scope(self, force_fresh: bool = False):
-        with connection_scope(self.connection, force_fresh=force_fresh) as conn:
+    @asynccontextmanager
+    async def _connection_scope(self, force_fresh: bool = False):
+        async with connection_scope(self.connection, force_fresh=force_fresh) as conn:
             yield conn
 
     def _retry_warning_message(self, action: str) -> str:
@@ -247,9 +247,9 @@ class RegulationQueryTool:
         except Exception:
             return bool(row)
 
-    def _rag_chunks_table_available(self, conn: psycopg.Connection) -> bool:
-        with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute("""
+    async def _rag_chunks_table_available(self, conn: psycopg.AsyncConnection) -> bool:
+        async with conn.cursor(row_factory=dict_row) as cursor:
+            await cursor.execute("""
                 SELECT EXISTS(
                     SELECT 1
                     FROM information_schema.tables
@@ -257,15 +257,15 @@ class RegulationQueryTool:
                       AND table_name = 'rag_chunks'
                 ) AS present;
                 """)
-            return self._row_truthy_value(cursor.fetchone())
+            return self._row_truthy_value(await cursor.fetchone())
 
-    def _search_regulation_once(
-        self, conn: psycopg.Connection, query: str, limit: int
+    async def _search_regulation_once(
+        self, conn: psycopg.AsyncConnection, query: str, limit: int
     ) -> tuple[list[dict[str, Any]] | None, str | None]:
-        if not self._rag_chunks_table_available(conn):
+        if not await self._rag_chunks_table_available(conn):
             return None, None
 
-        with conn.cursor(row_factory=dict_row) as cursor:
+        async with conn.cursor(row_factory=dict_row) as cursor:
             text_search_query = """
                 SELECT 
                     id,
@@ -295,7 +295,7 @@ class RegulationQueryTool:
 
             for search_term in search_terms:
                 search_pattern = f"%{search_term}%"
-                cursor.execute(
+                await cursor.execute(
                     text_search_query,
                     (
                         search_pattern,
@@ -305,14 +305,14 @@ class RegulationQueryTool:
                         limit,
                     ),
                 )
-                rows = cursor.fetchall()
+                rows = await cursor.fetchall()
                 if rows:
                     matched_term = search_term
                     break
 
             return rows, matched_term
 
-    def search_regulation(self, query: str, limit: int = 5) -> Dict[str, Any]:
+    async def search_regulation(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """
         규정 관련 질문을 검색합니다.
 
@@ -333,7 +333,7 @@ class RegulationQueryTool:
         )
 
         try:
-            rows, matched_term = run_with_fresh_connection_retry(
+            rows, matched_term = await run_with_fresh_connection_retry(
                 connection=self.connection,
                 operation=lambda conn: self._search_regulation_once(conn, query, limit),
                 logger=logger,
@@ -382,10 +382,10 @@ class RegulationQueryTool:
 
         return result
 
-    def _get_regulation_by_category_once(
-        self, conn: psycopg.Connection, category: str, limit: int
+    async def _get_regulation_by_category_once(
+        self, conn: psycopg.AsyncConnection, category: str, limit: int
     ) -> list[dict[str, Any]] | None:
-        if not self._rag_chunks_table_available(conn):
+        if not await self._rag_chunks_table_available(conn):
             return None
 
         keywords = self.regulation_categories.get(category, [])
@@ -411,11 +411,11 @@ class RegulationQueryTool:
 
         search_patterns = [f"%{keyword}%" for keyword in keywords] + [limit]
 
-        with conn.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(query, search_patterns)
-            return cursor.fetchall()
+        async with conn.cursor(row_factory=dict_row) as cursor:
+            await cursor.execute(query, search_patterns)
+            return await cursor.fetchall()
 
-    def get_regulation_by_category(
+    async def get_regulation_by_category(
         self, category: str, limit: int = 10
     ) -> Dict[str, Any]:
         """
@@ -437,7 +437,7 @@ class RegulationQueryTool:
         )
 
         try:
-            rows = run_with_fresh_connection_retry(
+            rows = await run_with_fresh_connection_retry(
                 connection=self.connection,
                 operation=lambda conn: self._get_regulation_by_category_once(
                     conn, category, limit
@@ -485,7 +485,7 @@ class RegulationQueryTool:
 
         return result
 
-    def find_related_regulations(self, topic: str) -> Dict[str, Any]:
+    async def find_related_regulations(self, topic: str) -> Dict[str, Any]:
         """
         특정 주제와 관련된 규정들을 찾습니다.
 
@@ -518,15 +518,15 @@ class RegulationQueryTool:
 
         if matched_category:
             # 카테고리별 검색
-            return self.get_regulation_by_category(matched_category)
+            return await self.get_regulation_by_category(matched_category)
         else:
             # 일반 검색
-            return self.search_regulation(topic)
+            return await self.search_regulation(topic)
 
-    def _validate_regulation_reference_once(
-        self, conn: psycopg.Connection, regulation_code: str
+    async def _validate_regulation_reference_once(
+        self, conn: psycopg.AsyncConnection, regulation_code: str
     ) -> dict[str, Any] | None:
-        with conn.cursor(row_factory=dict_row) as cursor:
+        async with conn.cursor(row_factory=dict_row) as cursor:
             query = """
                 SELECT 
                     id,
@@ -540,11 +540,13 @@ class RegulationQueryTool:
                 LIMIT 1;
             """
 
-            cursor.execute(query, (regulation_code,))
-            row = cursor.fetchone()
+            await cursor.execute(query, (regulation_code,))
+            row = await cursor.fetchone()
             return dict(row) if row else None
 
-    def validate_regulation_reference(self, regulation_code: str) -> Dict[str, Any]:
+    async def validate_regulation_reference(
+        self, regulation_code: str
+    ) -> Dict[str, Any]:
         """
         규정 조항 번호로 해당 규정이 존재하는지 확인합니다.
 
@@ -564,7 +566,7 @@ class RegulationQueryTool:
         }
 
         try:
-            row = run_with_fresh_connection_retry(
+            row = await run_with_fresh_connection_retry(
                 connection=self.connection,
                 operation=lambda conn: self._validate_regulation_reference_once(
                     conn, regulation_code

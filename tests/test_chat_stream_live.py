@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.core.chat_queue import InMemoryChatQueue
 from app.routers import chat_stream
 
 
@@ -51,8 +52,8 @@ def stream_app(monkeypatch):
 
     mock_pool = MagicMock()
     mock_conn_ctx = MagicMock()
-    mock_conn_ctx.__enter__ = MagicMock(return_value=MagicMock())
-    mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+    mock_conn_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+    mock_conn_ctx.__aexit__ = AsyncMock(return_value=False)
     mock_pool.connection = MagicMock(return_value=mock_conn_ctx)
 
     monkeypatch.setattr(
@@ -135,6 +136,142 @@ def test_stream_route_emits_status_before_delayed_first_token(stream_app) -> Non
     )
 
 
+def test_stream_route_emits_queue_event_before_processing(stream_app, monkeypatch) -> None:
+    class _QueuedStreamAgent:
+        async def process_query_stream(
+            self, question: str, context: dict[str, Any] | None = None
+        ):
+            yield {"type": "answer_chunk", "content": "대기 후 응답"}
+            yield {
+                "type": "metadata",
+                "data": {
+                    "tool_calls": [],
+                    "tool_results": [],
+                    "data_sources": [],
+                    "verified": True,
+                    "visualizations": [],
+                    "intent": "test",
+                    "planner_mode": "test",
+                    "planner_cache_hit": False,
+                    "tool_execution_mode": "none",
+                    "grounding_mode": "test",
+                    "source_tier": "test",
+                    "answer_sources": [],
+                    "as_of_date": "2026-03-19",
+                    "fallback_reason": None,
+                    "perf": {"model": "test"},
+                },
+            }
+
+    class _FakeQueueStatus:
+        def __init__(self, state: str, queue_position: int, estimated_wait_time: int):
+            self.state = state
+            self.queue_position = queue_position
+            self.estimated_wait_time = estimated_wait_time
+            self.rpm_limit = 18
+
+        def to_payload(self) -> dict[str, Any]:
+            return {
+                "state": self.state,
+                "queuePosition": self.queue_position,
+                "estimatedWaitTime": self.estimated_wait_time,
+                "rpmLimit": self.rpm_limit,
+            }
+
+    class _FakeReservation:
+        def __init__(self) -> None:
+            self.admitted = False
+
+        async def iter_statuses(self, disconnect_checker=None):
+            yield _FakeQueueStatus("queued", 2, 7)
+            self.admitted = True
+            yield _FakeQueueStatus("processing", 0, 0)
+
+        async def release(self):
+            return None
+
+    class _FakeQueue:
+        async def reserve(self):
+            return _FakeReservation()
+
+    monkeypatch.setattr(
+        chat_stream,
+        "get_chat_queue",
+        lambda settings: _FakeQueue(),
+    )
+    stream_app.dependency_overrides[chat_stream.get_agent] = (
+        lambda: _QueuedStreamAgent()
+    )
+
+    with TestClient(stream_app, raise_server_exceptions=False) as client:
+        with client.stream(
+            "POST",
+            "/ai/chat/stream",
+            json={"question": "대기열 테스트"},
+            headers={"X-Internal-Api-Key": "expected-token"},
+        ) as response:
+            events = _collect_sse_events(response)
+
+    assert response.status_code == 200
+    assert [event["type"] for event in events[:3]] == ["queue", "queue", "status"]
+    assert events[0]["data"] == {
+        "state": "queued",
+        "queuePosition": 2,
+        "estimatedWaitTime": 7,
+        "rpmLimit": 18,
+    }
+    assert events[1]["data"] == {
+        "state": "processing",
+        "queuePosition": 0,
+        "estimatedWaitTime": 0,
+        "rpmLimit": 18,
+    }
+
+
+@pytest.mark.asyncio
+async def test_queued_stream_cancels_waiter_on_disconnect_before_processing() -> None:
+    class _DisconnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    class _NeverCalledAgent:
+        async def process_query_stream(
+            self, question: str, context: dict[str, Any] | None = None
+        ):
+            raise AssertionError("queued request should stop before processing")
+
+    queue = InMemoryChatQueue(
+        rpm_limit=1,
+        window_seconds=60,
+        max_size=10,
+        max_wait_seconds=180,
+        status_interval_seconds=1,
+        clock=lambda: 0.0,
+        sleep=asyncio.sleep,
+    )
+    await queue.reserve()
+    queued = await queue.reserve()
+
+    events: list[dict[str, Any]] = []
+    async for event in chat_stream._queued_chat_stream_event_generator(
+        request=_DisconnectedRequest(),
+        question="연결 종료 테스트",
+        filters=None,
+        style="markdown",
+        history=None,
+        agent=_NeverCalledAgent(),
+        cache_key=None,
+        reservation=queued,
+    ):
+        events.append(event)
+
+    third = await queue.reserve()
+
+    assert events == []
+    assert queued.status().state == "cancelled"
+    assert third.status().queue_position == 1
+
+
 @pytest.mark.asyncio
 async def test_live_event_generator_emits_fallback_meta_on_partial_stream_error() -> (
     None
@@ -167,6 +304,13 @@ async def test_live_event_generator_emits_fallback_meta_on_partial_stream_error(
     assert isinstance(
         meta_events[-1]["data"]["perf"]["stream_first_message_ms"], (int, float)
     )
+
+
+def test_temporary_generation_error_event_is_retryable() -> None:
+    event = chat_stream._temporary_generation_error_event()
+
+    assert event["event"] == "error"
+    assert json.loads(event["data"])["retryable"] is True
 
 
 @pytest.mark.asyncio

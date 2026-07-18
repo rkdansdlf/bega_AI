@@ -16,10 +16,25 @@ def test_coach_openrouter_default_model_uses_openrouter_free(monkeypatch):
     assert settings.coach_openrouter_model == "openrouter/free"
 
 
-def test_resolve_coach_openrouter_models_skips_retired_slug():
+def test_resolve_coach_openrouter_models_skips_blocked_auto():
     models = resolve_coach_openrouter_models(
-        "upstage/solar-pro-3:free",
+        "openrouter/auto",
         ["openrouter/free", "openrouter/free"],
+    )
+
+    assert models == ["openrouter/free"]
+
+
+def test_resolve_coach_openrouter_models_uses_free_when_primary_is_blocked():
+    models = resolve_coach_openrouter_models("openrouter/auto", [])
+
+    assert models == ["openrouter/free"]
+
+
+def test_resolve_coach_openrouter_models_uses_free_when_all_candidates_blocked():
+    models = resolve_coach_openrouter_models(
+        "openrouter/auto",
+        ["openrouter/auto"],
     )
 
     assert models == ["openrouter/free"]

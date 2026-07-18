@@ -2,11 +2,11 @@
 챗봇 응답 DB 캐시 CRUD 모듈.
 
 DB 접근 패턴은 app/routers/coach.py와 동일하게 따릅니다:
-- psycopg3 (psycopg 패키지)
-- psycopg_pool.ConnectionPool, pool.connection() context manager
-- conn.execute(sql, (param, ...)) — %s 플레이스홀더, 튜플 파라미터
+- psycopg3 async (psycopg 패키지)
+- psycopg_pool.AsyncConnectionPool, ``async with pool.connection()`` context manager
+- ``await conn.execute(sql, (param, ...))`` — %s 플레이스홀더, 튜플 파라미터
 - 풀 생성 시 autocommit=True 설정 → 개별 DML에 conn.commit() 불필요
-- 비동기 컨텍스트에서 동기 DB 호출은 run_in_threadpool로 래핑
+- 네이티브 async psycopg3 — run_in_threadpool 래핑 없이 이벤트 루프에서 직접 실행
 
 DDL 자동 적용:
     deps.py lifespan()에서 CREATE_TABLE_SQL을 실행하도록 추가해야 합니다.
@@ -20,11 +20,19 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi.concurrency import run_in_threadpool
+from app.observability.metrics import AI_RESPONSE_CACHE_TOTAL
 
 from .chat_cache_key import get_ttl_seconds
 
 logger = logging.getLogger(__name__)
+
+
+def _record_response_cache(operation: str, result: str) -> None:
+    try:
+        AI_RESPONSE_CACHE_TOTAL.labels(operation=operation, result=result).inc()
+    except Exception:  # noqa: BLE001
+        pass
+
 
 # ─── DDL ────────────────────────────────────────────────────────────────────────
 # deps.py lifespan()에서 pool.connection()으로 실행합니다.
@@ -46,23 +54,23 @@ CREATE INDEX IF NOT EXISTS idx_chat_cache_created_at ON chat_response_cache(crea
 """
 
 
-# ─── 동기 헬퍼 (run_in_threadpool로 실행) ──────────────────────────────────────
-# psycopg3 API:
-#   conn.execute(sql, params_tuple) → cursor
-#   cursor.fetchone() → Optional[tuple]
-#   cursor.fetchall() → list[tuple]
-#   cursor.rowcount  → int (DML 영향 행 수)
+# ─── async DB 헬퍼 (네이티브 async psycopg3) ──────────────────────────────────
+# psycopg3 async API:
+#   cur = await conn.execute(sql, params_tuple) → AsyncCursor
+#   await cur.fetchone() → Optional[tuple]
+#   await cur.fetchall() → list[tuple]
+#   cur.rowcount  → int (DML 영향 행 수)
 # autocommit=True이므로 conn.commit() 생략.
 
 
-def _get_sync(conn, cache_key: str) -> Optional[Dict[str, Any]]:
+async def _get_sync(conn, cache_key: str) -> Optional[Dict[str, Any]]:
     """
     유효한 캐시 항목을 조회합니다.
 
     expires_at > now() 조건으로 만료 항목을 자동 제외합니다.
     항목이 없거나 만료된 경우 None을 반환합니다.
     """
-    row = conn.execute(
+    cur = await conn.execute(
         """
         SELECT response_text, intent, model_name, hit_count, expires_at
         FROM   chat_response_cache
@@ -70,7 +78,8 @@ def _get_sync(conn, cache_key: str) -> Optional[Dict[str, Any]]:
           AND  expires_at > now()
         """,
         (cache_key,),
-    ).fetchone()
+    )
+    row = await cur.fetchone()
 
     if row is None:
         return None
@@ -85,7 +94,7 @@ def _get_sync(conn, cache_key: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _save_sync(
+async def _save_sync(
     conn,
     *,
     cache_key: str,
@@ -114,7 +123,7 @@ def _save_sync(
         else None
     )
 
-    conn.execute(
+    await conn.execute(
         """
         INSERT INTO chat_response_cache
             (cache_key, question_text, filters_json, intent,
@@ -144,9 +153,9 @@ def _save_sync(
     )
 
 
-def _update_hit_count_sync(conn, cache_key: str) -> None:
+async def _update_hit_count_sync(conn, cache_key: str) -> None:
     """hit_count를 1 증가시킵니다. 존재하지 않는 키는 무시됩니다."""
-    conn.execute(
+    await conn.execute(
         """
         UPDATE chat_response_cache
         SET    hit_count = hit_count + 1
@@ -156,14 +165,16 @@ def _update_hit_count_sync(conn, cache_key: str) -> None:
     )
 
 
-def _cleanup_sync(conn) -> int:
+async def _cleanup_sync(conn) -> int:
     """
     만료된 캐시 항목을 삭제합니다.
 
     Returns:
         삭제된 행 수
     """
-    result = conn.execute("DELETE FROM chat_response_cache WHERE expires_at <= now()")
+    result = await conn.execute(
+        "DELETE FROM chat_response_cache WHERE expires_at <= now()"
+    )
     # psycopg3 cursor.rowcount: 영향받은 행 수 (DML 실행 후 유효)
     deleted: int = getattr(result, "rowcount", 0) or 0
     if deleted:
@@ -171,14 +182,14 @@ def _cleanup_sync(conn) -> int:
     return deleted
 
 
-def _get_stats_sync(conn) -> List[Dict[str, Any]]:
+async def _get_stats_sync(conn) -> List[Dict[str, Any]]:
     """
     유효한 캐시 항목의 intent별 통계를 반환합니다.
 
     Returns:
         [{"intent": str, "count": int, "avg_hits": float}, ...]
     """
-    rows = conn.execute("""
+    cur = await conn.execute("""
         SELECT intent,
                COUNT(*)                        AS cnt,
                ROUND(AVG(hit_count)::numeric, 2) AS avg_hits
@@ -186,7 +197,8 @@ def _get_stats_sync(conn) -> List[Dict[str, Any]]:
         WHERE  expires_at > now()
         GROUP  BY intent
         ORDER  BY cnt DESC
-        """).fetchall()
+        """)
+    rows = await cur.fetchall()
 
     return [
         {
@@ -198,18 +210,18 @@ def _get_stats_sync(conn) -> List[Dict[str, Any]]:
     ]
 
 
-def _delete_by_intent_sync(conn, intent: str) -> int:
+async def _delete_by_intent_sync(conn, intent: str) -> int:
     """특정 intent의 모든 캐시 항목을 삭제합니다 (만료 여부 무관)."""
-    result = conn.execute(
+    result = await conn.execute(
         "DELETE FROM chat_response_cache WHERE intent = %s",
         (intent,),
     )
     return getattr(result, "rowcount", 0) or 0
 
 
-def _delete_by_key_sync(conn, cache_key: str) -> int:
+async def _delete_by_key_sync(conn, cache_key: str) -> int:
     """특정 cache_key 항목을 삭제합니다."""
-    result = conn.execute(
+    result = await conn.execute(
         "DELETE FROM chat_response_cache WHERE cache_key = %s",
         (cache_key,),
     )
@@ -243,10 +255,13 @@ async def get_cached_response(conn, cache_key: str) -> Optional[Dict[str, Any]]:
         미스, 만료, 또는 오류 시 None (테이블 미존재 포함).
     """
     try:
-        return await run_in_threadpool(_get_sync, conn, cache_key)
+        result = await _get_sync(conn, cache_key)
     except Exception as exc:
         logger.warning("[ChatCache] get failed for key %.8s: %s", cache_key, exc)
+        _record_response_cache("lookup", "error")
         return None  # 캐시 미스로 처리 — 챗봇 응답 흐름은 정상 진행
+    _record_response_cache("lookup", "hit" if result is not None else "miss")
+    return result
 
 
 async def save_to_cache(
@@ -266,8 +281,7 @@ async def save_to_cache(
     캐시 저장 실패가 챗봇 응답 흐름을 중단시키지 않도록 하기 위함입니다.
     """
     try:
-        await run_in_threadpool(
-            _save_sync,
+        await _save_sync(
             conn,
             cache_key=cache_key,
             question_text=question_text,
@@ -279,6 +293,9 @@ async def save_to_cache(
     except Exception as exc:
         # 키 앞 8자만 로깅 (전체 해시 노출 방지)
         logger.warning("[ChatCache] save failed for key %.8s: %s", cache_key, exc)
+        _record_response_cache("store", "error")
+        return
+    _record_response_cache("store", "ok")
 
 
 async def update_hit_count(conn, cache_key: str) -> None:
@@ -288,7 +305,7 @@ async def update_hit_count(conn, cache_key: str) -> None:
     실패해도 응답 흐름에 영향을 주지 않도록 예외를 삼킵니다.
     """
     try:
-        await run_in_threadpool(_update_hit_count_sync, conn, cache_key)
+        await _update_hit_count_sync(conn, cache_key)
     except Exception as exc:
         logger.warning("[ChatCache] hit_count update failed: %s", exc)
 
@@ -302,7 +319,7 @@ async def cleanup_expired(conn) -> int:
     Returns:
         삭제된 행 수
     """
-    return await run_in_threadpool(_cleanup_sync, conn)
+    return await _cleanup_sync(conn)
 
 
 async def get_stats(conn) -> List[Dict[str, Any]]:
@@ -311,7 +328,7 @@ async def get_stats(conn) -> List[Dict[str, Any]]:
 
     관리 엔드포인트(/admin/cache/stats)에서 사용합니다.
     """
-    return await run_in_threadpool(_get_stats_sync, conn)
+    return await _get_stats_sync(conn)
 
 
 async def delete_by_intent(conn, intent: str) -> int:
@@ -323,7 +340,7 @@ async def delete_by_intent(conn, intent: str) -> int:
     Returns:
         삭제된 행 수
     """
-    return await run_in_threadpool(_delete_by_intent_sync, conn, intent)
+    return await _delete_by_intent_sync(conn, intent)
 
 
 async def delete_by_key(conn, cache_key: str) -> int:
@@ -333,4 +350,4 @@ async def delete_by_key(conn, cache_key: str) -> int:
     Returns:
         삭제된 행 수 (0이면 존재하지 않았음)
     """
-    return await run_in_threadpool(_delete_by_key_sync, conn, cache_key)
+    return await _delete_by_key_sync(conn, cache_key)
