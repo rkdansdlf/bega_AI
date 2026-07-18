@@ -150,7 +150,7 @@ def test_leased_database_ingest_passes_checkpoint_identity(monkeypatch):
         tables=["game"],
         lease_run_id="run-1",
         lease_owner="worker-1",
-        checkpoint_scope_key="season:2026",
+        checkpoint_scope_key="  season:2026  ",
         source_db_url="postgresql://internal-source",
         **OPTIONS,
     )

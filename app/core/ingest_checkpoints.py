@@ -14,7 +14,14 @@ from uuid import UUID
 
 CURSOR_VERSION = 1
 CursorScalarType = Literal[
-    "integer", "decimal", "date", "datetime", "uuid", "text", "boolean"
+    "integer",
+    "decimal",
+    "date",
+    "datetime",
+    "datetime_naive",
+    "uuid",
+    "text",
+    "boolean",
 ]
 
 
@@ -95,6 +102,12 @@ def _normalize_cursor_value(kind: CursorScalarType, value: Any) -> Any:
         raise IngestCheckpointCursorTypeError("decimal cursor value must be finite")
     if kind == "datetime" and isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if kind == "datetime_naive" and isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value
+        raise IngestCheckpointCursorTypeError(
+            "datetime_naive cursor value must not include a timezone offset"
+        )
     if kind == "date" and isinstance(value, date) and not isinstance(value, datetime):
         return value
     if kind == "uuid" and isinstance(value, UUID):
@@ -110,7 +123,7 @@ def _normalize_cursor_value(kind: CursorScalarType, value: Any) -> Any:
 
 def _json_cursor_value(kind: CursorScalarType, value: Any) -> Any:
     normalized = _normalize_cursor_value(kind, value)
-    if kind in {"decimal", "date", "datetime", "uuid"}:
+    if kind in {"decimal", "date", "datetime", "datetime_naive", "uuid"}:
         return normalized.isoformat() if hasattr(normalized, "isoformat") else str(normalized)
     return normalized
 
@@ -125,6 +138,8 @@ def _python_cursor_value(kind: CursorScalarType, value: Any) -> Any:
             decoded = date.fromisoformat(str(value))
         elif kind == "datetime":
             decoded = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        elif kind == "datetime_naive":
+            decoded = datetime.fromisoformat(str(value))
         elif kind == "uuid":
             decoded = UUID(str(value))
         elif kind == "text":

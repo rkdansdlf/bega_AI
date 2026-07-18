@@ -154,6 +154,22 @@ def test_resolve_checkpoint_order_maps_catalog_types_in_primary_key_order():
     assert params == ("plain_table", "public")
 
 
+def test_resolve_checkpoint_order_distinguishes_postgres_timestamp_types():
+    conn = FakeCatalogConnection(
+        [
+            ("local_time", "timestamp without time zone", True),
+            ("absolute_time", "timestamp with time zone", True),
+        ]
+    )
+
+    order = ingest_script.resolve_checkpoint_order(conn, "event", {})
+
+    assert order.fields == (
+        CheckpointOrderField("local_time", "datetime_naive"),
+        CheckpointOrderField("absolute_time", "datetime"),
+    )
+
+
 def test_resolve_checkpoint_order_rejects_float_primary_key():
     conn = FakeCatalogConnection([("score", "double precision", True)])
 
@@ -210,6 +226,7 @@ def test_generic_profile_cannot_bypass_catalog_with_configured_order(
         ("decimal", Decimal("3.140")),
         ("date", date(2026, 7, 18)),
         ("datetime", datetime(2026, 7, 18, 4, 0, tzinfo=UTC)),
+        ("datetime_naive", datetime(2026, 7, 18, 4, 0)),
         ("uuid", UUID("44444444-4444-4444-8444-444444444444")),
         ("text", "20260718LGKT"),
         ("boolean", True),
@@ -229,6 +246,19 @@ def test_cursor_codec_round_trips_supported_types(scalar_type, value):
 def test_signature_changes_with_query_version():
     changed = CheckpointOrder(ORDER.source_table, ORDER.fields, query_version="2")
     assert changed.signature != ORDER.signature
+
+
+def test_datetime_naive_has_distinct_signature_from_legacy_datetime():
+    legacy = CheckpointOrder(
+        "event",
+        (CheckpointOrderField("occurred_at", "datetime"),),
+    )
+    wall_clock = CheckpointOrder(
+        "event",
+        (CheckpointOrderField("occurred_at", "datetime_naive"),),
+    )
+
+    assert wall_clock.signature != legacy.signature
 
 
 def test_decode_rejects_field_or_type_mismatch():
@@ -362,6 +392,90 @@ def test_naive_datetime_is_normalized_to_utc():
     cursor = cursor_from_row(order, {"key": datetime(2026, 7, 18, 4, 0)})
 
     assert cursor == CheckpointCursor((datetime(2026, 7, 18, 4, 0, tzinfo=UTC),))
+
+
+def test_datetime_naive_round_trip_preserves_wall_clock_without_offset():
+    order = CheckpointOrder(
+        source_table="event",
+        fields=(CheckpointOrderField("occurred_at", "datetime_naive"),),
+    )
+    value = datetime(2026, 7, 18, 4, 0, 1, 123456)
+
+    payload = encode_cursor(order, CheckpointCursor((value,)))
+    decoded = decode_cursor(order, payload)
+
+    assert payload["values"][0]["value"] == "2026-07-18T04:00:01.123456"
+    assert decoded == CheckpointCursor((value,))
+    assert decoded.values[0].tzinfo is None
+
+
+def test_datetime_naive_rejects_aware_runtime_value():
+    order = CheckpointOrder(
+        source_table="event",
+        fields=(CheckpointOrderField("occurred_at", "datetime_naive"),),
+    )
+
+    with pytest.raises(IngestCheckpointCursorTypeError):
+        encode_cursor(
+            order,
+            CheckpointCursor((datetime(2026, 7, 18, 4, 0, tzinfo=UTC),)),
+        )
+
+
+@pytest.mark.parametrize(
+    "stored_value",
+    [
+        "2026-07-18T04:00:00+00:00",
+        "2026-07-18T13:00:00+09:00",
+        "2026-07-18T04:00:00Z",
+    ],
+)
+def test_datetime_naive_rejects_offset_bearing_stored_value(stored_value):
+    order = CheckpointOrder(
+        source_table="event",
+        fields=(CheckpointOrderField("occurred_at", "datetime_naive"),),
+    )
+    payload = {
+        "values": [
+            {
+                "field": "occurred_at",
+                "type": "datetime_naive",
+                "value": stored_value,
+            }
+        ]
+    }
+
+    with pytest.raises(IngestCheckpointCursorTypeError):
+        decode_cursor(order, payload)
+
+
+def test_legacy_datetime_signature_is_incompatible_with_datetime_naive_order():
+    legacy = CheckpointOrder(
+        "event",
+        (CheckpointOrderField("occurred_at", "datetime"),),
+    )
+    wall_clock = CheckpointOrder(
+        "event",
+        (CheckpointOrderField("occurred_at", "datetime_naive"),),
+    )
+    cursor = _RecordingCursor(
+        rows=[
+            _checkpoint_row(
+                source_table="event",
+                cursor_signature=legacy.signature,
+                cursor=None,
+            )
+        ]
+    )
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        IngestCheckpointSession.start(
+            cursor,
+            run_id=RUN_ID,
+            source_table="event",
+            scope_key=SCOPE_KEY,
+            order=wall_clock,
+        )
 
 
 def test_repository_load_uses_explicit_columns_and_decodes_typed_cursor():
