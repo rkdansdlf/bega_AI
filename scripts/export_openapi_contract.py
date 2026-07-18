@@ -29,6 +29,7 @@ DOCUMENTATION_ENV = {
     "AI_METRICS_ENABLED": "false",
     "AI_DIRECT_BROWSER_ACCESS_ENABLED": "false",
     "CORS_ORIGINS": "[]",
+    "BEGA_SKIP_APP_INIT": "1",
 }
 
 
@@ -857,19 +858,77 @@ def _finish(lines: list[str]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _snapshot_app_modules() -> dict[str, object]:
+    return {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "app" or name.startswith("app.")
+    }
+
+
+def _snapshot_prometheus_collectors() -> tuple[object, tuple[object, ...]] | None:
+    try:
+        from prometheus_client import REGISTRY
+    except ImportError:
+        return None
+    collectors = getattr(REGISTRY, "_names_to_collectors", {})
+    if not isinstance(collectors, Mapping):
+        return None
+    return REGISTRY, tuple(collectors.values())
+
+
+def _remove_transient_prometheus_collectors(
+    snapshot: tuple[object, tuple[object, ...]] | None,
+) -> None:
+    if snapshot is None:
+        return
+    registry, existing_collectors = snapshot
+    collectors = getattr(registry, "_names_to_collectors", {})
+    if not isinstance(collectors, Mapping):
+        return
+    existing_ids = {id(collector) for collector in existing_collectors}
+    transient_collectors = {
+        id(collector): collector
+        for collector in collectors.values()
+        if id(collector) not in existing_ids
+    }
+    for collector in transient_collectors.values():
+        try:
+            registry.unregister(collector)
+        except KeyError:
+            continue
+
+
+def _remove_transient_app_modules(existing_modules: Mapping[str, object]) -> None:
+    transient_modules = {
+        name: module
+        for name, module in _snapshot_app_modules().items()
+        if name not in existing_modules
+    }
+    for name in sorted(transient_modules, key=lambda value: value.count("."), reverse=True):
+        module = transient_modules[name]
+        if sys.modules.get(name) is not module:
+            continue
+        sys.modules.pop(name, None)
+        parent_name, _, attribute = name.rpartition(".")
+        if not parent_name:
+            continue
+        parent = sys.modules.get(parent_name)
+        if getattr(parent, attribute, None) is module:
+            delattr(parent, attribute)
+
+
 def build_contract_document() -> dict[str, Any]:
     """Build a detached OpenAPI document with fixed documentation settings."""
 
-    existing_main = sys.modules.get("app.main")
-    transient_main: object | None = None
+    existing_app_modules = _snapshot_app_modules()
+    prometheus_collectors = _snapshot_prometheus_collectors()
     previous = {key: os.environ.get(key) for key in DOCUMENTATION_ENV}
     os.environ.update(DOCUMENTATION_ENV)
     try:
         from app.config import get_settings
         from app.main import create_app
 
-        if existing_main is None:
-            transient_main = sys.modules.get("app.main")
         get_settings.cache_clear()
         document = json.loads(json.dumps(create_app().openapi(), ensure_ascii=False))
         if not isinstance(document, dict):
@@ -889,15 +948,8 @@ def build_contract_document() -> dict[str, Any]:
         from app.config import get_settings
 
         get_settings.cache_clear()
-        if existing_main is None:
-            if transient_main is None:
-                transient_main = sys.modules.get("app.main")
-            if transient_main is not None:
-                if sys.modules.get("app.main") is transient_main:
-                    sys.modules.pop("app.main", None)
-                app_package = sys.modules.get("app")
-                if getattr(app_package, "main", None) is transient_main:
-                    delattr(app_package, "main")
+        _remove_transient_app_modules(existing_app_modules)
+        _remove_transient_prometheus_collectors(prometheus_collectors)
 
 
 def _render_artifacts() -> dict[Path, str]:

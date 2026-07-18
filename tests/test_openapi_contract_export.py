@@ -1007,27 +1007,7 @@ def test_cli_writes_all_artifacts_and_check_reports_every_stale_path_without_wri
     assert not artifact_paths["schemas"].exists()
 
 
-def test_build_contract_document_does_not_leak_documentation_module_to_clean_process() -> None:
-    script = """
-import importlib
-import sys
-
-assert "app.main" not in sys.modules
-
-from scripts.export_openapi_contract import build_contract_document
-
-document = build_contract_document()
-assert document["paths"]
-assert "app.main" not in sys.modules
-
-import app
-assert not hasattr(app, "main")
-
-app_main = importlib.import_module("app.main")
-assert app_main.app.docs_url is None
-assert app_main.app.redoc_url is None
-assert app_main.app.openapi_url is None
-"""
+def _production_subprocess_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.update(
         {
@@ -1041,11 +1021,39 @@ assert app_main.app.openapi_url is None
     )
     environment.pop("PYTEST_CURRENT_TEST", None)
     environment.pop("BEGA_SKIP_APP_INIT", None)
+    return environment
+
+
+def test_build_contract_document_does_not_leak_documentation_package_to_clean_process() -> None:
+    script = """
+import importlib
+import sys
+
+assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
+
+from scripts.export_openapi_contract import build_contract_document
+
+document = build_contract_document()
+assert document["paths"]
+assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
+assert "BEGA_SKIP_APP_INIT" not in __import__("os").environ
+
+import app
+assert app.app is app.get_app()
+assert app.app.docs_url is None
+assert app.app.redoc_url is None
+assert app.app.openapi_url is None
+
+app_main = importlib.import_module("app.main")
+assert app_main.app.docs_url is None
+assert app_main.app.redoc_url is None
+assert app_main.app.openapi_url is None
+"""
 
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=Path(__file__).resolve().parents[1],
-        env=environment,
+        env=_production_subprocess_environment(),
         text=True,
         capture_output=True,
         check=False,
@@ -1054,16 +1062,93 @@ assert app_main.app.openapi_url is None
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_build_contract_document_preserves_preimported_app_main_module_and_global_app() -> None:
-    app_main = importlib.import_module("app.main")
-    original_app = app_main.app
-    original_docs_url = original_app.docs_url
-    original_openapi_url = original_app.openapi_url
+def test_build_contract_document_cleans_package_tree_after_failure_in_clean_process() -> None:
+    script = """
+import importlib
+import sys
 
-    document = exporter.build_contract_document()
+from scripts import export_openapi_contract as exporter
 
-    assert document["paths"]
-    assert sys.modules["app.main"] is app_main
-    assert app_main.app is original_app
-    assert app_main.app.docs_url == original_docs_url
-    assert app_main.app.openapi_url == original_openapi_url
+def fail_validation(parent, field):
+    raise RuntimeError("expected validation failure")
+
+exporter._require_mapping = fail_validation
+try:
+    exporter.build_contract_document()
+except RuntimeError as error:
+    assert str(error) == "expected validation failure"
+else:
+    raise AssertionError("generation should fail")
+
+assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
+
+import app
+assert app.app is app.get_app()
+assert app.app.docs_url is None
+assert app.app.openapi_url is None
+app_main = importlib.import_module("app.main")
+assert app_main.app.docs_url is None
+assert app_main.app.openapi_url is None
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=_production_subprocess_environment(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_build_contract_document_preserves_preimported_package_module_and_caches() -> None:
+    script = """
+import importlib
+import sys
+
+import app
+app_main = importlib.import_module("app.main")
+from scripts.export_openapi_contract import build_contract_document
+
+modules_before = {
+    name: module
+    for name, module in sys.modules.items()
+    if name == "app" or name.startswith("app.")
+}
+package_app = app.app
+get_app = app.get_app
+cache_info = get_app.cache_info()
+main_app = app_main.app
+
+document = build_contract_document()
+assert document["paths"]
+
+modules_after = {
+    name: module
+    for name, module in sys.modules.items()
+    if name == "app" or name.startswith("app.")
+}
+assert set(modules_after) == set(modules_before)
+assert all(modules_after[name] is module for name, module in modules_before.items())
+assert app.app is package_app
+assert app.get_app is get_app
+assert get_app.cache_info() == cache_info
+assert app_main.app is main_app
+assert package_app.docs_url is None
+assert package_app.openapi_url is None
+assert main_app.docs_url is None
+assert main_app.openapi_url is None
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=_production_subprocess_environment(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
