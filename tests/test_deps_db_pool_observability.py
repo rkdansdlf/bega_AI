@@ -146,6 +146,57 @@ def test_required_pool_startup_closes_both_pools_on_failure(monkeypatch) -> None
     assert deps._ingest_connection_pool is None
 
 
+def test_required_pool_startup_preserves_open_error_when_pool_close_fails(
+    monkeypatch,
+) -> None:
+    class PoolOpenError(RuntimeError):
+        pass
+
+    class PoolCloseError(RuntimeError):
+        pass
+
+    class _LifecyclePool:
+        def __init__(self, *, open_error=None, close_error=None):
+            self.open_error = open_error
+            self.close_error = close_error
+            self.close_calls = 0
+
+        async def open(self, *, wait, timeout):
+            assert wait is True
+            assert timeout == 10.0
+            if self.open_error is not None:
+                raise self.open_error
+
+        async def close(self):
+            self.close_calls += 1
+            if self.close_error is not None:
+                raise self.close_error
+
+        def get_stats(self):
+            return {"pool_available": 0}
+
+    open_error = PoolOpenError("ingest pool unavailable")
+    general_pool = _LifecyclePool()
+    ingest_pool = _LifecyclePool(
+        open_error=open_error,
+        close_error=PoolCloseError("secret close detail"),
+    )
+    monkeypatch.setattr(deps, "_connection_pool", general_pool)
+    monkeypatch.setattr(deps, "_ingest_connection_pool", ingest_pool)
+    monkeypatch.setattr(deps, "_prepare_schema", AsyncMock())
+
+    with pytest.raises(PoolOpenError) as raised:
+        asyncio.run(
+            deps._prepare_required_database_pools(
+                SimpleNamespace(ai_db_schema_mode="managed")
+            )
+        )
+
+    assert raised.value is open_error
+    assert ingest_pool.close_calls == 1
+    assert general_pool.close_calls == 1
+
+
 def test_close_ingest_pool_is_idempotent(monkeypatch) -> None:
     class _ClosablePool:
         def __init__(self):
@@ -177,18 +228,35 @@ def test_ingest_heartbeat_does_not_acquire_busy_general_pool(monkeypatch) -> Non
             raise AssertionError("general pool must not serve ingest heartbeat")
 
     class _Cursor:
+        def __init__(self, row):
+            self.row = row
+
         async def fetchone(self):
-            return {"lease_expires_at": lease_expires_at}
+            return self.row
 
     class _Connection:
+        def __init__(self):
+            self.calls = 0
+
+        def transaction(self):
+            return _ConnectionContext(self)
+
         async def execute(self, statement, params):
-            assert "lease_expires_at > now()" in statement
+            self.calls += 1
+            if self.calls == 1:
+                assert "FOR UPDATE" in statement
+                assert params == (run_id,)
+                return _Cursor((run_id,))
+            assert "lease_expires_at > clock_timestamp()" in statement
             assert params[1] == run_id
-            return _Cursor()
+            return _Cursor({"lease_expires_at": lease_expires_at})
 
     class _ConnectionContext:
+        def __init__(self, connection=None):
+            self.connection = connection or _Connection()
+
         async def __aenter__(self):
-            return _Connection()
+            return self.connection
 
         async def __aexit__(self, exc_type, exc, traceback):
             return False

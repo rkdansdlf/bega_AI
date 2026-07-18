@@ -1,0 +1,90 @@
+# Final Review Fix Report
+
+## Status
+
+- Branch: `codex/data-sync-orchestration`
+- Review base: `4a7ac0d` (`docs: explain ingest lease resilience`)
+- Result: all critical, important, and minor findings in the final-review brief are addressed.
+- Scope constraints: no network calls, live/shared database access, schema mutation, environment-file edits, external embeddings, or external baseball-data collection were used.
+
+## Finding Resolution
+
+### PostgreSQL lease safety
+
+- `scripts/ingest_from_kbo.py` now locks the target run row before validating ownership and lease state, and evaluates validity with PostgreSQL `clock_timestamp()`.
+- `app/core/ingest_run_store.py` now uses actual PostgreSQL time for claims, heartbeats, terminal transitions, and stale-run recovery.
+- Heartbeat and terminal mutations lock the run first with `FOR UPDATE`, then perform the state mutation. Recovery selects stale candidates with `FOR UPDATE SKIP LOCKED` and actual-time predicates.
+- Deterministic SQL-contract tests cover guard query ordering, row locks, actual-time comparisons, and stale-run recovery.
+
+### Heartbeat safety budget and retry classification
+
+- `app/core/ingest_worker.py` captures a conservative monotonic confirmation immediately before claim and immediately before each heartbeat request.
+- Every heartbeat call is bounded by the remaining lease-safe budget with `asyncio.timeout`; a hung call marks the lease lost and increments the exhausted counter exactly once.
+- A delayed successful response advances confirmation only to request start, never response completion.
+- Retries are limited to `psycopg.OperationalError`, `psycopg.InterfaceError`, and `psycopg_pool.PoolTimeout`.
+- Non-transient failures stop the heartbeat loop immediately without retry or exhausted-metric inflation. Logs contain only run identifiers and exception class names.
+- Tests cover each transient class, hung calls, delayed success, non-transient failure, metric cardinality, and initial claim confirmation.
+
+### Exception-safe FastAPI lifespan
+
+- `app/deps.py` now wraps the complete lifespan in exception-safe acquisition and cleanup logic.
+- All background tasks are canceled and awaited independently. HTTP, cache, runtime, and both database-pool closers are attempted independently.
+- The original startup or request exception is preserved when cleanup also fails. During normal shutdown, cleanup completes fully before the first cleanup error is raised.
+- Cleanup uses only a backend captured during startup; it never creates an embedding backend solely to close it.
+- Pool close helpers clear their global references before awaiting close, making failed cleanup idempotent.
+- Tests cover post-open startup failure, partial task cleanup, independent pool closing, request-exception preservation, and startup-error preservation.
+
+### Metrics and documentation
+
+- `AI_INGEST_HEARTBEATS_TOTAL` is explicitly exported with bounded result labels.
+- The runbook describes the safety margin as up to five seconds, actual database time, bounded heartbeat requests, transient classification, and cleanup semantics.
+- The approved design and implementation plan contain authoritative amendments for the final-review behavior.
+
+## TDD Evidence
+
+### RED
+
+Command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_results.py tests/test_ingest_run_store.py tests/test_ingest_worker.py tests/test_schema_startup_mode.py tests/test_deps_db_pool_observability.py tests/test_observability_metrics.py -q
+```
+
+Result: exit 1 — `19 failed, 48 passed in 5.13s`.
+
+The failures demonstrated the missing lock-first/actual-time SQL, heartbeat timeout and confirmation rules, transient-only retry policy, exception-safe cleanup behavior, and metric export.
+
+### GREEN
+
+The same focused command after implementation: exit 0 — `67 passed in 1.91s`.
+
+Prescribed broader focused command:
+
+```text
+/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_runs.py tests/test_ingest_results.py tests/test_ingest_run_store.py tests/test_ingest_worker.py tests/test_schema_startup_mode.py tests/test_deps_db_pool_observability.py tests/test_observability_metrics.py tests/test_db_schema_contract.py -q
+```
+
+Result: exit 0 — `82 passed in 1.11s`.
+
+A timing-sensitive retry-count assertion failed once under full-suite load. Its test budget was widened without changing production behavior; the targeted regression then passed: `1 passed in 0.49s`.
+
+## Full Verification
+
+- Full AI suite: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/ -q`
+  - Final result: exit 0 — `1700 passed, 5 skipped, 8 warnings in 60.86s`.
+  - The five skips require existing operator-provided local reports or migration fixtures. The eight warnings are existing dependency/deprecation warnings.
+- Bytecode compilation: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m compileall -q app scripts` — exit 0.
+- Baseball-data policy: `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python ../../../scripts/validate_baseball_data_policy.py` — exit 0, `External baseball data policy OK`.
+- Patch whitespace: `git diff --check` and `git diff --check 4a7ac0d` — exit 0.
+
+## Files Changed
+
+- Runtime: `app/core/ingest_run_store.py`, `app/core/ingest_worker.py`, `app/deps.py`, `app/observability/metrics.py`, `scripts/ingest_from_kbo.py`
+- Tests: `tests/test_ingest_results.py`, `tests/test_ingest_run_store.py`, `tests/test_ingest_worker.py`, `tests/test_schema_startup_mode.py`, `tests/test_deps_db_pool_observability.py`, `tests/test_observability_metrics.py`
+- Documentation: `docs/data-sync-orchestration-runbook.md`, the approved design, the implementation plan, and this report
+
+## Remaining Concerns
+
+- No live PostgreSQL integration test was run by design; SQL ordering and predicates are covered by deterministic unit/contract tests.
+- The full suite retains five environment-dependent skips and eight pre-existing warnings; neither is introduced by this patch.
+- No external baseball-data fallback or repair path was added. Missing baseball data continues to require the established `MANUAL_BASEBALL_DATA_REQUIRED` operator flow.
