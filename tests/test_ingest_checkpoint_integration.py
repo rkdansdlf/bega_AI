@@ -13,6 +13,7 @@ from app.core.ingest_checkpoints import (
     CheckpointOrder,
     CheckpointOrderField,
     IngestCheckpointCursorUnavailableError,
+    IngestCheckpointIncompatibleError,
     IngestCheckpointOrderError,
     IngestCheckpointStaleCleanupError,
 )
@@ -227,6 +228,8 @@ def _run_fake_checkpoint_ingest(
     captured_resumes=None,
     lease_calls=None,
     read_batch_size=2,
+    observe_metrics=False,
+    start_error=None,
 ):
     events = [] if events is None else events
     if state is None:
@@ -252,7 +255,11 @@ def _run_fake_checkpoint_ingest(
     )
 
     class _ConfiguredSession(_EventCheckpointSession):
-        pass
+        @classmethod
+        def start(cls, cursor, **kwargs):
+            if start_error is not None:
+                raise start_error
+            return super().start(cursor, **kwargs)
 
     _ConfiguredSession.events = events
     _ConfiguredSession.state = state
@@ -269,6 +276,21 @@ def _run_fake_checkpoint_ingest(
         return [[_payload_for_task(task)] for task in tasks], parallel_engine
 
     monkeypatch.setattr(module, "IngestCheckpointSession", _ConfiguredSession)
+    if observe_metrics:
+        monkeypatch.setattr(
+            module,
+            "_record_checkpoint_event",
+            lambda source_table, result: events.append(
+                f"metric.checkpoint:{source_table}:{result}"
+            ),
+        )
+        monkeypatch.setattr(
+            module,
+            "_record_checkpoint_batch_metrics",
+            lambda source_table, source_rows, written_chunks: events.append(
+                f"metric.batch:{source_table}:{source_rows}:{written_chunks}"
+            ),
+        )
     monkeypatch.setattr(module, "get_settings", lambda: SimpleNamespace())
     monkeypatch.setattr(module, "resolve_primary_key_columns", lambda *_args: ["id"])
     monkeypatch.setattr(module, "resolve_checkpoint_order", lambda *_args: ORDER)
@@ -313,6 +335,15 @@ def _run_fake_checkpoint_ingest(
         checkpoint_scope_key=SCOPE_KEY,
     )
     return result, events
+
+
+def _read_metric_value(name: str, labels: dict[str, str]) -> float:
+    prometheus_client = pytest.importorskip("prometheus_client")
+    for metric in prometheus_client.REGISTRY.collect():
+        for sample in metric.samples:
+            if sample.name == name and sample.labels == labels:
+                return sample.value
+    return 0.0
 
 
 def test_lookahead_rejects_duplicate_before_boundary_is_yielded():
@@ -405,6 +436,46 @@ def test_checkpointed_ingest_rejects_limit_before_opening_connections(monkeypatc
     assert raised.value.code == "INGEST_CHECKPOINT_CURSOR_UNAVAILABLE"
 
 
+def test_checkpointed_ingest_records_typed_rejection_once_before_connections(
+    monkeypatch,
+):
+    events: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "_record_checkpoint_event",
+        lambda source_table, result: events.append(
+            f"metric.checkpoint:{source_table}:{result}"
+        ),
+    )
+
+    with pytest.raises(IngestCheckpointCursorUnavailableError):
+        module.ingest(
+            tables=["game"],
+            lease_run_id=RUN_ID,
+            lease_owner="worker-1",
+            checkpoint_scope_key=SCOPE_KEY,
+            row_stale_cleanup="off",
+            **{**OPTIONS, "limit": 1},
+        )
+
+    assert events == ["metric.checkpoint:game:rejected"]
+
+
+def test_incompatible_checkpoint_start_records_only_incompatible(monkeypatch):
+    events: list[str] = []
+
+    with pytest.raises(IngestCheckpointIncompatibleError):
+        _run_fake_checkpoint_ingest(
+            monkeypatch,
+            rows=[],
+            events=events,
+            start_error=IngestCheckpointIncompatibleError("stored state changed"),
+            observe_metrics=True,
+        )
+
+    assert events == ["metric.checkpoint:teams:incompatible"]
+
+
 def test_leased_ingest_requires_checkpoint_scope_before_opening_connections(
     monkeypatch,
 ):
@@ -460,6 +531,97 @@ def test_chunk_write_and_checkpoint_precede_one_commit(monkeypatch):
     assert result.source_rows == 2
 
 
+def test_new_checkpoint_events_and_batch_metrics_follow_durable_commits(monkeypatch):
+    result, events = _run_fake_checkpoint_ingest(
+        monkeypatch,
+        rows=[{"id": 1}, {"id": 2}],
+        observe_metrics=True,
+    )
+
+    first_commit = events.index("destination.commit")
+    created = "metric.checkpoint:teams:created"
+    advanced = "metric.checkpoint:teams:advanced"
+    completed = "metric.checkpoint:teams:completed"
+    batch = "metric.batch:teams:2:2"
+    assert first_commit < events.index(created)
+    assert first_commit < events.index(batch)
+    assert first_commit < events.index(advanced)
+    assert events.index("destination.commit", first_commit + 1) < events.index(completed)
+    assert events.count(created) == 1
+    assert events.count(advanced) == 1
+    assert events.count(completed) == 1
+    assert events.count(batch) == 1
+    assert result.attempt_source_rows == 2
+    assert result.attempt_written_chunks == 2
+
+
+def test_new_zero_row_checkpoint_is_created_only_after_completion_commit(monkeypatch):
+    _result, events = _run_fake_checkpoint_ingest(
+        monkeypatch,
+        rows=[],
+        observe_metrics=True,
+    )
+
+    created = "metric.checkpoint:teams:created"
+    completed = "metric.checkpoint:teams:completed"
+    assert events.index("destination.commit") < events.index(created)
+    assert events.index("destination.commit") < events.index(completed)
+    assert events.count(created) == 1
+    assert events.count(completed) == 1
+    assert not any(event.startswith("metric.batch:") for event in events)
+    assert "metric.checkpoint:teams:advanced" not in events
+
+
+def test_failed_zero_row_completion_commit_emits_no_created_or_completed(monkeypatch):
+    events: list[str] = []
+
+    with pytest.raises(RuntimeError, match="scripted destination commit failure"):
+        _run_fake_checkpoint_ingest(
+            monkeypatch,
+            rows=[],
+            events=events,
+            fail_commits={1},
+            observe_metrics=True,
+        )
+
+    assert "destination.commit" in events
+    assert not any(event.startswith("metric.checkpoint:") for event in events)
+    assert not any(event.startswith("metric.batch:") for event in events)
+
+
+def test_failed_first_advance_emits_no_durable_lifecycle_or_batch_metrics(monkeypatch):
+    events: list[str] = []
+
+    with pytest.raises(RuntimeError, match="scripted checkpoint failure"):
+        _run_fake_checkpoint_ingest(
+            monkeypatch,
+            rows=[{"id": 1}],
+            events=events,
+            fail_advance=True,
+            observe_metrics=True,
+        )
+
+    assert not any(event.startswith("metric.checkpoint:") for event in events)
+    assert not any(event.startswith("metric.batch:") for event in events)
+
+
+def test_failed_first_advance_commit_emits_no_created_advanced_or_batch(monkeypatch):
+    events: list[str] = []
+
+    with pytest.raises(RuntimeError, match="scripted destination commit failure"):
+        _run_fake_checkpoint_ingest(
+            monkeypatch,
+            rows=[{"id": 1}],
+            events=events,
+            fail_commits={1},
+            observe_metrics=True,
+        )
+
+    assert "destination.commit" in events
+    assert not any(event.startswith("metric.checkpoint:") for event in events)
+    assert not any(event.startswith("metric.batch:") for event in events)
+
+
 def test_zero_output_rows_still_advance_checkpoint(monkeypatch):
     lease_calls: list[bool] = []
     result, events = _run_fake_checkpoint_ingest(
@@ -482,9 +644,11 @@ def test_completed_checkpoint_skips_source_select_and_returns_zero_attempt_delta
     result, events = _run_fake_checkpoint_ingest(
         monkeypatch,
         completed_checkpoint=True,
+        observe_metrics=True,
     )
 
     assert "source.execute" not in events
+    assert events == ["metric.checkpoint:teams:resumed"]
     assert result.source_rows == 10
     assert result.attempt_source_rows == 0
     assert result.attempt_written_chunks == 0
@@ -529,14 +693,20 @@ def test_restart_resumes_after_committed_cursor_and_returns_cumulative_counts(
     )
     captured_resumes: list[CheckpointCursor | None] = []
 
-    result, _events = _run_fake_checkpoint_ingest(
+    result, events = _run_fake_checkpoint_ingest(
         monkeypatch,
         rows=[{"id": 2}],
         state=state,
         captured_resumes=captured_resumes,
+        observe_metrics=True,
     )
 
     assert captured_resumes == [CheckpointCursor((1,))]
+    assert events.count("metric.checkpoint:teams:resumed") == 1
+    assert "metric.checkpoint:teams:created" not in events
+    assert events.count("metric.checkpoint:teams:advanced") == 1
+    assert events.count("metric.checkpoint:teams:completed") == 1
+    assert events.count("metric.batch:teams:1:1") == 1
     assert result.source_rows == 2
     assert result.written_chunks == 2
     assert result.attempt_source_rows == 1
@@ -557,6 +727,7 @@ def test_last_data_commit_crash_resumes_with_completion_only(monkeypatch):
             state=state,
             events=first_events,
             fail_commits={2},
+            observe_metrics=True,
         )
 
     assert state.durable == _CheckpointRecord(
@@ -566,6 +737,10 @@ def test_last_data_commit_crash_resumes_with_completion_only(monkeypatch):
         written_chunks=1,
     )
     assert first_events[-2:] == ["checkpoint.complete", "destination.commit"]
+    assert first_events.count("metric.checkpoint:teams:created") == 1
+    assert first_events.count("metric.checkpoint:teams:advanced") == 1
+    assert first_events.count("metric.batch:teams:1:1") == 1
+    assert "metric.checkpoint:teams:completed" not in first_events
 
     second_events: list[str] = []
     result, second_events = _run_fake_checkpoint_ingest(
@@ -573,16 +748,78 @@ def test_last_data_commit_crash_resumes_with_completion_only(monkeypatch):
         rows=[],
         state=state,
         events=second_events,
+        observe_metrics=True,
     )
 
     assert second_events == [
+        "metric.checkpoint:teams:resumed",
         "source.execute",
         "checkpoint.complete",
         "destination.commit",
+        "metric.checkpoint:teams:completed",
     ]
     assert result.source_rows == 1
     assert result.attempt_source_rows == 0
     assert result.checkpoint_completed is True
+    assert not any(event.startswith("metric.batch:") for event in second_events)
+
+
+def test_first_committed_batch_is_counted_when_later_batch_commit_fails(monkeypatch):
+    state = _CheckpointState()
+    first_events: list[str] = []
+
+    with pytest.raises(RuntimeError, match="scripted destination commit failure"):
+        _run_fake_checkpoint_ingest(
+            monkeypatch,
+            rows=[{"id": 1}, {"id": 2}],
+            state=state,
+            events=first_events,
+            fail_commits={2},
+            read_batch_size=1,
+            observe_metrics=True,
+        )
+
+    assert first_events.count("metric.batch:teams:1:1") == 1
+    assert first_events.count("metric.checkpoint:teams:created") == 1
+    assert first_events.count("metric.checkpoint:teams:advanced") == 1
+    assert state.durable is not None
+    assert state.durable.cursor == CheckpointCursor((1,))
+
+    retry_events: list[str] = []
+    result, retry_events = _run_fake_checkpoint_ingest(
+        monkeypatch,
+        rows=[{"id": 2}],
+        state=state,
+        events=retry_events,
+        read_batch_size=1,
+        observe_metrics=True,
+    )
+
+    assert retry_events.count("metric.batch:teams:1:1") == 1
+    assert retry_events.count("metric.checkpoint:teams:resumed") == 1
+    assert "metric.checkpoint:teams:created" not in retry_events
+    assert result.source_rows == 2
+
+
+def test_checkpoint_ingest_increments_existing_counters_at_batch_commit(monkeypatch):
+    rows_before = _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "teams"}
+    )
+    chunks_before = _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "teams"}
+    )
+
+    _run_fake_checkpoint_ingest(
+        monkeypatch,
+        rows=[{"id": 1}, {"id": 2}],
+    )
+
+    assert _read_metric_value(
+        "ai_ingest_table_source_rows_total", {"source_table": "teams"}
+    ) - rows_before == 2
+    assert _read_metric_value(
+        "ai_ingest_table_written_chunks_total", {"source_table": "teams"}
+    ) - chunks_before == 2
 
 
 def test_ingest_lookahead_spans_fetch_batches_before_checkpointing(monkeypatch):

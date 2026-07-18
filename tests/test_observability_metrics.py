@@ -138,6 +138,18 @@ def test_ingest_source_table_labels_are_allowlisted() -> None:
     assert normalize_ingest_source_table(None) == "other"
 
 
+def test_checkpoint_event_rejects_unknown_result_without_emitting_series() -> None:
+    from scripts import ingest_from_kbo as ingest_module
+
+    labels = {"source_table": "game", "result": "run-33333333"}
+    before = _read_metric_value("ai_ingest_checkpoint_events_total", labels)
+
+    with pytest.raises(ValueError, match="checkpoint event result"):
+        ingest_module._record_checkpoint_event("game", "run-33333333")
+
+    assert _read_metric_value("ai_ingest_checkpoint_events_total", labels) == before
+
+
 def test_rag_total_decorator_observes_total_stage() -> None:
     """_observe_rag_total 데코레이터가 코루틴 실행 후 total 스테이지를 관측한다."""
     from app.core.rag import _observe_rag_total

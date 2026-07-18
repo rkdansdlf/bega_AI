@@ -503,23 +503,18 @@ class IngestWorker:
 
     def _record_table_result_metrics(self, result: IngestExecutionResult) -> None:
         for source_table, table_result in result.tables.items():
+            if (
+                table_result.attempt_source_rows is not None
+                or table_result.attempt_written_chunks is not None
+            ):
+                continue
             table_label = self._table_label(source_table)
-            written = (
-                table_result.written_chunks
-                if table_result.attempt_written_chunks is None
-                else table_result.attempt_written_chunks
-            )
-            rows = (
-                table_result.source_rows
-                if table_result.attempt_source_rows is None
-                else table_result.attempt_source_rows
-            )
             AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(
                 source_table=table_label
-            ).inc(written)
+            ).inc(table_result.written_chunks)
             AI_INGEST_TABLE_SOURCE_ROWS_TOTAL.labels(
                 source_table=table_label
-            ).inc(rows)
+            ).inc(table_result.source_rows)
 
     @staticmethod
     def _watermark_lag_seconds(watermark: datetime) -> float:

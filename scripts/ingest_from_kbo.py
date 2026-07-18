@@ -89,16 +89,37 @@ from app.core.ingest_checkpoints import (
     cursor_from_row,
     ensure_cursor_advances,
 )
-from app.observability.metrics import AI_INGEST_CHECKPOINT_EVENTS_TOTAL
+from app.observability.metrics import (
+    AI_INGEST_CHECKPOINT_EVENTS_TOTAL,
+    AI_INGEST_TABLE_SOURCE_ROWS_TOTAL,
+    AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL,
+)
 
 _ingest_logger = _logging.getLogger(__name__)
+_CHECKPOINT_EVENT_RESULTS = frozenset(
+    {"created", "advanced", "completed", "resumed", "incompatible", "rejected"}
+)
 
 
 def _record_checkpoint_event(source_table: object, result: str) -> None:
+    if result not in _CHECKPOINT_EVENT_RESULTS:
+        raise ValueError("unsupported checkpoint event result")
     AI_INGEST_CHECKPOINT_EVENTS_TOTAL.labels(
         source_table=normalize_ingest_source_table(source_table),
         result=result,
     ).inc()
+
+
+def _record_checkpoint_batch_metrics(
+    source_table: object,
+    source_rows: int,
+    written_chunks: int,
+) -> None:
+    source_label = normalize_ingest_source_table(source_table)
+    AI_INGEST_TABLE_SOURCE_ROWS_TOTAL.labels(source_table=source_label).inc(source_rows)
+    AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(source_table=source_label).inc(
+        written_chunks
+    )
 
 
 def _record_checkpoint_rejection(
@@ -2600,6 +2621,7 @@ def flush_chunks(
             return False
         if lease_guard is not None and not write_fenced:
             lease_guard(True)
+        created = checkpoint_session.current is None
         checkpoint = checkpoint_session.advance(
             cur,
             next_cursor=checkpoint_cursor,
@@ -2614,6 +2636,13 @@ def flush_chunks(
             max_updated_at=checkpoint_max_updated_at,
         )
         cur.connection.commit()
+        if created:
+            _record_checkpoint_event(checkpoint.source_table, "created")
+        _record_checkpoint_batch_metrics(
+            checkpoint.source_table,
+            checkpoint_source_rows,
+            flushed,
+        )
         _record_checkpoint_event(checkpoint.source_table, "advanced")
         stats["since_commit"] = 0
         return True
@@ -2955,10 +2984,8 @@ def ingest_table(
                 scope_key=checkpoint_scope_key,
                 order=checkpoint_order,
             )
-            _record_checkpoint_event(
-                table_name,
-                "resumed" if checkpoint_session.resumed else "created",
-            )
+            if checkpoint_session.resumed:
+                _record_checkpoint_event(table_name, "resumed")
             if checkpoint_session.completed:
                 return _checkpoint_result(
                     checkpoint_session,
@@ -3137,8 +3164,11 @@ def ingest_table(
 
             if lease_guard is not None:
                 lease_guard(True)
-            checkpoint_session.complete(write_cur)
+            created = checkpoint_session.current is None
+            checkpoint = checkpoint_session.complete(write_cur)
             dest_conn.commit()
+            if created:
+                _record_checkpoint_event(checkpoint.source_table, "created")
             _record_checkpoint_event(table_name, "completed")
             if processed_chunks:
                 print(
