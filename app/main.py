@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
 from .config import get_settings
+from .deprecation import LegacyApiDeprecationMiddleware
 from .deps import lifespan
 from .routers import (
     chat_stream,
@@ -53,6 +54,7 @@ def create_app() -> FastAPI:
         redoc_url="/redoc" if api_docs_enabled else None,
         openapi_url="/openapi.json" if api_docs_enabled else None,
     )
+    app.add_middleware(LegacyApiDeprecationMiddleware)
 
     # CORS(Cross-Origin Resource Sharing) 미들웨어 추가
     # 다른 도메인에서의 요청을 허용하기 위한 설정입니다.
