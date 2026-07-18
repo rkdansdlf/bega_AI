@@ -4,8 +4,11 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
+import pytest
+
 from app.core.ingest_run_store import IngestRunStore
 from app.core.ingest_runs import (
+    IngestLeaseLostError,
     IngestRunRequest,
     IngestRunStatus,
     IngestTableResult,
@@ -229,6 +232,62 @@ def test_manual_data_terminal_requires_unexpired_owned_lease():
     assert "lease_owner = %s" in sql
     assert "lease_expires_at > clock_timestamp()" in sql
     assert "now()" not in sql
+
+
+def test_finish_success_zero_row_raises_lease_lost():
+    pool = _Pool([(RUN_ID,), None])
+    store = IngestRunStore(pool)
+    result = IngestTableResult("game", 3, 4, 1, 2, WATERMARK)
+
+    with pytest.raises(IngestLeaseLostError) as raised:
+        asyncio.run(
+            store.finish_success(
+                RUN_ID,
+                "worker-1",
+                {"game": result},
+                {"game": WATERMARK},
+                WATERMARK_SCOPE,
+            )
+        )
+
+    assert str(raised.value) == "ingest run lease is not owned"
+
+
+def test_finish_failed_zero_row_raises_lease_lost():
+    pool = _Pool([(RUN_ID,), None])
+    store = IngestRunStore(pool)
+
+    with pytest.raises(IngestLeaseLostError) as raised:
+        asyncio.run(
+            store.finish_failed(
+                RUN_ID,
+                "worker-1",
+                error_code="DB_FAILURE",
+                error_message="database failure",
+            )
+        )
+
+    assert str(raised.value) == "ingest run lease is not owned"
+
+
+def test_finish_manual_data_required_zero_row_raises_lease_lost():
+    pool = _Pool([(RUN_ID,), None])
+    store = IngestRunStore(pool)
+
+    with pytest.raises(IngestLeaseLostError) as raised:
+        asyncio.run(
+            store.finish_manual_data_required(
+                RUN_ID,
+                "worker-1",
+                {
+                    "code": "MANUAL_BASEBALL_DATA_REQUIRED",
+                    "entity": "game",
+                    "missing_fields": ["game_date"],
+                },
+            )
+        )
+
+    assert str(raised.value) == "ingest run lease is not owned"
 
 
 def test_recover_expired_increments_before_requeue_and_fails_exhausted_runs():
