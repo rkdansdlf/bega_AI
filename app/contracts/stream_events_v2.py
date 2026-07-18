@@ -178,6 +178,15 @@ class CoachMetaData(_StrictModel):
     win_probability_home: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class AiStreamHttpError(_StrictModel):
+    code: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    detail: str | None = None
+    retryable: bool
+    retry_after_seconds: int | None = Field(default=None, ge=0)
+    supported_versions: list[Literal["1", "2"]] = Field(default_factory=list)
+
+
 class StreamErrorData(_StrictModel):
     code: str = Field(min_length=1)
     message: str = Field(min_length=1)
