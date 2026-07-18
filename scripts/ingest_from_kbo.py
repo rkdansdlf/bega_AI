@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import wraps
 import gc
 import hashlib
 import json
@@ -69,12 +70,16 @@ from datetime import datetime, timezone
 from app.core.chunking import smart_chunks
 from app.core.embeddings import embed_texts
 from app.core.ingest_runs import IngestLeaseLostError, IngestTableResult
-from app.core.ingest_sources import TRUSTED_INGEST_SOURCE_TABLES
+from app.core.ingest_sources import (
+    TRUSTED_INGEST_SOURCE_TABLES,
+    normalize_ingest_source_table,
+)
 from app.core.ingest_checkpoints import (
     CheckpointCursor,
     CheckpointOrder,
     CheckpointOrderField,
     CursorScalarType,
+    IngestCheckpointError,
     IngestCheckpointCursorTypeError,
     IngestCheckpointCursorUnavailableError,
     IngestCheckpointIncompatibleError,
@@ -84,8 +89,45 @@ from app.core.ingest_checkpoints import (
     cursor_from_row,
     ensure_cursor_advances,
 )
+from app.observability.metrics import AI_INGEST_CHECKPOINT_EVENTS_TOTAL
 
 _ingest_logger = _logging.getLogger(__name__)
+
+
+def _record_checkpoint_event(source_table: object, result: str) -> None:
+    AI_INGEST_CHECKPOINT_EVENTS_TOTAL.labels(
+        source_table=normalize_ingest_source_table(source_table),
+        result=result,
+    ).inc()
+
+
+def _record_checkpoint_rejection(
+    source_table: object,
+    error: IngestCheckpointError,
+) -> None:
+    result = (
+        "incompatible"
+        if isinstance(error, IngestCheckpointIncompatibleError)
+        else "rejected"
+    )
+    _record_checkpoint_event(source_table, result)
+
+
+def _trace_checkpoint_rejections(function: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(function)
+    def traced(source_conn, dest_conn, table_name, *args, **kwargs):
+        checkpointed = (
+            kwargs.get("checkpoint_run_id") is not None
+            or kwargs.get("checkpoint_scope_key") is not None
+        )
+        try:
+            return function(source_conn, dest_conn, table_name, *args, **kwargs)
+        except IngestCheckpointError as exc:
+            if checkpointed:
+                _record_checkpoint_rejection(table_name, exc)
+            raise
+
+    return traced
 
 
 def _embed_with_retry(
@@ -2558,7 +2600,7 @@ def flush_chunks(
             return False
         if lease_guard is not None and not write_fenced:
             lease_guard(True)
-        checkpoint_session.advance(
+        checkpoint = checkpoint_session.advance(
             cur,
             next_cursor=checkpoint_cursor,
             source_rows_delta=checkpoint_source_rows,
@@ -2572,6 +2614,7 @@ def flush_chunks(
             max_updated_at=checkpoint_max_updated_at,
         )
         cur.connection.commit()
+        _record_checkpoint_event(checkpoint.source_table, "advanced")
         stats["since_commit"] = 0
         return True
 
@@ -2788,6 +2831,7 @@ def _checkpoint_result(
     )
 
 
+@_trace_checkpoint_rejections
 def ingest_table(
     source_conn: Any,
     dest_conn: Any,
@@ -2910,6 +2954,10 @@ def ingest_table(
                 source_table=table_name,
                 scope_key=checkpoint_scope_key,
                 order=checkpoint_order,
+            )
+            _record_checkpoint_event(
+                table_name,
+                "resumed" if checkpoint_session.resumed else "created",
             )
             if checkpoint_session.completed:
                 return _checkpoint_result(
@@ -3091,6 +3139,7 @@ def ingest_table(
                 lease_guard(True)
             checkpoint_session.complete(write_cur)
             dest_conn.commit()
+            _record_checkpoint_event(table_name, "completed")
             if processed_chunks:
                 print(
                     f"      총 {processed_chunks}개 청크를 처리했습니다.",
@@ -3265,13 +3314,19 @@ def ingest(
             and "source_file" not in TABLE_PROFILES.get(table, {})
         ]
         if checkpoint_tables and limit is not None:
-            raise IngestCheckpointCursorUnavailableError(
+            error = IngestCheckpointCursorUnavailableError(
                 "checkpointed ingestion requires limit=None"
             )
+            for source_table in checkpoint_tables:
+                _record_checkpoint_rejection(source_table, error)
+            raise error
         if checkpoint_tables and row_stale_cleanup != "off":
-            raise IngestCheckpointStaleCleanupError(
+            error = IngestCheckpointStaleCleanupError(
                 "checkpointed ingestion does not support stale cleanup"
             )
+            for source_table in checkpoint_tables:
+                _record_checkpoint_rejection(source_table, error)
+            raise error
 
     _require_psycopg()
     settings = get_settings()

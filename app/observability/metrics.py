@@ -229,6 +229,12 @@ AI_INGEST_HEARTBEATS_TOTAL = Counter(
     ["result"],
 )
 
+AI_INGEST_CHECKPOINT_EVENTS_TOTAL = Counter(
+    "ai_ingest_checkpoint_events_total",
+    "Durable ingestion checkpoint lifecycle events.",
+    ["source_table", "result"],
+)
+
 AI_INGEST_TABLE_SOURCE_ROWS_TOTAL = Counter(
     "ai_ingest_table_source_rows_total",
     "Source rows processed by configured source table.",
@@ -420,6 +426,7 @@ __all__ = [
     "AI_HTTP_REQUEST_DURATION_SECONDS",
     "AI_HTTP_REQUESTS_TOTAL",
     "AI_INGEST_ACTIVE_RUNS",
+    "AI_INGEST_CHECKPOINT_EVENTS_TOTAL",
     "AI_INGEST_HEARTBEATS_TOTAL",
     "AI_INGEST_LEASE_RECOVERIES_TOTAL",
     "AI_INGEST_QUEUED_RUNS",

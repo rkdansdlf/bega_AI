@@ -90,6 +90,11 @@ def _table_result_payload(result: IngestTableResult) -> dict[str, Any]:
         "max_updated_at": (
             result.max_updated_at.isoformat() if result.max_updated_at else None
         ),
+        "checkpoint": {
+            "resumed": result.checkpoint_resumed,
+            "committed_batches": result.checkpoint_committed_batches,
+            "completed": result.checkpoint_completed,
+        },
     }
 
 
