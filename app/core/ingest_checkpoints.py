@@ -850,7 +850,6 @@ class IngestCheckpointSession:
             )
             if (
                 requires_source_updated_before
-                and not initial.completed
                 and initial.source_updated_before is None
                 and _checkpoint_has_progress(initial)
             ):

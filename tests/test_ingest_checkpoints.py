@@ -652,12 +652,39 @@ def test_start_rejects_progressed_incomplete_checkpoint_missing_required_cutoff(
         )
 
 
-def test_start_allows_completed_legacy_checkpoint_without_required_cutoff():
+def test_start_rejects_progressed_completed_checkpoint_missing_required_cutoff():
     cursor = _RecordingCursor(
         rows=[
             _checkpoint_row(
                 committed_batches=1,
                 source_rows=1,
+                completed=True,
+            )
+        ]
+    )
+
+    with pytest.raises(IngestCheckpointIncompatibleError, match="source update cutoff"):
+        IngestCheckpointSession.start(
+            cursor,
+            run_id=RUN_ID,
+            source_table="game",
+            scope_key=SCOPE_KEY,
+            order=ORDER,
+            requires_source_updated_before=True,
+        )
+
+
+def test_start_allows_zero_row_completed_legacy_checkpoint_without_cutoff():
+    cursor = _RecordingCursor(
+        rows=[
+            _checkpoint_row(
+                cursor=None,
+                committed_batches=0,
+                source_rows=0,
+                written_chunks=0,
+                reused_embeddings=0,
+                embedded_chunks=0,
+                max_updated_at=None,
                 completed=True,
             )
         ]

@@ -308,6 +308,187 @@ def test_custom_checkpoint_registry_is_exact_and_static_profiles_are_isolated():
     assert all("checkpoint_query_version" not in profile for profile in static_profiles)
 
 
+def test_full_cutoff_eligibility_is_exact_for_every_trusted_database_profile():
+    expected = {
+        "player_season_batting": "bs.updated_at",
+        "player_season_pitching": "ps.updated_at",
+        "game": "gm.updated_at",
+        "game_flow_summary": "latest_updated_at",
+        "game_batting_stats": "gbs.updated_at",
+        "game_pitching_stats": "gps.updated_at",
+        "game_inning_scores": "gis.updated_at",
+        "game_lineups": "gl.updated_at",
+        "game_metadata": "gm.updated_at",
+        "kbo_seasons": None,
+        "stadiums": None,
+        "teams": None,
+        "team_history": "th.updated_at",
+        "team_name_mapping": None,
+        "awards": "a.updated_at",
+        "player_movements": "pm.updated_at",
+        "team_franchises": "tf.updated_at",
+        "player_basic": None,
+        "team_profiles": None,
+        "team_season_batting": "tsb.updated_at",
+        "team_season_pitching": "tsp.updated_at",
+        "stat_rankings": "sr.updated_at",
+        "game_summary": "gs.updated_at",
+    }
+
+    actual = {
+        table: ingest_script.resolve_update_filter_column(profile, since=None)
+        for table, profile in TABLE_PROFILES.items()
+        if "source_file" not in profile
+    }
+
+    assert actual == expected
+
+
+def test_incremental_update_filter_is_exact_for_every_trusted_database_profile(
+    sample_since,
+):
+    expected = {
+        "player_season_batting": "bs.updated_at",
+        "player_season_pitching": "ps.updated_at",
+        "game": "gm.updated_at",
+        "game_flow_summary": "latest_updated_at",
+        "game_batting_stats": "gbs.updated_at",
+        "game_pitching_stats": "gps.updated_at",
+        "game_inning_scores": "gis.updated_at",
+        "game_lineups": "gl.updated_at",
+        "game_metadata": "gm.updated_at",
+        "kbo_seasons": "updated_at",
+        "stadiums": "updated_at",
+        "teams": "updated_at",
+        "team_history": "th.updated_at",
+        "team_name_mapping": "updated_at",
+        "awards": "a.updated_at",
+        "player_movements": "pm.updated_at",
+        "team_franchises": "tf.updated_at",
+        "player_basic": None,
+        "team_profiles": None,
+        "team_season_batting": "tsb.updated_at",
+        "team_season_pitching": "tsp.updated_at",
+        "stat_rankings": "sr.updated_at",
+        "game_summary": "gs.updated_at",
+    }
+
+    actual = {
+        table: ingest_script.resolve_update_filter_column(profile, since=sample_since)
+        for table, profile in TABLE_PROFILES.items()
+        if "source_file" not in profile
+    }
+
+    assert actual == expected
+
+
+def test_kbo_seasons_full_checkpoint_does_not_require_or_emit_default_cutoff(
+    sample_cutoff,
+):
+    profile = TABLE_PROFILES["kbo_seasons"]
+    order = CheckpointOrder(
+        "kbo_seasons",
+        (
+            CheckpointOrderField("season_year", "integer"),
+            CheckpointOrderField("season_id", "text"),
+        ),
+    )
+
+    query, params = build_select_query(
+        table="kbo_seasons",
+        profile=profile,
+        pk_columns=["season_year", "season_id"],
+        limit=None,
+        season_year=None,
+        since=None,
+        source_updated_before=sample_cutoff,
+        checkpoint_order=order,
+        resume_cursor=None,
+    )
+
+    assert "updated_at" not in query.as_string()
+    assert params == ()
+
+
+def test_kbo_seasons_incremental_checkpoint_keeps_default_bounded_update_filter(
+    sample_since,
+    sample_cutoff,
+):
+    profile = TABLE_PROFILES["kbo_seasons"]
+    order = CheckpointOrder(
+        "kbo_seasons",
+        (
+            CheckpointOrderField("season_year", "integer"),
+            CheckpointOrderField("season_id", "text"),
+        ),
+    )
+
+    query, params = build_select_query(
+        table="kbo_seasons",
+        profile=profile,
+        pk_columns=["season_year", "season_id"],
+        limit=None,
+        season_year=None,
+        since=sample_since,
+        source_updated_before=sample_cutoff,
+        checkpoint_order=order,
+        resume_cursor=None,
+    )
+
+    assert (
+        'WHERE "updated_at" >= %s AND "updated_at" <= %s'
+        in query.as_string()
+    )
+    assert params == (sample_since, sample_cutoff)
+
+
+def test_game_full_checkpoint_includes_null_updates_with_cutoff(sample_cutoff):
+    profile = TABLE_PROFILES["game"]
+    order = ingest_script.resolve_checkpoint_order(None, "game", profile)
+
+    query, params = build_select_query(
+        table="game",
+        profile=profile,
+        pk_columns=["id"],
+        limit=None,
+        season_year=None,
+        since=None,
+        source_updated_before=sample_cutoff,
+        checkpoint_order=order,
+        resume_cursor=CheckpointCursor((41,)),
+    )
+
+    assert "(gm.updated_at IS NULL OR gm.updated_at <= %s)" in query
+    assert "gm.updated_at >= %s" not in query
+    assert query.index("gm.updated_at <= %s") < query.index('ROW("id") > ROW(%s)')
+    assert params == (sample_cutoff, 41)
+
+
+def test_generic_full_checkpoint_includes_null_updates_with_cutoff(sample_cutoff):
+    order = CheckpointOrder(
+        "plain_table",
+        (CheckpointOrderField("id", "integer"),),
+    )
+
+    query, params = build_select_query(
+        table="plain_table",
+        profile={"season_filter_column": None, "since_filter_column": "updated_at"},
+        pk_columns=["id"],
+        limit=None,
+        season_year=None,
+        since=None,
+        source_updated_before=sample_cutoff,
+        checkpoint_order=order,
+        resume_cursor=None,
+    )
+
+    assert query.as_string() == (
+        'SELECT * FROM "plain_table" WHERE '
+        '("updated_at" IS NULL OR "updated_at" <= %s) ORDER BY "id" ASC'
+    )
+    assert params == (sample_cutoff,)
+
+
 def test_custom_checkpoint_query_wraps_output_aliases(sample_since, sample_cutoff):
     profile = TABLE_PROFILES["game"]
     order = ingest_script.resolve_checkpoint_order(None, "game", profile)
@@ -329,6 +510,7 @@ def test_custom_checkpoint_query_wraps_output_aliases(sample_since, sample_cutof
     assert 'ROW("id") > ROW(%s)' in query
     assert query.rstrip().endswith('ORDER BY "id" ASC')
     assert "gm.updated_at <= %s" in query
+    assert "gm.updated_at IS NULL" not in query
     assert params == (2026, sample_since, sample_cutoff, 41)
 
 
@@ -553,6 +735,7 @@ def test_generic_checkpoint_query_has_exact_order_limit_and_parameter_order(
         'AND ROW("season", "entity_id") > ROW(%s, %s) '
         'ORDER BY "season" ASC, "entity_id" ASC LIMIT %s'
     )
+    assert '"updated_at" IS NULL' not in query.as_string()
     assert params == (
         2026,
         sample_since,

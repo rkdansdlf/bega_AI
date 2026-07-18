@@ -104,11 +104,17 @@ def test_data_sync_runbook_documents_persistent_checkpoint_operations():
         "A separately approved local-only disposable live PostgreSQL smoke is "
         "required to remove the residual PostgreSQL risk.",
         "`source_updated_before timestamptz` stores the immutable source-clock cutoff",
-        "`updated_at <= source_updated_before`",
-        "A progressed incomplete checkpoint with a missing cutoff fails closed as "
-        "`INGEST_CHECKPOINT_INCOMPATIBLE`.",
-        "The success watermark remains the maximum committed source update timestamp",
-        "The residual duplicate window starts at the prior successful watermark",
+        "FULL runs (`since` omitted) freeze only profiles that explicitly declare "
+        "a nonempty `since_filter_column`.",
+        "`kbo_seasons`처럼 해당 필드를 선언하지 않은 FULL profile은 source "
+        "clock을 읽거나 기본 `updated_at` 상한을 만들지 않습니다.",
+        "`(column IS NULL OR column <= source_updated_before)`",
+        "Any progressed eligible legacy checkpoint missing the cutoff fails "
+        "closed as `INGEST_CHECKPOINT_INCOMPATIBLE`, whether incomplete or completed.",
+        "The success watermark remains the maximum committed non-NULL source update "
+        "timestamp",
+        "The incremental residual duplicate window starts at the prior successful "
+        "watermark",
     ):
         assert statement in text
 
