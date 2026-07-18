@@ -1257,9 +1257,21 @@ assert app_main.app.openapi_url is None
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _assert_generated_artifact_is_current(path: Path, expected: str) -> None:
+    assert path.exists(), f"missing generated artifact: {path}"
+    assert path.read_bytes() == expected.encode("utf-8"), f"stale generated artifact: {path}"
+
+
+def test_current_artifact_comparison_rejects_crlf_bytes(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact.md"
+    artifact.write_bytes(b"generated\r\n")
+
+    with pytest.raises(AssertionError, match="stale generated artifact"):
+        _assert_generated_artifact_is_current(artifact, "generated\n")
+
+
 def test_committed_complete_openapi_artifacts_are_current() -> None:
     from scripts.export_openapi_contract import _render_artifacts
 
     for path, expected in _render_artifacts().items():
-        assert path.exists(), f"missing generated artifact: {path}"
-        assert path.read_text(encoding="utf-8") == expected
+        _assert_generated_artifact_is_current(path, expected)
