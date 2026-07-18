@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     ai_metrics_enabled: Optional[bool] = Field(
         None, validation_alias="AI_METRICS_ENABLED"
     )
+    ai_direct_browser_access_enabled: Optional[bool] = Field(
+        None, validation_alias="AI_DIRECT_BROWSER_ACCESS_ENABLED"
+    )
 
     # --- 데이터베이스 설정 ---
     # 운영 Source DB 경로
@@ -754,8 +757,10 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> List[str]:
         """CORS_ORIGINS 값을 JSON 배열/콤마 구분 문자열 모두 허용해 파싱합니다."""
-        parsed = self._parse_string_list(self.cors_origins_raw)
-        return parsed or DEFAULT_CORS_ORIGINS
+        raw = (self.cors_origins_raw or "").strip()
+        if not raw:
+            return DEFAULT_CORS_ORIGINS
+        return self._parse_string_list(raw)
 
     @property
     def is_local_dev_environment(self) -> bool:
@@ -788,6 +793,13 @@ class Settings(BaseSettings):
     def metrics_enabled(self) -> bool:
         if self.ai_metrics_enabled is not None:
             return self.ai_metrics_enabled
+        return not self.is_production_environment
+
+    @property
+    def browser_direct_access_enabled(self) -> bool:
+        """브라우저가 FastAPI를 직접 호출할 수 있도록 CORS를 설치할지 결정합니다."""
+        if self.ai_direct_browser_access_enabled is not None:
+            return self.ai_direct_browser_access_enabled
         return not self.is_production_environment
 
     @property
@@ -835,8 +847,7 @@ class Settings(BaseSettings):
                     normalized = [
                         str(item).strip() for item in parsed if str(item).strip()
                     ]
-                    if normalized:
-                        return normalized
+                    return normalized
             except Exception:
                 logger.warning(
                     "Failed to parse list-like setting as JSON list; fallback to CSV parsing."

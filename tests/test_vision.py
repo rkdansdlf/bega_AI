@@ -19,10 +19,12 @@ def client(monkeypatch):
     test_app.include_router(vision.router)
     test_app.dependency_overrides[vision.rate_limit_vision_dependency] = lambda: None
     monkeypatch.setattr(
-        "app.deps.get_settings",
+        "app.internal_auth.get_settings",
         lambda: SimpleNamespace(resolved_ai_internal_token=AI_INTERNAL_TEST_TOKEN),
     )
-    monkeypatch.setattr("app.deps.record_security_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.internal_auth.record_security_event", lambda *args, **kwargs: None
+    )
     with TestClient(
         test_app,
         headers={"X-Internal-Api-Key": AI_INTERNAL_TEST_TOKEN},
