@@ -860,12 +860,16 @@ def _finish(lines: list[str]) -> str:
 def build_contract_document() -> dict[str, Any]:
     """Build a detached OpenAPI document with fixed documentation settings."""
 
+    existing_main = sys.modules.get("app.main")
+    transient_main: object | None = None
     previous = {key: os.environ.get(key) for key in DOCUMENTATION_ENV}
     os.environ.update(DOCUMENTATION_ENV)
     try:
         from app.config import get_settings
         from app.main import create_app
 
+        if existing_main is None:
+            transient_main = sys.modules.get("app.main")
         get_settings.cache_clear()
         document = json.loads(json.dumps(create_app().openapi(), ensure_ascii=False))
         if not isinstance(document, dict):
@@ -885,6 +889,15 @@ def build_contract_document() -> dict[str, Any]:
         from app.config import get_settings
 
         get_settings.cache_clear()
+        if existing_main is None:
+            if transient_main is None:
+                transient_main = sys.modules.get("app.main")
+            if transient_main is not None:
+                if sys.modules.get("app.main") is transient_main:
+                    sys.modules.pop("app.main", None)
+                app_package = sys.modules.get("app")
+                if getattr(app_package, "main", None) is transient_main:
+                    delattr(app_package, "main")
 
 
 def _render_artifacts() -> dict[Path, str]:

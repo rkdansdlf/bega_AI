@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import importlib
 import os
+from pathlib import Path
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -1001,3 +1005,65 @@ def test_cli_writes_all_artifacts_and_check_reports_every_stale_path_without_wri
     assert str(artifact_paths["schemas"].relative_to(tmp_path)) in output
     assert artifact_paths["endpoints"].read_bytes() == stale_bytes
     assert not artifact_paths["schemas"].exists()
+
+
+def test_build_contract_document_does_not_leak_documentation_module_to_clean_process() -> None:
+    script = """
+import importlib
+import sys
+
+assert "app.main" not in sys.modules
+
+from scripts.export_openapi_contract import build_contract_document
+
+document = build_contract_document()
+assert document["paths"]
+assert "app.main" not in sys.modules
+
+import app
+assert not hasattr(app, "main")
+
+app_main = importlib.import_module("app.main")
+assert app_main.app.docs_url is None
+assert app_main.app.redoc_url is None
+assert app_main.app.openapi_url is None
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "APP_ENV": "production",
+            "AI_INTERNAL_TOKEN": "production-regression-token",
+            "AI_DOCS_ENABLED": "false",
+            "AI_METRICS_ENABLED": "false",
+            "AI_DIRECT_BROWSER_ACCESS_ENABLED": "false",
+            "CORS_ORIGINS": "[]",
+        }
+    )
+    environment.pop("PYTEST_CURRENT_TEST", None)
+    environment.pop("BEGA_SKIP_APP_INIT", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_build_contract_document_preserves_preimported_app_main_module_and_global_app() -> None:
+    app_main = importlib.import_module("app.main")
+    original_app = app_main.app
+    original_docs_url = original_app.docs_url
+    original_openapi_url = original_app.openapi_url
+
+    document = exporter.build_contract_document()
+
+    assert document["paths"]
+    assert sys.modules["app.main"] is app_main
+    assert app_main.app is original_app
+    assert app_main.app.docs_url == original_docs_url
+    assert app_main.app.openapi_url == original_openapi_url
