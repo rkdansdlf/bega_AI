@@ -7,7 +7,8 @@ import logging
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from typing import Any, Literal, cast
 
-from fastapi import HTTPException
+from app.contracts.stream_events_v2 import AiStreamHttpError
+from app.streaming.http_errors import AiStreamHttpException
 from pydantic import ValidationError
 from sse_starlette.sse import EventSourceResponse
 
@@ -49,12 +50,14 @@ def negotiate_event_version(
         return 2
 
     AI_STREAM_UNSUPPORTED_VERSION_TOTAL.labels(endpoint=endpoint).inc()
-    raise HTTPException(
+    raise AiStreamHttpException(
         status_code=406,
-        detail={
-            "code": "AI_EVENT_VERSION_UNSUPPORTED",
-            "supported_versions": list(SUPPORTED_EVENT_VERSIONS),
-        },
+        error=AiStreamHttpError(
+            code="AI_EVENT_VERSION_UNSUPPORTED",
+            message="지원하지 않는 AI 이벤트 버전입니다.",
+            retryable=False,
+            supported_versions=list(SUPPORTED_EVENT_VERSIONS),
+        ),
     )
 
 

@@ -177,6 +177,33 @@ def test_security_surface_allows_explicit_metrics_enablement(monkeypatch):
     assert settings.metrics_enabled is True
 
 
+def test_browser_direct_access_defaults_disabled_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("AI_DIRECT_BROWSER_ACCESS_ENABLED", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.browser_direct_access_enabled is False
+
+
+def test_browser_direct_access_defaults_enabled_in_local_development(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.delenv("AI_DIRECT_BROWSER_ACCESS_ENABLED", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.browser_direct_access_enabled is True
+
+
+def test_browser_direct_access_can_be_explicitly_enabled_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AI_DIRECT_BROWSER_ACCESS_ENABLED", "true")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.browser_direct_access_enabled is True
+
+
 def test_validate_internal_token_security_noop_when_app_env_unset(monkeypatch):
     # APP_ENV 미설정이면 기존 동작 유지: 가드는 통과하고 로컬 폴백도 살아있다.
     monkeypatch.delenv("APP_ENV", raising=False)
@@ -241,6 +268,14 @@ def test_cors_origins_accepts_csv(monkeypatch):
         "https://www.begabaseball.xyz",
         "https://api.begabaseball.xyz",
     ]
+
+
+def test_cors_origins_preserves_explicit_empty_json_list(monkeypatch):
+    monkeypatch.setenv("CORS_ORIGINS", "[]")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.cors_origins == []
 
 
 def test_chat_planner_cache_ttl_defaults_to_five_minutes(monkeypatch):
