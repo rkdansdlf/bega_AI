@@ -1468,3 +1468,19 @@ Date: 2026-07-18
 - Whitespace gate `git diff --check HEAD^ HEAD` exited 0 with no output before this addendum.
 
 Residual risk: no live PostgreSQL smoke or locale/collation matrix was run. Fake coverage cannot verify psycopg binding or migration execution against a real server. Text keyset comparisons remain source-collation dependent, and the lower watermark's inclusive comparison deliberately retains a safe duplicate window through the fixed cutoff. No shared/production database, network source, or external baseball-data source was contacted.
+
+## Safely Scoped Source Window Verification Evidence
+
+Date: 2026-07-18
+
+- Focused RED `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ingest_checkpoints.py tests/test_ingest_query.py tests/test_ingest_checkpoint_integration.py -q` exited 1 before the production fix: 169 passed, 14 failed, 26 warnings. Failures covered the completed-progressed legacy exemption, missing shared update-filter resolver, incorrect FULL default eligibility, missing FULL NULL predicate, and game-profile fake integration rows that required the fixture to bypass unrelated source-schema validation.
+- Focused GREEN after the minimal production and fixture changes: the same command exited 0 with 183 passed, 0 failed, 0 skipped, and 28 existing `datetime.utcnow()` warnings.
+- Expanded ingest/schema regression `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/test_ai_schema_migrations.py tests/test_db_schema_contract.py tests/test_schema_startup_mode.py tests/test_ingest_checkpoint_integration.py tests/test_ingest_checkpoints.py tests/test_ingest_parallel_engine.py tests/test_ingest_query.py tests/test_ingest_results.py tests/test_ingest_router.py tests/test_ingest_run_store.py tests/test_ingest_runs.py tests/test_ingest_worker.py -q` exited 0 with 286 passed, 0 failed, 0 skipped, and 29 existing deprecation warnings.
+- The implementation, tests, runbook correction, and tracked scratch-report deletion were committed as `32900f0` (`fix: scope checkpoint update windows safely`). Session startup and both query builders now share one effective update-filter resolver. Incremental runs retain the legacy default lower/upper `updated_at` window, FULL runs require an explicitly declared nonempty update column, FULL nullable fields use `IS NULL OR <=`, and any progressed eligible checkpoint missing its cutoff fails closed whether incomplete or completed.
+- Static compile `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m compileall -q app scripts tests` exited 0 with no output.
+- Baseball data policy `python3 /Users/mac/project/KBO_platform/scripts/validate_baseball_data_policy.py` exited 0: `External baseball data policy OK`.
+- OpenAPI contract `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python scripts/export_openapi_contract.py --check` exited 0: `AI OpenAPI artifacts are current`; one existing `google.generativeai` FutureWarning.
+- Full AI suite `/Users/mac/project/KBO_platform/bega_AI/.venv/bin/python -m pytest tests/ -q` exited 0 with 1931 passed, 5 skipped, 0 failed, and 36 warnings in 63.12 seconds. The skips require unavailable local operator-data migration, validation, or handoff artifacts; warnings are existing dependency/API deprecations.
+- Committed whitespace gate `git diff --check HEAD^ HEAD` exited 0 with no output. After the fix commit, `git ls-files .superpowers/sdd` produced no output, proving that no SDD report remains tracked.
+
+Residual risk: no live PostgreSQL smoke or locale/collation matrix was run. Fake coverage cannot verify psycopg binding against a real PostgreSQL session, and text keyset comparisons remain source-collation dependent. No shared or production database, network source, external baseball-data source, push, or merge was used.
