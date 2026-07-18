@@ -309,3 +309,51 @@ def test_async_main_returns_2_when_health_collection_fails(monkeypatch) -> None:
     exit_code = asyncio.run(smoke.async_main(args))
 
     assert exit_code == 2
+
+
+def test_warm_path_smoke_enforces_wall_deadline_and_fails_closed(
+    monkeypatch,
+) -> None:
+    target = MatchupTarget(
+        cache_key="completed-timeout",
+        game_id="20250310SSHH3",
+        season_id=260,
+        season_year=2025,
+        game_date="2025-03-10",
+        game_type="PRE",
+        home_team_id="SS",
+        away_team_id="HH",
+        league_type_code=1,
+        stage_label="PRE",
+        series_game_no=None,
+        game_status_bucket="COMPLETED",
+        starter_signature="s",
+        lineup_signature="l",
+        request_focus=["matchup"],
+        request_mode="manual_detail",
+        question_override=None,
+    )
+
+    async def stuck_call(**kwargs):
+        assert kwargs["wait_for_cache_completion_on_missing_done"] is False
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(smoke, "call_analyze", stuck_call)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            smoke.run_warm_path_smoke(
+                target=target,
+                base_url="http://127.0.0.1:18080/api/ai",
+                internal_api_key="test-internal-token",
+                timeout_seconds=0.01,
+            ),
+            timeout=1.0,
+        )
+    )
+
+    assert result.ok is False
+    assert result.reason == "target_wall_timeout"
+    assert result.status == "failed"
+    assert result.cache_state is None
+    assert result.cached is None
