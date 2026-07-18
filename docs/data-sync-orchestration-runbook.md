@@ -19,7 +19,7 @@
    AI_SCHEMA_DB_URL='postgresql://...' ./scripts/migrate_ai_runtime_schema.sh
    ```
 
-   이 명령은 `001_ai_runtime_cache.sql`, `003_ai_ingest_orchestration.sql` 순서로 적용합니다. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성합니다.
+   Managed migration script applies `001_ai_runtime_cache.sql` -> `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. Compatibility startup applies `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다. Fresh schema와 이전 004 schema 모두에 `source_updated_before timestamptz` stores the immutable source-clock cutoff; 같은 004가 `ADD COLUMN IF NOT EXISTS`로 기존 테이블을 안전하게 보강합니다.
 
 2. AI 서비스를 `AI_DB_SCHEMA_MODE=managed`로 시작합니다. 작업자는 기본 활성화되며 다음 값으로 조정합니다.
 
@@ -99,7 +99,33 @@ AI 서비스는 시작 시와 실행 중 주기적으로 만료된 `RUNNING` lea
 
 heartbeat와 성공·실패·`MANUAL_BASEBALL_DATA_REQUIRED` 종료는 모두 DB에서 `RUNNING`, owner 일치, `lease_expires_at > clock_timestamp()`를 만족해야 합니다. 트랜잭션 시작 시각에 고정되는 `now()`는 lease 판단에 사용하지 않습니다. 동기 ingest 경로와 store mutation은 run row lock을 먼저 얻은 뒤 실제 DB 시각으로 owner·만료 조건을 확인합니다. 만료된 owner는 recovery가 실행되기 전이라도 lease를 되살리거나 terminal 상태를 기록할 수 없습니다.
 
-`AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS` 미만이면 만료 실행을 `QUEUED`로 되돌리고, 한도에 도달하면 `FAILED` 및 `INGEST_LEASE_EXPIRED`로 종결합니다. watermark는 시즌과 명시적 `since` 범위별로 분리되고 `SUCCEEDED` 트랜잭션에서만 단조 증가합니다. 이번 안정화에는 배치 checkpoint가 포함되지 않으므로 recovery 실행은 이미 커밋된 청크를 content hash 기반으로 재확인할 수 있습니다.
+`AI_INGEST_WORKER_MAX_RECOVERY_ATTEMPTS` 미만이면 만료 실행을 `QUEUED`로 되돌리고, 한도에 도달하면 `FAILED` 및 `INGEST_LEASE_EXPIRED`로 종결합니다. watermark는 시즌과 명시적 `since` 범위별로 분리되고 전체 run이 `SUCCEEDED`가 되는 `finish_success` 트랜잭션에서만 단조 증가합니다. table의 batch checkpoint 성공만으로 watermark가 전진하지 않으므로, 실패·재시작 중 watermark는 변경되지 않습니다.
+
+## Persistent checkpoint resume
+
+Leased database-table ingest는 `ai_ingest_checkpoints`에 `(run_id, source_table)`당 정확히 한 행을 사용합니다. Exactly one `ai_ingest_checkpoints` row per `(run_id, source_table)` is retained after terminal completion. Resume uses a typed ascending keyset and never an offset. 체크포인트가 있으면 source query는 저장된 typed cursor의 모든 필드에 대해 ascending keyset (`>` row-value comparison)으로 재개합니다. custom query는 명시적 고유 cursor order를, generic PostgreSQL table은 실제 지원되는 primary key를 요구합니다.
+
+Checkpoint update-window eligibility uses the same resolver for session startup and query construction. Incremental runs (`since` supplied) preserve the legacy `updated_at` default when a profile omits `since_filter_column`; FULL runs (`since` omitted) freeze only profiles that explicitly declare a nonempty `since_filter_column`. 따라서 `kbo_seasons`처럼 해당 필드를 선언하지 않은 FULL profile은 source clock을 읽거나 기본 `updated_at` 상한을 만들지 않습니다. The `teams` and `stadiums` profiles explicitly bind both FULL cutoff filtering and watermark extraction to `updated_at`. Configured `watermark_fields` are exclusive: ingestion checks only those fields in declared order, returns no row watermark when they are all NULL or missing, and uses generic timestamp aliases only when the profile has no `watermark_fields` configuration. `kbo_seasons` and other timestamp-free profiles declare an empty field list, so unrelated projected timestamps cannot advance their watermark. Eligible new checkpoints read trusted source DB `clock_timestamp()` once before the source data SELECT. Custom and generic incremental queries apply inclusive lower and upper predicates to the same effective column, excluding NULL values. FULL queries use `(column IS NULL OR column <= source_updated_before)` so nullable or left-joined update fields remain eligible. 첫 progress commit 또는 zero-row completion이 정확한 cutoff를 checkpoint row에 저장하고, 재시작은 저장된 cutoff를 재사용합니다. Any progressed eligible legacy checkpoint missing the cutoff fails closed as `INGEST_CHECKPOINT_INCOMPATIBLE`, whether incomplete or completed. A completed legacy checkpoint may skip the source clock and data SELECT without a cutoff only when its durable cursor, counters, and watermark prove zero progress.
+
+Chunks and their cursor commit together under the lease fence. 청크 upsert/비활성화와 cursor advancement는 같은 destination transaction에서 lease fence 확인 후 함께 commit됩니다. 출력 청크가 0개인 source batch도 cursor progress는 fence 아래 commit되어 재시작 시 같은 행을 무한 재처리하지 않습니다. duplicate 또는 역행 cursor는 다음 행 lookahead가 unsafe boundary를 감지한 뒤 commit 전에 거부합니다. 이미 `completed`인 table checkpoint를 복구하면 source data `SELECT` 없이 누적 결과를 반환합니다.
+
+The success watermark remains the maximum committed non-NULL source update timestamp and still advances only in full-run `finish_success`. Every non-NULL update-filtered source row is bounded by the fixed cutoff, while FULL runs deliberately retain NULL update values. 따라서 뒤쪽 cursor의 post-cutoff update가 앞쪽 cursor의 deferred update를 건너뛰게 만들 수 없습니다. The incremental residual duplicate window starts at the prior successful watermark and ends at the fixed cutoff because the lower predicate is inclusive; 이는 안전한 중복 재평가이며 누락 복구를 자동 외부 소스로 대체하지 않습니다.
+
+`source_file` static documents create no checkpoint row and restart atomically. 정적 문서는 전체 profile을 하나의 atomic transaction으로 다시 시작·commit하므로 database-table cursor resume과 섞지 않습니다.
+
+Checkpointed run은 `limit=None` 및 `row_stale_cleanup=off`여야 합니다. `row_stale_cleanup`의 `dry-run` 또는 `apply`는 checkpointed run에서 허용되지 않습니다.
+
+### Checkpoint failure contracts
+
+The generic terminal status error code remains `INGEST_EXECUTION_FAILED`; the five `INGEST_CHECKPOINT_*` identifiers are internal typed exception and metric classifications, not status-payload error codes. `MANUAL_BASEBALL_DATA_REQUIRED` remains the separate operator handoff. 일반 checkpoint 실패의 상태 응답 `error.code`는 `INGEST_EXECUTION_FAILED`이며, worker log의 `run_id`와 `error_type`를 함께 확인합니다. cursor를 수동으로 수정하지 말고 구성 또는 내부 trusted source를 바로잡은 뒤 재시도합니다.
+
+- `INGEST_CHECKPOINT_CURSOR_UNAVAILABLE`: checkpoint 실행에 cursor를 만들 수 없음(예: `limit`이 `None`이 아님, 정적 문서에 checkpoint 요청).
+- `INGEST_CHECKPOINT_INCOMPATIBLE`: 저장된 cursor version/signature/scope 또는 durable checkpoint 상태가 현재 order와 호환되지 않음.
+- `INGEST_CHECKPOINT_CURSOR_TYPE_UNSUPPORTED`: source 또는 저장 cursor 값이 선언된 typed cursor scalar와 맞지 않음.
+- `INGEST_CHECKPOINT_ORDER_VIOLATION`: cursor가 strictly ascending이 아니거나 duplicate여서 안전한 경계를 보장할 수 없음.
+- `INGEST_CHECKPOINT_STALE_CLEANUP_UNSUPPORTED`: checkpointed run에 `row_stale_cleanup=off` 이외의 값을 지정함.
+
+필수 internal source field 또는 cursor field가 누락·null이면 `MANUAL_BASEBALL_DATA_REQUIRED`를 반환합니다. `scope=ai_ingest_source_schema`, `missing_fields`, `import_source=operator_manual_data`를 포함한 contract를 운영 티켓에 전달하고, 운영자 검증 데이터 또는 trusted internal sync로만 보완합니다. 외부 야구 API, 크롤링, 웹 검색 복구로 값을 만들지 않습니다.
 
 ## MANUAL_BASEBALL_DATA_REQUIRED 인계
 
@@ -127,6 +153,7 @@ heartbeat와 성공·실패·`MANUAL_BASEBALL_DATA_REQUIRED` 종료는 모두 DB
 - `ai_ingest_watermark_lag_seconds{source_table}`: 허용된 테이블별 최근 성공 watermark 지연
 - `ai_ingest_lease_recoveries_total{result}`: 만료 리스 재대기/최종 실패 수
 - `ai_ingest_heartbeats_total{result}`: `success`, `retry`, `rejected`, `exhausted` heartbeat 결과
+- `ai_ingest_checkpoint_events_total{source_table,result}`: durable checkpoint lifecycle. `created`는 첫 checkpoint row 생성, `advanced`는 fenced batch cursor commit, `completed`는 table completion commit, `resumed`는 기존 row 사용, `incompatible`은 `IngestCheckpointIncompatibleError` classification, `rejected`는 그 밖의 `IngestCheckpointError` classification을 뜻합니다. Checkpoint metric results are limited to `created`, `advanced`, `completed`, `resumed`, `incompatible`, and `rejected`. Operators observe checkpoint failures through `ai_ingest_checkpoint_events_total{source_table,result}` and AI worker logs with `run_id` and `error_type`. `source_table`과 `result`는 고정된 bounded label 집합입니다.
 
 Backend Prometheus에서는 다음 지표를 함께 확인합니다.
 
@@ -138,12 +165,16 @@ Backend Prometheus에서는 다음 지표를 함께 확인합니다.
 
 라벨은 고정 집합으로 정규화되며 run ID, 토큰, 오류 본문을 라벨에 넣지 않습니다.
 
-## 롤백
+## 롤백 (rollback)
 
 전용 coordination pool 변경만 비활성화하는 환경 플래그는 없습니다. 코드 롤백 시 이전 버전의 단일 공용 풀이 복원되지만 `ai_ingest_runs`, watermark, `rag_chunks` 데이터는 그대로 호환됩니다.
 
 1. `AI_INGEST_ENABLED=false`로 backend를 재배포해 새 반복 제출을 중단합니다.
 2. 이미 생성된 실행은 terminal 상태가 될 때까지 AI worker를 유지합니다. 긴급 중단 시 run ID와 lease 만료 시각을 기록합니다.
-3. 애플리케이션 코드를 롤백하되 003의 테이블과 인덱스는 즉시 삭제하지 않습니다. 마이그레이션은 additive이며 대기/실행 기록과 watermark 감사 자료를 보존합니다.
+3. Rollback preserves migration 004 and retained checkpoint audit rows; older code ignores them. 애플리케이션 코드를 롤백하되 003과 `004_ai_ingest_checkpoints.sql`의 테이블·인덱스는 즉시 삭제하지 않습니다. No automatic checkpoint retention job exists.
 4. 캐시가 성공 후 비워졌는지 확인하고, 필요하면 backend의 기존 캐시 운영 절차로만 무효화합니다.
 5. 재활성화 전에 JobRunr에 `ai-rag-ingestion` recurring 작업이 하나뿐인지 확인합니다.
+
+## 검증 범위와 잔여 위험
+
+이 절차의 unit/integration tests는 disposable fake connection으로 cursor, transaction, lease fence, resume을 검증합니다. A separately approved local-only disposable live PostgreSQL smoke is required to remove the residual PostgreSQL risk. 별도 승인 없이는 이 smoke를 실행하지 않으며, shared 또는 production database에서 실행하지 않습니다.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -158,7 +159,19 @@ def test_heartbeat_requires_unexpired_owner_and_returns_new_expiry():
 def test_finish_success_advances_only_committed_table_watermarks():
     pool = _Pool([(RUN_ID,), (RUN_ID,), None])
     store = IngestRunStore(pool)
-    result = IngestTableResult("game", 3, 4, 1, 2, WATERMARK)
+    result = IngestTableResult(
+        "game",
+        10,
+        20,
+        3,
+        7,
+        WATERMARK,
+        checkpoint_resumed=True,
+        checkpoint_committed_batches=4,
+        checkpoint_completed=True,
+        attempt_source_rows=2,
+        attempt_written_chunks=1,
+    )
 
     asyncio.run(
         store.finish_success(
@@ -182,6 +195,16 @@ def test_finish_success_advances_only_committed_table_watermarks():
     assert "INSERT INTO ai_ingest_watermarks" in watermark_sql
     assert "ON CONFLICT (source_table, scope_key)" in watermark_sql
     assert "GREATEST" in watermark_sql
+    payload = json.loads(pool.connection_instance.executed[1][1][0])["game"]
+    assert payload["source_rows"] == 20
+    assert payload["written_chunks"] == 10
+    assert payload["checkpoint"] == {
+        "resumed": True,
+        "committed_batches": 4,
+        "completed": True,
+    }
+    assert "attempt_source_rows" not in payload
+    assert "attempt_written_chunks" not in payload
     assert pool.connection_instance.transaction_entries == 1
 
 

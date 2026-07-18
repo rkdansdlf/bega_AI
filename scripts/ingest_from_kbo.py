@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import wraps
 import gc
 import hashlib
 import json
@@ -69,9 +70,85 @@ from datetime import datetime, timezone
 from app.core.chunking import smart_chunks
 from app.core.embeddings import embed_texts
 from app.core.ingest_runs import IngestLeaseLostError, IngestTableResult
-from app.core.ingest_sources import TRUSTED_INGEST_SOURCE_TABLES
+from app.core.ingest_sources import (
+    TRUSTED_INGEST_SOURCE_TABLES,
+    normalize_ingest_source_table,
+)
+from app.core.ingest_checkpoints import (
+    CheckpointCursor,
+    CheckpointOrder,
+    CheckpointOrderField,
+    CursorScalarType,
+    IngestCheckpointError,
+    IngestCheckpointCursorTypeError,
+    IngestCheckpointCursorUnavailableError,
+    IngestCheckpointIncompatibleError,
+    IngestCheckpointMissingFieldError,
+    IngestCheckpointSession,
+    IngestCheckpointStaleCleanupError,
+    cursor_from_row,
+    ensure_cursor_advances,
+)
+from app.observability.metrics import (
+    AI_INGEST_CHECKPOINT_EVENTS_TOTAL,
+    AI_INGEST_TABLE_SOURCE_ROWS_TOTAL,
+    AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL,
+)
 
 _ingest_logger = _logging.getLogger(__name__)
+_CHECKPOINT_EVENT_RESULTS = frozenset(
+    {"created", "advanced", "completed", "resumed", "incompatible", "rejected"}
+)
+
+
+def _record_checkpoint_event(source_table: object, result: str) -> None:
+    if result not in _CHECKPOINT_EVENT_RESULTS:
+        raise ValueError("unsupported checkpoint event result")
+    AI_INGEST_CHECKPOINT_EVENTS_TOTAL.labels(
+        source_table=normalize_ingest_source_table(source_table),
+        result=result,
+    ).inc()
+
+
+def _record_checkpoint_batch_metrics(
+    source_table: object,
+    source_rows: int,
+    written_chunks: int,
+) -> None:
+    source_label = normalize_ingest_source_table(source_table)
+    AI_INGEST_TABLE_SOURCE_ROWS_TOTAL.labels(source_table=source_label).inc(source_rows)
+    AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(source_table=source_label).inc(
+        written_chunks
+    )
+
+
+def _record_checkpoint_rejection(
+    source_table: object,
+    error: IngestCheckpointError,
+) -> None:
+    result = (
+        "incompatible"
+        if isinstance(error, IngestCheckpointIncompatibleError)
+        else "rejected"
+    )
+    _record_checkpoint_event(source_table, result)
+
+
+def _trace_checkpoint_rejections(function: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(function)
+    def traced(source_conn, dest_conn, table_name, *args, **kwargs):
+        checkpointed = (
+            kwargs.get("checkpoint_run_id") is not None
+            or kwargs.get("checkpoint_scope_key") is not None
+        )
+        try:
+            return function(source_conn, dest_conn, table_name, *args, **kwargs)
+        except IngestCheckpointError as exc:
+            if checkpointed:
+                _record_checkpoint_rejection(table_name, exc)
+            raise
+
+    return traced
 
 
 def _embed_with_retry(
@@ -233,6 +310,32 @@ def _raise_manual_source_schema(
     raise ManualBaseballDataRequiredError(contract)
 
 
+def iter_checkpoint_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    order: CheckpointOrder,
+    previous: Optional[CheckpointCursor],
+):
+    """Yield rows only after the following cursor proves the boundary is safe."""
+
+    pending = None
+    last_cursor = previous
+    for raw_row in rows:
+        row = dict(raw_row)
+        try:
+            cursor = cursor_from_row(order, row)
+        except IngestCheckpointMissingFieldError as exc:
+            _raise_manual_source_schema(order.source_table, exc.missing_fields)
+        if pending is not None:
+            ensure_cursor_advances(order, pending[1], cursor)
+            yield pending
+        elif last_cursor is not None:
+            ensure_cursor_advances(order, last_cursor, cursor)
+        pending = (row, cursor)
+    if pending is not None:
+        yield pending
+
+
 def execute_source_select(
     cursor: Any,
     query: Any,
@@ -334,12 +437,18 @@ def _cursor_column_names(cursor: Any) -> Set[str]:
 
 
 def _row_updated_at(row: Mapping[str, Any], profile: Mapping[str, Any]) -> datetime | None:
-    configured = profile.get("watermark_fields") or ()
-    fields = tuple(configured) + (
-        "updated_at",
-        "game_updated_at",
-        "latest_updated_at",
-    )
+    if "watermark_fields" in profile:
+        configured = profile.get("watermark_fields")
+        if isinstance(configured, str):
+            fields = (configured,)
+        else:
+            fields = tuple(configured or ())
+    else:
+        fields = (
+            "updated_at",
+            "game_updated_at",
+            "latest_updated_at",
+        )
     for field in fields:
         value = row.get(str(field))
         if value is None:
@@ -355,6 +464,22 @@ def _row_updated_at(row: Mapping[str, Any], profile: Mapping[str, Any]) -> datet
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed
     return None
+
+
+def _read_source_updated_before(cursor: Any) -> datetime:
+    cursor.execute("SELECT clock_timestamp() AS source_updated_before")
+    row = cursor.fetchone()
+    if isinstance(row, Mapping):
+        value = row.get("source_updated_before")
+    elif isinstance(row, Sequence) and row:
+        value = row[0]
+    else:
+        value = None
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise IngestCheckpointIncompatibleError(
+            "source database clock did not return an aware timestamp"
+        )
+    return value
 
 
 # TABLE_PROFILES에 테이블별 메타가 있음: 설명, select_sql, 제목 구성용 필드(title_fields), 본문 하이라이트(highlights), 기본키 힌트(pk_hint), 전용 렌더러(renderer).
@@ -657,6 +782,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "pk_hint": ["id", "game_id"],
         "season_filter_column": "ks.season_year",
         "since_filter_column": "gm.updated_at",
+        "watermark_fields": ("game_updated_at",),
     },
     "game_flow_summary": {
         "description": "KBO 경기 흐름 요약",
@@ -981,6 +1107,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["stadium_id"],
         "season_filter_column": None,
+        "since_filter_column": "updated_at",
     },
     "teams": {
         "description": "KBO 구단 기본 정보",
@@ -999,6 +1126,7 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         ],
         "pk_hint": ["team_id"],
         "season_filter_column": None,
+        "since_filter_column": "updated_at",
     },
     "team_history": {
         "description": "KBO 구단 변천사",
@@ -1280,6 +1408,27 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
             LEFT JOIN teams t ON (t.team_id = g.home_team OR t.team_id = g.away_team)
             ORDER BY g.game_date DESC, gs.game_id, gs.id
         """,
+        "checkpoint_select_sql": """
+            SELECT
+                gs.*,
+                g.game_date,
+                ks.season_year,
+                ks.league_type_code,
+                checkpoint_team.team_name
+            FROM game_summary gs
+            LEFT JOIN game g ON g.game_id = gs.game_id
+            LEFT JOIN kbo_seasons ks ON ks.season_id = g.season_id
+            LEFT JOIN LATERAL (
+                SELECT t.team_name
+                FROM teams t
+                WHERE t.team_id = g.home_team OR t.team_id = g.away_team
+                ORDER BY
+                    CASE WHEN t.team_id = g.home_team THEN 0 ELSE 1 END,
+                    t.team_id ASC
+                LIMIT 1
+            ) checkpoint_team ON TRUE
+            ORDER BY g.game_date DESC, gs.game_id, gs.id
+        """,
         "highlights": [
             ("경기 ID", ["game_id"]),
             ("구분", ["summary_type"]),
@@ -1292,6 +1441,62 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "date_to_exclusive_filter_column": "g.game_date",
     },
 }
+
+DATABASE_WATERMARK_FIELDS = {
+    "player_season_batting": ("updated_at",),
+    "player_season_pitching": ("updated_at",),
+    "game": ("game_updated_at",),
+    "game_flow_summary": ("latest_updated_at",),
+    "game_batting_stats": ("updated_at",),
+    "game_pitching_stats": ("updated_at",),
+    "game_inning_scores": ("updated_at",),
+    "game_lineups": ("updated_at",),
+    "game_metadata": ("updated_at",),
+    "kbo_seasons": (),
+    "stadiums": ("updated_at",),
+    "teams": ("updated_at",),
+    "team_history": ("updated_at",),
+    "team_name_mapping": (),
+    "awards": ("updated_at",),
+    "player_movements": ("updated_at",),
+    "team_franchises": ("updated_at",),
+    "player_basic": (),
+    "team_profiles": (),
+    "team_season_batting": ("updated_at",),
+    "team_season_pitching": ("updated_at",),
+    "stat_rankings": ("updated_at",),
+    "game_summary": ("updated_at",),
+}
+
+for source_table, watermark_fields in DATABASE_WATERMARK_FIELDS.items():
+    TABLE_PROFILES[source_table]["watermark_fields"] = watermark_fields
+
+CUSTOM_CHECKPOINT_ORDERS = {
+    "player_season_batting": (("id", "integer"),),
+    "player_season_pitching": (("id", "integer"),),
+    "game": (("id", "integer"),),
+    "game_flow_summary": (("game_id", "text"),),
+    "game_batting_stats": (("id", "integer"),),
+    "game_pitching_stats": (("id", "integer"),),
+    "game_inning_scores": (("id", "integer"),),
+    "game_lineups": (("id", "integer"),),
+    "game_metadata": (("game_id", "text"),),
+    "team_history": (("id", "integer"),),
+    "awards": (("id", "integer"),),
+    "player_movements": (("id", "integer"),),
+    "team_franchises": (("id", "integer"),),
+    "player_basic": (("player_id", "text"),),
+    "team_name_mapping": (("full_name", "text"),),
+    "team_profiles": (("id", "integer"),),
+    "team_season_batting": (("id", "integer"),),
+    "team_season_pitching": (("id", "integer"),),
+    "stat_rankings": (("id", "integer"),),
+    "game_summary": (("id", "integer"),),
+}
+
+for source_table, checkpoint_order in CUSTOM_CHECKPOINT_ORDERS.items():
+    TABLE_PROFILES[source_table]["checkpoint_order"] = checkpoint_order
+    TABLE_PROFILES[source_table]["checkpoint_query_version"] = "1"
 
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
 # team_daily_roster는 데이터가 많아 스킵
@@ -1389,6 +1594,86 @@ def resolve_primary_key_columns(
     if override:
         return override
     return get_primary_key_columns(conn, table)
+
+
+def _postgres_type_to_cursor_type(pg_type: str) -> CursorScalarType:
+    normalized = pg_type.lower()
+    if normalized in {"smallint", "integer", "bigint"}:
+        return "integer"
+    if normalized.startswith(("numeric", "decimal")):
+        return "decimal"
+    if normalized == "date":
+        return "date"
+    if re.fullmatch(r"timestamp(?:\([0-6]\))? with time zone", normalized):
+        return "datetime"
+    if re.fullmatch(r"timestamp(?:\([0-6]\))? without time zone", normalized):
+        return "datetime_naive"
+    if normalized == "uuid":
+        return "uuid"
+    if normalized in {"text", "character", "character varying"} or normalized.startswith(
+        ("character(", "character varying(")
+    ):
+        return "text"
+    if normalized == "boolean":
+        return "boolean"
+    raise IngestCheckpointCursorTypeError(f"unsupported primary-key type: {pg_type}")
+
+
+def resolve_checkpoint_order(
+    conn,
+    table_name: str,
+    profile: Dict[str, Any],
+) -> CheckpointOrder:
+    if profile.get("select_sql"):
+        configured_order = profile.get("checkpoint_order")
+        if configured_order:
+            return CheckpointOrder(
+                source_table=table_name,
+                fields=tuple(
+                    CheckpointOrderField(name, scalar_type)
+                    for name, scalar_type in configured_order
+                ),
+                query_version=str(profile.get("checkpoint_query_version", "1")),
+            )
+        raise IngestCheckpointCursorUnavailableError(
+            f"custom source query has no checkpoint order: {table_name}"
+        )
+    if conn is None:
+        raise IngestCheckpointCursorUnavailableError(
+            f"database connection is required to inspect primary key: {table_name}"
+        )
+
+    query = """
+        SELECT
+            a.attname,
+            format_type(a.atttypid, a.atttypmod),
+            a.attnotnull
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+        WHERE c.relname = %s AND n.nspname = %s AND i.indisprimary
+        ORDER BY array_position(i.indkey, a.attnum)
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, (table_name, "public"))
+        rows = cur.fetchall()
+
+    if not rows:
+        raise IngestCheckpointCursorUnavailableError(
+            f"source table has no primary key: {table_name}"
+        )
+    if any(not attnotnull for _, _, attnotnull in rows):
+        raise IngestCheckpointCursorUnavailableError(
+            f"primary-key cursor contains nullable fields: {table_name}"
+        )
+    return CheckpointOrder(
+        source_table=table_name,
+        fields=tuple(
+            CheckpointOrderField(name, _postgres_type_to_cursor_type(pg_type))
+            for name, pg_type, _ in rows
+        ),
+    )
 
 
 def _normalize_row_id_value(table: str, key: str, value: Any) -> Optional[str]:
@@ -1820,29 +2105,104 @@ def _find_top_level_keyword_positions(sql_text: str, keyword: str) -> List[int]:
     keyword_len = len(keyword_upper)
     depth = 0
     in_single_quote = False
+    single_quote_backslash_escapes = False
     in_double_quote = False
+    in_line_comment = False
+    block_comment_depth = 0
+    dollar_quote_delimiter: Optional[str] = None
     idx = 0
 
     while idx < len(sql_text):
         char = sql_text[idx]
 
+        if in_line_comment:
+            if char in "\r\n":
+                in_line_comment = False
+            idx += 1
+            continue
+
+        if block_comment_depth:
+            if sql_text.startswith("/*", idx):
+                block_comment_depth += 1
+                idx += 2
+                continue
+            if sql_text.startswith("*/", idx):
+                block_comment_depth -= 1
+                idx += 2
+                continue
+            idx += 1
+            continue
+
+        if dollar_quote_delimiter is not None:
+            if sql_text.startswith(dollar_quote_delimiter, idx):
+                idx += len(dollar_quote_delimiter)
+                dollar_quote_delimiter = None
+            else:
+                idx += 1
+            continue
+
         if in_single_quote:
+            if (
+                single_quote_backslash_escapes
+                and char == "\\"
+                and idx + 1 < len(sql_text)
+            ):
+                idx += 2
+                continue
             if char == "'" and idx + 1 < len(sql_text) and sql_text[idx + 1] == "'":
                 idx += 2
                 continue
             if char == "'":
                 in_single_quote = False
+                single_quote_backslash_escapes = False
             idx += 1
             continue
 
         if in_double_quote:
+            if char == '"' and idx + 1 < len(sql_text) and sql_text[idx + 1] == '"':
+                idx += 2
+                continue
             if char == '"':
                 in_double_quote = False
             idx += 1
             continue
 
+        if sql_text.startswith("--", idx):
+            in_line_comment = True
+            idx += 2
+            continue
+
+        if sql_text.startswith("/*", idx):
+            block_comment_depth = 1
+            idx += 2
+            continue
+
+        if char == "$" and (
+            idx == 0
+            or re.fullmatch(r"[A-Za-z0-9_$]", sql_text[idx - 1]) is None
+        ):
+            delimiter_match = re.match(
+                r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", sql_text[idx:]
+            )
+            if delimiter_match is not None:
+                dollar_quote_delimiter = delimiter_match.group(0)
+                idx += len(dollar_quote_delimiter)
+                continue
+
         if char == "'":
             in_single_quote = True
+            prefix_idx = idx - 1
+            single_quote_backslash_escapes = (
+                prefix_idx >= 0
+                and sql_text[prefix_idx] in {"e", "E"}
+                and (
+                    prefix_idx == 0
+                    or not (
+                        sql_text[prefix_idx - 1].isalnum()
+                        or sql_text[prefix_idx - 1] in {"_", "$"}
+                    )
+                )
+            )
             idx += 1
             continue
 
@@ -1878,6 +2238,28 @@ def _find_top_level_keyword_positions(sql_text: str, keyword: str) -> List[int]:
 
 
 # build_select_query가 프로필의 select_sql이 있으면 그 SQL에 season_year 등 필터를 주입하고 ORDER BY/ LIMIT를 붙임. 커스텀 SQL이 없으면 SELECT * FROM <table> + PK 순 정렬.
+def _quoted_checkpoint_fields(order: CheckpointOrder) -> str:
+    for field in order.fields:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field.name) is None:
+            raise IngestCheckpointCursorUnavailableError("unsafe cursor field")
+    return ", ".join(f'"{field.name}"' for field in order.fields)
+
+
+def resolve_update_filter_column(
+    profile: Mapping[str, Any],
+    *,
+    since: Optional[datetime],
+) -> Optional[str]:
+    if since is not None:
+        column = profile.get("since_filter_column", "updated_at")
+    else:
+        column = profile.get("since_filter_column")
+    if column is None:
+        return None
+    normalized = str(column).strip()
+    return normalized or None
+
+
 def build_select_query(
     table: str,
     profile: Dict[str, Any],
@@ -1885,12 +2267,25 @@ def build_select_query(
     limit: Optional[int],
     season_year: Optional[int],
     since: Optional[datetime],
+    source_updated_before: Optional[datetime] = None,
     date_to_exclusive: Optional[Any] = None,
+    checkpoint_order: Optional[CheckpointOrder] = None,
+    resume_cursor: Optional[CheckpointCursor] = None,
 ):
     custom_sql = profile.get("select_sql")
+    if checkpoint_order is not None:
+        custom_sql = profile.get("checkpoint_select_sql") or custom_sql
     season_filter_column = profile.get("season_filter_column", "season_year")
-    since_filter_column = profile.get("since_filter_column", "updated_at")
+    since_filter_column = resolve_update_filter_column(profile, since=since)
     date_to_exclusive_filter_column = profile.get("date_to_exclusive_filter_column")
+    if (
+        checkpoint_order is not None
+        and since_filter_column
+        and source_updated_before is None
+    ):
+        raise IngestCheckpointIncompatibleError(
+            "checkpointed update-filter query requires a source update cutoff"
+        )
     params: List[Any] = []
     if custom_sql:
         stripped = custom_sql.strip()
@@ -1910,6 +2305,19 @@ def build_select_query(
         if since is not None and since_filter_column:
             where_clauses.append(f"{since_filter_column} >= %s")
             params.append(since)
+        if (
+            checkpoint_order is not None
+            and source_updated_before is not None
+            and since_filter_column
+        ):
+            if since is None:
+                where_clauses.append(
+                    f"({since_filter_column} IS NULL OR "
+                    f"{since_filter_column} <= %s)"
+                )
+            else:
+                where_clauses.append(f"{since_filter_column} <= %s")
+            params.append(source_updated_before)
         if date_to_exclusive is not None and date_to_exclusive_filter_column:
             where_clauses.append(f"{date_to_exclusive_filter_column} < %s")
             params.append(date_to_exclusive)
@@ -1921,9 +2329,27 @@ def build_select_query(
             else:
                 base_sql = f"{base_sql}\nWHERE {' AND '.join(where_clauses)}"
 
-        query = base_sql
-        if order_clause:
-            query = f"{query}\n{order_clause}"
+        if checkpoint_order is not None:
+            quoted_fields = _quoted_checkpoint_fields(checkpoint_order)
+            if resume_cursor is not None and len(resume_cursor.values) != len(
+                checkpoint_order.fields
+            ):
+                raise IngestCheckpointIncompatibleError("cursor arity mismatch")
+            query = f"WITH checkpoint_source AS (\n{base_sql}\n)\nSELECT * FROM checkpoint_source"
+            if resume_cursor is not None:
+                placeholders = ", ".join("%s" for _ in checkpoint_order.fields)
+                query = (
+                    f"{query}\nWHERE ROW({quoted_fields}) > ROW({placeholders})"
+                )
+                params.extend(resume_cursor.values)
+            ascending_order = ", ".join(
+                f'"{field.name}" ASC' for field in checkpoint_order.fields
+            )
+            query = f"{query}\nORDER BY {ascending_order}"
+        else:
+            query = base_sql
+            if order_clause:
+                query = f"{query}\n{order_clause}"
         if limit is not None:
             query = f"{query} LIMIT %s"
             params.append(limit)
@@ -1940,13 +2366,58 @@ def build_select_query(
         column_name = str(since_filter_column).split(".")[-1]
         where_parts.append(sql.SQL("{} >= %s").format(sql.Identifier(column_name)))
         params.append(since)
+    if (
+        checkpoint_order is not None
+        and source_updated_before is not None
+        and since_filter_column
+    ):
+        column_name = str(since_filter_column).split(".")[-1]
+        if since is None:
+            identifier = sql.Identifier(column_name)
+            where_parts.append(
+                sql.SQL("({} IS NULL OR {} <= %s)").format(
+                    identifier,
+                    identifier,
+                )
+            )
+        else:
+            where_parts.append(
+                sql.SQL("{} <= %s").format(sql.Identifier(column_name))
+            )
+        params.append(source_updated_before)
     if date_to_exclusive is not None and date_to_exclusive_filter_column:
         column_name = str(date_to_exclusive_filter_column).split(".")[-1]
         where_parts.append(sql.SQL("{} < %s").format(sql.Identifier(column_name)))
         params.append(date_to_exclusive)
+    if checkpoint_order is not None:
+        _quoted_checkpoint_fields(checkpoint_order)
+        if resume_cursor is not None and len(resume_cursor.values) != len(
+            checkpoint_order.fields
+        ):
+            raise IngestCheckpointIncompatibleError("cursor arity mismatch")
+        if resume_cursor is not None:
+            checkpoint_columns = sql.SQL(", ").join(
+                sql.Identifier(field.name) for field in checkpoint_order.fields
+            )
+            checkpoint_placeholders = sql.SQL(", ").join(
+                sql.SQL("%s") for _ in checkpoint_order.fields
+            )
+            where_parts.append(
+                sql.SQL("ROW({}) > ROW({})").format(
+                    checkpoint_columns,
+                    checkpoint_placeholders,
+                )
+            )
+            params.extend(resume_cursor.values)
     if where_parts:
         query = query + sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
-    if pk_columns:
+    if checkpoint_order is not None:
+        order_cols = sql.SQL(", ").join(
+            sql.SQL("{} ASC").format(sql.Identifier(field.name))
+            for field in checkpoint_order.fields
+        )
+        query = query + sql.SQL(" ORDER BY {}").format(order_cols)
+    elif pk_columns:
         order_cols = sql.SQL(", ").join(sql.Identifier(col) for col in pk_columns)
         query = query + sql.SQL(" ORDER BY {}").format(order_cols)
     if limit is not None:
@@ -2241,11 +2712,52 @@ def flush_chunks(
     stats: Dict[str, Any],
     skip_embedding: bool,
     lease_guard: Optional[IngestLeaseGuard] = None,
+    checkpoint_session: Optional[IngestCheckpointSession] = None,
+    checkpoint_cursor: Optional[CheckpointCursor] = None,
+    checkpoint_source_rows: int = 0,
+    checkpoint_max_updated_at: Optional[datetime] = None,
 ) -> int:
-    if not buffer:
+    reused_before = int(stats.get("embedding_reused", 0))
+    embedded_before = int(stats.get("reembedded_count", 0))
+    if not buffer and checkpoint_source_rows <= 0:
         return 0
+    if checkpoint_source_rows > 0 and (
+        checkpoint_session is None or checkpoint_cursor is None
+    ):
+        raise ValueError("checkpoint progress requires a session and cursor")
     if lease_guard is not None:
         lease_guard(False)
+
+    def _advance_checkpoint(flushed: int, *, write_fenced: bool) -> bool:
+        if checkpoint_source_rows <= 0:
+            return False
+        if lease_guard is not None and not write_fenced:
+            lease_guard(True)
+        created = checkpoint_session.current is None
+        checkpoint = checkpoint_session.advance(
+            cur,
+            next_cursor=checkpoint_cursor,
+            source_rows_delta=checkpoint_source_rows,
+            written_chunks_delta=flushed,
+            reused_embeddings_delta=(
+                int(stats.get("embedding_reused", 0)) - reused_before
+            ),
+            embedded_chunks_delta=(
+                int(stats.get("reembedded_count", 0)) - embedded_before
+            ),
+            max_updated_at=checkpoint_max_updated_at,
+        )
+        cur.connection.commit()
+        if created:
+            _record_checkpoint_event(checkpoint.source_table, "created")
+        _record_checkpoint_batch_metrics(
+            checkpoint.source_table,
+            checkpoint_source_rows,
+            flushed,
+        )
+        _record_checkpoint_event(checkpoint.source_table, "advanced")
+        stats["since_commit"] = 0
+        return True
 
     stats["batches"] = stats.get("batches", 0) + 1
     embedding_model = resolve_embedding_model(settings)
@@ -2304,6 +2816,7 @@ def flush_chunks(
 
     buffer.clear()
     if not filtered_items:
+        _advance_checkpoint(0, write_fenced=False)
         return 0
 
     vector_literals: List[Optional[str]] = [None] * len(filtered_items)
@@ -2392,6 +2905,7 @@ def flush_chunks(
         stored_items.append((item, storage_fields))
 
     if not data:
+        _advance_checkpoint(0, write_fenced=False)
         return 0
 
     # Bulk upsert using executemany.
@@ -2418,12 +2932,17 @@ def flush_chunks(
 
     flushed = len(stored_items)
     stats["since_commit"] = stats.get("since_commit", 0) + flushed
-    if lease_guard is not None:
-        cur.connection.commit()
-        stats["since_commit"] = 0
-    elif commit_interval and stats["since_commit"] >= commit_interval:
-        cur.connection.commit()
-        stats["since_commit"] = 0
+    checkpoint_committed = _advance_checkpoint(
+        flushed,
+        write_fenced=lease_guard is not None,
+    )
+    if not checkpoint_committed:
+        if lease_guard is not None:
+            cur.connection.commit()
+            stats["since_commit"] = 0
+        elif commit_interval and stats["since_commit"] >= commit_interval:
+            cur.connection.commit()
+            stats["since_commit"] = 0
 
     if embeddings is not None:
         del embeddings
@@ -2431,6 +2950,40 @@ def flush_chunks(
     return flushed
 
 
+def _checkpoint_result(
+    session: IngestCheckpointSession,
+    *,
+    attempt_source_rows: int,
+    attempt_written_chunks: int,
+) -> IngestTableResult:
+    checkpoint = session.current
+    return IngestTableResult(
+        source_table=checkpoint.source_table,
+        written_chunks=checkpoint.written_chunks,
+        source_rows=checkpoint.source_rows,
+        reused_embeddings=checkpoint.reused_embeddings,
+        embedded_chunks=checkpoint.embedded_chunks,
+        max_updated_at=checkpoint.max_updated_at,
+        checkpoint_resumed=session.resumed,
+        checkpoint_committed_batches=checkpoint.committed_batches,
+        checkpoint_completed=checkpoint.completed,
+        attempt_source_rows=attempt_source_rows,
+        attempt_written_chunks=attempt_written_chunks,
+    )
+
+
+def _normalize_checkpoint_scope_key(scope_key: str) -> str:
+    if not isinstance(scope_key, str):
+        raise ValueError("checkpoint_scope_key must be a string")
+    normalized = scope_key.strip()
+    if not normalized:
+        raise ValueError("checkpoint_scope_key must not be empty")
+    if len(normalized) > 64:
+        raise ValueError("checkpoint_scope_key must not exceed 64 characters")
+    return normalized
+
+
+@_trace_checkpoint_rejections
 def ingest_table(
     source_conn: Any,
     dest_conn: Any,
@@ -2451,7 +3004,28 @@ def ingest_table(
     stats: Dict[str, Any],
     date_to_exclusive: Optional[Any] = None,
     lease_guard: Optional[IngestLeaseGuard] = None,
+    checkpoint_run_id: Any = None,
+    checkpoint_scope_key: Optional[str] = None,
 ) -> IngestTableResult:
+    checkpointed = checkpoint_run_id is not None or checkpoint_scope_key is not None
+    if checkpoint_scope_key is not None:
+        checkpoint_scope_key = _normalize_checkpoint_scope_key(checkpoint_scope_key)
+    if checkpointed:
+        if checkpoint_run_id is None or checkpoint_scope_key is None:
+            raise ValueError(
+                "checkpoint_run_id and checkpoint_scope_key must be provided together"
+            )
+        if lease_guard is None:
+            raise ValueError("checkpointed ingestion requires a lease guard")
+        if limit is not None:
+            raise IngestCheckpointCursorUnavailableError(
+                "checkpointed ingestion requires limit=None"
+            )
+        if row_stale_cleanup != "off":
+            raise IngestCheckpointStaleCleanupError(
+                "checkpointed ingestion does not support stale cleanup"
+            )
+
     if table_name == "rag_chunks":
         print("경고: rag_chunks 테이블은 처리 대상에서 제외됩니다.")
         return IngestTableResult(table_name, 0, 0, 0, 0, None)
@@ -2482,6 +3056,10 @@ def ingest_table(
 
         # --- NEW LOGIC FOR STATIC FILE ---
         if "source_file" in profile:
+            if checkpointed:
+                raise IngestCheckpointCursorUnavailableError(
+                    "static documents do not use database checkpoints"
+                )
             print(f"      정적 파일 '{profile['source_file']}'을(를) 수집 중입니다...")
             payloads = load_static_profile_payloads(
                 table_name,
@@ -2515,29 +3093,228 @@ def ingest_table(
             )
         # --- END NEW LOGIC ---
 
-        pk_columns = resolve_primary_key_columns(source_conn, table_name, profile)
-        query, params = build_select_query(
-            table_name,
-            profile,
-            pk_columns,
-            limit,
-            season_year,
-            since,
-            date_to_exclusive=date_to_exclusive,
-        )
+        checkpoint_session = None
+        checkpoint_order = None
+        resume_cursor = None
+        source_updated_before = None
+        if checkpointed:
+            requires_source_updated_before = bool(
+                resolve_update_filter_column(profile, since=since)
+            )
+            checkpoint_order = resolve_checkpoint_order(
+                source_conn,
+                table_name,
+                profile,
+            )
+            checkpoint_session = IngestCheckpointSession.start(
+                write_cur,
+                run_id=checkpoint_run_id,
+                source_table=table_name,
+                scope_key=checkpoint_scope_key,
+                order=checkpoint_order,
+                requires_source_updated_before=requires_source_updated_before,
+            )
+            if checkpoint_session.resumed:
+                _record_checkpoint_event(table_name, "resumed")
+            if checkpoint_session.completed:
+                return _checkpoint_result(
+                    checkpoint_session,
+                    attempt_source_rows=0,
+                    attempt_written_chunks=0,
+                )
+            if checkpoint_session.current is not None:
+                resume_cursor = checkpoint_session.current.cursor
 
+        pk_columns = resolve_primary_key_columns(source_conn, table_name, profile)
+        if checkpointed:
+            source_updated_before = checkpoint_session.source_updated_before
+            if requires_source_updated_before and source_updated_before is None:
+                source_updated_before = _read_source_updated_before(read_cur)
+                checkpoint_session.bind_source_updated_before(source_updated_before)
+            query, params = build_select_query(
+                table_name,
+                profile,
+                pk_columns,
+                limit,
+                season_year,
+                since,
+                source_updated_before=source_updated_before,
+                date_to_exclusive=date_to_exclusive,
+                checkpoint_order=checkpoint_order,
+                resume_cursor=resume_cursor,
+            )
+        else:
+            query, params = build_select_query(
+                table_name,
+                profile,
+                pk_columns,
+                limit,
+                season_year,
+                since,
+                date_to_exclusive=date_to_exclusive,
+            )
+
+        required_source_columns = set(REQUIRED_SOURCE_COLUMNS.get(table_name, ()))
+        if checkpoint_order is not None:
+            required_source_columns.update(
+                field.name for field in checkpoint_order.fields
+            )
         execute_source_select(
             read_cur,
             query,
             params,
             table_name=table_name,
-            required_columns=REQUIRED_SOURCE_COLUMNS.get(table_name, ()),
+            required_columns=required_source_columns,
         )
         validate_required_source_columns(
             table_name,
             _cursor_column_names(read_cur),
-            REQUIRED_SOURCE_COLUMNS.get(table_name, ()),
+            required_source_columns,
         )
+
+        if checkpoint_session is not None and checkpoint_order is not None:
+            attempt_source_rows = 0
+            attempt_written_chunks = 0
+            pending_source_rows = 0
+            pending_cursor = None
+            pending_max_updated_at = None
+
+            def _source_rows():
+                nonlocal fetched_rows
+                while True:
+                    if lease_guard is not None:
+                        lease_guard(False)
+                    rows = read_cur.fetchmany(read_batch_size)
+                    if not rows:
+                        return
+                    fetched_rows += len(rows)
+                    print(
+                        f"      테이블 '{table_name}'에서 "
+                        f"{fetched_rows}개 행을 가져왔습니다...",
+                        flush=True,
+                    )
+                    yield from rows
+
+            for row, cursor in iter_checkpoint_rows(
+                _source_rows(),
+                order=checkpoint_order,
+                previous=resume_cursor,
+            ):
+                attempt_source_rows += 1
+                pending_source_rows += 1
+                pending_cursor = cursor
+                row_updated_at = _row_updated_at(row, profile)
+                if row_updated_at is not None:
+                    if max_updated_at is None or row_updated_at > max_updated_at:
+                        max_updated_at = row_updated_at
+                    if (
+                        pending_max_updated_at is None
+                        or row_updated_at > pending_max_updated_at
+                    ):
+                        pending_max_updated_at = row_updated_at
+
+                source_row_id = build_source_row_id(
+                    row,
+                    table_name,
+                    pk_columns,
+                    profile.get("pk_hint", []),
+                )
+                row_tasks: List[RowPrepareTask] = []
+                if source_row_id not in seen_source_row_ids:
+                    seen_source_row_ids.add(source_row_id)
+                    row_tasks.append(
+                        (
+                            table_name,
+                            row,
+                            source_row_id,
+                            use_legacy_renderer,
+                            today_str,
+                        )
+                    )
+
+                prepared_rows, used_engine = _prepare_rows_for_engine(
+                    row_tasks,
+                    parallel_engine=effective_parallel_engine,
+                    workers=workers,
+                )
+                if used_engine != effective_parallel_engine:
+                    stats["parallel_engine_fallbacks"] = (
+                        stats.get("parallel_engine_fallbacks", 0) + 1
+                    )
+                    effective_parallel_engine = used_engine
+                stats["effective_parallel_engine"] = effective_parallel_engine
+
+                for chunk_payloads in prepared_rows:
+                    for payload in chunk_payloads:
+                        buffer.append(ChunkPayload(**payload))
+
+                if (
+                    len(buffer) >= embed_batch_size
+                    or pending_source_rows >= read_batch_size
+                ):
+                    flushed = flush_chunks(
+                        write_cur,
+                        settings,
+                        buffer,
+                        max_concurrency=max_concurrency,
+                        commit_interval=commit_interval,
+                        stats=stats,
+                        skip_embedding=skip_embedding,
+                        lease_guard=lease_guard,
+                        checkpoint_session=checkpoint_session,
+                        checkpoint_cursor=pending_cursor,
+                        checkpoint_source_rows=pending_source_rows,
+                        checkpoint_max_updated_at=pending_max_updated_at,
+                    )
+                    total_chunks += flushed
+                    processed_chunks += flushed
+                    attempt_written_chunks += flushed
+                    pending_source_rows = 0
+                    pending_cursor = None
+                    pending_max_updated_at = None
+                    if flushed:
+                        print(
+                            f"      현재까지 {processed_chunks}개 청크를 처리했습니다...",
+                            flush=True,
+                        )
+
+            if pending_source_rows > 0:
+                flushed = flush_chunks(
+                    write_cur,
+                    settings,
+                    buffer,
+                    max_concurrency=max_concurrency,
+                    commit_interval=commit_interval,
+                    stats=stats,
+                    skip_embedding=skip_embedding,
+                    lease_guard=lease_guard,
+                    checkpoint_session=checkpoint_session,
+                    checkpoint_cursor=pending_cursor,
+                    checkpoint_source_rows=pending_source_rows,
+                    checkpoint_max_updated_at=pending_max_updated_at,
+                )
+                total_chunks += flushed
+                processed_chunks += flushed
+                attempt_written_chunks += flushed
+
+            if lease_guard is not None:
+                lease_guard(True)
+            created = checkpoint_session.current is None
+            checkpoint = checkpoint_session.complete(write_cur)
+            dest_conn.commit()
+            if created:
+                _record_checkpoint_event(checkpoint.source_table, "created")
+            _record_checkpoint_event(table_name, "completed")
+            if processed_chunks:
+                print(
+                    f"      총 {processed_chunks}개 청크를 처리했습니다.",
+                    flush=True,
+                )
+            return _checkpoint_result(
+                checkpoint_session,
+                attempt_source_rows=attempt_source_rows,
+                attempt_written_chunks=attempt_written_chunks,
+            )
 
         while True:
             if lease_guard is not None:
@@ -2687,7 +3464,37 @@ def ingest(
     date_to_exclusive: Optional[Any] = None,
     lease_run_id: Any = None,
     lease_owner: Optional[str] = None,
+    checkpoint_scope_key: Optional[str] = None,
 ) -> IngestExecutionResult:
+    if checkpoint_scope_key is not None:
+        checkpoint_scope_key = _normalize_checkpoint_scope_key(checkpoint_scope_key)
+    leased = lease_run_id is not None or lease_owner is not None
+    if leased:
+        if lease_run_id is None or lease_owner is None or not lease_owner.strip():
+            raise ValueError("lease_run_id and lease_owner must be provided together")
+        if checkpoint_scope_key is None:
+            raise ValueError("checkpoint_scope_key is required for leased ingestion")
+        checkpoint_tables = [
+            table
+            for table in tables
+            if table != "rag_chunks"
+            and "source_file" not in TABLE_PROFILES.get(table, {})
+        ]
+        if checkpoint_tables and limit is not None:
+            error = IngestCheckpointCursorUnavailableError(
+                "checkpointed ingestion requires limit=None"
+            )
+            for source_table in checkpoint_tables:
+                _record_checkpoint_rejection(source_table, error)
+            raise error
+        if checkpoint_tables and row_stale_cleanup != "off":
+            error = IngestCheckpointStaleCleanupError(
+                "checkpointed ingestion does not support stale cleanup"
+            )
+            for source_table in checkpoint_tables:
+                _record_checkpoint_rejection(source_table, error)
+            raise error
+
     _require_psycopg()
     settings = get_settings()
 
@@ -2708,9 +3515,7 @@ def ingest(
         cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
     dest_conn.autocommit = original_autocommit
     lease_guard = None
-    if lease_run_id is not None or lease_owner is not None:
-        if lease_run_id is None or not lease_owner:
-            raise ValueError("lease_run_id and lease_owner must be provided together")
+    if leased:
         lease_guard = build_ingest_lease_guard(
             dest_conn,
             lease_run_id,
@@ -2729,6 +3534,16 @@ def ingest(
                 "effective_parallel_engine": parallel_engine,
                 "parallel_engine_fallbacks": 0,
             }
+            checkpoint_options = {}
+            if (
+                leased
+                and table != "rag_chunks"
+                and "source_file" not in TABLE_PROFILES.get(table, {})
+            ):
+                checkpoint_options = {
+                    "checkpoint_run_id": lease_run_id,
+                    "checkpoint_scope_key": checkpoint_scope_key,
+                }
             result = ingest_table(
                 source_conn,  # Read from Source
                 dest_conn,  # Write to Dest
@@ -2748,6 +3563,7 @@ def ingest(
                 row_stale_cleanup=row_stale_cleanup,
                 stats=stats,
                 lease_guard=lease_guard,
+                **checkpoint_options,
             )
             table_results[table] = result
             print(

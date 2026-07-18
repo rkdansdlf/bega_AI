@@ -300,6 +300,7 @@ def test_auto_schema_compatibility_ensures_ingest_orchestration_tables():
 
     asyncio.run(deps._ensure_ingest_orchestration_schema(pool))
 
-    sql = " ".join(pool.connection_instance.executed)
-    assert "CREATE TABLE IF NOT EXISTS ai_ingest_runs" in sql
-    assert "CREATE TABLE IF NOT EXISTS ai_ingest_watermarks" in sql
+    executed = pool.connection_instance.executed
+    assert len(executed) == 2
+    assert "CREATE TABLE IF NOT EXISTS ai_ingest_runs" in executed[0]
+    assert "CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints" in executed[1]
