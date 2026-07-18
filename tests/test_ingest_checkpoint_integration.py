@@ -427,6 +427,27 @@ def test_leased_ingest_requires_checkpoint_scope_before_opening_connections(
         )
 
 
+def test_leased_ingest_rejects_blank_owner_before_runtime_or_connections(
+    monkeypatch,
+):
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("runtime and connections must not be opened")
+
+    monkeypatch.setattr(module, "_require_psycopg", _unexpected)
+    monkeypatch.setattr(module, "get_settings", _unexpected)
+    monkeypatch.setattr(module.psycopg, "connect", _unexpected)
+
+    with pytest.raises(ValueError, match="lease_run_id and lease_owner"):
+        module.ingest(
+            tables=["game"],
+            lease_run_id=RUN_ID,
+            lease_owner="   ",
+            checkpoint_scope_key=SCOPE_KEY,
+            row_stale_cleanup="off",
+            **OPTIONS,
+        )
+
+
 def test_chunk_write_and_checkpoint_precede_one_commit(monkeypatch):
     result, events = _run_fake_checkpoint_ingest(
         monkeypatch,
