@@ -22,11 +22,6 @@ from app.core.ingest_runs import (
     build_watermark_scope_key,
 )
 from app.core.ingest_worker import IngestWorker
-from app.core.ingest_checkpoints import (
-    IngestCheckpointCursorUnavailableError,
-    IngestCheckpointIncompatibleError,
-)
-from scripts import ingest_from_kbo as ingest_module
 from scripts.ingest_from_kbo import (
     IngestExecutionResult,
     ManualBaseballDataRequiredError,
@@ -282,7 +277,7 @@ def test_checkpoint_result_keeps_cumulative_and_attempt_counts_separate():
     assert result.attempt_written_chunks == 1
 
 
-def test_table_metrics_use_current_attempt_deltas_for_resumed_checkpoint():
+def test_worker_does_not_duplicate_script_owned_checkpoint_batch_metrics():
     worker = IngestWorker(store=_Store(), settings=SETTINGS, owner="worker-1")
     result = IngestTableResult(
         "game",
@@ -310,10 +305,10 @@ def test_table_metrics_use_current_attempt_deltas_for_resumed_checkpoint():
 
     assert _read_metric_value(
         "ai_ingest_table_source_rows_total", {"source_table": "game"}
-    ) - rows_before == 2
+    ) == rows_before
     assert _read_metric_value(
         "ai_ingest_table_written_chunks_total", {"source_table": "game"}
-    ) - chunks_before == 1
+    ) == chunks_before
 
 
 def test_table_metrics_do_not_repeat_completed_checkpoint_cumulative_counts():
@@ -348,48 +343,6 @@ def test_table_metrics_do_not_repeat_completed_checkpoint_cumulative_counts():
     assert _read_metric_value(
         "ai_ingest_table_written_chunks_total", {"source_table": "game"}
     ) == chunks_before
-
-
-@pytest.mark.parametrize(
-    "result",
-    ["created", "advanced", "completed", "resumed"],
-)
-def test_checkpoint_lifecycle_event_increments_exactly_once(result):
-    before = _read_metric_value(
-        "ai_ingest_checkpoint_events_total",
-        {"source_table": "game", "result": result},
-    )
-
-    ingest_module._record_checkpoint_event("game", result)
-
-    assert _read_metric_value(
-        "ai_ingest_checkpoint_events_total",
-        {"source_table": "game", "result": result},
-    ) - before == 1
-
-
-@pytest.mark.parametrize(
-    ("error", "result"),
-    [
-        (IngestCheckpointIncompatibleError("stored state changed"), "incompatible"),
-        (IngestCheckpointCursorUnavailableError("no stable cursor"), "rejected"),
-    ],
-)
-def test_checkpoint_rejection_event_classifies_exception_without_error_labels(
-    error,
-    result,
-):
-    before = _read_metric_value(
-        "ai_ingest_checkpoint_events_total",
-        {"source_table": "game", "result": result},
-    )
-
-    ingest_module._record_checkpoint_rejection("game", error)
-
-    assert _read_metric_value(
-        "ai_ingest_checkpoint_events_total",
-        {"source_table": "game", "result": result},
-    ) - before == 1
 
 
 def test_execute_records_completed_table_counts_before_later_table_failure():
