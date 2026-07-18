@@ -211,7 +211,7 @@ class IngestRunStore:
                 ).fetchone()
                 return _row_to_record(claimed) if claimed is not None else None
 
-    async def heartbeat(self, run_id: UUID, owner: str) -> bool:
+    async def heartbeat(self, run_id: UUID, owner: str) -> datetime | None:
         async with self.pool.connection() as conn:
             row = await (
                 await conn.execute(
@@ -223,12 +223,17 @@ class IngestRunStore:
                     WHERE run_id = %s
                       AND status = 'RUNNING'
                       AND lease_owner = %s
-                    RETURNING run_id
+                      AND lease_expires_at > now()
+                    RETURNING lease_expires_at
                     """,
                     (self.lease_seconds, run_id, owner),
                 )
             ).fetchone()
-        return row is not None
+        if row is None:
+            return None
+        if isinstance(row, Mapping):
+            return row["lease_expires_at"]
+        return row[0]
 
     async def finish_success(
         self,
@@ -257,6 +262,7 @@ class IngestRunStore:
                         WHERE run_id = %s
                           AND status = 'RUNNING'
                           AND lease_owner = %s
+                          AND lease_expires_at > now()
                         RETURNING run_id
                         """,
                         (json.dumps(summary, sort_keys=True), run_id, owner),
@@ -361,6 +367,7 @@ class IngestRunStore:
                         WHERE run_id = %s
                           AND status = 'RUNNING'
                           AND lease_owner = %s
+                          AND lease_expires_at > now()
                         RETURNING run_id
                         """,
                         (
