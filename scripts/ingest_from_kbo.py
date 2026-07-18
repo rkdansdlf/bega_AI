@@ -70,6 +70,15 @@ from app.core.chunking import smart_chunks
 from app.core.embeddings import embed_texts
 from app.core.ingest_runs import IngestLeaseLostError, IngestTableResult
 from app.core.ingest_sources import TRUSTED_INGEST_SOURCE_TABLES
+from app.core.ingest_checkpoints import (
+    CheckpointCursor,
+    CheckpointOrder,
+    CheckpointOrderField,
+    CursorScalarType,
+    IngestCheckpointCursorTypeError,
+    IngestCheckpointCursorUnavailableError,
+    IngestCheckpointIncompatibleError,
+)
 
 _ingest_logger = _logging.getLogger(__name__)
 
@@ -1293,6 +1302,33 @@ TABLE_PROFILES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+CUSTOM_CHECKPOINT_ORDERS = {
+    "player_season_batting": (("id", "integer"),),
+    "player_season_pitching": (("id", "integer"),),
+    "game": (("id", "integer"),),
+    "game_flow_summary": (("game_id", "text"),),
+    "game_batting_stats": (("id", "integer"),),
+    "game_pitching_stats": (("id", "integer"),),
+    "game_inning_scores": (("id", "integer"),),
+    "game_lineups": (("id", "integer"),),
+    "game_metadata": (("game_id", "text"),),
+    "team_history": (("id", "integer"),),
+    "awards": (("id", "integer"),),
+    "player_movements": (("id", "integer"),),
+    "team_franchises": (("id", "integer"),),
+    "player_basic": (("player_id", "text"),),
+    "team_name_mapping": (("full_name", "text"),),
+    "team_profiles": (("team_id", "text"),),
+    "team_season_batting": (("id", "integer"),),
+    "team_season_pitching": (("id", "integer"),),
+    "stat_rankings": (("id", "integer"),),
+    "game_summary": (("id", "integer"),),
+}
+
+for source_table, checkpoint_order in CUSTOM_CHECKPOINT_ORDERS.items():
+    TABLE_PROFILES[source_table]["checkpoint_order"] = checkpoint_order
+    TABLE_PROFILES[source_table]["checkpoint_query_version"] = "1"
+
 # Tables the caller can choose. `rag_chunks` intentionally 제외.
 # team_daily_roster는 데이터가 많아 스킵
 DEFAULT_TABLES = list(TRUSTED_INGEST_SOURCE_TABLES)
@@ -1389,6 +1425,84 @@ def resolve_primary_key_columns(
     if override:
         return override
     return get_primary_key_columns(conn, table)
+
+
+def _postgres_type_to_cursor_type(pg_type: str) -> CursorScalarType:
+    normalized = pg_type.lower()
+    if normalized in {"smallint", "integer", "bigint"}:
+        return "integer"
+    if normalized.startswith(("numeric", "decimal")):
+        return "decimal"
+    if normalized == "date":
+        return "date"
+    if normalized in {"timestamp with time zone", "timestamp without time zone"}:
+        return "datetime"
+    if normalized == "uuid":
+        return "uuid"
+    if normalized in {"text", "character", "character varying"} or normalized.startswith(
+        ("character(", "character varying(")
+    ):
+        return "text"
+    if normalized == "boolean":
+        return "boolean"
+    raise IngestCheckpointCursorTypeError(f"unsupported primary-key type: {pg_type}")
+
+
+def resolve_checkpoint_order(
+    conn,
+    table_name: str,
+    profile: Dict[str, Any],
+) -> CheckpointOrder:
+    configured_order = profile.get("checkpoint_order")
+    if configured_order:
+        return CheckpointOrder(
+            source_table=table_name,
+            fields=tuple(
+                CheckpointOrderField(name, scalar_type)
+                for name, scalar_type in configured_order
+            ),
+            query_version=str(profile.get("checkpoint_query_version", "1")),
+        )
+    if profile.get("select_sql"):
+        raise IngestCheckpointCursorUnavailableError(
+            f"custom source query has no checkpoint order: {table_name}"
+        )
+    if conn is None:
+        raise IngestCheckpointCursorUnavailableError(
+            f"database connection is required to inspect primary key: {table_name}"
+        )
+
+    query = """
+        SELECT
+            a.attname,
+            format_type(a.atttypid, a.atttypmod),
+            a.attnotnull
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+        WHERE c.relname = %s AND n.nspname = %s AND i.indisprimary
+        ORDER BY array_position(i.indkey, a.attnum)
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, (table_name, "public"))
+        rows = cur.fetchall()
+
+    if not rows:
+        raise IngestCheckpointCursorUnavailableError(
+            f"source table has no primary key: {table_name}"
+        )
+    if any(not attnotnull for _, _, attnotnull in rows):
+        raise IngestCheckpointCursorUnavailableError(
+            f"primary-key cursor contains nullable fields: {table_name}"
+        )
+    return CheckpointOrder(
+        source_table=table_name,
+        fields=tuple(
+            CheckpointOrderField(name, _postgres_type_to_cursor_type(pg_type))
+            for name, pg_type, _ in rows
+        ),
+    )
 
 
 def _normalize_row_id_value(table: str, key: str, value: Any) -> Optional[str]:
@@ -1878,6 +1992,13 @@ def _find_top_level_keyword_positions(sql_text: str, keyword: str) -> List[int]:
 
 
 # build_select_query가 프로필의 select_sql이 있으면 그 SQL에 season_year 등 필터를 주입하고 ORDER BY/ LIMIT를 붙임. 커스텀 SQL이 없으면 SELECT * FROM <table> + PK 순 정렬.
+def _quoted_checkpoint_fields(order: CheckpointOrder) -> str:
+    for field in order.fields:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field.name) is None:
+            raise IngestCheckpointCursorUnavailableError("unsafe cursor field")
+    return ", ".join(f'"{field.name}"' for field in order.fields)
+
+
 def build_select_query(
     table: str,
     profile: Dict[str, Any],
@@ -1886,6 +2007,8 @@ def build_select_query(
     season_year: Optional[int],
     since: Optional[datetime],
     date_to_exclusive: Optional[Any] = None,
+    checkpoint_order: Optional[CheckpointOrder] = None,
+    resume_cursor: Optional[CheckpointCursor] = None,
 ):
     custom_sql = profile.get("select_sql")
     season_filter_column = profile.get("season_filter_column", "season_year")
@@ -1921,9 +2044,27 @@ def build_select_query(
             else:
                 base_sql = f"{base_sql}\nWHERE {' AND '.join(where_clauses)}"
 
-        query = base_sql
-        if order_clause:
-            query = f"{query}\n{order_clause}"
+        if checkpoint_order is not None:
+            quoted_fields = _quoted_checkpoint_fields(checkpoint_order)
+            if resume_cursor is not None and len(resume_cursor.values) != len(
+                checkpoint_order.fields
+            ):
+                raise IngestCheckpointIncompatibleError("cursor arity mismatch")
+            query = f"WITH checkpoint_source AS (\n{base_sql}\n)\nSELECT * FROM checkpoint_source"
+            if resume_cursor is not None:
+                placeholders = ", ".join("%s" for _ in checkpoint_order.fields)
+                query = (
+                    f"{query}\nWHERE ROW({quoted_fields}) > ROW({placeholders})"
+                )
+                params.extend(resume_cursor.values)
+            ascending_order = ", ".join(
+                f'"{field.name}" ASC' for field in checkpoint_order.fields
+            )
+            query = f"{query}\nORDER BY {ascending_order}"
+        else:
+            query = base_sql
+            if order_clause:
+                query = f"{query}\n{order_clause}"
         if limit is not None:
             query = f"{query} LIMIT %s"
             params.append(limit)
@@ -1944,9 +2085,35 @@ def build_select_query(
         column_name = str(date_to_exclusive_filter_column).split(".")[-1]
         where_parts.append(sql.SQL("{} < %s").format(sql.Identifier(column_name)))
         params.append(date_to_exclusive)
+    if checkpoint_order is not None:
+        _quoted_checkpoint_fields(checkpoint_order)
+        if resume_cursor is not None and len(resume_cursor.values) != len(
+            checkpoint_order.fields
+        ):
+            raise IngestCheckpointIncompatibleError("cursor arity mismatch")
+        if resume_cursor is not None:
+            checkpoint_columns = sql.SQL(", ").join(
+                sql.Identifier(field.name) for field in checkpoint_order.fields
+            )
+            checkpoint_placeholders = sql.SQL(", ").join(
+                sql.SQL("%s") for _ in checkpoint_order.fields
+            )
+            where_parts.append(
+                sql.SQL("ROW({}) > ROW({})").format(
+                    checkpoint_columns,
+                    checkpoint_placeholders,
+                )
+            )
+            params.extend(resume_cursor.values)
     if where_parts:
         query = query + sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
-    if pk_columns:
+    if checkpoint_order is not None:
+        order_cols = sql.SQL(", ").join(
+            sql.SQL("{} ASC").format(sql.Identifier(field.name))
+            for field in checkpoint_order.fields
+        )
+        query = query + sql.SQL(" ORDER BY {}").format(order_cols)
+    elif pk_columns:
         order_cols = sql.SQL(", ").join(sql.Identifier(col) for col in pk_columns)
         query = query + sql.SQL(" ORDER BY {}").format(order_cols)
     if limit is not None:

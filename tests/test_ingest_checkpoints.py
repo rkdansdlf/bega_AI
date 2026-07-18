@@ -10,6 +10,7 @@ from app.core.ingest_checkpoints import (
     CheckpointOrderField,
     IngestCheckpointIncompatibleError,
     IngestCheckpointCursorTypeError,
+    IngestCheckpointCursorUnavailableError,
     IngestCheckpointMissingFieldError,
     IngestCheckpointOrderError,
     decode_cursor,
@@ -17,6 +18,7 @@ from app.core.ingest_checkpoints import (
     cursor_from_row,
     ensure_cursor_advances,
 )
+import scripts.ingest_from_kbo as ingest_script
 
 
 ORDER = CheckpointOrder(
@@ -27,6 +29,75 @@ ORDER = CheckpointOrder(
     ),
     query_version="1",
 )
+
+
+class FakeCatalogCursor:
+    def __init__(self, rows):
+        self.rows = rows
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, query, params):
+        self.executed.append((query, params))
+
+    def fetchall(self):
+        return self.rows
+
+
+class FakeCatalogConnection:
+    def __init__(self, rows):
+        self.catalog_cursor = FakeCatalogCursor(rows)
+
+    def cursor(self):
+        return self.catalog_cursor
+
+
+def test_resolve_checkpoint_order_maps_catalog_types_in_primary_key_order():
+    conn = FakeCatalogConnection(
+        [("sequence_id", "bigint", True), ("event_uuid", "uuid", True)]
+    )
+
+    order = ingest_script.resolve_checkpoint_order(conn, "plain_table", {})
+
+    assert order == CheckpointOrder(
+        "plain_table",
+        (
+            CheckpointOrderField("sequence_id", "integer"),
+            CheckpointOrderField("event_uuid", "uuid"),
+        ),
+    )
+    query, params = conn.catalog_cursor.executed[0]
+    assert "format_type(a.atttypid, a.atttypmod)" in query
+    assert "ORDER BY array_position(i.indkey, a.attnum)" in query
+    assert params == ("plain_table", "public")
+
+
+def test_resolve_checkpoint_order_rejects_float_primary_key():
+    conn = FakeCatalogConnection([("score", "double precision", True)])
+
+    with pytest.raises(IngestCheckpointCursorTypeError) as raised:
+        ingest_script.resolve_checkpoint_order(conn, "plain_table", {})
+
+    assert raised.value.code == "INGEST_CHECKPOINT_CURSOR_TYPE_UNSUPPORTED"
+
+
+def test_resolve_checkpoint_order_rejects_missing_primary_key():
+    conn = FakeCatalogConnection([])
+
+    with pytest.raises(IngestCheckpointCursorUnavailableError):
+        ingest_script.resolve_checkpoint_order(conn, "plain_table", {})
+
+
+def test_resolve_checkpoint_order_rejects_nullable_primary_key_field():
+    conn = FakeCatalogConnection([("entity_id", "text", False)])
+
+    with pytest.raises(IngestCheckpointCursorUnavailableError):
+        ingest_script.resolve_checkpoint_order(conn, "plain_table", {})
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,12 @@
 import pytest
 from datetime import datetime
 from app.config import get_settings
+from app.core.ingest_checkpoints import (
+    CheckpointCursor,
+    CheckpointOrder,
+    CheckpointOrderField,
+    IngestCheckpointCursorUnavailableError,
+)
 
 try:
     import psycopg
@@ -15,6 +21,7 @@ from scripts.ingest_from_kbo import (
     TABLE_PROFILES,
     build_select_query,
 )
+import scripts.ingest_from_kbo as ingest_script
 
 
 @pytest.fixture
@@ -214,6 +221,82 @@ def test_build_select_query_appends_outer_where_after_nested_where(sample_since)
         ") game_flow_rows\nWHERE season_year = %s AND latest_updated_at >= %s" in query
     )
     assert params == (2025, sample_since)
+
+
+def test_every_custom_database_profile_declares_checkpoint_order():
+    missing = [
+        table
+        for table, profile in TABLE_PROFILES.items()
+        if "source_file" not in profile
+        and "select_sql" in profile
+        and not profile.get("checkpoint_order")
+    ]
+    assert missing == []
+
+
+def test_custom_checkpoint_query_wraps_output_aliases(sample_since):
+    profile = TABLE_PROFILES["game"]
+    order = ingest_script.resolve_checkpoint_order(None, "game", profile)
+    cursor = CheckpointCursor((41,))
+
+    query, params = build_select_query(
+        table="game",
+        profile=profile,
+        pk_columns=["id"],
+        limit=None,
+        season_year=2026,
+        since=sample_since,
+        checkpoint_order=order,
+        resume_cursor=cursor,
+    )
+
+    assert "WITH checkpoint_source AS" in query
+    assert 'ROW("id") > ROW(%s)' in query
+    assert query.rstrip().endswith('ORDER BY "id" ASC')
+    assert params == (2026, sample_since, 41)
+
+
+def test_generic_checkpoint_query_uses_composite_primary_key():
+    order = CheckpointOrder(
+        "plain_table",
+        (
+            CheckpointOrderField("season", "integer"),
+            CheckpointOrderField("entity_id", "text"),
+        ),
+    )
+    query, params = build_select_query(
+        table="plain_table",
+        profile={"season_filter_column": None, "since_filter_column": None},
+        pk_columns=["season", "entity_id"],
+        limit=None,
+        season_year=None,
+        since=None,
+        checkpoint_order=order,
+        resume_cursor=CheckpointCursor((2025, "P100")),
+    )
+
+    rendered = str(query)
+    assert "ROW" in rendered and "season" in rendered and "entity_id" in rendered
+    assert params == (2025, "P100")
+
+
+def test_checkpoint_query_rejects_unsafe_order_field():
+    order = CheckpointOrder(
+        "plain_table",
+        (CheckpointOrderField('id") > ROW(0); --', "integer"),),
+    )
+
+    with pytest.raises(IngestCheckpointCursorUnavailableError):
+        build_select_query(
+            table="plain_table",
+            profile={"season_filter_column": None, "since_filter_column": None},
+            pk_columns=["id"],
+            limit=None,
+            season_year=None,
+            since=None,
+            checkpoint_order=order,
+            resume_cursor=CheckpointCursor((1,)),
+        )
 
 
 def test_awards_profile_matches_current_schema() -> None:
