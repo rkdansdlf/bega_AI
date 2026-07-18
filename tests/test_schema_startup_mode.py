@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -92,13 +93,24 @@ def test_ingest_run_store_uses_worker_lease_and_recovery_settings():
 
     with (
         patch.object(deps, "get_settings", return_value=settings),
-        patch.object(deps, "get_connection_pool", return_value=pool),
+        patch.object(deps, "get_ingest_connection_pool", return_value=pool),
     ):
         store = deps.get_ingest_run_store()
 
     assert store.pool is pool
     assert store.lease_seconds == 240
     assert store.max_recovery_attempts == 2
+
+
+def test_lifespan_stops_ingest_tasks_before_closing_coordination_pool():
+    source = inspect.getsource(deps.lifespan)
+
+    assert source.index("ingest_worker_task.cancel()") < source.index(
+        "await close_ingest_connection_pool()"
+    )
+    assert source.index("ingest_recovery_task.cancel()") < source.index(
+        "await close_ingest_connection_pool()"
+    )
 
 
 def test_auto_schema_compatibility_ensures_ingest_orchestration_tables():

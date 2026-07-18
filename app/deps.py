@@ -43,8 +43,11 @@ from .db.schema_contract import validate_schema_contract
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성). 전 계층이 async psycopg3로 통일됨.
 _connection_pool: Optional[AsyncConnectionPool] = None
+_ingest_connection_pool: Optional[AsyncConnectionPool] = None
 DB_POOL_MIN_SIZE = 1
 DB_POOL_MAX_SIZE = 30
+INGEST_DB_POOL_MIN_SIZE = 1
+INGEST_DB_POOL_MAX_SIZE = 2
 INGEST_ORCHESTRATION_MIGRATION_SQL = (
     Path(__file__).resolve().parent
     / "db"
@@ -210,47 +213,71 @@ def clamp_coach_openrouter_max_tokens(requested_tokens: int) -> int:
     return min(normalized, COACH_OPENROUTER_MAX_TOKENS)
 
 
+def _create_async_connection_pool(
+    *,
+    min_size: int,
+    max_size: int,
+) -> AsyncConnectionPool:
+    settings = get_settings()
+    return AsyncConnectionPool(
+        conninfo=settings.database_url,
+        min_size=min_size,
+        max_size=max_size,
+        check=AsyncConnectionPool.check_connection,
+        open=False,
+        kwargs={
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+            "autocommit": True,
+            "target_session_attrs": "read-write",
+        },
+    )
+
+
 def get_connection_pool() -> AsyncConnectionPool:
-    """커넥션 풀을 가져오거나 생성합니다.
-
-    AsyncConnectionPool은 실행 중인 이벤트 루프에서 ``await pool.open()``으로 열어야
-    하므로 ``open=False``로 생성하고, lifespan startup에서 한 번 open 한다.
-    """
     global _connection_pool
-
     if _connection_pool is None:
-        settings = get_settings()
-        _connection_pool = AsyncConnectionPool(
-            conninfo=settings.database_url,
+        _connection_pool = _create_async_connection_pool(
             min_size=DB_POOL_MIN_SIZE,
             max_size=DB_POOL_MAX_SIZE,
-            check=AsyncConnectionPool.check_connection,
-            open=False,  # lifespan에서 await pool.open()으로 명시적 오픈
-            # TCP keepalive 옵션 및 기타 설정
-            kwargs={
-                "keepalives": 1,
-                "keepalives_idle": 30,
-                "keepalives_interval": 10,
-                "keepalives_count": 5,
-                "autocommit": True,
-                "target_session_attrs": "read-write",  # standby/recovery 서버 연결 거부
-            },
         )
         logger.info(
-            "[DB] Connection pool created (open pending) pool_stats=%s",
+            "[DB] General connection pool created (open pending) pool_stats=%s",
             _format_connection_pool_stats(_connection_pool),
         )
-
     return _connection_pool
+
+
+def get_ingest_connection_pool() -> AsyncConnectionPool:
+    global _ingest_connection_pool
+    if _ingest_connection_pool is None:
+        _ingest_connection_pool = _create_async_connection_pool(
+            min_size=INGEST_DB_POOL_MIN_SIZE,
+            max_size=INGEST_DB_POOL_MAX_SIZE,
+        )
+        logger.info(
+            "[DB] Ingest coordination pool created (open pending) pool_stats=%s",
+            _format_connection_pool_stats(
+                _ingest_connection_pool,
+                min_size=INGEST_DB_POOL_MIN_SIZE,
+                max_size=INGEST_DB_POOL_MAX_SIZE,
+            ),
+        )
+    return _ingest_connection_pool
 
 
 def _snapshot_connection_pool_stats(
     pool_instance: Optional[Any] = None,
+    *,
+    min_size: int = DB_POOL_MIN_SIZE,
+    max_size: int = DB_POOL_MAX_SIZE,
 ) -> dict[str, Any]:
     pool = pool_instance or _connection_pool
     snapshot: dict[str, Any] = {
-        "min_size": DB_POOL_MIN_SIZE,
-        "max_size": DB_POOL_MAX_SIZE,
+        "min_size": min_size,
+        "max_size": max_size,
         "pool_available": pool is not None,
     }
     if pool is None:
@@ -273,9 +300,18 @@ def _snapshot_connection_pool_stats(
     return snapshot
 
 
-def _format_connection_pool_stats(pool_instance: Optional[Any] = None) -> str:
+def _format_connection_pool_stats(
+    pool_instance: Optional[Any] = None,
+    *,
+    min_size: int = DB_POOL_MIN_SIZE,
+    max_size: int = DB_POOL_MAX_SIZE,
+) -> str:
     return json.dumps(
-        _snapshot_connection_pool_stats(pool_instance),
+        _snapshot_connection_pool_stats(
+            pool_instance,
+            min_size=min_size,
+            max_size=max_size,
+        ),
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -287,6 +323,13 @@ async def close_connection_pool() -> None:
     if _connection_pool is not None:
         await _connection_pool.close()
         _connection_pool = None
+
+
+async def close_ingest_connection_pool() -> None:
+    global _ingest_connection_pool
+    if _ingest_connection_pool is not None:
+        await _ingest_connection_pool.close()
+        _ingest_connection_pool = None
 
 
 async def _chat_cache_cleanup_loop(interval_seconds: int = 3600) -> None:
@@ -525,12 +568,40 @@ async def _prepare_schema(pool, settings) -> None:
     await _ensure_startup_schema(pool, settings)
 
 
+async def _prepare_required_database_pools(
+    settings: Any,
+) -> tuple[AsyncConnectionPool, AsyncConnectionPool]:
+    general_pool = get_connection_pool()
+    ingest_pool = get_ingest_connection_pool()
+    try:
+        await general_pool.open(wait=True, timeout=10.0)
+        await ingest_pool.open(wait=True, timeout=10.0)
+        await _prepare_schema(general_pool, settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[Lifespan] required DB pool preparation failed "
+            "error_type=%s general_pool_stats=%s ingest_pool_stats=%s",
+            type(exc).__name__,
+            _format_connection_pool_stats(general_pool),
+            _format_connection_pool_stats(
+                ingest_pool,
+                min_size=INGEST_DB_POOL_MIN_SIZE,
+                max_size=INGEST_DB_POOL_MAX_SIZE,
+            ),
+        )
+        await close_ingest_connection_pool()
+        await close_connection_pool()
+        raise
+    logger.info("[Lifespan] required database pools opened")
+    return general_pool, ingest_pool
+
+
 def get_ingest_run_store() -> IngestRunStore:
-    """Build an ingestion store over the shared PostgreSQL pool."""
+    """Build an ingestion store over its dedicated coordination pool."""
 
     settings = get_settings()
     return IngestRunStore(
-        get_connection_pool(),
+        get_ingest_connection_pool(),
         lease_seconds=settings.ingest_worker_lease_seconds,
         max_recovery_attempts=settings.ingest_worker_max_recovery_attempts,
     )
@@ -542,16 +613,8 @@ async def lifespan(app):
     # 시작 시
     settings = get_settings()
     load_clf()
-    pool = get_connection_pool()  # 커넥션 풀 생성
-    # AsyncConnectionPool은 이벤트 루프 내에서 열어야 한다.
-    try:
-        await pool.open(wait=True, timeout=10.0)
-        logger.info("[Lifespan] connection pool opened")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[Lifespan] connection pool open failed: %s", exc)
+    pool, _ = await _prepare_required_database_pools(settings)
     _initialize_shared_baseball_agent_runtime()
-
-    await _prepare_schema(pool, settings)
 
     # [Chat Caching] 만료 항목 주기적 삭제 백그라운드 태스크 시작
     cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
@@ -638,6 +701,7 @@ async def lifespan(app):
         logger.warning("[Lifespan] embedding cache cleanup failed: %s", exc)
 
     reset_shared_baseball_agent_runtime()
+    await close_ingest_connection_pool()
     await close_connection_pool()  # 모든 커넥션 정리
 
 
