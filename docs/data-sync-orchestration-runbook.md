@@ -19,7 +19,7 @@
    AI_SCHEMA_DB_URL='postgresql://...' ./scripts/migrate_ai_runtime_schema.sh
    ```
 
-   Managed migration script applies `001_ai_runtime_cache.sql` -> `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. Compatibility startup applies `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다.
+   Managed migration script applies `001_ai_runtime_cache.sql` -> `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. Compatibility startup applies `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다. Fresh schema와 이전 004 schema 모두에 `source_updated_before timestamptz` stores the immutable source-clock cutoff; 같은 004가 `ADD COLUMN IF NOT EXISTS`로 기존 테이블을 안전하게 보강합니다.
 
 2. AI 서비스를 `AI_DB_SCHEMA_MODE=managed`로 시작합니다. 작업자는 기본 활성화되며 다음 값으로 조정합니다.
 
@@ -105,7 +105,11 @@ heartbeat와 성공·실패·`MANUAL_BASEBALL_DATA_REQUIRED` 종료는 모두 DB
 
 Leased database-table ingest는 `ai_ingest_checkpoints`에 `(run_id, source_table)`당 정확히 한 행을 사용합니다. Exactly one `ai_ingest_checkpoints` row per `(run_id, source_table)` is retained after terminal completion. Resume uses a typed ascending keyset and never an offset. 체크포인트가 있으면 source query는 저장된 typed cursor의 모든 필드에 대해 ascending keyset (`>` row-value comparison)으로 재개합니다. custom query는 명시적 고유 cursor order를, generic PostgreSQL table은 실제 지원되는 primary key를 요구합니다.
 
+`since_filter_column`이 있는 새 incomplete table은 source data SELECT 전에 trusted source DB의 `clock_timestamp()`를 한 번 읽습니다. Custom과 generic query는 기존 inclusive lower watermark 뒤에 같은 update column의 `updated_at <= source_updated_before` 상한을 적용하고 그 뒤에 keyset resume predicate를 적용합니다. 첫 progress commit 또는 zero-row completion이 정확한 cutoff를 checkpoint row에 저장합니다. 재시작은 저장된 cutoff를 재사용하고 source clock을 다시 읽지 않습니다. A progressed incomplete checkpoint with a missing cutoff fails closed as `INGEST_CHECKPOINT_INCOMPATIBLE`. 이미 completed인 legacy checkpoint는 cutoff가 없어도 source clock 및 data SELECT를 모두 건너뜁니다.
+
 Chunks and their cursor commit together under the lease fence. 청크 upsert/비활성화와 cursor advancement는 같은 destination transaction에서 lease fence 확인 후 함께 commit됩니다. 출력 청크가 0개인 source batch도 cursor progress는 fence 아래 commit되어 재시작 시 같은 행을 무한 재처리하지 않습니다. duplicate 또는 역행 cursor는 다음 행 lookahead가 unsafe boundary를 감지한 뒤 commit 전에 거부합니다. 이미 `completed`인 table checkpoint를 복구하면 source data `SELECT` 없이 누적 결과를 반환합니다.
+
+The success watermark remains the maximum committed source update timestamp and still advances only in full-run `finish_success`. 모든 update-filtered source row가 고정 cutoff 이하이므로 뒤쪽 cursor의 post-cutoff update가 앞쪽 cursor의 deferred update를 건너뛰게 만들 수 없습니다. The residual duplicate window starts at the prior successful watermark and ends at the fixed cutoff because the lower predicate is inclusive; 이는 안전한 중복 재평가이며 누락 복구를 자동 외부 소스로 대체하지 않습니다.
 
 `source_file` static documents create no checkpoint row and restart atomically. 정적 문서는 전체 profile을 하나의 atomic transaction으로 다시 시작·commit하므로 database-table cursor resume과 섞지 않습니다.
 

@@ -43,7 +43,8 @@ watermark. Existing watermarks still advance only when the full run reaches
   operational policy.
 - Supporting checkpointed `row_stale_cleanup`. The orchestration worker already
   runs with cleanup disabled.
-- Providing exactly-once source snapshots across concurrent source mutations.
+- Providing exactly-once source snapshots for inserts, deletes, or mutations that
+  do not change a configured update timestamp.
 - Changing the backend scheduler, frontend synchronization UI, or ingestion API
   request schema.
 
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints (
     reused_embeddings bigint NOT NULL DEFAULT 0,
     embedded_chunks bigint NOT NULL DEFAULT 0,
     max_updated_at timestamptz,
+    source_updated_before timestamptz,
     completed boolean NOT NULL DEFAULT false,
     completed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -105,6 +107,9 @@ CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints (
         OR (completed = true AND completed_at IS NOT NULL)
     )
 );
+
+ALTER TABLE ai_ingest_checkpoints
+    ADD COLUMN IF NOT EXISTS source_updated_before timestamptz;
 ```
 
 An index on `updated_at` supports later audit and retention queries. The primary
@@ -154,7 +159,11 @@ processing order in a custom query is not part of the checkpoint contract.
 Supported cursor scalar types are integer, decimal, date, timezone-aware or
 naive timestamp, UUID, text, and boolean. Values are encoded with explicit type
 tags in JSON. Decimal, date, timestamp, and UUID values use canonical strings.
-Naive timestamps are normalized to UTC, matching current watermark handling.
+`timestamp without time zone` preserves its wall-clock fields with the
+`datetime_naive` scalar. `timestamp with time zone` is restored as an aware UTC instant
+with the `datetime` scalar. Catalog mapping accepts PostgreSQL
+timestamp precision forms from `timestamp(0)` through `timestamp(6)` and rejects
+malformed or out-of-range precision. The two timestamp subtypes remain signature-distinct.
 
 The cursor signature is a SHA-256 digest of the cursor version, source table,
 ordered field names, scalar types, direction, and a profile query-version value.
@@ -183,6 +192,7 @@ adds a row-value comparison and the canonical keyset order:
 SELECT *
 FROM source_table
 WHERE <existing filters>
+  AND updated_at <= source_updated_before
   AND ROW(pk_1, pk_2) > ROW(%s, %s)
 ORDER BY pk_1 ASC, pk_2 ASC
 ```
@@ -199,12 +209,22 @@ WITH checkpoint_source AS (
 )
 SELECT *
 FROM checkpoint_source
-WHERE ROW("cursor_field_1", "cursor_field_2") > ROW(%s, %s)
+WHERE updated_at <= source_updated_before
+  AND ROW("cursor_field_1", "cursor_field_2") > ROW(%s, %s)
 ORDER BY "cursor_field_1" ASC, "cursor_field_2" ASC
 ```
 
 The same canonical `ORDER BY` is used on the first attempt when no cursor exists.
 This guarantees that initial execution and recovery share one order contract.
+
+For every checkpointed profile with `since_filter_column`, a new incomplete
+table reads `clock_timestamp()` from the trusted source database before its data
+SELECT. That exact value is the run-local `source_updated_before` cutoff. The
+custom and generic builders apply the lower successful-watermark predicate when
+present, then `updated_at <= source_updated_before`, then the resume predicate,
+all against the configured update-filter column. The first progress commit or a
+zero-row completion persists the cutoff. Recovery reuses the stored value and
+does not sample the source clock again.
 
 Checkpointed orchestration requires `limit=None`. A leased checkpointed call with
 a limit is rejected because a per-attempt limit would not represent a stable
@@ -263,6 +283,11 @@ checkpoint skipped during recovery returns zero attempt deltas, so cumulative
 run summaries remain accurate without double-counting the existing Prometheus
 table totals.
 
+The success watermark remains the maximum committed update timestamp. This is
+safe for update-filtered profiles because every committed source row is bounded
+by the fixed source cutoff. Watermark ownership remains success-only and does not
+move to checkpoint advancement.
+
 ## Recovery Semantics
 
 When a leased database table starts, ingestion loads `(run_id, source_table)`
@@ -272,8 +297,14 @@ from the destination connection.
 - Compatible incomplete checkpoint: add the keyset predicate and start strictly
   after its cursor.
 - Compatible completed checkpoint: return its durable result without executing
-  the source SELECT.
+  the source timestamp or data SELECT.
 - Incompatible checkpoint: fail explicitly; never reset or ignore it.
+
+An incomplete legacy checkpoint with committed progress but no required
+`source_updated_before` fails closed with `INGEST_CHECKPOINT_INCOMPATIBLE`. A
+zero-progress incomplete row may initialize the cutoff on its first subsequent
+progress or completion commit. A completed legacy row remains skippable because
+it executes neither source query.
 
 Crash behavior is deterministic:
 
@@ -287,11 +318,13 @@ Crash behavior is deterministic:
   uses its durable cumulative result.
 
 The system provides atomic at-least-once processing at the batch boundary. It
-does not hold a PostgreSQL snapshot across process restarts. A source row inserted
-or updated behind the current cursor during a run may be deferred to the next
-normal synchronization. Existing successful-watermark behavior ensures later
-updates with a newer update timestamp are eligible on the next incremental run.
-Tables without an update timestamp are re-evaluated by their next full scan. The
+does not hold a PostgreSQL snapshot across process restarts. A row updated after
+the fixed cutoff is excluded even when it is ahead of the current cursor, so it
+cannot advance the current run's maximum past an update deferred behind the
+cursor. Both updates are eligible for the next normal run. The residual duplicate
+window starts at the prior successful watermark and ends at the fixed cutoff
+because the lower predicate remains inclusive. Inserts, deletes, and tables
+without an update timestamp retain full-scan or next-run semantics. The
 checkpoint never becomes the successful cross-run watermark.
 
 ## Error Contracts
@@ -388,6 +421,11 @@ Implementation follows red-green-refactor cycles. Tests cover:
 16. `MANUAL_BASEBALL_DATA_REQUIRED` for missing trusted-source cursor fields.
 17. Existing ingestion worker, run-store, migration, and OpenAPI regression tests.
 18. Full AI test suite and `scripts/validate_baseball_data_policy.py`.
+19. Fixed source cutoff sampling, persistence on first advance and zero-row
+    completion, immutable recovery reuse, post-cutoff exclusion, deferred next-run
+    visibility, and progressed legacy incompatibility.
+20. Precision-qualified PostgreSQL timestamp subtype mapping for valid 0..6 and
+    rejection of malformed or out-of-range precision.
 
 No test uses an external baseball source, external embedding call, shared
 database write, or production data. PostgreSQL transaction and keyset syntax use
@@ -424,6 +462,8 @@ table does not alter older execution behavior.
 - Unsafe cursor, cleanup, limit, or compatibility states fail explicitly.
 - Static documents remain atomic and uncheckpointed.
 - Watermarks advance only after full run success.
+- Update-filtered checkpoint queries reuse one persisted source-clock cutoff and
+  cannot let a post-cutoff suffix update outrun a deferred behind-cursor update.
 - Checkpoints remain available after terminal run completion.
 - Missing trusted baseball fields surface `MANUAL_BASEBALL_DATA_REQUIRED` without
   external repair.

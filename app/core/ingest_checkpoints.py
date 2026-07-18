@@ -237,6 +237,7 @@ class IngestCheckpoint:
     reused_embeddings: int = 0
     embedded_chunks: int = 0
     max_updated_at: datetime | None = None
+    source_updated_before: datetime | None = None
     completed: bool = False
     completed_at: datetime | None = None
 
@@ -254,6 +255,7 @@ _CHECKPOINT_COLUMNS = (
     "reused_embeddings",
     "embedded_chunks",
     "max_updated_at",
+    "source_updated_before",
     "completed",
     "completed_at",
 )
@@ -360,6 +362,10 @@ def _checkpoint_from_row(order: CheckpointOrder, row: Any) -> IngestCheckpoint:
             values["max_updated_at"],
             "max_updated_at",
         )
+        source_updated_before = _checkpoint_datetime(
+            values["source_updated_before"],
+            "source_updated_before",
+        )
         completed_at = _checkpoint_datetime(values["completed_at"], "completed_at")
         if source_rows > 0 and cursor is None:
             raise IngestCheckpointIncompatibleError(
@@ -383,6 +389,7 @@ def _checkpoint_from_row(order: CheckpointOrder, row: Any) -> IngestCheckpoint:
             reused_embeddings=reused_embeddings,
             embedded_chunks=embedded_chunks,
             max_updated_at=max_updated_at,
+            source_updated_before=source_updated_before,
             completed=completed,
             completed_at=completed_at,
         )
@@ -403,6 +410,32 @@ def _maximum_updated_at(
     if candidate is None:
         return persisted
     return max(persisted, candidate)
+
+
+def _checkpoint_has_progress(checkpoint: IngestCheckpoint) -> bool:
+    return bool(
+        checkpoint.cursor is not None
+        or checkpoint.committed_batches
+        or checkpoint.source_rows
+        or checkpoint.written_chunks
+        or checkpoint.reused_embeddings
+        or checkpoint.embedded_chunks
+        or checkpoint.max_updated_at is not None
+    )
+
+
+def _durable_source_updated_before(
+    persisted: IngestCheckpoint | None,
+    candidate: datetime | None,
+) -> datetime | None:
+    candidate = _checkpoint_datetime(candidate, "source_updated_before")
+    if persisted is None or persisted.source_updated_before is None:
+        return candidate
+    if candidate != persisted.source_updated_before:
+        raise IngestCheckpointIncompatibleError(
+            "persisted source update cutoff is immutable"
+        )
+    return persisted.source_updated_before
 
 
 class IngestCheckpointRepository:
@@ -445,6 +478,7 @@ class IngestCheckpointRepository:
         reused_embeddings_delta: int,
         embedded_chunks_delta: int,
         max_updated_at: datetime | None,
+        source_updated_before: datetime | None,
     ) -> IngestCheckpoint:
         deltas = (
             source_rows_delta,
@@ -487,6 +521,10 @@ class IngestCheckpointRepository:
             persisted.max_updated_at if persisted else None,
             max_updated_at,
         )
+        durable_source_updated_before = _durable_source_updated_before(
+            persisted,
+            source_updated_before,
+        )
         encoded_cursor = encode_cursor(self.order, next_cursor)
         durable_cursor = decode_cursor(self.order, encoded_cursor)
         cursor_payload = json.dumps(
@@ -511,13 +549,14 @@ class IngestCheckpointRepository:
                     reused_embeddings,
                     embedded_chunks,
                     max_updated_at,
+                    source_updated_before,
                     completed,
                     completed_at,
                     updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s::jsonb,
-                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
                     false, NULL, clock_timestamp()
                 )
                 ON CONFLICT (run_id, source_table) DO NOTHING
@@ -536,6 +575,7 @@ class IngestCheckpointRepository:
                     reused_embeddings,
                     embedded_chunks,
                     durable_max_updated_at,
+                    durable_source_updated_before,
                 ),
             )
         else:
@@ -549,6 +589,7 @@ class IngestCheckpointRepository:
                     reused_embeddings = %s,
                     embedded_chunks = %s,
                     max_updated_at = %s,
+                    source_updated_before = COALESCE(source_updated_before, %s),
                     completed = false,
                     completed_at = NULL,
                     updated_at = clock_timestamp()
@@ -563,6 +604,7 @@ class IngestCheckpointRepository:
                     reused_embeddings,
                     embedded_chunks,
                     durable_max_updated_at,
+                    durable_source_updated_before,
                     run_id,
                     source_table,
                 ),
@@ -583,6 +625,7 @@ class IngestCheckpointRepository:
             or updated.reused_embeddings != reused_embeddings
             or updated.embedded_chunks != embedded_chunks
             or updated.max_updated_at != durable_max_updated_at
+            or updated.source_updated_before != durable_source_updated_before
             or updated.completed
             or updated.completed_at is not None
         ):
@@ -599,6 +642,7 @@ class IngestCheckpointRepository:
         source_table: str,
         scope_key: str,
         current: IngestCheckpoint | None,
+        source_updated_before: datetime | None,
     ) -> IngestCheckpoint:
         persisted = self.load(
             db_cursor,
@@ -612,6 +656,10 @@ class IngestCheckpointRepository:
             run_id=run_id,
             source_table=source_table,
             scope_key=scope_key,
+        )
+        durable_source_updated_before = _durable_source_updated_before(
+            persisted,
+            source_updated_before,
         )
 
         if persisted is None:
@@ -630,13 +678,14 @@ class IngestCheckpointRepository:
                     reused_embeddings,
                     embedded_chunks,
                     max_updated_at,
+                    source_updated_before,
                     completed,
                     completed_at,
                     updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, NULL,
-                    0, 0, 0, 0, 0, NULL,
+                    0, 0, 0, 0, 0, NULL, %s,
                     true, clock_timestamp(), clock_timestamp()
                 )
                 ON CONFLICT (run_id, source_table) DO NOTHING
@@ -648,19 +697,21 @@ class IngestCheckpointRepository:
                     scope_key,
                     CURSOR_VERSION,
                     self.order.signature,
+                    durable_source_updated_before,
                 ),
             )
         else:
             db_cursor.execute(
                 f"""
                 UPDATE ai_ingest_checkpoints
-                SET completed = true,
+                SET source_updated_before = COALESCE(source_updated_before, %s),
+                    completed = true,
                     completed_at = clock_timestamp(),
                     updated_at = clock_timestamp()
                 WHERE run_id = %s AND source_table = %s
                 RETURNING {_CHECKPOINT_SELECT}
                 """,
-                (run_id, source_table),
+                (durable_source_updated_before, run_id, source_table),
             )
 
         completed = self._returned_checkpoint(db_cursor)
@@ -677,6 +728,7 @@ class IngestCheckpointRepository:
             cursor_version=CURSOR_VERSION,
             cursor_signature=self.order.signature,
             cursor=None,
+            source_updated_before=durable_source_updated_before,
         )
         if (
             completed.cursor != expected.cursor
@@ -686,6 +738,7 @@ class IngestCheckpointRepository:
             or completed.reused_embeddings != expected.reused_embeddings
             or completed.embedded_chunks != expected.embedded_chunks
             or completed.max_updated_at != expected.max_updated_at
+            or completed.source_updated_before != durable_source_updated_before
             or not completed.completed
             or completed.completed_at is None
         ):
@@ -754,6 +807,7 @@ class IngestCheckpointSession:
         source_table: str,
         scope_key: str,
         initial: IngestCheckpoint | None,
+        requires_source_updated_before: bool,
     ) -> None:
         self.repository = repository
         self.run_id = run_id
@@ -761,6 +815,10 @@ class IngestCheckpointSession:
         self.scope_key = scope_key
         self.initial = initial
         self.current = initial
+        self.requires_source_updated_before = requires_source_updated_before
+        self._source_updated_before = (
+            initial.source_updated_before if initial is not None else None
+        )
 
     @classmethod
     def start(
@@ -771,6 +829,7 @@ class IngestCheckpointSession:
         source_table: str,
         scope_key: str,
         order: CheckpointOrder,
+        requires_source_updated_before: bool = False,
     ) -> IngestCheckpointSession:
         if order.source_table != source_table:
             raise IngestCheckpointIncompatibleError(
@@ -789,12 +848,22 @@ class IngestCheckpointSession:
                 source_table=source_table,
                 scope_key=scope_key,
             )
+            if (
+                requires_source_updated_before
+                and not initial.completed
+                and initial.source_updated_before is None
+                and _checkpoint_has_progress(initial)
+            ):
+                raise IngestCheckpointIncompatibleError(
+                    "progressed checkpoint is missing required source update cutoff"
+                )
         return cls(
             repository,
             run_id=run_id,
             source_table=source_table,
             scope_key=scope_key,
             initial=initial,
+            requires_source_updated_before=requires_source_updated_before,
         )
 
     @property
@@ -804,6 +873,33 @@ class IngestCheckpointSession:
     @property
     def completed(self) -> bool:
         return bool(self.current and self.current.completed)
+
+    @property
+    def source_updated_before(self) -> datetime | None:
+        if self.current is not None and self.current.source_updated_before is not None:
+            return self.current.source_updated_before
+        return self._source_updated_before
+
+    def bind_source_updated_before(self, value: datetime) -> None:
+        normalized = _checkpoint_datetime(value, "source_updated_before")
+        if normalized is None:
+            raise IngestCheckpointIncompatibleError(
+                "source update cutoff must be a timestamp"
+            )
+        if (
+            self.source_updated_before is not None
+            and self.source_updated_before != normalized
+        ):
+            raise IngestCheckpointIncompatibleError(
+                "persisted source update cutoff is immutable"
+            )
+        self._source_updated_before = normalized
+
+    def _require_source_updated_before(self) -> None:
+        if self.requires_source_updated_before and self.source_updated_before is None:
+            raise IngestCheckpointIncompatibleError(
+                "checkpoint requires a source update cutoff"
+            )
 
     def advance(
         self,
@@ -816,6 +912,7 @@ class IngestCheckpointSession:
         embedded_chunks_delta: int,
         max_updated_at: datetime | None,
     ) -> IngestCheckpoint:
+        self._require_source_updated_before()
         updated = self.repository.advance(
             db_cursor,
             run_id=self.run_id,
@@ -828,17 +925,20 @@ class IngestCheckpointSession:
             reused_embeddings_delta=reused_embeddings_delta,
             embedded_chunks_delta=embedded_chunks_delta,
             max_updated_at=max_updated_at,
+            source_updated_before=self.source_updated_before,
         )
         self.current = updated
         return updated
 
     def complete(self, db_cursor: Any) -> IngestCheckpoint:
+        self._require_source_updated_before()
         completed = self.repository.complete(
             db_cursor,
             run_id=self.run_id,
             source_table=self.source_table,
             scope_key=self.scope_key,
             current=self.current,
+            source_updated_before=self.source_updated_before,
         )
         self.current = completed
         return completed

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints (
     reused_embeddings bigint NOT NULL DEFAULT 0,
     embedded_chunks bigint NOT NULL DEFAULT 0,
     max_updated_at timestamptz,
+    source_updated_before timestamptz,
     completed boolean NOT NULL DEFAULT false,
     completed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -31,6 +32,9 @@ CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints (
         OR (completed = true AND completed_at IS NOT NULL)
     )
 );
+
+ALTER TABLE ai_ingest_checkpoints
+    ADD COLUMN IF NOT EXISTS source_updated_before timestamptz;
 
 CREATE INDEX IF NOT EXISTS idx_ai_ingest_checkpoints_updated_at
     ON ai_ingest_checkpoints (updated_at);

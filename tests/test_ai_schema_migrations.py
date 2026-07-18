@@ -50,8 +50,13 @@ def test_ingest_checkpoint_migration_defines_durable_progress_table():
     assert "PRIMARY KEY (run_id, source_table)" in sql
     assert "cursor_signature varchar(64) NOT NULL" in sql
     assert "cursor_payload jsonb" in sql
+    assert "source_updated_before timestamptz" in sql
     assert "source_rows = 0 OR cursor_payload IS NOT NULL" in sql
     assert "idx_ai_ingest_checkpoints_updated_at" in sql
+    assert (
+        "ALTER TABLE ai_ingest_checkpoints\n"
+        "    ADD COLUMN IF NOT EXISTS source_updated_before timestamptz;"
+    ) in sql
 
 
 def test_managed_migration_script_applies_ingest_checkpoint_migration_in_order():
@@ -98,5 +103,33 @@ def test_data_sync_runbook_documents_persistent_checkpoint_operations():
         "No automatic checkpoint retention job exists.",
         "A separately approved local-only disposable live PostgreSQL smoke is "
         "required to remove the residual PostgreSQL risk.",
+        "`source_updated_before timestamptz` stores the immutable source-clock cutoff",
+        "`updated_at <= source_updated_before`",
+        "A progressed incomplete checkpoint with a missing cutoff fails closed as "
+        "`INGEST_CHECKPOINT_INCOMPATIBLE`.",
+        "The success watermark remains the maximum committed source update timestamp",
+        "The residual duplicate window starts at the prior successful watermark",
+    ):
+        assert statement in text
+
+
+def test_checkpoint_design_documents_timestamp_subtypes_and_frozen_source_window():
+    text = (
+        ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-07-18-ingest-persistent-keyset-checkpoint-design.md"
+    ).read_text(encoding="utf-8")
+
+    for statement in (
+        "`timestamp without time zone` preserves its wall-clock fields",
+        "`timestamp with time zone` is restored as an aware UTC instant",
+        "timestamp precision forms from `timestamp(0)` through `timestamp(6)`",
+        "The two timestamp subtypes remain signature-distinct.",
+        "source_updated_before",
+        "clock_timestamp()",
+        "updated_at <= source_updated_before",
+        "success watermark remains the maximum committed update timestamp",
     ):
         assert statement in text
