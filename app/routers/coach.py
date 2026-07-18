@@ -13709,7 +13709,7 @@ async def analyze_team(
 # ============================================================
 
 
-@router.post("/analyze-legacy")
+@router.post("/analyze-legacy", deprecated=True)
 async def analyze_team_legacy(
     payload: AnalyzeRequest,
     agent: BaseballStatisticsAgent = Depends(get_agent),

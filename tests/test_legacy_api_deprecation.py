@@ -27,6 +27,8 @@ EXPECTED_DEPRECATED_OPERATIONS = {
     ("GET", "/ai/chat/stream", "POST", "/ai/chat/stream"),
 }
 
+HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
+
 
 def _operation_tuple(operation):
     return (
@@ -114,3 +116,27 @@ def test_legacy_request_emits_structured_warning(caplog) -> None:
         "canonical_method=POST canonical_path=/ai/coach/analyze"
         in caplog.text
     )
+
+
+def test_openapi_marks_exactly_seven_deprecated_operations() -> None:
+    from app.main import app
+
+    app.openapi_schema = None
+    schema = app.openapi()
+    operations = {
+        (method.upper(), path): definition
+        for path, path_item in schema["paths"].items()
+        for method, definition in path_item.items()
+        if method in HTTP_METHODS
+    }
+    deprecated = {
+        (method, path)
+        for (method, path), definition in operations.items()
+        if definition.get("deprecated") is True
+    }
+
+    assert len(operations) == 33
+    assert deprecated == {
+        (method, path)
+        for method, path, _, _ in EXPECTED_DEPRECATED_OPERATIONS
+    }
