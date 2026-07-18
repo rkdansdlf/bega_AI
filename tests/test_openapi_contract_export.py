@@ -1046,6 +1046,50 @@ def test_hostile_app_name_cannot_change_document_artifacts_or_check(
     assert {path: path.read_bytes() for path in artifact_paths.values()} == before
 
 
+def test_clean_import_and_update_do_not_read_existing_openapi_artifact() -> None:
+    script = """
+import tempfile
+from pathlib import Path
+
+root = Path.cwd()
+contract_path = root / "contracts" / "openapi.json"
+original_read_bytes = Path.read_bytes
+
+def reject_contract_read(self, *args, **kwargs):
+    if self == contract_path:
+        raise AssertionError("exporter must not read contracts/openapi.json")
+    return original_read_bytes(self, *args, **kwargs)
+
+Path.read_bytes = reject_contract_read
+
+from scripts import export_openapi_contract as exporter
+
+assert exporter.DOCUMENTATION_ENV["APP_NAME"] == "KBO AI Service"
+target = Path(tempfile.mkdtemp())
+exporter.CONTRACT_PATH = target / "contracts" / "openapi.json"
+exporter.ENDPOINTS_PATH = target / "docs" / "api-endpoints.md"
+exporter.SCHEMAS_PATH = target / "docs" / "api-schemas.md"
+
+assert exporter.main([]) == 0
+assert all(path.exists() for path in (
+    exporter.CONTRACT_PATH,
+    exporter.ENDPOINTS_PATH,
+    exporter.SCHEMAS_PATH,
+))
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=_production_subprocess_environment(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_build_contract_document_restores_environment_and_settings_cache_after_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

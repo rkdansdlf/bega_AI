@@ -23,25 +23,11 @@ ENDPOINTS_PATH = ROOT / "docs" / "api-endpoints.md"
 SCHEMAS_PATH = ROOT / "docs" / "api-schemas.md"
 UPDATE_COMMAND = "python scripts/export_openapi_contract.py"
 HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head", "trace")
-
-
-def _committed_openapi_title() -> str:
-    """Read the canonical non-secret documentation title from the contract."""
-
-    document = json.loads(CONTRACT_PATH.read_bytes().decode("utf-8"))
-    if not isinstance(document, Mapping):
-        raise ValueError("Committed OpenAPI document must be an object")
-    info = document.get("info")
-    if not isinstance(info, Mapping):
-        raise ValueError("Committed OpenAPI info must be an object")
-    title = info.get("title")
-    if not isinstance(title, str):
-        raise ValueError("Committed OpenAPI info title must be a string")
-    return title
+DOCUMENTATION_APP_NAME = "KBO AI Service"
 
 
 DOCUMENTATION_ENV = {
-    "APP_NAME": _committed_openapi_title(),
+    "APP_NAME": DOCUMENTATION_APP_NAME,
     "APP_ENV": "local",
     "AI_INTERNAL_TOKEN": "openapi-contract-generation-token",
     "AI_DOCS_ENABLED": "true",
