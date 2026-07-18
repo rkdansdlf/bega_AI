@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
 
+import pytest
+
+import scripts.export_openapi_contract as exporter
 from scripts.export_openapi_contract import render_contract_json, render_openapi_markdown
 
 
@@ -904,3 +908,96 @@ def test_retains_reference_siblings_in_component_and_nested_property_schemas() -
     assert rendered.schemas.count('Default: `"nested default"`') == 1
     assert rendered.schemas.count('"x-root": {') == 1
     assert rendered.schemas.count('"x-nested": {') == 1
+
+
+def test_build_contract_document_uses_documentation_settings_and_restores_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller_environment = {
+        key: f"caller-{key.lower()}" for key in exporter.DOCUMENTATION_ENV
+    }
+    for key, value in caller_environment.items():
+        monkeypatch.setenv(key, value)
+
+    document = exporter.build_contract_document()
+
+    operations = [
+        operation
+        for path_item in document["paths"].values()
+        for method, operation in path_item.items()
+        if method in exporter.HTTP_METHODS
+    ]
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command=exporter.UPDATE_COMMAND,
+    )
+
+    assert operations
+    assert rendered.operation_count == len(operations)
+    assert "security" not in document["paths"]["/health"]["get"]
+    assert document["paths"]["/ai/chat/completion"]["post"]["security"] == [
+        {"InternalApiKey": []}
+    ]
+    assert document["components"]["securitySchemes"]["InternalApiKey"]["name"] == (
+        "X-Internal-Api-Key"
+    )
+    assert {key: os.environ[key] for key in caller_environment} == caller_environment
+
+    document["paths"].clear()
+    assert exporter.build_contract_document()["paths"]
+
+
+def test_build_contract_document_restores_environment_and_settings_cache_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import main as app_main
+    from app.config import get_settings
+
+    caller_environment = {
+        key: f"before-failure-{key.lower()}" for key in exporter.DOCUMENTATION_ENV
+    }
+    for key, value in caller_environment.items():
+        monkeypatch.setenv(key, value)
+
+    def fail_to_create_app() -> object:
+        raise RuntimeError("expected app construction failure")
+
+    monkeypatch.setattr(app_main, "create_app", fail_to_create_app)
+
+    with pytest.raises(RuntimeError, match="expected app construction failure"):
+        exporter.build_contract_document()
+
+    assert {key: os.environ[key] for key in caller_environment} == caller_environment
+    assert get_settings.cache_info().currsize == 0
+
+
+def test_cli_writes_all_artifacts_and_check_reports_every_stale_path_without_writing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    artifact_paths = {
+        "contract": tmp_path / "contracts" / "openapi.json",
+        "endpoints": tmp_path / "docs" / "api-endpoints.md",
+        "schemas": tmp_path / "docs" / "api-schemas.md",
+    }
+    monkeypatch.setattr(exporter, "CONTRACT_PATH", artifact_paths["contract"])
+    monkeypatch.setattr(exporter, "ENDPOINTS_PATH", artifact_paths["endpoints"])
+    monkeypatch.setattr(exporter, "SCHEMAS_PATH", artifact_paths["schemas"])
+
+    assert exporter.main([]) == 0
+    generated_bytes = {
+        name: path.read_bytes() for name, path in artifact_paths.items()
+    }
+    assert all(content.endswith(b"\n") and not content.endswith(b"\n\n") for content in generated_bytes.values())
+    assert exporter.main(["--check"]) == 0
+
+    artifact_paths["endpoints"].write_bytes(b"stale endpoint bytes\n")
+    artifact_paths["schemas"].unlink()
+    stale_bytes = artifact_paths["endpoints"].read_bytes()
+
+    assert exporter.main(["--check"]) == 1
+    output = capsys.readouterr().out
+    assert str(artifact_paths["endpoints"].relative_to(tmp_path)) in output
+    assert str(artifact_paths["schemas"].relative_to(tmp_path)) in output
+    assert artifact_paths["endpoints"].read_bytes() == stale_bytes
+    assert not artifact_paths["schemas"].exists()

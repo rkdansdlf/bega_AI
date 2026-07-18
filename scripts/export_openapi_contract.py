@@ -9,15 +9,27 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 CONTRACT_PATH = ROOT / "contracts" / "openapi.json"
 ENDPOINTS_PATH = ROOT / "docs" / "api-endpoints.md"
 SCHEMAS_PATH = ROOT / "docs" / "api-schemas.md"
 UPDATE_COMMAND = "python scripts/export_openapi_contract.py"
 HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head", "trace")
+DOCUMENTATION_ENV = {
+    "APP_ENV": "local",
+    "AI_INTERNAL_TOKEN": "openapi-contract-generation-token",
+    "AI_DOCS_ENABLED": "true",
+    "AI_METRICS_ENABLED": "false",
+    "AI_DIRECT_BROWSER_ACCESS_ENABLED": "false",
+    "CORS_ORIGINS": "[]",
+}
 
 
 @dataclass(frozen=True)
@@ -843,3 +855,108 @@ def _title_and_version(document: Mapping[str, Any]) -> tuple[str, str]:
 
 def _finish(lines: list[str]) -> str:
     return "\n".join(lines).rstrip() + "\n"
+
+
+def build_contract_document() -> dict[str, Any]:
+    """Build a detached OpenAPI document with fixed documentation settings."""
+
+    previous = {key: os.environ.get(key) for key in DOCUMENTATION_ENV}
+    os.environ.update(DOCUMENTATION_ENV)
+    try:
+        from app.config import get_settings
+        from app.main import create_app
+
+        get_settings.cache_clear()
+        document = json.loads(json.dumps(create_app().openapi(), ensure_ascii=False))
+        if not isinstance(document, dict):
+            raise ValueError("OpenAPI document must be an object")
+        paths = _require_mapping(document, "paths")
+        components = _require_mapping(document, "components")
+        _require_mapping(components, "schemas")
+        if not isinstance(paths, Mapping):
+            raise AssertionError("validated OpenAPI paths must be a mapping")
+        return document
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+
+
+def _render_artifacts() -> dict[Path, str]:
+    document = build_contract_document()
+    rendered = render_openapi_markdown(
+        document,
+        source_path="contracts/openapi.json",
+        update_command=UPDATE_COMMAND,
+    )
+    return {
+        CONTRACT_PATH: render_contract_json(document),
+        ENDPOINTS_PATH: rendered.endpoints,
+        SCHEMAS_PATH: rendered.schemas,
+    }
+
+
+def _write_atomic(path: Path, content: str) -> None:
+    """Atomically replace a UTF-8 artifact after writing one complete document."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+        text=True,
+    )
+    temporary_path = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+        temporary_path.replace(path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Update generated API artifacts, or check them without writing."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args(argv)
+    artifacts = _render_artifacts()
+
+    if args.check:
+        stale_paths = [
+            path
+            for path, expected in artifacts.items()
+            if not path.exists() or path.read_text(encoding="utf-8") != expected
+        ]
+        if stale_paths:
+            for path in stale_paths:
+                print(
+                    "AI OpenAPI artifact is missing or out of date: "
+                    f"{_display_path(path)}"
+                )
+            print(f"Run {UPDATE_COMMAND}.")
+            return 1
+        print("AI OpenAPI artifacts are current.")
+        return 0
+
+    for path, content in artifacts.items():
+        _write_atomic(path, content)
+        print(f"Wrote {_display_path(path)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
