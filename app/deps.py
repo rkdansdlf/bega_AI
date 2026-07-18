@@ -621,6 +621,10 @@ async def lifespan(app):
         except asyncio.CancelledError:
             pass
 
+    from .routers.coach import cancel_auto_brief_background_tasks
+
+    await cancel_auto_brief_background_tasks()
+
     # httpx 클라이언트 정리
     await close_shared_httpx_clients()
 
