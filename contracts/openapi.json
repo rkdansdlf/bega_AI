@@ -1737,6 +1737,26 @@
           },
           {
             "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
             "name": "X-Cache-Admin-Token",
             "required": false,
             "schema": {
@@ -1782,6 +1802,26 @@
         "description": "캐시 현황 통계를 반환합니다.",
         "operationId": "chat_cache_stats_ai_chat_cache_stats_get",
         "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
           {
             "in": "header",
             "name": "X-Cache-Admin-Token",
@@ -1835,6 +1875,26 @@
             "required": true,
             "schema": {
               "title": "Cache Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
               "type": "string"
             }
           },
@@ -1951,6 +2011,7 @@
     },
     "/ai/chat/stream": {
       "get": {
+        "deprecated": true,
         "description": "GET 요청을 통해 질문을 받고, 답변을 SSE 스트림으로 반환합니다.",
         "operationId": "chat_stream_get_ai_chat_stream_get",
         "parameters": [
@@ -2274,6 +2335,7 @@
     },
     "/ai/coach/analyze-legacy": {
       "post": {
+        "deprecated": true,
         "description": "기존 방식의 Coach 분석 (전체 에이전트 파이프라인 사용).\nFast Path에 문제가 있을 경우 대안으로 사용.\ndeprecate: COACH_ANALYZE_LEGACY_ENABLED=0 으로 비활성화 가능.",
         "operationId": "analyze_team_legacy_ai_coach_analyze_legacy_post",
         "parameters": [
@@ -3605,6 +3667,7 @@
     },
     "/coach/analyze": {
       "post": {
+        "deprecated": true,
         "description": "특정 팀(들)에 대한 심층 분석을 요청합니다. 'The Coach' 페르소나가 적용됩니다.",
         "operationId": "analyze_team_coach_analyze_post",
         "parameters": [
@@ -3688,6 +3751,7 @@
     },
     "/coach/analyze-legacy": {
       "post": {
+        "deprecated": true,
         "description": "기존 방식의 Coach 분석 (전체 에이전트 파이프라인 사용).\nFast Path에 문제가 있을 경우 대안으로 사용.\ndeprecate: COACH_ANALYZE_LEGACY_ENABLED=0 으로 비활성화 가능.",
         "operationId": "analyze_team_legacy_coach_analyze_legacy_post",
         "parameters": [
@@ -3755,6 +3819,7 @@
     },
     "/coach/cache/reset": {
       "post": {
+        "deprecated": true,
         "description": "FAILED_LOCKED 상태의 Coach 분석 캐시를 운영자가 수동으로 즉시 복구한다.\n\n삭제된 row는 다음 분석 요청에서 자연 재생성된다. 활성 PENDING lease와\nCOMPLETED row는 보호된다. cache_key 단건 또는 (team_id, year) 묶음을 받는다.",
         "operationId": "reset_coach_cache_coach_cache_reset_post",
         "parameters": [
@@ -3900,6 +3965,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
         "summary": "Safety Check",
         "tags": [
           "moderation"
@@ -3908,6 +3978,7 @@
     },
     "/vision/seat-view-classify": {
       "post": {
+        "deprecated": true,
         "description": "Classify an uploaded baseball-related image for seat-view moderation.",
         "operationId": "classify_seat_view_image_vision_seat_view_classify_post",
         "parameters": [
@@ -3977,6 +4048,7 @@
     },
     "/vision/ticket": {
       "post": {
+        "deprecated": true,
         "description": "Analyzes an uploaded ticket image using Gemini Vision (Native or OpenRouter) to extract details.",
         "operationId": "analyze_ticket_image_vision_ticket_post",
         "parameters": [
