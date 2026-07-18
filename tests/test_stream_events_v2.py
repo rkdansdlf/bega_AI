@@ -143,6 +143,35 @@ def test_ai_stream_http_error_has_exact_canonical_shape() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "supported_versions",
+    [[], ["1"], ["2"], ["1", "2", "2"], ["2", "1"]],
+)
+def test_ai_stream_http_version_error_requires_exact_supported_versions(
+    supported_versions: list[str],
+) -> None:
+    with pytest.raises(ValidationError):
+        AiStreamHttpError(
+            code="AI_EVENT_VERSION_UNSUPPORTED",
+            message="지원하지 않는 버전입니다.",
+            retryable=False,
+            supported_versions=supported_versions,
+        )
+
+
+@pytest.mark.parametrize("supported_versions", [["1"], ["1", "2"], ["2", "2"]])
+def test_ai_stream_http_non_version_error_requires_no_supported_versions(
+    supported_versions: list[str],
+) -> None:
+    with pytest.raises(ValidationError):
+        AiStreamHttpError(
+            code="AI_UPSTREAM_RATE_LIMITED",
+            message="요청 한도를 초과했습니다.",
+            retryable=True,
+            supported_versions=supported_versions,
+        )
+
+
 def test_ai_stream_http_error_rejects_invalid_retry_and_versions() -> None:
     with pytest.raises(ValidationError):
         AiStreamHttpError(

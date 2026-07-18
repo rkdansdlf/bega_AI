@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -10,6 +10,7 @@ from pydantic import (
     Field,
     JsonValue,
     TypeAdapter,
+    model_validator,
 )
 
 
@@ -185,6 +186,15 @@ class AiStreamHttpError(_StrictModel):
     retryable: bool
     retry_after_seconds: int | None = Field(default=None, ge=0)
     supported_versions: list[Literal["1", "2"]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_supported_versions(self) -> Self:
+        expected = (
+            ["1", "2"] if self.code == "AI_EVENT_VERSION_UNSUPPORTED" else []
+        )
+        if self.supported_versions != expected:
+            raise ValueError("supported_versions does not match code")
+        return self
 
 
 class StreamErrorData(_StrictModel):
