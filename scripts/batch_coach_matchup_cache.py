@@ -1205,6 +1205,7 @@ async def call_analyze(
     client: httpx.AsyncClient,
     base_url: str,
     target: MatchupTarget,
+    wait_for_cache_completion_on_missing_done: bool = True,
 ) -> Dict[str, Any]:
     payload = _build_analyze_payload(target)
     result: Dict[str, Any] = _build_result_shell(target)
@@ -1280,6 +1281,17 @@ async def call_analyze(
         return _annotate_cache_resolution(target=target, result=result)
 
     if not saw_done:
+        if not wait_for_cache_completion_on_missing_done:
+            if saw_error_event and error_message:
+                result["reason"] = error_message
+            elif not saw_any_event:
+                result["reason"] = "empty_response_stream"
+            elif not saw_message_event and not saw_meta_event:
+                result["reason"] = "missing_done_event_no_payload"
+            else:
+                result["reason"] = "missing_done_event"
+            return _annotate_cache_resolution(target=target, result=result)
+
         resolved_cache_key = _resolved_cache_key_from_meta(
             meta_payload, target.cache_key
         )
