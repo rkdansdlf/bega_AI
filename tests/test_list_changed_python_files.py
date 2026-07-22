@@ -2,11 +2,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-
 SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "list_changed_python_files.py"
+    Path(__file__).resolve().parents[1] / "scripts" / "list_changed_python_files.py"
 )
 
 

@@ -6,7 +6,6 @@ import argparse
 import subprocess
 import sys
 
-
 ZERO_SHA = "0" * 40
 
 
@@ -20,10 +19,14 @@ def git_output(arguments: list[str], *, stdin: bytes | None = None) -> bytes:
 
 
 def empty_tree() -> str:
-    return git_output(
-        ["hash-object", "-t", "tree", "--stdin"],
-        stdin=b"",
-    ).decode().strip()
+    return (
+        git_output(
+            ["hash-object", "-t", "tree", "--stdin"],
+            stdin=b"",
+        )
+        .decode()
+        .strip()
+    )
 
 
 def changed_python_files(base: str, head: str, comparison: str) -> bytes:
