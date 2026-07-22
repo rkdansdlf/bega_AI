@@ -49,6 +49,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
       - name: Set up Python 3.14
         uses: actions/setup-python@v5
@@ -59,13 +61,29 @@ jobs:
       - name: Install linting tools
         run: |
           python -m pip install --upgrade pip
-          pip install flake8 black
+          pip install -r requirements-dev
       
       - name: Run flake8
         run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
       
-      - name: Check code formatting
-        run: black --check .
+      - name: Check changed Python formatting
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          COMPARISON: ${{ github.event_name == 'pull_request' && 'merge-base' || 'range' }}
+        run: |
+          changed_files_output="${RUNNER_TEMP}/changed-python-files"
+          python scripts/list_changed_python_files.py \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}" \
+            --comparison "${COMPARISON}" \
+            > "${changed_files_output}"
+          mapfile -d '' changed_python_files < "${changed_files_output}"
+          if (( ${#changed_python_files[@]} == 0 )); then
+            echo "No changed Python files to format-check."
+          else
+            black --check -- "${changed_python_files[@]}"
+          fi
       
       - name: Lint Summary
         run: |
