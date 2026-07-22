@@ -178,3 +178,5 @@ Backend Prometheus에서는 다음 지표를 함께 확인합니다.
 ## 검증 범위와 잔여 위험
 
 이 절차의 unit/integration tests는 disposable fake connection으로 cursor, transaction, lease fence, resume을 검증합니다. A separately approved local-only disposable live PostgreSQL smoke is required to remove the residual PostgreSQL risk. 별도 승인 없이는 이 smoke를 실행하지 않으며, shared 또는 production database에서 실행하지 않습니다.
+
+2026-07-22 검증에서는 로컬 `postgres:16-alpine` disposable database에 003과 `004_ai_ingest_checkpoints.sql`을 적용하고 004 재적용의 멱등성까지 확인했습니다. 운영 `ingest_table`/checkpoint repository/run store/heartbeat loop를 임베딩 없이 실행해 첫 2행 commit 직후 중단, 저장 cursor 뒤 4행 keyset 재개, 완료 checkpoint의 source SELECT 생략, 고정 cutoff 이후 행 제외, lease 만료 후 재큐잉·owner 인계, transient heartbeat 재시도 성공을 확인했습니다. 컨테이너와 one-shot harness는 검증 직후 제거했습니다. 이 검증은 checkpoint PostgreSQL binding 위험을 제거하지만 pgvector 포함 전체 001 schema migration과 locale/collation matrix는 다루지 않습니다.
