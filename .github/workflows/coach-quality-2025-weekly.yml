@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: coach-quality-2025-weekly
+  group: coach-cache-operations
   cancel-in-progress: false
 
 jobs:
@@ -24,6 +24,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate required secrets
+        run: |
+          missing=()
+          if [ -z "${POSTGRES_DB_URL}" ]; then
+            missing+=(COACH_QUALITY_DB_URL_STAGING_RW)
+          fi
+          if [ -z "${OPENROUTER_API_KEY}" ]; then
+            missing+=(OPENROUTER_API_KEY_STAGING)
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing required Actions secrets: ${missing[*]}"
+            exit 1
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -34,17 +48,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Validate required secrets
-        run: |
-          if [ -z "${POSTGRES_DB_URL}" ]; then
-            echo "COACH_QUALITY_DB_URL_STAGING_RW is required"
-            exit 1
-          fi
-          if [ -z "${OPENROUTER_API_KEY}" ]; then
-            echo "OPENROUTER_API_KEY_STAGING is required"
-            exit 1
-          fi
 
       - name: Cleanup cache dry-run (7d, year=2025)
         run: |
