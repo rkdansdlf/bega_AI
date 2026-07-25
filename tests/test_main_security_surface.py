@@ -106,16 +106,68 @@ def test_create_app_registers_every_business_router_with_internal_auth(monkeypat
 
     original_include_router = FastAPI.include_router
     registrations = []
+    direct_registrations = []
+    include_router_depth = 0
+    direct_registration_depth = 0
 
     def record_router_registration(app, router, *args, **kwargs):
+        nonlocal include_router_depth
         registrations.append((router, args, kwargs))
-        return original_include_router(app, router, *args, **kwargs)
+        include_router_depth += 1
+        try:
+            return original_include_router(app, router, *args, **kwargs)
+        finally:
+            include_router_depth -= 1
 
     monkeypatch.setattr(
         FastAPI,
         "include_router",
         record_router_registration,
     )
+
+    direct_route_methods = (
+        "api_route",
+        "get",
+        "post",
+        "put",
+        "patch",
+        "delete",
+        "options",
+        "head",
+        "trace",
+        "websocket",
+        "websocket_route",
+        "add_api_route",
+        "add_api_websocket_route",
+    )
+    for method_name in direct_route_methods:
+        original_method = getattr(FastAPI, method_name)
+
+        def record_direct_registration(
+            app,
+            path,
+            *args,
+            _method_name=method_name,
+            _original_method=original_method,
+            **kwargs,
+        ):
+            nonlocal direct_registration_depth
+            is_outer_direct_registration = (
+                include_router_depth == 0 and direct_registration_depth == 0
+            )
+            if is_outer_direct_registration:
+                direct_registrations.append((_method_name, path))
+            direct_registration_depth += 1
+            try:
+                return _original_method(app, path, *args, **kwargs)
+            finally:
+                direct_registration_depth -= 1
+
+        monkeypatch.setattr(
+            FastAPI,
+            method_name,
+            record_direct_registration,
+        )
 
     app = main_module.create_app()
 
@@ -138,6 +190,7 @@ def test_create_app_registers_every_business_router_with_internal_auth(monkeypat
         )
         for _router, _args, kwargs in registrations
     )
+    assert direct_registrations == [("get", "/health")]
 
     assert TestClient(app).get("/health").status_code == 200
 
