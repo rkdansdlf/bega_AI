@@ -7,15 +7,26 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Optional
+
+import psycopg
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.deps import get_connection_pool
+# This standalone exporter only needs validated settings, not FastAPI app startup.
+os.environ.setdefault("BEGA_SKIP_APP_INIT", "1")
+
+from app.config import get_settings
+
+
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_QUERY_TIMEOUT_SECONDS = 30.0
+DEFAULT_EXPORT_LIMIT = 1_000
 
 
 def build_export_query(
@@ -70,18 +81,37 @@ def row_to_sample(row: tuple[Any, ...]) -> dict[str, Any]:
 
 
 async def export_samples(
-    *, days: int, limit: int, route: Optional[str]
+    *,
+    days: int,
+    limit: int,
+    route: Optional[str],
+    connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    query_timeout_seconds: float = DEFAULT_QUERY_TIMEOUT_SECONDS,
 ) -> list[dict[str, Any]]:
     sql, params = build_export_query(days=days, limit=limit, route=route)
-    pool = get_connection_pool()
-    await pool.open(wait=True, timeout=10.0)
+    connection = await _connect_database(
+        connect_timeout_seconds=connect_timeout_seconds
+    )
     try:
-        async with pool.connection() as conn:
-            cursor = await conn.execute(sql, params)
+        async with asyncio.timeout(max(0.1, float(query_timeout_seconds))):
+            cursor = await connection.execute(sql, params)
             rows = await cursor.fetchall()
     finally:
-        await pool.close()
+        await connection.close()
     return [row_to_sample(tuple(row)) for row in rows]
+
+
+async def _connect_database(
+    *, connect_timeout_seconds: float
+) -> psycopg.AsyncConnection[Any]:
+    settings = get_settings()
+    return await psycopg.AsyncConnection.connect(
+        settings.database_url,
+        autocommit=True,
+        connect_timeout=max(1, int(connect_timeout_seconds)),
+        target_session_attrs="read-write",
+        options="-c search_path=public,security,extensions",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,8 +120,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output", required=True)
     parser.add_argument("--days", type=int, default=30)
-    parser.add_argument("--limit", type=int, default=10_000)
+    parser.add_argument("--limit", type=int, default=DEFAULT_EXPORT_LIMIT)
     parser.add_argument("--route", choices=("completion", "stream"), default=None)
+    parser.add_argument(
+        "--connect-timeout-seconds",
+        type=float,
+        default=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    )
+    parser.add_argument(
+        "--query-timeout-seconds",
+        type=float,
+        default=DEFAULT_QUERY_TIMEOUT_SECONDS,
+    )
     return parser.parse_args()
 
 
@@ -100,6 +140,8 @@ async def async_main(args: argparse.Namespace) -> int:
         days=args.days,
         limit=args.limit,
         route=args.route,
+        connect_timeout_seconds=args.connect_timeout_seconds,
+        query_timeout_seconds=args.query_timeout_seconds,
     )
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
