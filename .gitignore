@@ -47,6 +47,7 @@ test_rag_search.py
 !/tests/test_ai_optimization_ops_scripts.py
 !/tests/test_semantic_cache_shadow_eval.py
 !/tests/test_cleanup_embedding_256_warnings.py
+!/tests/test_coach_cleanup_workflows.py
 !/tests/test_hnsw_migration.py
 !/tests/test_rag_storage_schema.py
 !/tests/test_analyze_operator_data_required.py

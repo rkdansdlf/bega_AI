@@ -1,19 +1,57 @@
-name: Coach Cache Cleanup
+name: Coach Cache Cleanup (Manual Scoped)
 
 on:
-  schedule:
-    - cron: '0 18 * * 0'  # 매주 일요일 오전 3시 (KST = UTC+9)
-  workflow_dispatch:       # 수동 실행 가능
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "보관 기간(일)"
+        required: true
+        default: "14"
+        type: string
+      years:
+        description: "정리 대상 연도 목록(예: 2025 또는 2024,2025)"
+        required: false
+        default: ""
+        type: string
+      teams:
+        description: "정리 대상 팀 목록(예: SSG,DB)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: coach-cache-operations
+  cancel-in-progress: false
 
 jobs:
   cleanup:
-    name: Clean Expired Coach Cache
+    name: Clean Expired Coach Cache (Scoped)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      POSTGRES_DB_URL: ${{ secrets.COACH_QUALITY_DB_URL_STAGING_RW }}
+      CLEANUP_DAYS: ${{ inputs.days }}
+      CLEANUP_YEARS: ${{ inputs.years }}
+      CLEANUP_TEAMS: ${{ inputs.teams }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Validate required secret and cleanup scope
+        run: |
+          if [ -z "${POSTGRES_DB_URL}" ]; then
+            echo "COACH_QUALITY_DB_URL_STAGING_RW is required"
+            exit 1
+          fi
+          if [ -z "${CLEANUP_YEARS}" ] && [ -z "${CLEANUP_TEAMS}" ]; then
+            echo "Provide at least one of workflow inputs: years or teams"
+            exit 1
+          fi
+          if ! [[ "${CLEANUP_DAYS}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "days must be a positive integer"
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,12 +64,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Cache Cleanup
-        env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python scripts/cleanup_expired_cache.py
+      - name: Run scoped cache cleanup
+        run: |
+          cleanup_args=(
+            --days "${CLEANUP_DAYS}"
+            --output /tmp/coach_cleanup.json
+          )
+          if [ -n "${CLEANUP_YEARS}" ]; then
+            cleanup_args+=(--years "${CLEANUP_YEARS}")
+          fi
+          if [ -n "${CLEANUP_TEAMS}" ]; then
+            cleanup_args+=(--teams "${CLEANUP_TEAMS}")
+          fi
+          python scripts/cleanup_expired_cache.py "${cleanup_args[@]}"
 
       - name: Cleanup Summary
+        if: always()
         run: |
-          echo "### Coach Cache Cleanup" >> "${GITHUB_STEP_SUMMARY}"
-          echo "Expired cache entries (>14 days) cleaned up." >> "${GITHUB_STEP_SUMMARY}"
+          {
+            echo "### Coach Cache Cleanup"
+            echo "보관 기간: ${CLEANUP_DAYS}일"
+            echo "연도 범위: ${CLEANUP_YEARS:-미지정}"
+            echo "팀 범위: ${CLEANUP_TEAMS:-미지정}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload cleanup artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coach-cache-cleanup
+          path: /tmp/coach_cleanup.json
+          if-no-files-found: ignore
