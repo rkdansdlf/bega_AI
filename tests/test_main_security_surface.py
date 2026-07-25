@@ -1,6 +1,6 @@
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
 
 from app.config import get_settings
 from app.internal_auth import require_ai_internal_token
@@ -12,13 +12,6 @@ def _route_paths(app) -> set[str]:
 
 def _has_cors_middleware(app) -> bool:
     return any(middleware.cls is CORSMiddleware for middleware in app.user_middleware)
-
-
-def _route_has_internal_auth(route: APIRoute) -> bool:
-    return any(
-        dependency.call is require_ai_internal_token
-        for dependency in route.dependant.dependencies
-    )
 
 
 def test_create_app_disables_docs_and_metrics_by_default_in_production(monkeypatch):
@@ -75,7 +68,13 @@ def test_create_app_keeps_cors_for_local_direct_development(monkeypatch):
     assert _has_cors_middleware(app) is True
 
 
-def test_internal_router_registration_protects_routes_without_endpoint_dependency():
+def test_internal_router_registration_protects_routes_without_endpoint_dependency(
+    monkeypatch,
+):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "local-test-token")
+    get_settings.cache_clear()
+
     from app.main import _include_internal_router
 
     app = FastAPI()
@@ -87,38 +86,60 @@ def test_internal_router_registration_protects_routes_without_endpoint_dependenc
 
     _include_internal_router(app, router)
 
-    route = next(
-        route
-        for route in app.routes
-        if isinstance(route, APIRoute)
-        and route.path == "/probe/unprotected-at-endpoint"
+    client = TestClient(app)
+    assert client.get("/probe/unprotected-at-endpoint").status_code == 401
+    assert (
+        client.get(
+            "/probe/unprotected-at-endpoint",
+            headers={"X-Internal-Api-Key": "local-test-token"},
+        ).status_code
+        == 200
     )
-    assert _route_has_internal_auth(route)
 
 
-def test_create_app_protects_every_business_api_route(monkeypatch):
+def test_create_app_registers_every_business_router_with_internal_auth(monkeypatch):
     monkeypatch.setenv("APP_ENV", "local")
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "local-test-token")
     get_settings.cache_clear()
 
-    from app.main import create_app
+    import app.main as main_module
 
-    app = create_app()
-    business_routes = [
-        route
-        for route in app.routes
-        if isinstance(route, APIRoute) and route.path != "/health"
-    ]
+    original_include_router = FastAPI.include_router
+    registrations = []
 
-    assert business_routes
-    assert all(_route_has_internal_auth(route) for route in business_routes)
+    def record_router_registration(app, router, *args, **kwargs):
+        registrations.append((router, args, kwargs))
+        return original_include_router(app, router, *args, **kwargs)
 
-    health_route = next(
-        route
-        for route in app.routes
-        if isinstance(route, APIRoute) and route.path == "/health"
+    monkeypatch.setattr(
+        FastAPI,
+        "include_router",
+        record_router_registration,
     )
-    assert _route_has_internal_auth(health_route) is False
+
+    app = main_module.create_app()
+
+    assert [router for router, _args, _kwargs in registrations] == [
+        main_module.chat_stream.router,
+        main_module.search.router,
+        main_module.ingest.router,
+        main_module.vision.router,
+        main_module.vision.router,
+        main_module.coach.router,
+        main_module.coach.router,
+        main_module.coach_auto_brief_ops.router,
+        main_module.moderation.router,
+        main_module.release_decision.router,
+    ]
+    assert all(
+        any(
+            getattr(dependency, "dependency", None) is require_ai_internal_token
+            for dependency in kwargs.get("dependencies", [])
+        )
+        for _router, _args, kwargs in registrations
+    )
+
+    assert TestClient(app).get("/health").status_code == 200
 
 
 def test_openapi_marks_business_operations_as_internal(monkeypatch):
