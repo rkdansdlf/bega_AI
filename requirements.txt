@@ -11,7 +11,9 @@ httpx>=0.28.1
 openai>=2.38.0
 # Use CPU-only Torch to avoid downloading CUDA/nvidia libraries during image build.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.12.0
+# Torch 2.13 removes the setuptools<82 cap; pin the patched release.
+setuptools==83.0.0
+torch==2.13.0
 sentence-transformers==5.5.1
 tqdm>=4.67.3
 firebase-admin>=7.4.0

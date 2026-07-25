@@ -3,6 +3,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 DEV_REQUIREMENTS = (ROOT / "requirements-dev").read_text(encoding="utf-8")
+RUNTIME_REQUIREMENTS = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+RUNTIME_REQUIREMENT_LINES = {
+    line.strip()
+    for line in RUNTIME_REQUIREMENTS.splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+}
 LINT_JOB = WORKFLOW[WORKFLOW.index("  lint:\n") : WORKFLOW.index("\n  test:\n")]
 FORMAT_STEP = LINT_JOB[
     LINT_JOB.index("      - name: Check changed Python formatting\n") : LINT_JOB.index(
@@ -34,3 +40,9 @@ def test_ci_formats_only_nul_safe_changed_python_paths() -> None:
     assert '> "${changed_files_output}"' in FORMAT_STEP
     assert 'black --check -- "${changed_python_files[@]}"' in FORMAT_STEP
     assert "black --check ." not in LINT_JOB
+
+
+def test_runtime_dependencies_allow_patched_setuptools() -> None:
+    assert "torch==2.13.0" in RUNTIME_REQUIREMENT_LINES
+    assert "setuptools==83.0.0" in RUNTIME_REQUIREMENT_LINES
+    assert "torch==2.12.0" not in RUNTIME_REQUIREMENT_LINES
