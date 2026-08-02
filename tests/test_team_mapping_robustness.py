@@ -331,7 +331,7 @@ class TestTeamMappingRobustness:
             "_fetch_team_mapping_rows",
             _fake_fetch,
         )
-        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr("app.deps.get_baseball_connection_pool", lambda: _FakePool())
 
         tool = DatabaseQueryTool(mock_db_connection)
 
@@ -376,7 +376,7 @@ class TestTeamMappingRobustness:
             "_fetch_team_mapping_rows",
             _fake_fetch,
         )
-        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr("app.deps.get_baseball_connection_pool", lambda: _FakePool())
 
         tool = GameQueryTool(mock_db_connection)
 
@@ -415,7 +415,7 @@ class TestTeamMappingRobustness:
             raise RuntimeError("oci closed")
 
         monkeypatch.setattr(GameQueryTool, "_fetch_team_mapping_rows", _always_fail)
-        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr("app.deps.get_baseball_connection_pool", lambda: _FakePool())
         monkeypatch.setattr(
             "app.tools.game_query.load_team_mapping_snapshot",
             lambda: snapshot_rows,
@@ -458,7 +458,7 @@ class TestTeamMappingRobustness:
             raise RuntimeError("oci closed")
 
         monkeypatch.setattr(DatabaseQueryTool, "_fetch_team_mapping_rows", _always_fail)
-        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr("app.deps.get_baseball_connection_pool", lambda: _FakePool())
         monkeypatch.setattr(
             "app.tools.database_query.load_team_mapping_snapshot",
             lambda: snapshot_rows,
@@ -491,7 +491,7 @@ class TestTeamMappingRobustness:
             raise RuntimeError("oci closed")
 
         monkeypatch.setattr(DatabaseQueryTool, "_fetch_team_mapping_rows", _always_fail)
-        monkeypatch.setattr("app.deps.get_connection_pool", lambda: _FakePool())
+        monkeypatch.setattr("app.deps.get_baseball_connection_pool", lambda: _FakePool())
         monkeypatch.setattr(
             "app.tools.database_query.load_team_mapping_snapshot",
             lambda: [],

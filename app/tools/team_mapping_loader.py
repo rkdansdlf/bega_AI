@@ -93,9 +93,10 @@ async def load_team_mappings_with_retry(
         logger.warning(primary_failure_message, exc)
 
     try:
-        from app.deps import get_connection_pool
+        # teams 는 야구 도메인 테이블이다.
+        from app.deps import get_baseball_connection_pool
 
-        async with get_connection_pool().connection() as retry_conn:
+        async with get_baseball_connection_pool().connection() as retry_conn:
             rows = await fetch_rows(retry_conn)
         if rows:
             apply_rows(rows, retry_source)

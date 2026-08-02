@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     legacy_source_db_url: Optional[str] = Field(
         None, validation_alias="SUPABASE_DB_URL"
     )
+    # 야구 데이터를 RAG 와 다른 DB 로 분리할 때만 설정한다. 미설정이면 RAG DB 를
+    # 그대로 쓰므로 단일 DB 배포에서 동작이 바뀌지 않는다.
+    ai_baseball_db_url: Optional[str] = Field(
+        None, validation_alias="AI_BASEBALL_DB_URL"
+    )
     # `auto` keeps local/dev startup compatibility. `managed` requires the
     # migration role to provision the schema before the AI process starts.
     ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
@@ -864,12 +869,7 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """AI 서비스가 사용할 PostgreSQL 연결 URL을 반환합니다."""
-        return self.source_db_url
-
-    @property
-    def source_db_url(self) -> str:
-        """배치/마이그레이션 스크립트용 Source DB URL을 반환합니다.
+        """AI 소유 데이터(RAG·캐시·인제스트 상태)를 저장할 PostgreSQL URL.
 
         우선순위:
         1) OCI_DB_URL
@@ -891,6 +891,25 @@ class Settings(BaseSettings):
             return self.legacy_source_db_url
 
         raise RuntimeError("OCI_DB_URL or POSTGRES_DB_URL is not configured.")
+
+    @property
+    def baseball_db_url(self) -> str:
+        """야구 데이터를 읽을 PostgreSQL URL.
+
+        AI_BASEBALL_DB_URL 이 설정된 경우에만 RAG DB 와 갈라진다. 미설정이면
+        database_url 을 그대로 반환하므로 단일 DB 배포에서 동작이 동일하다.
+        """
+        if self.ai_baseball_db_url:
+            return self.ai_baseball_db_url
+        return self.database_url
+
+    @property
+    def source_db_url(self) -> str:
+        """배치/마이그레이션 스크립트가 읽을 Source DB URL.
+
+        인제스트는 여기서 야구 테이블을 읽어 database_url 의 rag_chunks 로 쓴다.
+        """
+        return self.baseball_db_url
 
     @property
     def function_calling_model(self) -> str:

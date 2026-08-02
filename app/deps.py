@@ -43,10 +43,13 @@ from .internal_auth import require_ai_internal_token
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성). 전 계층이 async psycopg3로 통일됨.
 _connection_pool: Optional[AsyncConnectionPool] = None
 _ingest_connection_pool: Optional[AsyncConnectionPool] = None
+_baseball_connection_pool: Optional[AsyncConnectionPool] = None
 DB_POOL_MIN_SIZE = 1
 DB_POOL_MAX_SIZE = 30
 INGEST_DB_POOL_MIN_SIZE = 1
 INGEST_DB_POOL_MAX_SIZE = 2
+BASEBALL_DB_POOL_MIN_SIZE = 1
+BASEBALL_DB_POOL_MAX_SIZE = 10
 INGEST_ORCHESTRATION_MIGRATION_SQLS = tuple(
     (
         Path(__file__).resolve().parent / "db" / "migrations" / filename
@@ -219,10 +222,11 @@ def _create_async_connection_pool(
     *,
     min_size: int,
     max_size: int,
+    conninfo: Optional[str] = None,
 ) -> AsyncConnectionPool:
     settings = get_settings()
     return AsyncConnectionPool(
-        conninfo=settings.database_url,
+        conninfo=conninfo or settings.database_url,
         min_size=min_size,
         max_size=max_size,
         check=AsyncConnectionPool.check_connection,
@@ -250,6 +254,33 @@ def get_connection_pool() -> AsyncConnectionPool:
             _format_connection_pool_stats(_connection_pool),
         )
     return _connection_pool
+
+
+def get_baseball_connection_pool() -> AsyncConnectionPool:
+    """야구 테이블 조회 전용 풀.
+
+    AI_BASEBALL_DB_URL 이 설정되지 않으면 baseball_db_url 이 database_url 과 같아
+    이 풀은 일반 풀과 같은 DB 를 가리킨다. 그 상태에서는 커넥션이 조금 더 열릴 뿐
+    동작이 달라지지 않으므로, 분리 전에도 안전하게 배포할 수 있다.
+    """
+    global _baseball_connection_pool
+    if _baseball_connection_pool is None:
+        settings = get_settings()
+        _baseball_connection_pool = _create_async_connection_pool(
+            min_size=BASEBALL_DB_POOL_MIN_SIZE,
+            max_size=BASEBALL_DB_POOL_MAX_SIZE,
+            conninfo=settings.baseball_db_url,
+        )
+        logger.info(
+            "[DB] Baseball connection pool created (open pending) separated=%s pool_stats=%s",
+            bool(settings.ai_baseball_db_url),
+            _format_connection_pool_stats(
+                _baseball_connection_pool,
+                min_size=BASEBALL_DB_POOL_MIN_SIZE,
+                max_size=BASEBALL_DB_POOL_MAX_SIZE,
+            ),
+        )
+    return _baseball_connection_pool
 
 
 def get_ingest_connection_pool() -> AsyncConnectionPool:
@@ -332,6 +363,14 @@ async def close_ingest_connection_pool() -> None:
     global _ingest_connection_pool
     pool = _ingest_connection_pool
     _ingest_connection_pool = None
+    if pool is not None:
+        await pool.close()
+
+
+async def close_baseball_connection_pool() -> None:
+    global _baseball_connection_pool
+    pool = _baseball_connection_pool
+    _baseball_connection_pool = None
     if pool is not None:
         await pool.close()
 
@@ -578,9 +617,12 @@ async def _prepare_required_database_pools(
 ) -> tuple[AsyncConnectionPool, AsyncConnectionPool]:
     general_pool = get_connection_pool()
     ingest_pool = get_ingest_connection_pool()
+    baseball_pool = get_baseball_connection_pool()
     try:
         await general_pool.open(wait=True, timeout=10.0)
         await ingest_pool.open(wait=True, timeout=10.0)
+        await baseball_pool.open(wait=True, timeout=10.0)
+        # 스키마 준비는 AI 소유 테이블만 대상이므로 일반 풀에서만 수행한다.
         await _prepare_schema(general_pool, settings)
     except BaseException as exc:  # noqa: BLE001
         logger.error(
@@ -595,6 +637,7 @@ async def _prepare_required_database_pools(
             ),
         )
         for resource_name, closer in (
+            ("baseball_pool", close_baseball_connection_pool),
             ("ingest_pool", close_ingest_connection_pool),
             ("general_pool", close_connection_pool),
         ):
@@ -742,6 +785,10 @@ async def lifespan(app):
                 except BaseException as exc:  # noqa: BLE001
                     cleanup_errors.append(("baseball_agent_runtime", exc))
 
+            await attempt_async_cleanup(
+                "baseball_pool",
+                close_baseball_connection_pool,
+            )
             await attempt_async_cleanup(
                 "ingest_pool",
                 close_ingest_connection_pool,

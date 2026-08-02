@@ -41,6 +41,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from ..deps import (
     get_agent,
+    get_baseball_connection_pool,
     get_connection_pool,
     get_coach_llm_generator,
     require_ai_internal_token,
@@ -11536,7 +11537,9 @@ async def analyze_team(
 
     try:
         request_id = uuid.uuid4().hex[:8]
+        # coach_analysis_cache 는 AI 소유라 일반 풀, 경기/시즌 조회는 야구 풀을 쓴다.
         pool = get_connection_pool()
+        baseball_pool = get_baseball_connection_pool()
         team_resolver = TeamCodeResolver()
 
         home_team_canonical = team_resolver.resolve_canonical(payload.home_team_id)
@@ -11556,7 +11559,7 @@ async def analyze_team(
                 detail="unsupported_team_for_regular_analysis",
             )
 
-        year, resolve_source = await _resolve_target_year(payload, pool)
+        year, resolve_source = await _resolve_target_year(payload, baseball_pool)
         if not _is_valid_analysis_year(year):
             raise HTTPException(status_code=400, detail="analysis_year_out_of_range")
 
@@ -11567,7 +11570,7 @@ async def analyze_team(
             else None
         )
         game_evidence = await _collect_game_evidence(
-            pool,
+            baseball_pool,
             payload,
             year=year,
             home_team_code=home_team_canonical,
@@ -11715,7 +11718,7 @@ async def analyze_team(
             analysis_type=analysis_type,
         )
         manual_data_request = await _build_manual_data_request(
-            pool,
+            baseball_pool,
             payload,
             game_evidence,
             evidence_assessment,
