@@ -43,6 +43,54 @@ AI 서비스가 직접 조회하는 야구 테이블: `game`(28곳), `player_sea
 
 → **쿼리 재작성 없이 라우팅만으로 분리된다.**
 
+## 요건: 배포 환경에서 적재와 조회가 모두 살아 있어야 한다
+
+분리 후에도 운영에서 다음 둘이 동작해야 한다.
+
+1. **RAG 적재** — `rag_chunks`에 쓰기. 소스는 야구 테이블이므로 **읽기(야구 DB) →
+   쓰기(RAG DB)** 가 DB 경계를 넘는다.
+2. **야구 조회** — 챗봇·코치가 요청 처리 중 야구 테이블을 읽는다.
+
+### 적재는 이미 2-DB를 지원한다
+
+`scripts/ingest_from_kbo.py`가 소스와 대상 커넥션을 따로 연다.
+
+```python
+source_conn = psycopg.connect(source_db_url)          # 야구 읽기
+dest_conn   = psycopg.connect(settings.database_url)  # rag_chunks 쓰기
+```
+
+`--source-db-url` CLI 인자도 이미 있다. 두 URL이 현재 같은 DB를 가리킬 뿐,
+**코드는 분리된 두 DB를 전제로 쓰여 있다.** 서비스 내부 경로(`POST /ingest/run`)도
+실행 레코드만 남기고(202 Accepted) 실제 작업은 워커가 이 스크립트를 호출하므로
+같은 구조를 탄다.
+
+교차 SQL도 없다 — 이 스크립트의 SQL 블록 35개 중 두 도메인을 함께 참조하는 것은
+1개뿐이고 그마저 모듈 docstring이다.
+
+더 나아가 **설정 계층에 이미 이음새가 있다.** `app/config.py`에서:
+
+```python
+@property
+def database_url(self) -> str:
+    return self.source_db_url          # 868행 — 지금은 그대로 위임
+
+@property
+def source_db_url(self) -> str:        # 871행
+    # 우선순위: OCI_DB_URL → POSTGRES_DB_URL → SUPABASE_DB_URL(deprecated)
+```
+
+이름은 이미 `database_url`(대상)과 `source_db_url`(소스)로 갈라져 있고 **값만 같다.**
+그리고 호출부가 이미 올바른 의미로 쓰고 있다 — 인제스트는 읽기에 `source_db_url`,
+쓰기에 `database_url`을 넘긴다(`ingest_worker.py:467`, `daily_ingest_kbo.sh:64`).
+
+→ **적재 경로는 코드 변경이 없다.** `source_db_url`이 새 환경변수를 먼저 보게 하면
+   그 순간 소스와 대상이 갈라진다.
+
+### 남는 것은 런타임 조회 경로
+
+요청 처리 중 야구 테이블을 읽는 26개 커넥션 획득 지점만 풀을 나누면 된다.
+
 ## 분리 지점이 하나다
 
 모든 DB 접근이 단일 초크포인트를 지난다.
@@ -161,6 +209,53 @@ psql -h <대상> -U <user> -d rag -c "\di idx_rag_chunks_*"
 5. 문제 시 3단계의 환경변수만 되돌리고 재기동 — **데이터 롤백 불필요**
 
 원본 RAG 테이블은 안정화가 확인될 때까지 삭제하지 않는다.
+
+## 작업계획
+
+각 단계가 독립적으로 되돌아가도록 배치했다. 1·2단계는 운영에 배포해도 동작이 변하지
+않으므로(폴백), 데이터가 움직이는 3단계 전에 코드를 먼저 안정화할 수 있다.
+
+### 1단계 — 런타임 2-풀 (코드, 동작 무변화)
+
+| 파일 | 작업 |
+|---|---|
+| `app/config.py` | `source_db_url`이 신규 `AI_BASEBALL_DB_URL`을 최우선으로 보게 함. 미설정 시 현행 우선순위(`OCI_DB_URL`→`POSTGRES_DB_URL`) 유지 → **동작 무변화**. `database_url`은 `source_db_url` 위임을 끊고 `POSTGRES_DB_URL`을 직접 반환 |
+| `app/deps.py` | `_create_async_connection_pool(conninfo=…)` 일반화, 풀 2개 노출, 기동/종료 시 함께 open/close |
+| `app/tools/pooled_connection.py` | `connection_scope(conn, *, domain="rag")` — 기본값 RAG로 두어 누락 시 현행 유지 |
+| 호출부 26곳 | 야구 쿼리에만 `domain="baseball"` 명시 |
+
+호출부는 대부분 파일 단위로 도메인이 갈려 기계적이다. 쿼리별 판단이 필요한 것은
+`routers/coach.py`(4)와 `tools/regulation_query.py`(2) 둘뿐이다.
+
+검증: 기존 pytest 전량(현재 4062건). `AI_BASEBALL_DB_URL` 미설정 상태에서 전부 통과해야
+한다 — 통과하면 이 단계는 운영에 무해하다.
+
+### 2단계 — 적재 배선
+
+**코드 변경 없음.** 1단계에서 `source_db_url`을 분리하면 인제스트는 자동으로
+야구 DB에서 읽고 RAG DB에 쓴다 — 호출부가 이미 두 값을 구분해 넘기고 있다.
+
+검증: 소량 테이블 하나로 인제스트를 돌려 야구 DB 읽기와 `rag_chunks` 행 증가를
+함께 확인한다. 이 검증이 **경계를 넘는 쓰기가 살아 있는지**를 보는 지점이다.
+
+### 3단계 — 데이터 이관
+
+아래 "데이터 이관" 절의 `pg_dump`/`pg_restore`. 원본은 유지한다.
+
+### 4단계 — 전환
+
+`POSTGRES_DB_URL`을 새 RAG DB로, `AI_BASEBALL_DB_URL`을 기존 DB로 지정 후 재기동.
+
+검증 순서:
+1. `GET /health`
+2. 챗봇 질의 1건 — RAG 검색 경로
+3. 코치 분석 1건 — 야구 조회 경로 (가장 혼재된 경로라 여기서 누락이 드러난다)
+4. 인제스트 1건 — 경계를 넘는 쓰기
+5. `scripts/smoke_chatbot.py`
+
+### 5단계 — 정리
+
+안정화 확인 후 기존 DB의 RAG 테이블 삭제. 그 전까지는 남겨 롤백 여지를 유지한다.
 
 ## 미결 사항
 
