@@ -86,7 +86,7 @@ def test_get_rag_pipeline_uses_shared_runtime(monkeypatch):
 
     monkeypatch.setattr(deps, "get_shared_baseball_agent_runtime", lambda: fake_runtime)
     monkeypatch.setattr(deps, "RAGPipeline", _FakePipeline)
-    monkeypatch.setattr(deps, "get_connection_pool", lambda: fake_pool)
+    monkeypatch.setattr(deps, "get_rag_connection_pool", lambda: fake_pool)
 
     pipeline = deps.get_rag_pipeline()
 

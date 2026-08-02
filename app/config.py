@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     ai_baseball_db_url: Optional[str] = Field(
         None, validation_alias="AI_BASEBALL_DB_URL"
     )
+    # rag_chunks 를 별도 호스트에 둘 때만 설정한다. 자체 캐시(chat/coach)는
+    # 요청마다 쓰기가 발생하므로 여기로 따라가지 않고 database_url 에 남는다.
+    ai_rag_db_url: Optional[str] = Field(None, validation_alias="AI_RAG_DB_URL")
     # `auto` keeps local/dev startup compatibility. `managed` requires the
     # migration role to provision the schema before the AI process starts.
     ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
@@ -891,6 +894,17 @@ class Settings(BaseSettings):
             return self.legacy_source_db_url
 
         raise RuntimeError("OCI_DB_URL or POSTGRES_DB_URL is not configured.")
+
+    @property
+    def rag_db_url(self) -> str:
+        """rag_chunks 를 읽을 PostgreSQL URL.
+
+        AI_RAG_DB_URL 이 설정된 경우에만 갈라진다. 미설정이면 database_url 을
+        그대로 반환하므로 단일 DB 배포에서 동작이 동일하다.
+        """
+        if self.ai_rag_db_url:
+            return self.ai_rag_db_url
+        return self.database_url
 
     @property
     def baseball_db_url(self) -> str:

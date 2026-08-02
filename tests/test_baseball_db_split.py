@@ -1,7 +1,7 @@
-"""야구 DB 분리 배선 검증.
+"""DB 도메인 분리 배선 검증.
 
-분리 전(AI_BASEBALL_DB_URL 미설정)에는 두 풀이 같은 DB 를 가리켜야 하고,
-설정한 순간에만 갈라져야 한다. 그 경계를 고정한다.
+캐시(자체 테이블) · RAG(rag_chunks) · 야구 세 도메인이 각자 URL 을 갖되,
+전용 환경변수를 설정하기 전에는 모두 같은 DB 로 폴백해야 한다. 그 경계를 고정한다.
 """
 
 import pytest
@@ -23,6 +23,7 @@ def build_settings(monkeypatch):
             "POSTGRES_DB_URL",
             "SUPABASE_DB_URL",
             "AI_BASEBALL_DB_URL",
+            "AI_RAG_DB_URL",
         ):
             monkeypatch.delenv(name, raising=False)
         env.setdefault("POSTGRES_DB_URL", "postgresql://user:pw@rag-host:5432/rag")
@@ -60,7 +61,7 @@ def test_oci_url_still_wins_for_the_rag_database(build_settings) -> None:
 
 @pytest.mark.parametrize(
     ("domain", "expected_pool"),
-    [("rag", "general"), ("baseball", "baseball")],
+    [("cache", "general"), ("rag", "rag"), ("baseball", "baseball")],
 )
 @pytest.mark.asyncio
 async def test_connection_scope_selects_the_pool_for_its_domain(
@@ -94,14 +95,15 @@ async def test_connection_scope_selects_the_pool_for_its_domain(
     monkeypatch.setattr(
         "app.deps.get_baseball_connection_pool", lambda: _FakePool("baseball")
     )
+    monkeypatch.setattr("app.deps.get_rag_connection_pool", lambda: _FakePool("rag"))
 
     async with connection_scope(None, domain=domain) as conn:
         assert conn.label == expected_pool
 
 
 @pytest.mark.asyncio
-async def test_connection_scope_defaults_to_the_rag_pool(monkeypatch) -> None:
-    """태깅을 빠뜨린 호출부가 야구 풀로 새지 않아야 한다."""
+async def test_connection_scope_defaults_to_the_local_cache_pool(monkeypatch) -> None:
+    """태깅을 빠뜨린 호출부가 원격 DB(RAG·야구)로 새지 않아야 한다."""
 
     from app.tools.pooled_connection import connection_scope
 
@@ -129,8 +131,29 @@ async def test_connection_scope_defaults_to_the_rag_pool(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.deps.get_baseball_connection_pool", lambda: _FakePool("baseball")
     )
+    monkeypatch.setattr("app.deps.get_rag_connection_pool", lambda: _FakePool("rag"))
 
     async with connection_scope(None):
         pass
 
     assert calls == ["general"]
+
+
+def test_rag_url_defaults_to_the_cache_database(build_settings) -> None:
+    settings = build_settings()
+
+    assert settings.rag_db_url == settings.database_url
+
+
+def test_rag_url_splits_without_dragging_the_caches_along(build_settings) -> None:
+    """A-2 의 요점: rag_chunks 만 원격으로 가고 캐시는 남는다."""
+
+    settings = build_settings(
+        AI_RAG_DB_URL="postgresql://user:pw@rag-remote:5432/ragdb",
+        AI_BASEBALL_DB_URL="postgresql://user:pw@bb-host:5432/bb",
+    )
+
+    assert settings.rag_db_url.endswith("/ragdb")
+    # 캐시는 요청마다 쓰기가 발생하므로 원격으로 따라가면 안 된다.
+    assert settings.database_url.endswith("/rag")
+    assert settings.baseball_db_url.endswith("/bb")

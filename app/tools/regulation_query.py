@@ -87,7 +87,9 @@ class RegulationQueryTool:
 
     @asynccontextmanager
     async def _connection_scope(self, force_fresh: bool = False):
-        async with connection_scope(self.connection, force_fresh=force_fresh) as conn:
+        async with connection_scope(
+            self.connection, force_fresh=force_fresh, domain="rag"
+        ) as conn:
             yield conn
 
     def _retry_warning_message(self, action: str) -> str:
