@@ -44,12 +44,15 @@ from .internal_auth import require_ai_internal_token
 _connection_pool: Optional[AsyncConnectionPool] = None
 _ingest_connection_pool: Optional[AsyncConnectionPool] = None
 _baseball_connection_pool: Optional[AsyncConnectionPool] = None
+_rag_connection_pool: Optional[AsyncConnectionPool] = None
 DB_POOL_MIN_SIZE = 1
 DB_POOL_MAX_SIZE = 30
 INGEST_DB_POOL_MIN_SIZE = 1
 INGEST_DB_POOL_MAX_SIZE = 2
 BASEBALL_DB_POOL_MIN_SIZE = 1
 BASEBALL_DB_POOL_MAX_SIZE = 10
+RAG_DB_POOL_MIN_SIZE = 1
+RAG_DB_POOL_MAX_SIZE = 20
 INGEST_ORCHESTRATION_MIGRATION_SQLS = tuple(
     (
         Path(__file__).resolve().parent / "db" / "migrations" / filename
@@ -256,6 +259,33 @@ def get_connection_pool() -> AsyncConnectionPool:
     return _connection_pool
 
 
+def get_rag_connection_pool() -> AsyncConnectionPool:
+    """rag_chunks 조회 전용 풀.
+
+    AI_RAG_DB_URL 이 설정되지 않으면 일반 풀과 같은 DB 를 가리키므로 분리 전에도
+    안전하게 배포할 수 있다. 자체 캐시는 요청마다 쓰기가 발생하므로 이 풀을 타지
+    않고 일반 풀에 남는다.
+    """
+    global _rag_connection_pool
+    if _rag_connection_pool is None:
+        settings = get_settings()
+        _rag_connection_pool = _create_async_connection_pool(
+            min_size=RAG_DB_POOL_MIN_SIZE,
+            max_size=RAG_DB_POOL_MAX_SIZE,
+            conninfo=settings.rag_db_url,
+        )
+        logger.info(
+            "[DB] RAG connection pool created (open pending) separated=%s pool_stats=%s",
+            bool(settings.ai_rag_db_url),
+            _format_connection_pool_stats(
+                _rag_connection_pool,
+                min_size=RAG_DB_POOL_MIN_SIZE,
+                max_size=RAG_DB_POOL_MAX_SIZE,
+            ),
+        )
+    return _rag_connection_pool
+
+
 def get_baseball_connection_pool() -> AsyncConnectionPool:
     """야구 테이블 조회 전용 풀.
 
@@ -363,6 +393,14 @@ async def close_ingest_connection_pool() -> None:
     global _ingest_connection_pool
     pool = _ingest_connection_pool
     _ingest_connection_pool = None
+    if pool is not None:
+        await pool.close()
+
+
+async def close_rag_connection_pool() -> None:
+    global _rag_connection_pool
+    pool = _rag_connection_pool
+    _rag_connection_pool = None
     if pool is not None:
         await pool.close()
 
@@ -618,10 +656,12 @@ async def _prepare_required_database_pools(
     general_pool = get_connection_pool()
     ingest_pool = get_ingest_connection_pool()
     baseball_pool = get_baseball_connection_pool()
+    rag_pool = get_rag_connection_pool()
     try:
         await general_pool.open(wait=True, timeout=10.0)
         await ingest_pool.open(wait=True, timeout=10.0)
         await baseball_pool.open(wait=True, timeout=10.0)
+        await rag_pool.open(wait=True, timeout=10.0)
         # 스키마 준비는 AI 소유 테이블만 대상이므로 일반 풀에서만 수행한다.
         await _prepare_schema(general_pool, settings)
     except BaseException as exc:  # noqa: BLE001
@@ -637,6 +677,7 @@ async def _prepare_required_database_pools(
             ),
         )
         for resource_name, closer in (
+            ("rag_pool", close_rag_connection_pool),
             ("baseball_pool", close_baseball_connection_pool),
             ("ingest_pool", close_ingest_connection_pool),
             ("general_pool", close_connection_pool),
@@ -785,6 +826,7 @@ async def lifespan(app):
                 except BaseException as exc:  # noqa: BLE001
                     cleanup_errors.append(("baseball_agent_runtime", exc))
 
+            await attempt_async_cleanup("rag_pool", close_rag_connection_pool)
             await attempt_async_cleanup(
                 "baseball_pool",
                 close_baseball_connection_pool,
@@ -842,7 +884,9 @@ def get_rag_pipeline() -> RAGPipeline:
     더 이상 단일 커넥션으로 직렬화되지 않는다.
     """
     settings = get_settings()
-    pool_instance = get_connection_pool()
+    # 검색은 rag_chunks 를 읽으므로 RAG 풀을 쓴다. rag_retrieval_events 쓰기도
+    # 같은 풀을 타지만 fire-and-forget 이라 응답 지연에 얹히지 않는다.
+    pool_instance = get_rag_connection_pool()
     return RAGPipeline(
         settings=settings,
         pool=pool_instance,

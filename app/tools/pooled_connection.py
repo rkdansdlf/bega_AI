@@ -14,13 +14,19 @@ async def connection_scope(
     connection: psycopg.AsyncConnection | None,
     *,
     force_fresh: bool = False,
-    domain: str = "rag",
+    domain: str = "cache",
 ) -> AsyncIterator[psycopg.AsyncConnection]:
     """풀에서 커넥션을 빌린다.
 
-    `domain="baseball"` 은 야구 테이블을 읽는 쿼리에만 쓴다. 기본값이 "rag" 이므로
-    태깅을 빠뜨린 호출부는 기존과 같은 풀을 쓴다 — AI_BASEBALL_DB_URL 을 설정하기
-    전까지는 두 풀이 같은 DB 를 가리키므로 어느 쪽이든 동작이 같다.
+    도메인은 셋이다.
+      - "cache"    기본값. AI 자체 테이블(chat/coach 캐시, 인제스트 상태).
+                   요청마다 쓰기가 발생하므로 가장 가까운 DB 에 둔다.
+      - "rag"      rag_chunks 조회. 별도 호스트로 뺄 수 있다.
+      - "baseball" 야구 테이블 조회.
+
+    기본값이 "cache" 인 이유는 태깅을 빠뜨린 호출부가 원격 DB 로 새지 않게
+    하기 위해서다. 세 URL 이 모두 같은 값으로 폴백되는 동안에는 어느 쪽이든
+    동작이 같으므로, 분리 전 배포는 무해하다.
     """
     conn = connection
     if (
@@ -31,11 +37,18 @@ async def connection_scope(
         yield conn
         return
 
-    from ..deps import get_baseball_connection_pool, get_connection_pool
-
-    pool = (
-        get_baseball_connection_pool() if domain == "baseball" else get_connection_pool()
+    from ..deps import (
+        get_baseball_connection_pool,
+        get_connection_pool,
+        get_rag_connection_pool,
     )
+
+    if domain == "baseball":
+        pool = get_baseball_connection_pool()
+    elif domain == "rag":
+        pool = get_rag_connection_pool()
+    else:
+        pool = get_connection_pool()
     async with pool.connection() as pooled_conn:
         yield pooled_conn
 
