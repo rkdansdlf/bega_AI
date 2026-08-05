@@ -1,273 +1,130 @@
-# AI 서비스 2-DB 분리 설계 (RAG ↔ 야구)
+# AI 서비스 DB 도메인 분리
 
-작성 2026-07-26. 상태: **설계안, 미구현.**
+작성 2026-07-26, 갱신 2026-08-03.
+상태: **코드 구현 완료(`418cf2e`, `518fea4`). 데이터 이관·전환 대기.**
 
-## 배경
+## 무엇을 왜 나눴나
 
-AI 서비스와 백엔드가 같은 PostgreSQL 데이터베이스(`bega_backend`, 3.5GB)를 공유한다.
-RAG 임베딩을 별도 호스트로 옮기려 했으나, AI 서비스가 같은 커넥션에서 야구 테이블도
-조회하고 있어 `rag_chunks`만 떼어낼 수 없다는 것이 확인됐다.
+AI 서비스와 백엔드가 하나의 PostgreSQL(`bega_backend`, 3.5GB)을 공유하고 있었다.
+`rag_chunks`(2233MB)를 다른 호스트로 옮기려 했으나, AI 서비스가 같은 커넥션으로
+야구 테이블도 조회해서 떼어낼 수 없었다.
 
-이 문서는 그 결합을 끊는 설계다.
+이후 대량 임베딩과 `rag_chunks` 적재가 **별도 프로젝트로 이관**되면서 이 서비스는
+`rag_chunks`에 대해 읽기 전용이 되었다. 그에 맞춰 분리 단위를 셋으로 잡았다.
 
-## 현재 상태 (2026-07-26 실측)
+| 도메인 | 환경변수 | 내용 | 위치 |
+|---|---|---|---|
+| cache | `POSTGRES_DB_URL` | chat/coach 캐시, 인제스트 상태 | **로컬 고정** |
+| rag | `AI_RAG_DB_URL` | `rag_chunks`, `rag_retrieval_events` | 원격 가능 |
+| baseball | `AI_BASEBALL_DB_URL` | `game`, `player_season_*` 등 | 원격 가능 |
+
+**캐시를 rag 와 함께 보내지 않는 것이 요점이다.** 캐시는 거의 모든 요청에서 쓰이므로
+원격 왕복이 응답 지연에 그대로 얹힌다. 반면 `rag_chunks`는 조회뿐이고
+`rag_retrieval_events` 쓰기는 `asyncio.create_task` 로 fire-and-forget 이라
+원격에 둬도 응답을 막지 않는다.
+
+## 분리가 가능했던 이유
+
+**교차 조인이 없다.** 두 도메인 테이블을 함께 언급하는 파일은 `core/rag_storage.py`와
+`tools/regulation_query.py` 둘뿐인데, 그 안의 SQL 블록 26개 중 두 도메인을 함께
+참조하는 것은 0개였다. 같은 파일에 도메인별 쿼리가 나란히 있을 뿐이다.
+→ 쿼리 재작성 없이 **라우팅만으로** 분리된다.
+
+**획득 지점이 하나다.** 모든 DB 접근이
+`app/tools/pooled_connection.py:connection_scope()` 를 지나고, RAG 검색은
+`app/deps.py:get_rag_pipeline()` 한 곳에서 풀을 주입받는다.
+
+## 구현된 것
 
 ```
-pgvector-db 컨테이너 (서버 /var/lib/docker/volumes/ubuntu_pgvector_data)
-└── bega_backend  3495 MB
-    ├── rag_chunks                    2233 MB   ← AI 소유, 64%
-    ├── game_events / game_play_by_play 685 MB  ← 야구
-    ├── team_daily_roster               87 MB   ← 야구
-    └── 그 외 야구 테이블               ~490 MB
+app/config.py                database_url / rag_db_url / baseball_db_url
+                             뒤 둘은 전용 환경변수 미설정 시 database_url 로 폴백
+app/deps.py                  풀 3개(+인제스트 조정 풀) 생성·기동·종료
+                             get_rag_pipeline() 이 RAG 풀을 주입
+app/tools/pooled_connection.py
+                             connection_scope(domain="cache"|"rag"|"baseball")
+                             기본값 "cache" — 태깅 누락이 원격으로 새지 않게
 ```
 
-두 소비자가 같은 DB를 가리킨다.
+도메인 태깅이 실제로 필요했던 곳:
 
-| 소비자 | 환경변수 | 값 |
+| 위치 | 도메인 | 근거 |
 |---|---|---|
-| AI 서비스 | `POSTGRES_DB_URL` | `postgresql://…@pgvector-db:5432/bega_backend` |
-| 백엔드(야구) | `BASEBALL_DB_URL` | `jdbc:postgresql://pgvector-db:5432/bega_backend` |
+| `tools/document_query.py`, `tools/regulation_query.py` | rag | `FROM rag_chunks` |
+| `deps.py:get_rag_pipeline()` | rag | 검색·리트리벌 |
+| `tools/team_mapping_loader.py` | baseball | `FROM teams` |
+| `routers/coach.py` — `_resolve_target_year`, `_collect_game_evidence`, `_build_manual_data_request` | baseball | `FROM game`, `game_lineups`, `game_summary`, `kbo_seasons` |
+| `routers/coach.py` — 나머지 8곳 | cache | `coach_analysis_cache` |
 
-AI 서비스가 직접 조회하는 야구 테이블: `game`(28곳), `player_season_pitching`(14),
-`player_season_batting`(13), `game_events`(5), `game_batting_stats`(5),
-`team_standings_daily`(4).
+나머지 호출부는 전부 캐시/RAG 라 기본값으로 덮인다.
 
-## 실현 가능성 — 교차 조인이 없다
+검증: `tests/test_baseball_db_split.py` 가 폴백과 도메인별 풀 선택을 고정한다.
+전체 스위트 4073건 통과.
 
-분리의 성패는 "한 SQL 안에서 두 도메인을 조인하는가"에 달렸다. **없다.**
+## 남은 단계
 
-`rag_chunks`와 야구 테이블을 함께 언급하는 파일은 `core/rag_storage.py`와
-`tools/regulation_query.py` 둘뿐인데, 두 파일의 SQL 블록 26개를 검사한 결과
-**두 도메인을 함께 참조하는 블록은 0개**다. 같은 파일 안에 도메인별 쿼리가
-나란히 있을 뿐이다.
+세 URL 이 모두 폴백 상태이므로 현재 코드는 **운영에 배포해도 동작이 바뀌지 않는다.**
+아래는 실제로 도메인을 갈라내는 절차다. 각 단계가 환경변수 하나씩이라 개별 롤백된다.
 
-→ **쿼리 재작성 없이 라우팅만으로 분리된다.**
+### R-1. 사전 확인 (외부 RAG DB 준비 측)
 
-## 요건: 배포 환경에서 적재와 조회가 모두 살아 있어야 한다
+- pgvector 확장 존재: `CREATE EXTENSION IF NOT EXISTS vector;`
+- `rag_chunks` 스키마가 `app/db/schema.sql` 과 일치하는지
+- **임베딩 정합성** — 적재에 쓴 모델·차원과 이 서비스의 `EMBED_MODEL`·`EMBED_DIM`
+  이 같아야 한다. 다르면 질의 벡터와 저장 벡터의 공간이 달라 검색이 무의미해진다.
+  현재 스키마는 `vector(256)` 고정이므로 차원이 바뀌면 컬럼 타입 변경이 선행된다.
+- 인덱스: `idx_rag_chunks_*` 15종. 대량 적재 후 생성해야 빠르다.
 
-분리 후에도 운영에서 다음 둘이 동작해야 한다.
-
-1. **RAG 적재** — `rag_chunks`에 쓰기. 소스는 야구 테이블이므로 **읽기(야구 DB) →
-   쓰기(RAG DB)** 가 DB 경계를 넘는다.
-2. **야구 조회** — 챗봇·코치가 요청 처리 중 야구 테이블을 읽는다.
-
-### 적재는 이미 2-DB를 지원한다
-
-`scripts/ingest_from_kbo.py`가 소스와 대상 커넥션을 따로 연다.
-
-```python
-source_conn = psycopg.connect(source_db_url)          # 야구 읽기
-dest_conn   = psycopg.connect(settings.database_url)  # rag_chunks 쓰기
-```
-
-`--source-db-url` CLI 인자도 이미 있다. 두 URL이 현재 같은 DB를 가리킬 뿐,
-**코드는 분리된 두 DB를 전제로 쓰여 있다.** 서비스 내부 경로(`POST /ingest/run`)도
-실행 레코드만 남기고(202 Accepted) 실제 작업은 워커가 이 스크립트를 호출하므로
-같은 구조를 탄다.
-
-교차 SQL도 없다 — 이 스크립트의 SQL 블록 35개 중 두 도메인을 함께 참조하는 것은
-1개뿐이고 그마저 모듈 docstring이다.
-
-더 나아가 **설정 계층에 이미 이음새가 있다.** `app/config.py`에서:
-
-```python
-@property
-def database_url(self) -> str:
-    return self.source_db_url          # 868행 — 지금은 그대로 위임
-
-@property
-def source_db_url(self) -> str:        # 871행
-    # 우선순위: OCI_DB_URL → POSTGRES_DB_URL → SUPABASE_DB_URL(deprecated)
-```
-
-이름은 이미 `database_url`(대상)과 `source_db_url`(소스)로 갈라져 있고 **값만 같다.**
-그리고 호출부가 이미 올바른 의미로 쓰고 있다 — 인제스트는 읽기에 `source_db_url`,
-쓰기에 `database_url`을 넘긴다(`ingest_worker.py:467`, `daily_ingest_kbo.sh:64`).
-
-→ **적재 경로는 코드 변경이 없다.** `source_db_url`이 새 환경변수를 먼저 보게 하면
-   그 순간 소스와 대상이 갈라진다.
-
-### 남는 것은 런타임 조회 경로
-
-요청 처리 중 야구 테이블을 읽는 26개 커넥션 획득 지점만 풀을 나누면 된다.
-
-## 분리 지점이 하나다
-
-모든 DB 접근이 단일 초크포인트를 지난다.
-
-```
-app/deps.py:_create_async_connection_pool()   settings.database_url 로 풀 1개 생성
-        ↑
-app/deps.py:get_connection_pool()             전역 싱글턴
-        ↑
-app/tools/pooled_connection.py:connection_scope()   커넥션 획득 표준 경로
-```
-
-획득 지점은 총 26곳이며 도메인 분포는 다음과 같다.
-
-| 파일 | 획득 | 도메인 |
-|---|---|---|
-| `routers/chat_stream.py` | 13 | RAG |
-| `routers/coach.py` | 4 | **혼재** (RAG 18 / 야구 21 참조) |
-| `core/chat_cache.py` | 1 | RAG |
-| `tools/team_mapping_loader.py` | 1 | 야구 |
-| `tools/regulation_query.py` | 2 | 혼재 |
-| `tools/document_query.py` | 2 | RAG |
-| `tools/pooled_connection.py` | 1 | (초크포인트) |
-
-혼재 파일이 둘 있으나 교차 조인이 없으므로 **쿼리 단위로 도메인이 결정된다.**
-
-## 목표 구조
-
-```
-AI 서비스
-├── RAG 풀      POSTGRES_DB_URL          → rag_chunks, chat_*_cache, ai_ingest_*, …
-└── 야구 풀     AI_BASEBALL_DB_URL(신규)  → game, player_season_*, …  (읽기 전용)
-
-백엔드
-└── 야구 풀     BASEBALL_DB_URL          → 변경 없음
-```
-
-AI 서비스의 야구 접근은 전부 조회다. 야구 풀은 **읽기 전용**으로 열어
-`target_session_attrs`를 낮추고 권한도 `SELECT`만 부여한다.
-
-## 테이블 배치
-
-**RAG DB로 이동** (AI 소유, `app/db/schema.sql` + `migrations/`):
-
-```
-rag_chunks  rag_ingest_jobs  rag_retrieval_events
-chat_response_cache  chat_semantic_response_cache
-chat_semantic_cache_shadow_observation
-coach_analysis_cache
-ai_ingest_runs  ai_ingest_watermarks  ai_ingest_checkpoints
-```
-
-**야구 DB에 잔류**: `game*`, `player_*`, `team_*`, `matchup_*`, `stat_rankings` 등.
-
-**미결정 — `operator_*` 4종** (`operator_data_items`, `operator_roster_events`,
-`operator_schedule_items`, `operator_season_events`): 스키마상 AI 소유지만 내용은
-운영자가 제공한 **야구 데이터**이며 `MANUAL_BASEBALL_DATA_REQUIRED` 계약의 일부다.
-`tools/operator_data_query.py`가 야구 테이블을 1회 참조하므로 배치에 따라
-그 쿼리의 풀이 달라진다. **결정 필요** (아래 미결 사항 참조).
-
-## 코드 변경
-
-1. **`app/config.py`** — `baseball_db_url` 필드 추가(`AI_BASEBALL_DB_URL`).
-   미설정 시 `database_url`로 폴백해 **기존 단일 DB 배포와 하위호환**을 유지한다.
-   이 폴백이 있어야 분리 전후로 같은 코드가 돈다.
-
-2. **`app/deps.py`** — `_create_async_connection_pool(conninfo=…)`로 일반화하고
-   `get_connection_pool()` / `get_baseball_connection_pool()` 두 개를 노출.
-   기동·종료 시 두 풀을 함께 open/close.
-
-3. **`app/tools/pooled_connection.py`** — `connection_scope(conn, *, domain="rag")`.
-   `domain`으로 풀을 고르되 기본값은 RAG로 두어 호출부 누락 시 현행 동작을 유지한다.
-
-4. **호출부 26곳 태깅** — 야구 쿼리에만 `domain="baseball"`을 명시. 대부분은
-   `chat_stream.py`(13)처럼 파일 전체가 한 도메인이라 기계적이다. `coach.py`와
-   `regulation_query.py`만 쿼리별 판단이 필요하다.
-
-5. **`app/db/schema.sql`** — 야구 테이블 참조가 있다면 RAG DB 스키마에서 제외.
-
-## 데이터 이관
-
-분리 자체는 코드 배포만으로 끝나지 않는다. RAG 테이블을 새 DB로 옮겨야 한다.
+### R-2. RAG 전환
 
 ```bash
-# 1) RAG 테이블만 덤프 (약 2.3GB)
-pg_dump -h <현재> -U <user> -d bega_backend -Fc \
-  -t rag_chunks -t rag_ingest_jobs -t rag_retrieval_events \
-  -t chat_response_cache -t chat_semantic_response_cache \
-  -t chat_semantic_cache_shadow_observation -t coach_analysis_cache \
-  -t ai_ingest_runs -t ai_ingest_watermarks -t ai_ingest_checkpoints \
-  -f rag.dump
+# .env.prod 에 추가 (env_file 로 컨테이너에 전달된다)
+AI_RAG_DB_URL=postgresql://user:pw@<rag-host>:5432/<db>
 
-# 2) 대상 DB 준비 — pgvector 확장이 먼저 있어야 한다
-psql -h <대상> -U <user> -d rag -c "CREATE EXTENSION IF NOT EXISTS vector;"
-
-# 3) 복원
-pg_restore -h <대상> -U <user> -d rag --no-owner --no-privileges -j 4 rag.dump
-
-# 4) 검증 — 행 수와 인덱스가 모두 넘어왔는지
-psql -h <대상> -U <user> -d rag -c "SELECT count(*) FROM rag_chunks;"
-psql -h <대상> -U <user> -d rag -c "\di idx_rag_chunks_*"
+cd /home/ubuntu && ./compose.sh up -d --no-build ai-chatbot
 ```
 
-`rag_chunks`의 pgvector 인덱스(`idx_rag_chunks_season_year`, `_team_id`,
-`_meta_league`)는 복원 후 재생성에 시간이 걸린다. `-j 4`로 병렬화하고,
-복원 완료까지 AI 서비스는 기존 DB를 계속 보게 둔다.
-
-## 전환과 롤백
-
-폴백 설계 덕에 무중단 전환이 가능하다.
-
-1. 코드 배포 (`AI_BASEBALL_DB_URL` 미설정 → 두 풀이 같은 DB를 가리킴, **동작 무변화**)
-2. RAG 데이터를 새 DB로 복사 (원본 유지)
-3. `POSTGRES_DB_URL`을 새 RAG DB로, `AI_BASEBALL_DB_URL`을 기존 DB로 지정 후 재기동
-4. 검증
-5. 문제 시 3단계의 환경변수만 되돌리고 재기동 — **데이터 롤백 불필요**
-
-원본 RAG 테이블은 안정화가 확인될 때까지 삭제하지 않는다.
-
-## 작업계획
-
-각 단계가 독립적으로 되돌아가도록 배치했다. 1·2단계는 운영에 배포해도 동작이 변하지
-않으므로(폴백), 데이터가 움직이는 3단계 전에 코드를 먼저 안정화할 수 있다.
-
-### 1단계 — 런타임 2-풀 (코드, 동작 무변화)
-
-| 파일 | 작업 |
-|---|---|
-| `app/config.py` | `source_db_url`이 신규 `AI_BASEBALL_DB_URL`을 최우선으로 보게 함. 미설정 시 현행 우선순위(`OCI_DB_URL`→`POSTGRES_DB_URL`) 유지 → **동작 무변화**. `database_url`은 `source_db_url` 위임을 끊고 `POSTGRES_DB_URL`을 직접 반환 |
-| `app/deps.py` | `_create_async_connection_pool(conninfo=…)` 일반화, 풀 2개 노출, 기동/종료 시 함께 open/close |
-| `app/tools/pooled_connection.py` | `connection_scope(conn, *, domain="rag")` — 기본값 RAG로 두어 누락 시 현행 유지 |
-| 호출부 26곳 | 야구 쿼리에만 `domain="baseball"` 명시 |
-
-호출부는 대부분 파일 단위로 도메인이 갈려 기계적이다. 쿼리별 판단이 필요한 것은
-`routers/coach.py`(4)와 `tools/regulation_query.py`(2) 둘뿐이다.
-
-검증: 기존 pytest 전량(현재 4062건). `AI_BASEBALL_DB_URL` 미설정 상태에서 전부 통과해야
-한다 — 통과하면 이 단계는 운영에 무해하다.
-
-### 2단계 — 적재 배선
-
-**코드 변경 없음.** 1단계에서 `source_db_url`을 분리하면 인제스트는 자동으로
-야구 DB에서 읽고 RAG DB에 쓴다 — 호출부가 이미 두 값을 구분해 넘기고 있다.
-
-검증: 소량 테이블 하나로 인제스트를 돌려 야구 DB 읽기와 `rag_chunks` 행 증가를
-함께 확인한다. 이 검증이 **경계를 넘는 쓰기가 살아 있는지**를 보는 지점이다.
-
-### 3단계 — 데이터 이관
-
-아래 "데이터 이관" 절의 `pg_dump`/`pg_restore`. 원본은 유지한다.
-
-### 4단계 — 전환
-
-`POSTGRES_DB_URL`을 새 RAG DB로, `AI_BASEBALL_DB_URL`을 기존 DB로 지정 후 재기동.
+기동 로그에서 `[DB] RAG connection pool created ... separated=True` 확인.
 
 검증 순서:
 1. `GET /health`
-2. 챗봇 질의 1건 — RAG 검색 경로
-3. 코치 분석 1건 — 야구 조회 경로 (가장 혼재된 경로라 여기서 누락이 드러난다)
-4. 인제스트 1건 — 경계를 넘는 쓰기
-5. `scripts/smoke_chatbot.py`
+2. 챗봇 질의 1건 — RAG 검색 경로가 살아 있는지
+3. `scripts/smoke_chatbot.py` 로 **p95 지연을 전환 전과 비교** — 원격 왕복이
+   붙으므로 여기서 수용 가능한지 판단한다
+4. 코치 분석 1건 — 캐시(로컬)와 야구(로컬)가 여전히 정상인지
 
-### 5단계 — 정리
+롤백: `AI_RAG_DB_URL` 을 지우고 재기동. 데이터 롤백 불필요.
 
-안정화 확인 후 기존 DB의 RAG 테이블 삭제. 그 전까지는 남겨 롤백 여지를 유지한다.
+### R-3. 야구 전환 (R-2 안정화 후)
+
+```bash
+AI_BASEBALL_DB_URL=postgresql://user:pw@<baseball-host>:5432/<db>
+```
+
+같은 방식으로 재기동·검증. 로그의 `[DB] Baseball connection pool created ...
+separated=True` 확인. 검증은 코치 분석(야구 조회가 가장 많은 경로)을 중심으로.
+
+주의: 백엔드의 `BASEBALL_DB_URL` 은 **별개**다. 이 단계는 AI 서비스만 옮기므로,
+백엔드가 여전히 기존 DB 를 본다면 야구 데이터가 두 곳에 존재하게 된다.
+정본을 하나로 유지할 계획이 없으면 두 사본이 갈라진다.
+
+### R-4. 정리
+
+전환이 안정되면 기존 DB 의 `rag_chunks` 를 삭제한다. 그 전까지는 남겨 롤백 여지를
+유지한다.
 
 ## 미결 사항
 
-1. **`operator_*` 4종의 배치** — AI 소유 vs 야구 데이터. 운영자 입력 흐름
-   (`MANUAL_BASEBALL_DATA_REQUIRED`)이 어느 쪽 DB를 정본으로 볼지 결정해야 한다.
-2. **RAG DB 호스트** — 서버 pgvector 컨테이너에 DB만 추가할지, 별도 호스트로 뺄지.
-   노트북 호스팅을 검토했다면 가용성 영향은 챗봇 품질 저하로 한정된다(야구 기능은
-   서버 DB에 남으므로 무관). 이 분리의 실질적 이득이 그 격리다.
-3. **야구 풀 권한** — 읽기 전용 롤을 새로 만들지, 기존 자격증명을 재사용할지.
+1. **`operator_*` 4종** — `operator_data_items`, `operator_roster_events`,
+   `operator_schedule_items`, `operator_season_events`. 스키마상 AI 소유지만 내용은
+   운영자가 제공한 야구 데이터이며 `MANUAL_BASEBALL_DATA_REQUIRED` 계약의 일부다.
+   현재는 캐시 도메인(기본값)에 있다. 야구가 원격으로 가면 정본 위치를 정해야 한다.
+2. **야구 사본 정본화** — R-3 주의 참조.
+3. **인제스트 코드의 처분** — 적재가 외부로 나가면서 `scripts/ingest_from_kbo.py`,
+   `app/routers/ingest.py`, ingest worker, `ai_ingest_*` 테이블이 쓰이지 않게 된다.
+   제거할지 폴백으로 남길지 미정.
 
 ## 이 작업이 풀지 못하는 것
 
-**Oracle의 `ORA-65114`와 무관하다.** 그것은 Autonomous Database의 할당량 문제이고
-이 분리는 PostgreSQL 쪽 이야기다. B2 재배포 차단은 이 작업으로 해소되지 않는다.
-이 분리의 목적은 RAG 데이터의 배치 자유도를 얻는 것이지 용량 확보가 아니다.
+Oracle Autonomous 의 `ORA-65114` 와 무관하다. 그것은 ADB 할당량 문제이고 이 분리는
+PostgreSQL 쪽이다. 백엔드의 Oracle 탈출은 별도 과제다.
