@@ -29,7 +29,7 @@ V1 실행 경로는 `P0` 도메인(`season_meta`, `schedule_window`, `game_day_l
 | --- | ---: | --- |
 | `season_meta` | 2 | 전용 operator season event 테이블 또는 RAG 보조 청크 |
 | `schedule_window` | 38 | `game` row와 대조 후 일정 override/staging |
-| `game_day_lineup` | 24 | 기존 `ingest_lineup_manual.py`, `apply_manual_starters.py` 우선 재사용 |
+| `game_day_lineup` | 24 | 기존 `ingest_lineup_manual.py(2026-08-17 삭제 — 라인업 수집은 크롤러 KBO_playwright 담당)`, `apply_manual_starters.py` 우선 재사용 |
 | `roster_news` | 22 | 전용 roster event 테이블 |
 | `venue_ticket` | 26 | 전용 venue guide 테이블 및 유효기간 기반 조회 |
 | `broadcast_media` | 7 | 전용 broadcast 테이블 |

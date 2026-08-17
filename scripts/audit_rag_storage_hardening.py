@@ -366,7 +366,8 @@ def build_recommendations(report: Dict[str, Any]) -> List[str]:
     ]
     if any(int(summary.get(field) or 0) > 0 for field in missing_fields):
         recommendations.append(
-            "Run backfill_rag_chunk_metadata.py in dry-run first, then apply in staging before production."
+            "Chunk metadata backfill now lives in the crawler project (KBO_playwright). "
+            "Run it there in dry-run first, then apply in staging before production."
         )
     if sensitive_scan.get("finding_counts"):
         recommendations.append(

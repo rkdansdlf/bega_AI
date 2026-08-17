@@ -1,3 +1,10 @@
+> ⛔ **폐기됨 (2026-08-17).** RAG 임베딩이 크롤러 프로젝트
+> ([KBO_playwright](https://github.com/rkdansdlf/KBO_playwright))로 이관됐고,
+> 이 런북이 전제하는 정리 스크립트들은 이 저장소에서 삭제됐다.
+> 임베딩 차원 변경을 포함한 후속 작업은 크롤러 쪽
+> `migrations/pgvector/004_switch_embedding_dimension.sql` 계열에서 다룬다.
+> 아래는 이력 보존용이다.
+
 # 256-d Embedding Post-Rollout Cleanup
 
 This runbook is for the final cleanup after `rag_chunks.embedding` has already

@@ -16,7 +16,7 @@
   2. 스크립트를 --drop-ivfflat 없이 실행하여 HNSW 생성
   3. AI 서비스에 AI_VECTOR_INDEX=hnsw 배포
      (halfvec 인덱스 생성 시 AI_VECTOR_QUANTIZATION=halfvec도 함께 배포)
-  4. scripts/audit_embedding_256_migration.py 로 검색 SQL이 halfvec(256)인지 확인
+  4. 검색 SQL이 현재 임베딩 차원의 halfvec인지 확인
   5. 정상 확인 후 --drop-ivfflat 옵션으로 IVFFlat 제거
   6. halfvec 전환 완료 후 --dry-run --drop-vector-hnsw 확인,
      이후 --drop-vector-hnsw 로 중복 vector HNSW 제거
@@ -122,12 +122,11 @@ def _vector_hnsw_drop_error(
 ) -> Optional[str]:
     if (quantization or "none").lower().strip() != "halfvec":
         return "AI_VECTOR_QUANTIZATION=halfvec is required to drop vector HNSW."
-    if int(embed_dim) != 256:
-        return "EMBED_DIM=256 is required to drop vector HNSW."
+    normalized_dim = max(1, int(embed_dim))
     if not halfvec_index_exists:
         return f"Required halfvec HNSW index is missing: {HALFVEC_HNSW_INDEX_NAME}"
-    if "halfvec(256)" not in distance_sql:
-        return "Retrieval distance SQL is not using halfvec(256)."
+    if f"halfvec({normalized_dim})" not in distance_sql:
+        return f"Retrieval distance SQL is not using halfvec({normalized_dim})."
     return None
 
 
@@ -230,7 +229,7 @@ def run(
 
     settings = get_settings()
     dsn = settings.database_url
-    embed_dim: int = getattr(settings, "embed_dim", 256)
+    embed_dim: int = getattr(settings, "embed_dim", 1536)
     quantization = getattr(settings, "ai_vector_quantization", "none")
     from app.core.retrieval import _embedding_distance_sql
 
@@ -386,7 +385,8 @@ def run(
                     f"{quantization_step}"
                     "2. 서비스 재시작 또는 재배포\n"
                     "3. 256-d 감사로 런타임/DB/검색 SQL 확인:\n"
-                    "     python scripts/audit_embedding_256_migration.py\n"
+                    "     (임베딩 점검은 크롤러 프로젝트 KBO_playwright 에서: "
+                    "src/cli/audit_rag_index.py)\n"
                     "4. 기존 IVFFlat 제거 (아직 제거하지 않은 경우):\n"
                     f"     python scripts/create_vector_index.py --drop-ivfflat\n"
                     "5. halfvec 정상화 후 중복 vector HNSW 제거:\n"
