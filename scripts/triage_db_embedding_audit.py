@@ -141,7 +141,7 @@ def _table_arg(source_table: str) -> str:
 
 def _reembed_command(table: str, year: str) -> str:
     return (
-        ".venv/bin/python scripts/reembed_missing_rows.py "
+        "KBO_playwright: scripts/maintenance/reembed_rag_chunks.py "
         "--report-path <coverage-report> "
         f"--start-year {year or '<start-year>'} --end-year {year or '<end-year>'}"
     )
@@ -149,13 +149,13 @@ def _reembed_command(table: str, year: str) -> str:
 
 def _backfill_command(source_table: str, year: str) -> str:
     return (
-        ".venv/bin/python scripts/backfill_rag_chunk_metadata.py --dry-run"
+        "KBO_playwright: src/cli/backfill_rag_index_identity.py --dry-run"
         f"{_table_arg(source_table)}{_season_arg(year)}"
     )
 
 
 def _cleanup_command() -> str:
-    return ".venv/bin/python scripts/cleanup_embedding_256_warnings.py --dry-run"
+    return "KBO_playwright: src/cli/audit_rag_index.py --dry-run"
 
 
 def _source_refresh_command(source_table: str, year: str) -> str:
@@ -401,7 +401,7 @@ def triage_storage(report: Mapping[str, Any]) -> List[TriageAction]:
                 action_type="metadata_backfill",
                 source_report="storage",
                 finding_type="storage_metadata_missing",
-                recommended_command=".venv/bin/python scripts/backfill_rag_chunk_metadata.py --dry-run",
+                recommended_command="KBO_playwright: src/cli/backfill_rag_index_identity.py --dry-run",
                 notes=f"Storage audit found {missing_total} missing lineage/hash/metadata signals.",
             )
         )

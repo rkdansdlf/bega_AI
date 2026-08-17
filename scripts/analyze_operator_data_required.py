@@ -184,7 +184,7 @@ CONTRACTS: Dict[str, DataContract] = {
             **COMMON_SOURCE_FIELDS,
         },
         description="선발, 라인업, 로테이션, 경기 당일 매치업 데이터가 필요합니다.",
-        notes="기존 ingest_lineup_manual.py와 manual starter pipeline을 우선 재사용합니다.",
+        notes="manual starter pipeline 을 우선 재사용합니다. 라인업 인제스트는 크롤러 프로젝트(KBO_playwright)가 맡습니다.",
     ),
     "roster_news": DataContract(
         domain="roster_news",

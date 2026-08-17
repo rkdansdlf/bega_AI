@@ -200,7 +200,8 @@ def build_steps(
                 "embedding_256",
                 [
                     py,
-                    "scripts/audit_embedding_256_migration.py",
+                    # 임베딩 생성/보정은 크롤러 프로젝트(KBO_playwright)로 이관됐다.
+                    "KBO_playwright: src/cli/audit_rag_index.py",
                     "--sample-limit",
                     str(args.sample_limit),
                     "--summary-output",

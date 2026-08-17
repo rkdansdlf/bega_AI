@@ -8,7 +8,9 @@
 
 - backend `AI_INGEST_ENABLED=true`일 때만 반복 작업을 등록합니다.
 - `AI_INGEST_CRON`의 기본값은 KST 기준 서버 설정에 따른 `30 4 * * *`입니다. 배포 환경의 JobRunr 시간대를 먼저 확인합니다.
-- `scripts/daily_ingest_kbo.sh`는 `MANUAL RECOVERY ONLY`입니다. 두 번째 cron이나 별도 주기 작업으로 등록하지 않습니다.
+- ~~`scripts/daily_ingest_kbo.sh`~~ 는 2026-08-17 에 삭제됐습니다. 야구 데이터 수집은
+  크롤러 프로젝트([KBO_playwright](https://github.com/rkdansdlf/KBO_playwright))가 맡습니다.
+  수동 복구가 필요하면 그쪽 워크플로(`daily_kbo_sync.yml`)를 씁니다.
 - 여러 backend 인스턴스가 같은 JobRunr 저장소를 사용해야 동일 recurring-job ID의 단일 실행 특성이 유지됩니다.
 
 ## 배포 및 마이그레이션 순서
@@ -19,7 +21,7 @@
    AI_SCHEMA_DB_URL='postgresql://...' ./scripts/migrate_ai_runtime_schema.sh
    ```
 
-   Managed migration script applies `001_ai_runtime_cache.sql` -> `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. Compatibility startup applies `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다. Fresh schema와 이전 004 schema 모두에 `source_updated_before timestamptz` stores the immutable source-clock cutoff; 같은 004가 `ADD COLUMN IF NOT EXISTS`로 기존 테이블을 안전하게 보강합니다.
+   Managed migration script applies `001_ai_runtime_cache.sql` -> `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql` -> `005_rag_runtime_compatibility.sql`. Compatibility startup applies `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다. 005는 기존 `rag_chunks`에 검색 계약 컬럼과 `rag_retrieval_events`를 additive하게 보강하며, 임베딩을 재생성하거나 `embedding_model` provenance를 추정하지 않습니다. Fresh schema와 이전 004 schema 모두에 `source_updated_before timestamptz` stores the immutable source-clock cutoff; 같은 004가 `ADD COLUMN IF NOT EXISTS`로 기존 테이블을 안전하게 보강합니다.
 
 2. AI 서비스를 `AI_DB_SCHEMA_MODE=managed`로 시작합니다. 작업자는 기본 활성화되며 다음 값으로 조정합니다.
 
