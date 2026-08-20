@@ -175,7 +175,9 @@ async def test_similarity_search_without_keyword_keeps_vector_path() -> None:
     assert "(expires_at IS NULL OR expires_at > now())" in sql
     assert "(valid_from IS NULL OR valid_from <= now())" in sql
     assert "(valid_to IS NULL OR valid_to > now())" in sql
-    assert "ORDER BY embedding <=> %s::vector ASC" in sql
+    assert (
+        "ORDER BY embedding::halfvec(1536) <=> %s::halfvec(1536) ASC" in sql
+    )
     assert params == [expected_vector, "game_inning_scores", 2025, expected_vector, 3]
 
 
