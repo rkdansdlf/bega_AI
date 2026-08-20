@@ -239,12 +239,12 @@ FastAPI Application (8001)
     # --- LLM/임베딩 프로바이더 선택 ---
     LLM_PROVIDER=openrouter          # openrouter(기본), gemini
     EMBED_PROVIDER=openrouter        # openrouter(기본), gemini, hf, local, openai
-    EMBED_DIM=256
+    EMBED_DIM=1536
     
     # --- OpenRouter 설정 (기본) ---
     OPENROUTER_API_KEY=sk-or-...
     OPENROUTER_MODEL=openrouter/free
-    OPENROUTER_EMBED_MODEL=openai/text-embedding-3-small
+    OPENROUTER_EMBED_MODEL=perplexity/pplx-embed-v1-4b
     OPENROUTER_REFERER=https://begabaseball.xyz
     OPENROUTER_APP_TITLE=BEGA 챗봇
     

@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.errors import QueryCanceled, UndefinedTable
 from psycopg import OperationalError as PsycopgOperationalError
 from psycopg import InterfaceError as PsycopgInterfaceError
-from ..config import Settings, get_settings
+from ..config import DEFAULT_EMBED_DIM, Settings, get_settings
 from .exceptions import DBRetrievalError
 from ..observability.metrics import AI_RETRIEVAL_FALLBACK_LEVEL_TOTAL
 
@@ -116,7 +116,10 @@ def _embedding_distance_sql(
         .strip()
     )
     if quantization == "halfvec":
-        embed_dim = max(1, int(getattr(settings, "embed_dim", 256) or 256))
+        embed_dim = max(
+            1,
+            int(getattr(settings, "embed_dim", DEFAULT_EMBED_DIM) or DEFAULT_EMBED_DIM),
+        )
         return f"{column}::halfvec({embed_dim}) <=> %s::halfvec({embed_dim})"
     return f"{column} <=> %s::vector"
 

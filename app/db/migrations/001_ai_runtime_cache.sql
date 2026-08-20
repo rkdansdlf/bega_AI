@@ -3,6 +3,8 @@
 -- AI_DB_SCHEMA_MODE=managed.
 -- The pgvector extension is a DBA/database prerequisite and is not installed
 -- by this application-cache migration.
+-- Deployments may install pgvector in either `public` or `extensions`.
+SET search_path TO public, extensions;
 
 CREATE TABLE IF NOT EXISTS coach_analysis_cache (
     cache_key varchar(64) primary key,
@@ -60,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_cache_created_at
 CREATE TABLE IF NOT EXISTS chat_semantic_response_cache (
     cache_key varchar(64) primary key,
     question_text text not null,
-    question_embedding extensions.vector(256) not null,
+    question_embedding vector(1536) not null,
     filters_hash varchar(64) not null,
     filters_json jsonb,
     intent varchar(50),

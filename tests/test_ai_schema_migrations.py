@@ -24,8 +24,22 @@ def test_ai_runtime_schema_vector_index_is_explicit_operator_step():
     )
 
     assert "CREATE INDEX IF NOT EXISTS idx_chat_semantic_cache_embedding_hnsw" in sql
-    assert "extensions.vector_cosine_ops" in sql
+    assert "question_embedding vector_cosine_ops" in sql
     assert "CREATE INDEX CONCURRENTLY" not in sql
+
+
+def test_pgvector_migrations_support_public_or_extensions_schema():
+    runtime_sql = (MIGRATION_DIR / "001_ai_runtime_cache.sql").read_text(
+        encoding="utf-8"
+    )
+    index_sql = (MIGRATION_DIR / "002_chat_semantic_cache_vector_index.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SET search_path TO public, extensions;" in runtime_sql
+    assert "question_embedding vector(1536)" in runtime_sql
+    assert "SET search_path TO public, extensions;" in index_sql
+    assert "question_embedding vector_cosine_ops" in index_sql
 
 
 def test_ingest_orchestration_migration_defines_durable_run_and_watermark_tables():

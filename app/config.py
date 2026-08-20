@@ -27,6 +27,8 @@ LOCAL_DEV_AI_INTERNAL_TOKEN = "local-dev-ai-internal-token"
 LOCAL_DEV_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "host.docker.internal"}
 DEFAULT_VISION_MODEL = "google/gemma-4-31b-it:free"
 DEFAULT_VISION_FALLBACK_MODELS = "mistralai/mistral-small-3.2-24b-instruct"
+DEFAULT_EMBED_DIM = 1536
+DEFAULT_OPENROUTER_EMBED_MODEL = "perplexity/pplx-embed-v1-4b"
 
 
 class Settings(BaseSettings):
@@ -169,7 +171,7 @@ class Settings(BaseSettings):
         None, validation_alias="OPENROUTER_APP_TITLE"
     )
     openrouter_embed_model: Optional[str] = Field(
-        "openai/text-embedding-3-small", validation_alias="OPENROUTER_EMBED_MODEL"
+        DEFAULT_OPENROUTER_EMBED_MODEL, validation_alias="OPENROUTER_EMBED_MODEL"
     )
     vision_model: str = Field(DEFAULT_VISION_MODEL, validation_alias="VISION_MODEL")
     vision_fallback_models_raw: str = Field(
@@ -504,7 +506,7 @@ class Settings(BaseSettings):
 
     # --- 임베딩 설정 ---
     embed_batch_size: int = Field(32, validation_alias="EMBED_BATCH_SIZE")
-    embed_dim: int = Field(256, validation_alias="EMBED_DIM")
+    embed_dim: int = Field(DEFAULT_EMBED_DIM, validation_alias="EMBED_DIM")
     hf_embed_model: str = Field(
         "intfloat/multilingual-e5-large", validation_alias="HF_EMBED_MODEL"
     )

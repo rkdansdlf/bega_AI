@@ -11,6 +11,8 @@ import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from ..config import DEFAULT_EMBED_DIM, DEFAULT_OPENROUTER_EMBED_MODEL
+
 _WHITESPACE_RE = re.compile(r"\s+")
 _SOURCE_LINE_RE = re.compile(r"(?m)^\s*(?:출처|source)\s*:.*$")
 _URL_RE = re.compile(r"https?://\S+")
@@ -167,7 +169,7 @@ CANONICAL_KBO_SOURCE_TABLES = {
     "game_pitching_stats",
     "game_summary",
 }
-DEFAULT_RAG_EMBEDDING_DIM = 256
+DEFAULT_RAG_EMBEDDING_DIM = DEFAULT_EMBED_DIM
 DEFAULT_RAG_EMBEDDING_VERSION = 2
 
 
@@ -317,7 +319,7 @@ def resolve_embedding_model(settings: Any) -> str:
         model = (
             getattr(settings, "openrouter_embed_model", None)
             or getattr(settings, "embed_model", None)
-            or "openai/text-embedding-3-small"
+            or DEFAULT_OPENROUTER_EMBED_MODEL
         )
     elif provider == "gemini":
         model = (

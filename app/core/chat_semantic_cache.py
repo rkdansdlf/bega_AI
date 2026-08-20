@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Sequence
 
-from app.config import Settings
+from app.config import DEFAULT_EMBED_DIM, Settings
 from app.observability.metrics import (
     AI_SEMANTIC_RESPONSE_CACHE_SHADOW_TOTAL,
     AI_SEMANTIC_RESPONSE_CACHE_TOTAL,
@@ -28,11 +28,13 @@ logger = logging.getLogger(__name__)
 FILTERS_HASH_SCHEMA_VERSION = "chat_semantic_filters_v1"
 
 
-CREATE_TABLE_SQL = """
+CREATE_TABLE_SQL = f"""
+SET search_path TO public, extensions;
+
 CREATE TABLE IF NOT EXISTS chat_semantic_response_cache (
     cache_key           VARCHAR(64)  PRIMARY KEY,
     question_text       TEXT         NOT NULL,
-    question_embedding  extensions.VECTOR(256)  NOT NULL,
+    question_embedding  vector({DEFAULT_EMBED_DIM})  NOT NULL,
     filters_hash        VARCHAR(64)  NOT NULL,
     filters_json        JSONB,
     intent              VARCHAR(50),
@@ -75,9 +77,11 @@ CREATE INDEX IF NOT EXISTS idx_chat_semantic_shadow_request_key
 """
 
 CREATE_VECTOR_INDEX_SQL = """
+SET search_path TO public, extensions;
+
 CREATE INDEX IF NOT EXISTS idx_chat_semantic_cache_embedding_hnsw
     ON chat_semantic_response_cache
-    USING hnsw (question_embedding extensions.vector_cosine_ops)
+    USING hnsw (question_embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 """
 

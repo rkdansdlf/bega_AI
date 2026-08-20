@@ -101,9 +101,59 @@ def test_general_and_ingest_pools_are_distinct_and_bounded(monkeypatch) -> None:
 
     assert general_pool is not ingest_pool
     assert captured[0]["min_size"] == 1
-    assert captured[0]["max_size"] == 30
+    assert captured[0]["max_size"] == 16
     assert captured[1]["min_size"] == 1
     assert captured[1]["max_size"] == 2
+
+
+def test_vector_index_readiness_rejects_invalid_concurrent_index() -> None:
+    report = deps._vector_index_readiness(
+        (
+            False,
+            True,
+            "hnsw",
+            "public",
+            "rag_chunks",
+            "CREATE INDEX idx ON public.rag_chunks USING hnsw "
+            "((embedding::halfvec(1536)) halfvec_cosine_ops)",
+        ),
+        expected_index="idx_rag_chunks_embedding_halfvec_hnsw",
+        quantization="halfvec",
+    )
+
+    assert report["ready"] is False
+    assert report["reason"] == "invalid_or_unexpected_definition"
+
+
+def test_vector_index_readiness_accepts_valid_halfvec_hnsw_definition() -> None:
+    report = deps._vector_index_readiness(
+        (
+            True,
+            True,
+            "hnsw",
+            "public",
+            "rag_chunks",
+            "CREATE INDEX idx ON public.rag_chunks USING hnsw "
+            "((embedding::halfvec(1536)) halfvec_cosine_ops)",
+        ),
+        expected_index="idx_rag_chunks_embedding_halfvec_hnsw",
+        quantization="halfvec",
+    )
+
+    assert report["ready"] is True
+
+
+def test_optional_release_model_failure_does_not_degrade_core_readiness() -> None:
+    checks = {
+        "db_general": {"ready": True},
+        "model_configuration": {"ready": True},
+        "release_decision_model_circuit": {
+            "ready": False,
+            "required": False,
+        },
+    }
+
+    assert deps._required_checks_ready(checks) is True
 
 
 def test_required_pool_startup_closes_both_pools_on_failure(monkeypatch) -> None:

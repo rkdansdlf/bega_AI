@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
-from ..config import Settings
+from ..config import DEFAULT_OPENROUTER_EMBED_MODEL, Settings
 from .http_clients import get_shared_httpx_client
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ def _embed_signature(settings: Settings) -> str:
         model = (
             getattr(settings, "openrouter_embed_model", None)
             or getattr(settings, "embed_model", None)
-            or "openai/text-embedding-3-small"
+            or DEFAULT_OPENROUTER_EMBED_MODEL
         )
         return f"{provider}:{model}:{embed_dim}"
     if provider == "gemini":
@@ -548,7 +548,7 @@ async def _embed_openrouter(
     model = (
         settings.openrouter_embed_model
         or settings.embed_model
-        or "openai/text-embedding-3-small"
+        or DEFAULT_OPENROUTER_EMBED_MODEL
     )
     expected_dim = int(settings.embed_dim) if settings.embed_dim else None
     base_url = settings.openrouter_base_url.rstrip("/")
@@ -591,7 +591,10 @@ async def _embed_openrouter(
             "model": model,
             "input": list(chunk),
         }
-        if expected_dim and _is_text_embedding_3_model(model):
+        if expected_dim and (
+            _is_text_embedding_3_model(model)
+            or model == DEFAULT_OPENROUTER_EMBED_MODEL
+        ):
             payload["dimensions"] = expected_dim
         response = await client.post(url, json=payload, headers=headers)
 

@@ -239,8 +239,8 @@ def test_settings_default_embeddings_use_openrouter(monkeypatch):
     settings = Settings(_env_file=None)
 
     assert settings.embed_provider == "openrouter"
-    assert settings.openrouter_embed_model == "openai/text-embedding-3-small"
-    assert settings.embed_dim == 256
+    assert settings.openrouter_embed_model == "perplexity/pplx-embed-v1-4b"
+    assert settings.embed_dim == 1536
 
 
 def test_cors_origins_accepts_json_array(monkeypatch):
