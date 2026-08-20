@@ -56,14 +56,14 @@ class _AsyncConn:
 # ---------------------------------------------------------------------------
 
 
-def test_ai_vector_index_default_is_auto(monkeypatch) -> None:
-    """AI_VECTOR_INDEX 미설정 시 기본값은 'auto'."""
+def test_ai_vector_index_default_is_hnsw(monkeypatch) -> None:
+    """AI_VECTOR_INDEX 미설정 시 운영 표준인 HNSW를 사용한다."""
     monkeypatch.delenv("AI_VECTOR_INDEX", raising=False)
     # get_settings()는 lru_cache이므로 직접 Settings 인스턴스를 생성한다.
     from app.config import Settings
 
     s = Settings()
-    assert s.ai_vector_index == "auto"
+    assert s.ai_vector_index == "hnsw"
 
 
 def test_ai_vector_index_env_override(monkeypatch) -> None:
@@ -84,13 +84,13 @@ def test_ai_vector_index_ivfflat(monkeypatch) -> None:
     assert s.ai_vector_index == "ivfflat"
 
 
-def test_ai_vector_quantization_default_is_none(monkeypatch) -> None:
-    """AI_VECTOR_QUANTIZATION 미설정 시 기본값은 'none'."""
+def test_ai_vector_quantization_default_is_halfvec(monkeypatch) -> None:
+    """AI_VECTOR_QUANTIZATION 미설정 시 운영 표준인 halfvec을 사용한다."""
     monkeypatch.delenv("AI_VECTOR_QUANTIZATION", raising=False)
     from app.config import Settings
 
     s = Settings()
-    assert s.ai_vector_quantization == "none"
+    assert s.ai_vector_quantization == "halfvec"
 
 
 def test_ai_vector_quantization_halfvec(monkeypatch) -> None:

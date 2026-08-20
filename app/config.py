@@ -336,12 +336,12 @@ class Settings(BaseSettings):
     # 벡터 인덱스 타입 선택:
     #   "hnsw"     - HNSW 세션 GUC(hnsw.ef_search)만 설정. 운영 HNSW 인덱스가 있을 때 사용.
     #   "ivfflat"  - IVFFlat 세션 GUC(ivfflat.probes)만 설정. 레거시 인덱스 유지 시 사용.
-    #   "auto"     - 기동 시 pg_indexes에서 HNSW 존재 여부를 감지하여 자동 선택(기본값).
-    # 운영 전환 흐름: 256-prefix migration → create_vector_index.py 실행(HNSW 생성)
+    #   "auto"     - 레거시/복구 환경에서만 명시적으로 선택하는 자동 감지 모드.
+    # 운영 전환 흐름: 1536-d embedding schema → create_vector_index.py 실행(HNSW 생성)
     # → AI_VECTOR_INDEX=hnsw 배포(halfvec 사용 시 AI_VECTOR_QUANTIZATION=halfvec) → ivfflat 제거.
-    ai_vector_index: str = Field("auto", validation_alias="AI_VECTOR_INDEX")
+    ai_vector_index: str = Field("hnsw", validation_alias="AI_VECTOR_INDEX")
     ai_vector_quantization: str = Field(
-        "none", validation_alias="AI_VECTOR_QUANTIZATION"
+        "halfvec", validation_alias="AI_VECTOR_QUANTIZATION"
     )
     # IVFFlat 인덱스(`idx_rag_chunks_embedding`, lists=644) 기준 probes=512는 79% 버킷 스캔을
     # 의미하여 사실상 시퀀셜 스캔에 가깝다. 권장 운영치는 24~64 범위. dev/test 기본을 보수적으로
