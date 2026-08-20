@@ -1,5 +1,6 @@
 -- pgvector extension and rag_chunks table definition
-create extension if not exists vector with schema extensions;
+create extension if not exists vector;
+set search_path to public, extensions;
 
 create table if not exists rag_chunks (
   id bigserial primary key,
@@ -13,7 +14,7 @@ create table if not exists rag_chunks (
   title text,
   content text not null,
   content_tsv tsvector generated always as (to_tsvector('simple', coalesce(content, ''))) stored,
-  embedding vector(256),
+  embedding vector(1536),
   meta jsonb default '{}'::jsonb,
   metadata jsonb default '{}'::jsonb,
   source_type text,
@@ -60,7 +61,7 @@ where (metadata is null or metadata = '{}'::jsonb)
 -- Vector and text search indexes
 -- halfvec HNSW 인덱스 (신규 설치 기본). 운영 마이그레이션은 scripts/create_vector_index.py 사용.
 -- pgvector >= 0.7.0 필요. m=16: 레이어당 최대 연결 수, ef_construction=64: 빌드 정확도.
-create index if not exists idx_rag_chunks_embedding_halfvec_hnsw on rag_chunks using hnsw ((embedding::halfvec(256)) halfvec_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
+create index if not exists idx_rag_chunks_embedding_halfvec_hnsw on rag_chunks using hnsw ((embedding::halfvec(1536)) halfvec_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
 -- vector HNSW 인덱스는 halfvec 전환 후 운영 cleanup 대상입니다.
 -- create index if not exists idx_rag_chunks_embedding_hnsw on rag_chunks using hnsw (embedding vector_cosine_ops) with (m = 16, ef_construction = 64) where embedding is not null;
 -- 기존 IVFFlat 인덱스 (레거시, 운영 마이그레이션 후 scripts/create_vector_index.py --drop-ivfflat 으로 제거)

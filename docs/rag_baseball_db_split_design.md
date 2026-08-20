@@ -72,7 +72,7 @@ app/tools/pooled_connection.py
 - `rag_chunks` 스키마가 `app/db/schema.sql` 과 일치하는지
 - **임베딩 정합성** — 적재에 쓴 모델·차원과 이 서비스의 `EMBED_MODEL`·`EMBED_DIM`
   이 같아야 한다. 다르면 질의 벡터와 저장 벡터의 공간이 달라 검색이 무의미해진다.
-  현재 스키마는 `vector(256)` 고정이므로 차원이 바뀌면 컬럼 타입 변경이 선행된다.
+  현재 스키마는 `vector(1536)` 고정이므로 질의 임베딩도 동일한 차원을 사용해야 한다.
 - 인덱스: `idx_rag_chunks_*` 15종. 대량 적재 후 생성해야 빠르다.
 
 ### R-2. RAG 전환

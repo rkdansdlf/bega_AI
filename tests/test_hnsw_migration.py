@@ -268,7 +268,7 @@ def test_schema_sql_has_hnsw_index_definition() -> None:
     content = schema_path.read_text(encoding="utf-8").lower()
     assert "hnsw" in content, "schema.sql에 HNSW 인덱스 정의가 없습니다."
     assert "idx_rag_chunks_embedding_halfvec_hnsw" in content
-    assert "embedding::halfvec(256)" in content
+    assert "embedding::halfvec(1536)" in content
     assert "where embedding is not null" in content
 
 

@@ -34,11 +34,11 @@ def test_schema_sql_has_rag_storage_metadata_columns() -> None:
         assert column in content
 
 
-def test_schema_sql_uses_256_dimensional_embeddings() -> None:
+def test_schema_sql_uses_1536_dimensional_embeddings() -> None:
     content = _schema_sql()
 
-    assert "embedding vector(256)" in content
-    assert "embedding vector(1536)" not in content
+    assert "embedding vector(1536)" in content
+    assert "embedding vector(256)" not in content
     assert "embedding_version int default 2" in content
 
 
@@ -53,7 +53,7 @@ def test_halfvec_index_migration_sql_does_not_reembed() -> None:
         "create index concurrently if not exists idx_rag_chunks_embedding_halfvec_hnsw"
         in content
     )
-    assert "embedding::halfvec(256)" in content
+    assert "embedding::halfvec(1536)" in content
     assert "halfvec_cosine_ops" in content
     assert "does not call any embedding api" in content
     assert "alter column embedding type" not in content

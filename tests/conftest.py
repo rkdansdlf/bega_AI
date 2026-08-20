@@ -35,9 +35,14 @@ if "PIL" not in sys.modules:
 # ``halfvec(256)`` path. The failure only reproduces in the *full* suite (where
 # the polluting module is collected), not in isolation.
 #
+# ``EMBED_DIM``/``EMBED_MODEL`` leak the same way and matter more since the
+# 1536-d switch: an operator whose workspace ``.env.prod`` still carries the
+# old 256-d rollout would see dimension assertions fail against code that is
+# correct. Tests must read the declared default, not the operator's env.
+#
 # We snapshot a clean baseline for these keys before any test module is
 # collected, then restore it and reset the cached settings around every test.
-_ENV_BASELINE_KEYS = ("AI_VECTOR_QUANTIZATION",)
+_ENV_BASELINE_KEYS = ("AI_VECTOR_QUANTIZATION", "EMBED_DIM", "EMBED_MODEL")
 _env_baseline: dict[str, str | None] = {}
 
 
