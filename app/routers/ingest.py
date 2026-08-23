@@ -30,8 +30,12 @@ from ..core.rag_storage import (
     soft_deactivate_missing_parts_async,
     vector_literal,
 )
+from ..core.oracle_rag import (
+    is_oracle_rag_connection,
+    upsert_oracle_rag_chunks,
+)
 from ..deps import (
-    get_db_connection,
+    get_rag_connection,
     get_ingest_run_store,
     require_ai_internal_token,
 )
@@ -57,7 +61,7 @@ class IngestPayload(BaseModel):
 @router.post("/")
 async def ingest_document(
     payload: IngestPayload,
-    conn=Depends(get_db_connection),
+    conn=Depends(get_rag_connection),
     __: None = Depends(require_ai_internal_token),
     _: None = Depends(rate_limit_debug_dependency),
 ):
@@ -111,22 +115,26 @@ async def ingest_document(
     if not records:
         return {"status": "ok", "chunks": 0, "skipped": chunk_count}
 
-    async with conn.cursor() as cur:
-        await cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
-        existing_embeddings = (
-            await fetch_existing_embedding_texts_async(
-                cur,
-                content_hashes=(record[4]["content_hash"] for record in records),
-                embedding_model=embedding_model,
-                embedding_dim=records[0][4]["embedding_dim"],
-                embedding_version=embedding_version,
-                chunking_version=records[0][4]["chunking_version"],
+    if is_oracle_rag_connection(conn):
+        existing_embeddings = {}
+    else:
+        async with conn.cursor() as cur:
+            await cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
+            existing_embeddings = (
+                await fetch_existing_embedding_texts_async(
+                    cur,
+                    content_hashes=(record[4]["content_hash"] for record in records),
+                    embedding_model=embedding_model,
+                    embedding_dim=records[0][4]["embedding_dim"],
+                    embedding_version=embedding_version,
+                    chunking_version=records[0][4]["chunking_version"],
+                )
+                if bool(getattr(settings, "rag_storage_dedup_enabled", True))
+                else {}
             )
-            if bool(getattr(settings, "rag_storage_dedup_enabled", True))
-            else {}
-        )
 
     vector_literals: list[Optional[str]] = [None] * len(records)
+    vector_values: list[Optional[list[float]]] = [None] * len(records)
     embed_indices: list[int] = []
     embed_texts: list[str] = []
     pending_hashes: dict[str, int] = {}
@@ -148,9 +156,31 @@ async def ingest_document(
     if embed_texts:
         embeddings = await async_embed_texts(embed_texts, settings)
         for idx, embedding in zip(embed_indices, embeddings):
+            vector_values[idx] = list(embedding)
             vector_literals[idx] = vector_literal(embedding)
         for duplicate_idx, original_idx in duplicate_links:
             vector_literals[duplicate_idx] = vector_literals[original_idx]
+            vector_values[duplicate_idx] = vector_values[original_idx]
+
+    if is_oracle_rag_connection(conn):
+        active_source_row_ids = [record[1] for record in records]
+        stored = await upsert_oracle_rag_chunks(
+            conn,
+            source_table=payload.source_table,
+            records=records,
+            embeddings=vector_values,
+            season_year=payload.season_year,
+            team_id=payload.team_id,
+            player_id=payload.player_id,
+            source_prefix=base_source_row_id(payload.source_row_id),
+            active_source_row_ids=active_source_row_ids,
+        )
+        return {
+            "status": "ok",
+            "chunks": len(records),
+            "stored": stored,
+            "skipped": chunk_count - len(records),
+        }
 
     async with conn.cursor() as cur:
         await cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH};")
@@ -309,7 +339,9 @@ async def get_ingestion_run(
 
     record = await store.get(run_id)
     if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="run not found"
+        )
     return {
         "run_id": str(record.run_id),
         "status": record.status.value,

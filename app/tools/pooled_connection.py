@@ -30,7 +30,8 @@ async def connection_scope(
     """
     conn = connection
     if (
-        not force_fresh
+        domain != "rag"
+        and not force_fresh
         and conn is not None
         and not bool(getattr(conn, "closed", False))
     ):

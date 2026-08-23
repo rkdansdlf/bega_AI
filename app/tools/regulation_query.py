@@ -11,6 +11,13 @@ from typing import Dict, Any, List
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.errors import UndefinedTable
+from ..core.oracle_rag import (
+    _parse_meta_async,
+    acquire_cursor,
+    is_oracle_rag_connection,
+    lob_to_text,
+    oracle_exact_document_search,
+)
 from .pooled_connection import connection_scope, run_with_fresh_connection_retry
 from .query_logging import (
     ACTION_FIND_RELATED_REGULATIONS,
@@ -250,6 +257,20 @@ class RegulationQueryTool:
             return bool(row)
 
     async def _rag_chunks_table_available(self, conn: psycopg.AsyncConnection) -> bool:
+        if is_oracle_rag_connection(conn):
+            cursor = await acquire_cursor(conn)
+            try:
+                await cursor.execute(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RAG_CHUNKS'"
+                )
+                row = await cursor.fetchone()
+                return bool(row and row[0])
+            finally:
+                close = getattr(cursor, "close", None)
+                if callable(close):
+                    result = close()
+                    if hasattr(result, "__await__"):
+                        await result
         async with conn.cursor(row_factory=dict_row) as cursor:
             await cursor.execute("""
                 SELECT EXISTS(
@@ -266,6 +287,21 @@ class RegulationQueryTool:
     ) -> tuple[list[dict[str, Any]] | None, str | None]:
         if not await self._rag_chunks_table_available(conn):
             return None, None
+
+        if is_oracle_rag_connection(conn):
+            search_terms = self._build_regulation_search_terms(query)
+            rows = await oracle_exact_document_search(
+                conn,
+                search_terms,
+                limit=limit,
+                source_tables=("kbo_regulations", "markdown_docs"),
+            )
+            for row in rows:
+                meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+                row["document_type"] = meta.get("document_type")
+                row["category"] = meta.get("category")
+                row["regulation_code"] = meta.get("regulation_code")
+            return rows, search_terms[0] if rows and search_terms else None
 
         async with conn.cursor(row_factory=dict_row) as cursor:
             text_search_query = """
@@ -394,7 +430,21 @@ class RegulationQueryTool:
         if not keywords:
             raise ValueError(f"알 수 없는 카테고리: {category}")
 
-        keyword_conditions = " OR ".join([f"content ILIKE %s" for _ in keywords])
+        if is_oracle_rag_connection(conn):
+            rows = await oracle_exact_document_search(
+                conn,
+                keywords,
+                limit=limit,
+                source_tables=("kbo_regulations",),
+            )
+            for row in rows:
+                meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+                row["document_type"] = meta.get("document_type")
+                row["category"] = meta.get("category")
+                row["regulation_code"] = meta.get("regulation_code")
+            return rows
+
+        keyword_conditions = " OR ".join(["content ILIKE %s" for _ in keywords])
         query = f"""
             SELECT 
                 id,
@@ -528,6 +578,45 @@ class RegulationQueryTool:
     async def _validate_regulation_reference_once(
         self, conn: psycopg.AsyncConnection, regulation_code: str
     ) -> dict[str, Any] | None:
+        if is_oracle_rag_connection(conn):
+            cursor = await acquire_cursor(conn)
+            try:
+                await cursor.execute(
+                    """
+                    SELECT id, title, content, meta
+                    FROM rag_chunks
+                    WHERE source_table = 'kbo_regulations'
+                      AND JSON_VALUE(meta, '$.regulation_code') = :regulation_code
+                      AND index_status IN ('ACTIVE', 'INDEXED')
+                    FETCH FIRST 1 ROW ONLY
+                    """,
+                    {"regulation_code": regulation_code},
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                columns = [
+                    str(getattr(item, "name", item[0])).lower()
+                    for item in cursor.description or ()
+                ]
+                result = dict(zip(columns, row, strict=False))
+                result["title"] = await lob_to_text(result.get("title"))
+                result["content"] = await lob_to_text(result.get("content"))
+                meta = (
+                    await _parse_meta_async(result.get("meta"))
+                    if not isinstance(result.get("meta"), dict)
+                    else result["meta"]
+                )
+                result["meta"] = meta
+                result["regulation_code"] = meta.get("regulation_code")
+                result["category"] = meta.get("category")
+                return result
+            finally:
+                close = getattr(cursor, "close", None)
+                if callable(close):
+                    result = close()
+                    if hasattr(result, "__await__"):
+                        await result
         async with conn.cursor(row_factory=dict_row) as cursor:
             query = """
                 SELECT 

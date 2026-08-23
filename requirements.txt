@@ -3,6 +3,7 @@ uvicorn[standard]>=0.48.0
 pydantic>=2.13.4
 pydantic-settings==2.4.0
 psycopg[binary,pool]>=3.3.4
+oracledb>=2.5.0
 python-multipart>=0.0.29
 sse-starlette==3.4.4
 joblib==1.5.3

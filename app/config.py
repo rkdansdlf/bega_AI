@@ -29,6 +29,7 @@ DEFAULT_VISION_MODEL = "google/gemma-4-31b-it:free"
 DEFAULT_VISION_FALLBACK_MODELS = "mistralai/mistral-small-3.2-24b-instruct"
 DEFAULT_EMBED_DIM = 1536
 DEFAULT_OPENROUTER_EMBED_MODEL = "perplexity/pplx-embed-v1-4b"
+ORACLE_RAG_URL_PREFIXES = ("oracle+oracledb://", "oracle://")
 
 
 class Settings(BaseSettings):
@@ -84,7 +85,9 @@ class Settings(BaseSettings):
     )
     # rag_chunks 를 별도 호스트에 둘 때만 설정한다. 자체 캐시(chat/coach)는
     # 요청마다 쓰기가 발생하므로 여기로 따라가지 않고 database_url 에 남는다.
+    # oracle+oracledb URL이면 RAG 전용 pool만 python-oracledb를 사용한다.
     ai_rag_db_url: Optional[str] = Field(None, validation_alias="AI_RAG_DB_URL")
+    oracle_tns_admin: Optional[str] = Field(None, validation_alias="TNS_ADMIN")
     # `auto` keeps local/dev startup compatibility. `managed` requires the
     # migration role to provision the schema before the AI process starts.
     ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
@@ -103,6 +106,15 @@ class Settings(BaseSettings):
     _legacy_source_db_warned: bool = PrivateAttr(default=False)
 
     def model_post_init(self, __context) -> None:
+        if (
+            self.ai_rag_db_url
+            and self.ai_rag_db_url.lower().startswith(ORACLE_RAG_URL_PREFIXES)
+            and self.ingest_worker_enabled
+        ):
+            raise RuntimeError(
+                "AI_INGEST_WORKER_ENABLED=false is required when AI_RAG_DB_URL "
+                "uses Oracle; the background batch writer is PostgreSQL-only"
+            )
         if (
             self.llm_provider == "openrouter"
             and self.embed_provider == "openai"
@@ -536,6 +548,7 @@ class Settings(BaseSettings):
             )
         return value
 
+
     @field_validator("ingest_worker_poll_seconds")
     def _validate_ingest_worker_poll_seconds(cls, value: float) -> float:
         if value <= 0:
@@ -899,10 +912,11 @@ class Settings(BaseSettings):
 
     @property
     def rag_db_url(self) -> str:
-        """rag_chunks 를 읽을 PostgreSQL URL.
+        """rag_chunks 를 읽을 PostgreSQL 또는 Oracle URL.
 
         AI_RAG_DB_URL 이 설정된 경우에만 갈라진다. 미설정이면 database_url 을
-        그대로 반환하므로 단일 DB 배포에서 동작이 동일하다.
+        그대로 반환한다. ``oracle+oracledb://``이면 RAG 전용 Oracle pool을
+        사용하고, 일반 AI DB는 PostgreSQL로 유지한다.
         """
         if self.ai_rag_db_url:
             return self.ai_rag_db_url
@@ -923,7 +937,9 @@ class Settings(BaseSettings):
     def source_db_url(self) -> str:
         """배치/마이그레이션 스크립트가 읽을 Source DB URL.
 
-        인제스트는 여기서 야구 테이블을 읽어 database_url 의 rag_chunks 로 쓴다.
+        PostgreSQL RAG 배치 인제스트는 여기서 야구 테이블을 읽어 database_url 의
+        rag_chunks 로 쓴다. Oracle RAG 분리 배포에서는 PostgreSQL 전용 worker를
+        끄고 ``/ai/ingest``의 Oracle 경로를 사용한다.
         """
         return self.baseball_db_url
 

@@ -15,6 +15,7 @@ from psycopg.rows import dict_row
 from ..config import Settings
 from ..core.embeddings import async_embed_query
 from ..core.exceptions import DBRetrievalError
+from ..core.oracle_rag import is_oracle_rag_connection, oracle_exact_document_search
 from ..core.retrieval import similarity_search_with_fallback
 from .query_logging import (
     ACTION_SEARCH_DOCUMENTS,
@@ -236,6 +237,14 @@ class DocumentQueryTool:
         focus_terms = self._focus_terms(query_lower)
         if not focus_terms:
             return []
+
+        if is_oracle_rag_connection(conn):
+            return await oracle_exact_document_search(
+                conn,
+                focus_terms,
+                limit=limit,
+                source_tables=DOCUMENT_SOURCE_TABLES,
+            )
 
         clauses: list[str] = []
         params: list[Any] = [list(DOCUMENT_SOURCE_TABLES)]
