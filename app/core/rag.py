@@ -12,8 +12,7 @@ import inspect
 import json
 import logging
 import re
-import random
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from functools import lru_cache, wraps
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Sequence, Tuple
@@ -27,6 +26,7 @@ from .embeddings import async_embed_query
 from .http_clients import get_shared_httpx_client
 from .prompts import FOLLOWUP_PROMPT, SYSTEM_PROMPT, HYDE_PROMPT
 from .retrieval import record_retrieval_event, similarity_search
+from .oracle_rag import oracle_similarity_search
 from . import kbo_metrics
 from .entity_extractor import enhance_search_strategy
 from .query_normalizer import full_normalize
@@ -2520,6 +2520,7 @@ class RAGPipeline:
         settings: Settings,
         connection: Optional[psycopg.AsyncConnection] = None,
         pool: Optional[AsyncConnectionPool] = None,
+        rag_pool: Optional[Any] = None,
         agent_runtime: BaseballAgentRuntime | None = None,
         context_formatter: Optional[ContextFormatter] = None,
         wpa_calculator: Optional["WPACalculator"] = None,
@@ -2529,6 +2530,8 @@ class RAGPipeline:
         self.settings = settings
         self.connection = connection
         self._pool = pool
+        self._rag_pool = rag_pool
+        self._oracle_rag = getattr(rag_pool or pool, "backend", None) == "oracle"
         self.query_transformer = QueryTransformer(self._generate)
         self.context_formatter = context_formatter or ContextFormatter()
         self.agent_runtime = agent_runtime or initialize_shared_baseball_agent_runtime(
@@ -2547,6 +2550,17 @@ class RAGPipeline:
         else:
             yield self.connection
 
+    @asynccontextmanager
+    async def _checkout_rag_conn(self) -> AsyncIterator[Any]:
+        """Borrow the RAG-only pool while preserving the general AI DB pool."""
+        pool = self._rag_pool or self._pool
+        if pool is not None:
+            async with pool.connection() as conn:
+                yield conn
+        else:
+            yield self.connection
+
+    @asynccontextmanager
     async def _build_operator_or_static_kbo_result(
         self, query: str
     ) -> Optional[Dict[str, Any]]:
@@ -2733,15 +2747,25 @@ class RAGPipeline:
         try:
             # 풀 모드: 매 호출마다 풀에서 짧게 커넥션을 빌림 (멀티 variation 병렬 가능)
             # 단일 커넥션 모드: 기존 방식 유지 (테스트/스크립트용)
-            async with self._checkout_conn() as conn:
-                docs = await similarity_search(
-                    conn,
-                    embedding,
-                    limit=limit,
-                    filters=filters,
-                    keyword=keyword,
-                    settings=self.settings,
-                )
+            async with self._checkout_rag_conn() as conn:
+                if self._oracle_rag:
+                    docs = await oracle_similarity_search(
+                        conn,
+                        embedding,
+                        limit=limit,
+                        filters=filters,
+                        keyword=keyword,
+                        intent=intent,
+                    )
+                else:
+                    docs = await similarity_search(
+                        conn,
+                        embedding,
+                        limit=limit,
+                        filters=filters,
+                        keyword=keyword,
+                        settings=self.settings,
+                    )
         except DBRetrievalError as exc:
             logger.error("[RAG] DB retrieval error in retrieve(): %s", exc)
             _record_retrieval_state_error(
@@ -2967,7 +2991,7 @@ class RAGPipeline:
 
             # Check if fallback is available
             if fallback_provider == "gemini" and self.settings.gemini_api_key:
-                logger.info(f"[RAG] Attempting fallback to Gemini")
+                logger.info("[RAG] Attempting fallback to Gemini")
                 try:
                     fb_result = await self._generate_with_gemini(messages)
                     try:
@@ -2980,7 +3004,7 @@ class RAGPipeline:
                 except Exception as fallback_e:
                     logger.error(f"[RAG] Fallback to Gemini also failed: {fallback_e}")
             elif fallback_provider == "openrouter" and self.settings.openrouter_api_key:
-                logger.info(f"[RAG] Attempting fallback to OpenRouter")
+                logger.info("[RAG] Attempting fallback to OpenRouter")
                 try:
                     fb_result = await self._generate_with_openrouter(messages)
                     try:
@@ -3412,7 +3436,7 @@ class RAGPipeline:
 
             if agent_result["verified"] and not agent_result.get("error"):
                 logger.info(
-                    f"[RAG] Agent successfully handled query with verified data"
+                    "[RAG] Agent successfully handled query with verified data"
                 )
                 perf = agent_result.get("perf") or {}
                 if not isinstance(perf, dict):
@@ -3598,7 +3622,6 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         is_game_query = self._is_game_query(query)
         is_game_flow_narrative = self._is_game_flow_narrative_query(query)
-        is_statistical = self._is_statistical_query(query, entity_filter)
         is_regulation = self._is_regulation_query(query)
         force_agent_fast_path = self._should_force_agent_fast_path(query, entity_filter)
 
@@ -3887,20 +3910,20 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
         if is_statistical:
             logger.info(
-                f"[RAG] Statistical query detected, using traditional RAG directly"
+                "[RAG] Statistical query detected, using traditional RAG directly"
             )
             # 통계 질문이면 바로 RAG로 처리 (에이전트 건너뛰기)
             pass  # 6단계로 진행
 
         # 3. 일반 대화인지 확인
         elif self._is_general_conversation(query):
-            logger.info(f"[RAG] General conversation detected")
+            logger.info("[RAG] General conversation detected")
             return await self._handle_general_conversation(query)
 
         # 4. 규정 질문인지 확인
         elif is_regulation:
             logger.info(
-                f"[RAG] Regulation query detected, using traditional RAG directly"
+                "[RAG] Regulation query detected, using traditional RAG directly"
             )
             # 에이전트 대신 RAG를 직접 사용하여 벡터 검색 성능을 활용
             pass  # 6단계로 진행
@@ -3912,7 +3935,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     "[RAG] Narrative game-flow query detected, skipping agent-first"
                 )
             elif agent_fast_path_enabled:
-                logger.info(f"[RAG] Game query detected, trying agent first")
+                logger.info("[RAG] Game query detected, trying agent first")
                 agent_result = await self._try_agent_first(
                     query, intent=intent, filters=filters, history=history
                 )
@@ -3920,7 +3943,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     return agent_result
                 else:
                     logger.info(
-                        f"[RAG] Game agent failed, falling back to traditional RAG"
+                        "[RAG] Game agent failed, falling back to traditional RAG"
                     )
             else:
                 logger.info("[RAG] Game agent fast-path disabled, using RAG")

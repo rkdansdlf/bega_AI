@@ -157,3 +157,56 @@ def test_rag_url_splits_without_dragging_the_caches_along(build_settings) -> Non
     # 캐시는 요청마다 쓰기가 발생하므로 원격으로 따라가면 안 된다.
     assert settings.database_url.endswith("/rag")
     assert settings.baseball_db_url.endswith("/bb")
+
+
+def test_oracle_rag_url_selects_the_native_rag_pool(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import app.deps as deps
+    from app.core.oracle_rag import OracleRagPool
+
+    monkeypatch.setattr(deps, "_rag_connection_pool", None)
+    monkeypatch.setattr(
+        deps,
+        "get_settings",
+        lambda: SimpleNamespace(
+            rag_db_url="oracle+oracledb://rag_user:password@adb_high",
+            ai_rag_db_url="oracle+oracledb://rag_user:password@adb_high",
+            rag_db_pool_max_size=4,
+        ),
+    )
+
+    pool = deps.get_rag_connection_pool()
+
+    assert isinstance(pool, OracleRagPool)
+    assert pool.backend == "oracle"
+
+
+def test_postgres_baseball_url_keeps_the_existing_psycopg_pool(monkeypatch) -> None:
+    """The default/current case — no Oracle scheme, so the branch added for
+    Oracle must not disturb the pre-existing psycopg pool construction."""
+    from types import SimpleNamespace
+
+    import app.deps as deps
+
+    monkeypatch.setattr(deps, "_baseball_connection_pool", None)
+    created: list[str] = []
+    monkeypatch.setattr(
+        deps,
+        "_create_async_connection_pool",
+        lambda *, min_size, max_size, conninfo: created.append(conninfo) or object(),
+    )
+    monkeypatch.setattr(
+        deps,
+        "get_settings",
+        lambda: SimpleNamespace(
+            baseball_db_url="postgresql://user:pw@pgvector-db:5432/bega_backend",
+            ai_baseball_db_url="postgresql://user:pw@pgvector-db:5432/bega_backend",
+            baseball_db_pool_max_size=6,
+        ),
+    )
+
+    pool = deps.get_baseball_connection_pool()
+
+    assert created == ["postgresql://user:pw@pgvector-db:5432/bega_backend"]
+    assert pool is not None

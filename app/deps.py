@@ -1,8 +1,9 @@
 """FastAPI 의존성 주입을 위한 공통 헬퍼를 정의하는 모듈."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -10,7 +11,6 @@ from time import perf_counter
 from typing import Any, Optional
 
 import psycopg
-import httpx
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from fastapi import Depends, HTTPException, status
 
@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 from .config import get_settings
 from .core.http_clients import close_shared_httpx_clients, get_shared_httpx_client
 from .core.rag import RAGPipeline
+from .core.oracle_rag import (
+    OracleRagPool,
+    acquire_cursor,
+    is_oracle_rag_connection,
+    is_oracle_rag_url,
+    oracle_rag_readiness,
+)
 from .ml.intent_router import predict_intent, load_clf
 from .agents.baseball_agent import BaseballAgentRuntime, BaseballStatisticsAgent
 from .agents.shared_runtime import (
@@ -38,13 +45,13 @@ from .core.chat_semantic_cache import cleanup_expired as _cleanup_expired_semant
 from .core.ingest_run_store import IngestRunStore
 from .core.ingest_worker import IngestWorker
 from .db.schema_contract import validate_schema_contract
-from .internal_auth import require_ai_internal_token
+from .internal_auth import require_ai_internal_token  # noqa: F401  (re-export)
 
 # 전역 커넥션 풀 (앱 시작 시 한 번만 생성). 전 계층이 async psycopg3로 통일됨.
 _connection_pool: Optional[AsyncConnectionPool] = None
 _ingest_connection_pool: Optional[AsyncConnectionPool] = None
-_baseball_connection_pool: Optional[AsyncConnectionPool] = None
-_rag_connection_pool: Optional[AsyncConnectionPool] = None
+_baseball_connection_pool: Optional[Any] = None
+_rag_connection_pool: Optional[Any] = None
 DB_POOL_MIN_SIZE = 1
 DB_POOL_MAX_SIZE = 30
 INGEST_DB_POOL_MIN_SIZE = 1
@@ -259,7 +266,7 @@ def get_connection_pool() -> AsyncConnectionPool:
     return _connection_pool
 
 
-def get_rag_connection_pool() -> AsyncConnectionPool:
+def get_rag_connection_pool() -> Any:
     """rag_chunks 조회 전용 풀.
 
     AI_RAG_DB_URL 이 설정되지 않으면 일반 풀과 같은 DB 를 가리키므로 분리 전에도
@@ -269,18 +276,30 @@ def get_rag_connection_pool() -> AsyncConnectionPool:
     global _rag_connection_pool
     if _rag_connection_pool is None:
         settings = get_settings()
-        _rag_connection_pool = _create_async_connection_pool(
-            min_size=RAG_DB_POOL_MIN_SIZE,
-            max_size=RAG_DB_POOL_MAX_SIZE,
-            conninfo=settings.rag_db_url,
-        )
+        if is_oracle_rag_url(settings.rag_db_url):
+            _rag_connection_pool = OracleRagPool(
+                settings.rag_db_url,
+                max_size=getattr(
+                    settings, "rag_db_pool_max_size", RAG_DB_POOL_MAX_SIZE
+                ),
+            )
+        else:
+            _rag_connection_pool = _create_async_connection_pool(
+                min_size=RAG_DB_POOL_MIN_SIZE,
+                max_size=getattr(
+                    settings, "rag_db_pool_max_size", RAG_DB_POOL_MAX_SIZE
+                ),
+                conninfo=settings.rag_db_url,
+            )
         logger.info(
             "[DB] RAG connection pool created (open pending) separated=%s pool_stats=%s",
             bool(settings.ai_rag_db_url),
             _format_connection_pool_stats(
                 _rag_connection_pool,
                 min_size=RAG_DB_POOL_MIN_SIZE,
-                max_size=RAG_DB_POOL_MAX_SIZE,
+                max_size=getattr(
+                    settings, "rag_db_pool_max_size", RAG_DB_POOL_MAX_SIZE
+                ),
             ),
         )
     return _rag_connection_pool
@@ -450,22 +469,35 @@ async def _db_pool_metrics_loop(interval_seconds: int = 30) -> None:
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            pool = get_connection_pool()
-            get_stats = getattr(pool, "get_stats", None)
-            if not callable(get_stats):
-                continue
-            stats = get_stats() or {}
-            mapping = {
-                "max": stats.get("pool_max") or DB_POOL_MAX_SIZE,
-                "min": stats.get("pool_min") or DB_POOL_MIN_SIZE,
-                "available": stats.get("pool_available", 0),
-                "requests_waiting": stats.get("requests_waiting", 0),
-            }
-            for state, value in mapping.items():
-                try:
-                    AI_DB_POOL_SIZE.labels(state=state).set(float(value or 0))
-                except Exception:  # noqa: BLE001
-                    pass
+            pools = (
+                ("general", get_connection_pool(), DB_POOL_MAX_SIZE),
+                (
+                    "ingest",
+                    get_ingest_connection_pool(),
+                    INGEST_DB_POOL_MAX_SIZE,
+                ),
+                ("rag", get_rag_connection_pool(), RAG_DB_POOL_MAX_SIZE),
+            )
+            for pool_name, pool, configured_max in pools:
+                get_stats = getattr(pool, "get_stats", None)
+                if not callable(get_stats):
+                    continue
+                stats = get_stats() or {}
+                mapping = {
+                    "max": stats.get("pool_max") or configured_max,
+                    "min": stats.get("pool_min") or 1,
+                    "available": stats.get("pool_available", 0),
+                    "requests_waiting": stats.get("requests_waiting", 0),
+                    "requests_wait_ms": stats.get("requests_wait_ms", 0),
+                    "requests_errors": stats.get("requests_errors", 0),
+                }
+                for state, value in mapping.items():
+                    try:
+                        AI_DB_POOL_SIZE.labels(pool=pool_name, state=state).set(
+                            float(value or 0)
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception as exc:  # noqa: BLE001
             logger.debug("[DBPoolMetrics] publish loop error: %s", exc)
 
@@ -655,12 +687,10 @@ async def _prepare_required_database_pools(
 ) -> tuple[AsyncConnectionPool, AsyncConnectionPool]:
     general_pool = get_connection_pool()
     ingest_pool = get_ingest_connection_pool()
-    baseball_pool = get_baseball_connection_pool()
     rag_pool = get_rag_connection_pool()
     try:
         await general_pool.open(wait=True, timeout=10.0)
         await ingest_pool.open(wait=True, timeout=10.0)
-        await baseball_pool.open(wait=True, timeout=10.0)
         await rag_pool.open(wait=True, timeout=10.0)
         # 스키마 준비는 AI 소유 테이블만 대상이므로 일반 풀에서만 수행한다.
         await _prepare_schema(general_pool, settings)
@@ -678,7 +708,6 @@ async def _prepare_required_database_pools(
         )
         for resource_name, closer in (
             ("rag_pool", close_rag_connection_pool),
-            ("baseball_pool", close_baseball_connection_pool),
             ("ingest_pool", close_ingest_connection_pool),
             ("general_pool", close_connection_pool),
         ):
@@ -686,14 +715,186 @@ async def _prepare_required_database_pools(
                 await closer()
             except BaseException as cleanup_exc:  # noqa: BLE001
                 logger.error(
-                    "[Lifespan] startup cleanup failed "
-                    "resource=%s error_type=%s",
+                    "[Lifespan] startup cleanup failed resource=%s error_type=%s",
                     resource_name,
                     type(cleanup_exc).__name__,
                 )
         raise
     logger.info("[Lifespan] required database pools opened")
     return general_pool, ingest_pool
+
+
+async def get_readiness_report() -> dict[str, Any]:
+    """Return dependency readiness without making an external model request."""
+
+    settings = get_settings()
+    checks: dict[str, dict[str, Any]] = {}
+    pool_specs = (
+        ("db_general", _connection_pool),
+        ("db_ingest", _ingest_connection_pool),
+        ("db_rag", _rag_connection_pool),
+    )
+    for name, pool in pool_specs:
+        if pool is None:
+            checks[name] = {"ready": False, "reason": "pool_not_started"}
+            continue
+        try:
+            async with pool.connection(timeout=1.5) as conn:
+                if is_oracle_rag_connection(conn):
+                    cursor = await acquire_cursor(conn)
+                    try:
+                        await cursor.execute("SELECT 1 FROM dual")
+                        await cursor.fetchone()
+                    finally:
+                        close = getattr(cursor, "close", None)
+                        if callable(close):
+                            result = close()
+                            if inspect.isawaitable(result):
+                                await result
+                else:
+                    await conn.execute("SELECT 1")
+            checks[name] = {"ready": True}
+        except Exception as exc:  # noqa: BLE001
+            checks[name] = {
+                "ready": False,
+                "reason": type(exc).__name__,
+            }
+
+    if _rag_connection_pool is not None and settings.ai_vector_index == "hnsw":
+        if getattr(_rag_connection_pool, "backend", None) == "oracle":
+            try:
+                async with _rag_connection_pool.connection(timeout=1.5) as conn:
+                    checks["vector_index"] = await oracle_rag_readiness(
+                        conn,
+                        expected_dim=settings.embed_dim,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                checks["vector_index"] = {
+                    "ready": False,
+                    "index": "IDX_RAG_CHUNKS_EMBEDDING_HNSW",
+                    "reason": type(exc).__name__,
+                }
+        else:
+            expected_index = (
+                "idx_rag_chunks_embedding_halfvec_hnsw"
+                if settings.ai_vector_quantization == "halfvec"
+                else "idx_rag_chunks_embedding_hnsw"
+            )
+            try:
+                async with _rag_connection_pool.connection(timeout=1.5) as conn:
+                    cursor = await conn.execute(
+                        """
+                        SELECT i.indisvalid,
+                               i.indisready,
+                               am.amname,
+                               table_namespace.nspname,
+                               table_class.relname,
+                               pg_get_indexdef(index_class.oid)
+                        FROM pg_index i
+                        JOIN pg_class index_class ON index_class.oid = i.indexrelid
+                        JOIN pg_am am ON am.oid = index_class.relam
+                        JOIN pg_class table_class ON table_class.oid = i.indrelid
+                        JOIN pg_namespace table_namespace
+                          ON table_namespace.oid = table_class.relnamespace
+                        WHERE index_class.relname = %s
+                          AND table_class.relname = 'rag_chunks'
+                          AND table_namespace.nspname = ANY(current_schemas(false))
+                        """,
+                        (expected_index,),
+                    )
+                    index_row = await cursor.fetchone()
+                checks["vector_index"] = _vector_index_readiness(
+                    index_row,
+                    expected_index=expected_index,
+                    quantization=settings.ai_vector_quantization,
+                    embed_dim=settings.embed_dim,
+                )
+            except Exception as exc:  # noqa: BLE001
+                checks["vector_index"] = {
+                    "ready": False,
+                    "index": expected_index,
+                    "reason": type(exc).__name__,
+                }
+
+    provider_ready = bool(
+        (settings.llm_provider == "openrouter" and settings.openrouter_api_key)
+        or (settings.llm_provider == "gemini" and settings.gemini_api_key)
+    )
+    checks["model_configuration"] = {
+        "ready": provider_ready,
+        "provider": settings.llm_provider,
+    }
+    checks["release_decision_model_configuration"] = {
+        "ready": bool(getattr(settings, "openai_api_key", None)),
+        "required": False,
+        "provider": "openai",
+    }
+    try:
+        from app.core.model_circuit import release_decision_circuit
+
+        circuit = release_decision_circuit.snapshot()
+        checks["release_decision_model_circuit"] = {
+            "ready": circuit.ready,
+            "required": False,
+            "consecutive_failures": circuit.consecutive_failures,
+        }
+    except Exception as exc:  # noqa: BLE001
+        checks["release_decision_model_circuit"] = {
+            "ready": False,
+            "required": False,
+            "reason": type(exc).__name__,
+        }
+    ready = _required_checks_ready(checks)
+    return {"status": "ready" if ready else "degraded", "checks": checks}
+
+
+def _vector_index_readiness(
+    row: Any,
+    *,
+    expected_index: str,
+    quantization: str,
+    embed_dim: int = 1536,
+) -> dict[str, Any]:
+    """Validate that the configured RAG index is usable, not merely named."""
+
+    result: dict[str, Any] = {"ready": False, "index": expected_index}
+    if row is None or len(row) < 6:
+        result["reason"] = "missing"
+        return result
+    indisvalid, indisready, access_method, schema_name, table_name, definition = row
+    definition_text = str(definition or "").lower()
+    required_tokens = ["using hnsw"]
+    if str(quantization).lower() == "halfvec":
+        required_tokens.extend(
+            (f"halfvec({max(1, int(embed_dim))})", "halfvec_cosine_ops")
+        )
+    else:
+        required_tokens.append("vector_cosine_ops")
+    usable = (
+        bool(indisvalid)
+        and bool(indisready)
+        and str(access_method).lower() == "hnsw"
+        and str(table_name).lower() == "rag_chunks"
+        and all(token in definition_text for token in required_tokens)
+    )
+    result.update(
+        {
+            "ready": usable,
+            "schema": str(schema_name),
+            "table": str(table_name),
+        }
+    )
+    if not usable:
+        result["reason"] = "invalid_or_unexpected_definition"
+    return result
+
+
+def _required_checks_ready(checks: dict[str, dict[str, Any]]) -> bool:
+    return all(
+        bool(check.get("ready"))
+        for check in checks.values()
+        if bool(check.get("required", True))
+    )
 
 
 def get_ingest_run_store() -> IngestRunStore:
@@ -727,9 +928,7 @@ async def lifespan(app):
 
         cleanup_task = asyncio.create_task(_chat_cache_cleanup_loop())
         background_tasks.append(cleanup_task)
-        logger.info(
-            "[Lifespan] chat_response_cache cleanup task started (interval=1h)"
-        )
+        logger.info("[Lifespan] chat_response_cache cleanup task started (interval=1h)")
 
         db_pool_metrics_task = asyncio.create_task(_db_pool_metrics_loop())
         background_tasks.append(db_pool_metrics_task)
@@ -865,6 +1064,7 @@ async def get_db_connection() -> AsyncGenerator[psycopg.AsyncConnection, None]:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="데이터베이스 연결이 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.",
         ) from exc
+
     except psycopg.OperationalError as exc:
         logger.error(
             "[DB] Operational error while acquiring connection: %s pool_stats=%s",
@@ -877,6 +1077,13 @@ async def get_db_connection() -> AsyncGenerator[psycopg.AsyncConnection, None]:
         ) from exc
 
 
+async def get_rag_connection() -> AsyncGenerator[Any, None]:
+    """Yield a connection from the configured RAG backend."""
+    pool_instance = get_rag_connection_pool()
+    async with pool_instance.connection() as conn:
+        yield conn
+
+
 def get_rag_pipeline() -> RAGPipeline:
     """RAGPipeline에 ConnectionPool을 주입하여 멀티쿼리가 진정 병렬로 실행되도록 한다.
 
@@ -884,12 +1091,17 @@ def get_rag_pipeline() -> RAGPipeline:
     더 이상 단일 커넥션으로 직렬화되지 않는다.
     """
     settings = get_settings()
-    # 검색은 rag_chunks 를 읽으므로 RAG 풀을 쓴다. rag_retrieval_events 쓰기도
-    # 같은 풀을 타지만 fire-and-forget 이라 응답 지연에 얹히지 않는다.
-    pool_instance = get_rag_connection_pool()
+    rag_pool = get_rag_connection_pool()
+    # Oracle RAG is read separately; agents, operator tools, and retrieval-event
+    # logging continue using the general PostgreSQL AI database.
+    if getattr(rag_pool, "backend", None) == "oracle":
+        general_pool = get_connection_pool()
+    else:
+        general_pool = rag_pool
     return RAGPipeline(
         settings=settings,
-        pool=pool_instance,
+        pool=general_pool,
+        rag_pool=rag_pool if getattr(rag_pool, "backend", None) == "oracle" else None,
         agent_runtime=get_shared_baseball_agent_runtime(),
         context_formatter=_get_shared_context_formatter(),
         wpa_calculator=_get_shared_wpa_calculator(),

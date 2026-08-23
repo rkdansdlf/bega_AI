@@ -207,6 +207,18 @@ async def similarity_search(
     Returns:
         유사도 순으로 정렬된 문서 리스트. 각 문서는 사전(dict) 형태로 반환됩니다.
     """
+    if getattr(conn, "backend", None) == "oracle":
+        from .oracle_rag import oracle_similarity_search
+
+        return await oracle_similarity_search(
+            conn,
+            embedding,
+            limit=limit,
+            filters=filters,
+            keyword=keyword,
+            intent=intent,
+        )
+
     if os.getenv("USE_FIRESTORE_SEARCH", "false").lower() == "true":
         raise NotImplementedError(
             "Firestore search has been removed. PostgreSQL pgvector search is supported only."

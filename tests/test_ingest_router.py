@@ -221,6 +221,47 @@ def test_ingest_document_returns_zero_when_all_chunks_sensitive(monkeypatch) -> 
     assert result == {"status": "ok", "chunks": 0, "skipped": 2}
 
 
+def test_ingest_document_uses_oracle_upsert_and_part_cleanup(monkeypatch) -> None:
+    async def fake_embed_texts(chunks, settings):
+        return [[0.1, 0.2] for _ in chunks]
+
+    captured: dict[str, object] = {}
+
+    async def fake_oracle_upsert(conn, **kwargs):
+        captured.update(kwargs)
+        return len(kwargs["records"])
+
+    monkeypatch.setattr(
+        ingest,
+        "smart_chunks",
+        lambda text, settings=None: ["first part", "second part"],
+    )
+    monkeypatch.setattr(ingest, "async_embed_texts", fake_embed_texts)
+    monkeypatch.setattr(ingest, "is_oracle_rag_connection", lambda conn: True)
+    monkeypatch.setattr(ingest, "upsert_oracle_rag_chunks", fake_oracle_upsert)
+    monkeypatch.setattr(
+        ingest,
+        "get_settings",
+        lambda: SimpleNamespace(rag_quality_min_chars=1),
+    )
+
+    payload = ingest.IngestPayload(
+        title="Oracle Doc",
+        content="body",
+        source_table="kbo_regulations",
+        source_row_id="rule-oracle",
+    )
+
+    result = asyncio.run(ingest.ingest_document(payload, object(), None, None))
+
+    assert result == {"status": "ok", "chunks": 2, "stored": 2, "skipped": 0}
+    assert captured["source_prefix"] == "rule-oracle"
+    assert captured["active_source_row_ids"] == [
+        "rule-oracle#part1",
+        "rule-oracle#part2",
+    ]
+
+
 RUN_ID = UUID("44444444-4444-4444-8444-444444444444")
 REQUESTED_AT = datetime(2026, 7, 15, 4, 30, tzinfo=UTC)
 
