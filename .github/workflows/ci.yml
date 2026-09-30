@@ -167,6 +167,11 @@ jobs:
       - name: Build Docker Image
         run: docker build -t ai-service:${{ github.sha }} .
 
+      - name: Locate vulnerable setuptools copy (diagnostic)
+        run: |
+          docker run --rm --entrypoint sh ai-service:${{ github.sha }} -c \
+            'grep -rl --include=METADATA --include=PKG-INFO "^Version: 70.3.0" / 2>/dev/null; find / -iname "setuptools-*" -not -path "/proc/*" 2>/dev/null | head' || true
+
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:

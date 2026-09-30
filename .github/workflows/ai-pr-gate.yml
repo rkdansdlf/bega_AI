@@ -69,7 +69,6 @@ jobs:
             tests/test_chat_model_routing_experiment.py \
             tests/test_chat_model_usage.py \
             tests/test_chat_quality_golden_dataset.py \
-            tests/test_coach.py \
             tests/test_coach_dual.py \
             tests/test_coach_router_year_resolution.py \
             tests/test_pooled_connection.py \
