@@ -25,7 +25,7 @@ from .retrieval import _vector_literal
 
 logger = logging.getLogger(__name__)
 
-FILTERS_HASH_SCHEMA_VERSION = "chat_semantic_filters_v1"
+FILTERS_HASH_SCHEMA_VERSION = "chat_semantic_filters_v2"
 
 
 CREATE_TABLE_SQL = f"""
@@ -244,7 +244,11 @@ async def _save_semantic_sync(
     if not embedding:
         return
 
-    ttl_secs = get_ttl_seconds(intent)
+    ttl_secs = get_ttl_seconds(
+        intent,
+        question=question_text,
+        filters=filters_json,
+    )
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_secs)
     vector_str = _vector_literal(embedding)
     filters_hash = _build_filters_hash(filters_json)

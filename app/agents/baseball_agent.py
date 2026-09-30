@@ -38,6 +38,7 @@ from ..core.chat_model_usage import (
     estimate_model_usage,
 )
 from ..core.chat_cost_metrics import record_model_usage_estimate
+from ..core.time import kst_now, kst_today
 from .chat_intent_router import ChatIntent, ChatIntentRouter, IntentDecision
 from .chat_renderers import ChatRendererRegistry
 from .tool_caller import ToolCaller, ToolCall, ToolDefinition, ToolResult
@@ -100,16 +101,24 @@ class AgentRequestContext:
         runtime_id: int,
         connection: psycopg.AsyncConnection,
         settings: Optional[Settings],
+        baseball_connection: Optional[Any] = None,
     ) -> "AgentRequestContext":
         from ..core.game_strategist import GameStrategist
         from ..core.match_predictor import MatchPredictor
 
+        # GameQueryTool alone speaks both dialects (see QueryDialect in
+        # oracle_baseball.py). GameStrategist/MatchPredictor still assume
+        # PostgreSQL, so they intentionally keep using the shared `connection`
+        # (the general/legacy pool) even when baseball_connection is Oracle —
+        # rewriting them is a separate, not-yet-scoped task.
         return cls(
             runtime_id=runtime_id,
             connection=connection,
             db_query_tool=DatabaseQueryTool(connection),
             regulation_query_tool=RegulationQueryTool(connection),
-            game_query_tool=GameQueryTool(connection),
+            game_query_tool=GameQueryTool(
+                baseball_connection if baseball_connection is not None else connection
+            ),
             document_query_tool=DocumentQueryTool(
                 connection,
                 settings=settings,
@@ -369,7 +378,10 @@ class BaseballAgentRuntime:
             self._team_name_cache = dict(mapping)
 
     def enter_request_context(
-        self, connection: psycopg.AsyncConnection
+        self,
+        connection: psycopg.AsyncConnection,
+        *,
+        baseball_connection: Optional[Any] = None,
     ) -> AgentRequestContextHandle:
         with self._lock:
             self._request_context_count += 1
@@ -379,6 +391,7 @@ class BaseballAgentRuntime:
             runtime_id=self.runtime_id,
             connection=connection,
             settings=self.settings,
+            baseball_connection=baseball_connection,
         )
         previous_request_context = _REQUEST_CONTEXT.get()
         _REQUEST_CONTEXT.set(request_context)
@@ -409,8 +422,15 @@ class BaseballAgentRuntime:
         )
 
     @contextmanager
-    def request_context(self, connection: psycopg.AsyncConnection):
-        handle = self.enter_request_context(connection)
+    def request_context(
+        self,
+        connection: psycopg.AsyncConnection,
+        *,
+        baseball_connection: Optional[Any] = None,
+    ):
+        handle = self.enter_request_context(
+            connection, baseball_connection=baseball_connection
+        )
         try:
             yield handle.request_context
         finally:
@@ -1790,7 +1810,7 @@ class BaseballStatisticsAgent:
     ) -> ToolResult:
         """투타 맞대결 예측 도구"""
         if year is None:
-            year = date.today().year
+            year = kst_today().year
 
         try:
             predictor = self._current_request_context().match_predictor
@@ -2333,9 +2353,7 @@ class BaseballStatisticsAgent:
         """선수 존재 여부 확인 도구"""
         try:
             if year is None:
-                import datetime as dt
-
-                year = dt.datetime.now().year
+                year = kst_today().year
             result = await self.db_query_tool.validate_player_exists(player_name, year)
 
             if result["error"]:
@@ -3873,7 +3891,7 @@ class BaseballStatisticsAgent:
         )
 
     def _resolve_reference_year(self, query: str, entity_filter: Any) -> int:
-        now = datetime.now()
+        now = kst_now()
         current_year = now.year
 
         extracted_year = getattr(entity_filter, "season_year", None)
@@ -4471,7 +4489,7 @@ class BaseballStatisticsAgent:
 
         year = call.parameters.get("year")
         reference_year = self._resolve_reference_year(query, entity_filter)
-        current_year = datetime.now().year
+        current_year = kst_today().year
         normalized_year = year
         if isinstance(normalized_year, str):
             match = re.search(r"\d{4}", normalized_year)
@@ -5194,7 +5212,7 @@ class BaseballStatisticsAgent:
             keyword in query_lower
             for keyword in ["경기", "일정", "중계", "몇 시", "몇시"]
         ):
-            extracted_date = datetime.now().strftime("%Y-%m-%d")
+            extracted_date = kst_today().isoformat()
         else:
             date_patterns = [
                 r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일",
@@ -6172,7 +6190,7 @@ class BaseballStatisticsAgent:
                 continue
             if result.data.get("as_of_date"):
                 return str(result.data.get("as_of_date"))
-        return datetime.now().date().isoformat()
+        return kst_today().isoformat()
 
     async def process_query_stream(
         self, query: str, context: Dict[str, Any] = None
@@ -6206,7 +6224,7 @@ class BaseballStatisticsAgent:
                         "grounding_mode": "predefined",
                         "source_tier": "predefined",
                         "answer_sources": [],
-                        "as_of_date": datetime.now().date().isoformat(),
+                        "as_of_date": kst_today().isoformat(),
                         "fallback_reason": None,
                     },
                 }
@@ -6262,7 +6280,7 @@ class BaseballStatisticsAgent:
                     ),
                     "source_tier": analysis_result.get("source_tier", "none"),
                     "answer_sources": [],
-                    "as_of_date": datetime.now().date().isoformat(),
+                    "as_of_date": kst_today().isoformat(),
                     "fallback_reason": analysis_result.get("fallback_reason"),
                 },
             }
@@ -6302,7 +6320,7 @@ class BaseballStatisticsAgent:
                     query,
                     grounding_mode="latest_info",
                     source_tier="web",
-                    as_of_date=datetime.now().date().isoformat(),
+                    as_of_date=kst_today().isoformat(),
                 )
                 if heuristic_answer:
                     heuristic_verified = True
@@ -6329,7 +6347,7 @@ class BaseballStatisticsAgent:
                     team_name = self._detect_team_alias_from_query(query)
                     year_match = re.search(r"(20\d{2})년", query)
                     year = (
-                        int(year_match.group(1)) if year_match else datetime.now().year
+                        int(year_match.group(1)) if year_match else kst_today().year
                     )
                     if team_name:
                         heuristic_tool_calls = self._build_team_fast_path_tool_calls(
@@ -6415,7 +6433,7 @@ class BaseballStatisticsAgent:
                         else "none"
                     ),
                     "answer_sources": [],
-                    "as_of_date": datetime.now().date().isoformat(),
+                    "as_of_date": kst_today().isoformat(),
                     "fallback_reason": (
                         (
                             "analysis_error_fast_path_recovery"
@@ -7608,7 +7626,7 @@ class BaseballStatisticsAgent:
                 if not player_match:
                     return None
                 player_name = player_match.group(1).strip()
-                as_of_label = as_of_date or datetime.now().strftime("%Y-%m-%d")
+                as_of_label = as_of_date or kst_today().isoformat()
                 return (
                     f"{as_of_label} 기준으로 {player_name}의 최근 경기 활약은 현재 연결된 최신 자료에서 직접 확인되지 않았습니다.\n\n"
                     f"지금 확보된 자료가 {player_name}의 실제 최근 경기 기록이나 활약 요약이 아니라서, 최근 폼을 추정해서 말하진 않겠습니다.\n\n"
@@ -7617,7 +7635,7 @@ class BaseballStatisticsAgent:
             if "5위" in query_lower and any(
                 token in query_lower for token in ["싸움", "순위", "경쟁"]
             ):
-                as_of_label = as_of_date or datetime.now().strftime("%Y-%m-%d")
+                as_of_label = as_of_date or kst_today().isoformat()
                 return (
                     f"{as_of_label} 기준으로 현재 5위 순위 경쟁 상황은 연결된 최신 자료에서 직접 확인되지 않았습니다.\n\n"
                     "지금 확보된 자료만으로는 어느 팀이 5위 싸움에서 앞선다고 단정할 수 없어서, 순위 경쟁 상황을 추정해서 말하진 않겠습니다.\n\n"
@@ -7635,7 +7653,7 @@ class BaseballStatisticsAgent:
 
         team1 = matchup.group(1).strip()
         team2 = matchup.group(2).strip()
-        as_of_label = as_of_date or datetime.now().strftime("%Y-%m-%d")
+        as_of_label = as_of_date or kst_today().isoformat()
         return (
             f"{as_of_label} 기준으로 {team1}와 {team2}의 최근 맞대결 기록은 현재 연결된 최신 자료에서 직접 확인되지 않았습니다.\n\n"
             f"지금 확보된 자료가 두 팀의 실제 맞대결 결과가 아니라서, {team1}와 {team2} 중 어느 쪽이 우세하다고 추정해서 말하진 않겠습니다.\n\n"
@@ -9266,7 +9284,7 @@ class BaseballStatisticsAgent:
         logger.info(f"[BaseballAgent] Analyzing query for tool planning: {query}")
 
         # 시간 표현 전처리
-        now = datetime.now()
+        now = kst_now()
         current_year = now.year
         current_date = now.strftime("%Y년 %m월 %d일")
         # 시간 표현 전처리 (프롬프트에서 처리하므로 파이썬 측 치환 로직 제거)
@@ -9406,10 +9424,8 @@ class BaseballStatisticsAgent:
                 # --- Year Correction Logic ---
                 try:
                     from ..core.entity_extractor import extract_entities_from_query
-                    import datetime as dt
-
                     entity_filter = extract_entities_from_query(query)
-                    now = dt.datetime.now()
+                    now = kst_now()
                     current_year = now.year
 
                     # 명시적으로 추출된 연도가 있는 경우 (예: "작년" -> 2025)
@@ -9491,10 +9507,9 @@ class BaseballStatisticsAgent:
             logger.error(f"[BaseballAgent] Failed response content: {raw_response}")
 
             # 현재 연도 계산 및 엔티티 추출
-            import datetime as dt
             from ..core.entity_extractor import extract_entities_from_query
 
-            current_year = dt.datetime.now().year
+            current_year = kst_today().year
             entity_filter = extract_entities_from_query(query)
 
             # 질문 유형에 따른 스마트 폴백
@@ -11373,7 +11388,7 @@ class BaseballStatisticsAgent:
         )
 
         # 시간 컨텍스트 생성
-        now = datetime.now()
+        now = kst_now()
         current_year = now.year
         is_team_query = self._is_team_analysis_query(
             query, extract_entities_from_query(query)
@@ -12087,7 +12102,7 @@ class BaseballStatisticsAgent:
         if year is None:
             import datetime
 
-            year = datetime.datetime.now().year
+            year = kst_today().year
 
         try:
             result = await self.db_query_tool.get_player_wpa_leaders(
@@ -12128,7 +12143,7 @@ class BaseballStatisticsAgent:
         if year is None:
             import datetime
 
-            year = datetime.datetime.now().year
+            year = kst_today().year
 
         try:
             result = await self.db_query_tool.get_player_wpa_stats(

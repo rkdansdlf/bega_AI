@@ -11,7 +11,7 @@ from pydantic import BaseModel, field_validator
 
 from ..config import get_settings
 from ..core.chunking import smart_chunks
-from ..core.embeddings import async_embed_texts
+from ..core.embeddings import EmbeddingError, async_embed_texts
 from ..core.ingest_runs import IngestRunMode, IngestRunRequest, IngestRunStatus
 from ..observability.metrics import (
     AI_INGEST_SUBMISSIONS_TOTAL,
@@ -37,7 +37,12 @@ from ..core.oracle_rag import (
 from ..deps import (
     get_rag_connection,
     get_ingest_run_store,
+    require_rag_write_ready,
     require_ai_internal_token,
+)
+from ..core.rag_runtime import (
+    RagDependencyUnavailable,
+    classify_rag_dependency_error,
 )
 from ..core.ratelimit import rate_limit_debug_dependency
 
@@ -64,7 +69,20 @@ async def ingest_document(
     conn=Depends(get_rag_connection),
     __: None = Depends(require_ai_internal_token),
     _: None = Depends(rate_limit_debug_dependency),
+    _ready: None = Depends(require_rag_write_ready),
 ):
+    try:
+        return await _ingest_document(payload, conn)
+    except EmbeddingError as exc:
+        raise RagDependencyUnavailable("RAG_EMBEDDING_NOT_READY") from exc
+    except Exception as exc:
+        code = classify_rag_dependency_error(exc)
+        if code:
+            raise RagDependencyUnavailable(code) from exc
+        raise
+
+
+async def _ingest_document(payload: IngestPayload, conn):
     settings = get_settings()
     chunks = smart_chunks(payload.content, settings=settings)
     chunk_count = len(chunks)

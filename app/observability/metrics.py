@@ -342,7 +342,7 @@ AI_COACH_DYNAMIC_PROMPT_CHARS = Histogram(
 AI_DB_POOL_SIZE = Gauge(
     "ai_db_pool_size",
     "Current PostgreSQL connection pool state.",
-    ["state"],  # max|min|available|requests_waiting
+    ["pool", "state"],  # pool + capacity/wait/error states
 )
 
 AI_CHAT_QUEUE_DEPTH = Gauge(

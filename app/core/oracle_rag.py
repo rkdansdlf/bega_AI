@@ -126,9 +126,10 @@ def _oracle_connect_args(conninfo: str) -> dict[str, Any]:
         # wallet_location for the TLS identity (cwallet.sso).
         args["config_dir"] = tns_admin
         args["wallet_location"] = tns_admin
-        # Autonomous wallets generated with the user password reuse it as the
-        # PEM passphrase (same fallback as src/db/engine.py).
-        wallet_password = os.getenv("OCI_WALLET_PASSWORD") or args["password"] or None
+        # Thin mode needs the password chosen when the wallet was downloaded.
+        # It is independent from the database user's password; never guess it
+        # from the credential-bearing connection URL.
+        wallet_password = os.getenv("OCI_WALLET_PASSWORD") or None
         if wallet_password:
             args["wallet_password"] = wallet_password
     return args

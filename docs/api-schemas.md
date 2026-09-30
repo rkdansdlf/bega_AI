@@ -5,7 +5,139 @@
 > Regenerate with: `python scripts/export_openapi_contract.py`
 
 Version: `0.1.0`
-Schemas: **37**
+Schemas: **41**
+
+<a id="aidependencyunavailableresponse"></a>
+## AIDependencyUnavailableResponse
+- Type: `object`
+- Required properties: `code`, `message`, `retryable`
+
+### Properties
+
+| Name | Required | Schema | Description | Constraints |
+| --- | --- | --- | --- | --- |
+| `code` | yes | `string` |  |  |
+- `code`: Const: `"AI_DEPENDENCY_UNAVAILABLE"`
+
+Unsupported property code metadata:
+
+```json
+{
+  "title": "Code"
+}
+```
+| `message` | yes | `string` |  |  |
+
+Unsupported property message metadata:
+
+```json
+{
+  "title": "Message"
+}
+```
+| `retryable` | yes | `boolean` |  |  |
+
+Unsupported property retryable metadata:
+
+```json
+{
+  "title": "Retryable"
+}
+```
+
+<a id="aireadinessresponse"></a>
+## AIReadinessResponse
+- Type: `object`
+- Required properties: `components`, `status`
+
+### Properties
+
+| Name | Required | Schema | Description | Constraints |
+| --- | --- | --- | --- | --- |
+| `components` | yes | `object` |  |  |
+
+Unsupported property components metadata:
+
+```json
+{
+  "additionalProperties": {
+    "additionalProperties": true,
+    "type": "object"
+  },
+  "title": "Components"
+}
+```
+| `status` | yes | `string` |  |  |
+- `status`: Const: `"UP"`
+
+Unsupported property status metadata:
+
+```json
+{
+  "title": "Status"
+}
+```
+
+<a id="aireadinessunavailableresponse"></a>
+## AIReadinessUnavailableResponse
+- Type: `object`
+- Required properties: `code`, `components`, `message`, `retryable`, `status`
+
+### Properties
+
+| Name | Required | Schema | Description | Constraints |
+| --- | --- | --- | --- | --- |
+| `code` | yes | `string` |  |  |
+- `code`: Const: `"AI_DEPENDENCY_UNAVAILABLE"`
+
+Unsupported property code metadata:
+
+```json
+{
+  "title": "Code"
+}
+```
+| `components` | yes | `object` |  |  |
+
+Unsupported property components metadata:
+
+```json
+{
+  "additionalProperties": {
+    "additionalProperties": true,
+    "type": "object"
+  },
+  "title": "Components"
+}
+```
+| `message` | yes | `string` |  |  |
+
+Unsupported property message metadata:
+
+```json
+{
+  "title": "Message"
+}
+```
+| `retryable` | yes | `boolean` |  |  |
+
+Unsupported property retryable metadata:
+
+```json
+{
+  "title": "Retryable"
+}
+```
+| `status` | yes | `string` |  |  |
+- `status`: Const: `"NOT_READY"`
+
+Unsupported property status metadata:
+
+```json
+{
+  "title": "Status"
+}
+```
 
 <a id="body-analyze-ticket-image-ai-vision-ticket-post"></a>
 ## Body_analyze_ticket_image_ai_vision_ticket_post
@@ -1030,6 +1162,11 @@ Unsupported property source metadata:
 }
 ```
 
+<a id="evidenceprofile"></a>
+## EvidenceProfile
+- Type: `string`
+- Enum: `release_gate`
+
 <a id="httpvalidationerror"></a>
 ## HTTPValidationError
 - Type: `object`
@@ -1525,16 +1662,8 @@ Unsupported property title metadata:
 
 | Name | Required | Schema | Description | Constraints |
 | --- | --- | --- | --- | --- |
-| `allowed_roots` | no | `array` | Additional repo-relative allowed roots inside the workspace. |  |
-- `allowed_roots`: Items: `string`
-
-Unsupported property allowed_roots metadata:
-
-```json
-{
-  "title": "Allowed Roots"
-}
-```
+| `evidence_profile` | no | [EvidenceProfile](api-schemas.md#evidenceprofile) |  |  |
+- `evidence_profile`: Default: `"release_gate"`
 | `max_output_tokens` | no | `integer` |  | minimum=400.0, maximum=8000.0 |
 - `max_output_tokens`: Default: `2200`
 
@@ -1545,8 +1674,8 @@ Unsupported property max_output_tokens metadata:
   "title": "Max Output Tokens"
 }
 ```
-| `max_tool_rounds` | no | `integer` |  | minimum=1.0, maximum=10.0 |
-- `max_tool_rounds`: Default: `6`
+| `max_tool_rounds` | no | `integer` |  | minimum=1.0, maximum=3.0 |
+- `max_tool_rounds`: Default: `3`
 
 Unsupported property max_tool_rounds metadata:
 
@@ -1581,16 +1710,6 @@ Unsupported property scenario metadata:
   "title": "Scenario"
 }
 ```
-| `seed_paths` | no | `array` | Additional repo-relative seed paths. |  |
-- `seed_paths`: Items: `string`
-
-Unsupported property seed_paths metadata:
-
-```json
-{
-  "title": "Seed Paths"
-}
-```
 | `task_prompt` | no | `{   "anyOf": [     {       "type": "string"     },     {       "type": "null"     }   ],   "description": "Optional override prompt for the selected scenario.",   "title": "Task Prompt" }` | Optional override prompt for the selected scenario. |  |
 
 Unsupported property task_prompt metadata:
@@ -1608,6 +1727,7 @@ Unsupported property task_prompt metadata:
   "title": "Task Prompt"
 }
 ```
+- Additional properties: not allowed
 
 <a id="releasedecisiondraftresponse"></a>
 ## ReleaseDecisionDraftResponse

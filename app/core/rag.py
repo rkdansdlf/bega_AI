@@ -2521,6 +2521,7 @@ class RAGPipeline:
         connection: Optional[psycopg.AsyncConnection] = None,
         pool: Optional[AsyncConnectionPool] = None,
         rag_pool: Optional[Any] = None,
+        baseball_pool: Optional[Any] = None,
         agent_runtime: BaseballAgentRuntime | None = None,
         context_formatter: Optional[ContextFormatter] = None,
         wpa_calculator: Optional["WPACalculator"] = None,
@@ -2531,6 +2532,7 @@ class RAGPipeline:
         self.connection = connection
         self._pool = pool
         self._rag_pool = rag_pool
+        self._baseball_pool = baseball_pool
         self._oracle_rag = getattr(rag_pool or pool, "backend", None) == "oracle"
         self.query_transformer = QueryTransformer(self._generate)
         self.context_formatter = context_formatter or ContextFormatter()
@@ -2561,6 +2563,20 @@ class RAGPipeline:
             yield self.connection
 
     @asynccontextmanager
+    async def _checkout_baseball_conn(self) -> AsyncIterator[Any]:
+        """Borrow the baseball-only pool for the agent's GameQueryTool.
+
+        Mirrors ``_checkout_rag_conn`` — GameStrategist/MatchPredictor still
+        read baseball through the shared general connection (see the comment
+        in ``AgentRequestContext.create``), so this only affects GameQueryTool.
+        """
+        pool = self._baseball_pool or self._pool
+        if pool is not None:
+            async with pool.connection() as conn:
+                yield conn
+        else:
+            yield self.connection
+
     async def _build_operator_or_static_kbo_result(
         self, query: str
     ) -> Optional[Dict[str, Any]]:
@@ -3421,8 +3437,10 @@ class RAGPipeline:
 
         try:
             # 야구 에이전트를 통한 처리 시도
-            async with self._checkout_conn() as conn:
-                with self.agent_runtime.request_context(conn):
+            async with self._checkout_conn() as conn, self._checkout_baseball_conn() as baseball_conn:
+                with self.agent_runtime.request_context(
+                    conn, baseball_connection=baseball_conn
+                ):
                     agent_result = await self.baseball_agent.process_query(
                         query,
                         {
@@ -3657,8 +3675,10 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     "[RAG] Agent fast-path query detected, trying agent stream first"
                 )
                 try:
-                    async with self._checkout_conn() as conn:
-                        with self.agent_runtime.request_context(conn):
+                    async with self._checkout_conn() as conn, self._checkout_baseball_conn() as baseball_conn:
+                        with self.agent_runtime.request_context(
+                            conn, baseball_connection=baseball_conn
+                        ):
                             async for event in self.baseball_agent.process_query_stream(
                                 query,
                                 context={

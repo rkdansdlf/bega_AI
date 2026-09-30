@@ -5,11 +5,15 @@ import logging
 import re
 from typing import Any, Dict, Literal
 
-import google.generativeai as genai
+import httpx
+from google import genai
+from google.genai import types as genai_types
 from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from typing_extensions import TypedDict
 
 from ..config import Settings, get_settings
+from ..core.http_clients import get_shared_httpx_client
 from ..deps import require_ai_internal_token
 
 logger = logging.getLogger(__name__)
@@ -41,16 +45,25 @@ async def safety_check(
     settings = get_settings()
     rule_result = _evaluate_rule(content, settings)
 
-    if not settings.gemini_api_key:
+    provider = settings.llm_provider
+    provider_configured = bool(
+        (provider == "openrouter" and settings.openrouter_api_key)
+        or (provider == "gemini" and settings.gemini_api_key)
+    )
+    if not provider_configured:
         logger.warning(
-            "GEMINI_API_KEY 미설정 상태입니다. RULE 기반 FALLBACK으로 처리합니다."
+            "%s moderation API key 미설정 상태입니다. RULE 기반 FALLBACK으로 처리합니다.",
+            provider,
         )
         fallback_result = _fallback_from_rule(rule_result)
         _log_result(fallback_result)
         return fallback_result
 
     try:
-        model_result = _evaluate_model(content, settings)
+        if provider == "openrouter":
+            model_result = await _evaluate_openrouter_model(content, settings)
+        else:
+            model_result = await run_in_threadpool(_evaluate_model, content, settings)
         final_result = _merge_rule_and_model(rule_result, model_result)
         _log_result(final_result)
         return final_result
@@ -115,11 +128,8 @@ def _evaluate_rule(content: str, settings: Settings) -> ModerationResult:
     )
 
 
-def _evaluate_model(content: str, settings: Settings) -> ModerationResult:
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel(settings.gemini_model)
-
-    prompt = f"""
+def _build_moderation_prompt(content: str) -> str:
+    return f"""
     당신은 KBO(한국 프로야구) 커뮤니티의 콘텐츠 관리자입니다.
     다음 텍스트를 분석해 JSON으로만 답변하세요.
 
@@ -140,10 +150,9 @@ def _evaluate_model(content: str, settings: Settings) -> ModerationResult:
     }}
     """
 
-    response = model.generate_content(
-        prompt, generation_config={"response_mime_type": "application/json"}
-    )
-    parsed = _parse_json_payload(getattr(response, "text", ""))
+
+def _model_result_from_text(response_text: str) -> ModerationResult:
+    parsed = _parse_json_payload(response_text)
 
     action = _normalize_action(str(parsed.get("action", "ALLOW")))
     risk_level = _normalize_risk_level(str(parsed.get("riskLevel", "LOW")), action)
@@ -157,6 +166,58 @@ def _evaluate_model(content: str, settings: Settings) -> ModerationResult:
         decision_source="MODEL",
         risk_level=risk_level,
     )
+
+
+async def _evaluate_openrouter_model(
+    content: str, settings: Settings
+) -> ModerationResult:
+    model = str(settings.openrouter_model or "").strip()
+    if not model:
+        raise RuntimeError("OpenRouter moderation model is not configured")
+
+    client = get_shared_httpx_client(
+        "moderation-openrouter",
+        timeout=httpx.Timeout(30.0, connect=10.0, read=20.0, pool=5.0),
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+    )
+    response = await client.post(
+        f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": settings.openrouter_referer or "https://kbo-platform.com",
+            "X-Title": settings.openrouter_app_title or "KBO Platform Moderation",
+        },
+        json={
+            "model": model,
+            "messages": [
+                {"role": "user", "content": _build_moderation_prompt(content)}
+            ],
+            "temperature": 0.0,
+            "max_tokens": 300,
+            "response_format": {"type": "json_object"},
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    response_text = payload["choices"][0]["message"]["content"]
+    if not isinstance(response_text, str) or not response_text.strip():
+        raise RuntimeError("OpenRouter moderation response content is empty")
+    return _model_result_from_text(response_text)
+
+
+def _evaluate_model(content: str, settings: Settings) -> ModerationResult:
+    prompt = _build_moderation_prompt(content)
+
+    with genai.Client(api_key=settings.gemini_api_key) as client:
+        response = client.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                response_mime_type="application/json"
+            ),
+        )
+    return _model_result_from_text(getattr(response, "text", ""))
 
 
 def _merge_rule_and_model(

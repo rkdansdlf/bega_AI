@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -65,6 +66,7 @@ DEFAULT_GATE_MAX_PENDING_WAIT = 2
 DEFAULT_GATE_MAX_INSUFFICIENT_RATIO = 0.4
 DEFAULT_GATE_MIN_SELECTED_TARGETS = 0
 DEFAULT_GATE_FAIL_ON_MISSING_REPORT = True
+KBO_BUSINESS_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 router = APIRouter(prefix="/ai/coach/auto-brief/ops", tags=["coach-auto-brief-ops"])
 
@@ -171,7 +173,7 @@ def _resolve_requested_window(
     start_date: date | None,
     end_date: date | None,
 ) -> tuple[date, date]:
-    today = date.today()
+    today = datetime.now(KBO_BUSINESS_TIMEZONE).date()
     if window == "today":
         return today, today
     if window == "tomorrow":

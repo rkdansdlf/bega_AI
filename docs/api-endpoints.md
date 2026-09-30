@@ -5,8 +5,8 @@
 > Regenerate with: `python scripts/export_openapi_contract.py`
 
 Version: `0.1.0`
-Paths: **32**
-Operations: **33**
+Paths: **33**
+Operations: **34**
 
 ## chat
 
@@ -743,6 +743,12 @@ Validation Error
 #### Media type: `application/json`
 - Schema: [HTTPValidationError](api-schemas.md#httpvalidationerror)
 
+### Response `503`
+Service Unavailable
+
+#### Media type: `application/json`
+- Schema: [AIDependencyUnavailableResponse](api-schemas.md#aidependencyunavailableresponse)
+
 ### GET `/ai/release-decision/eval-cases`
 List Release Decision Eval Cases
 - Operation ID: `list_release_decision_eval_cases_ai_release_decision_eval_cases_get`
@@ -770,6 +776,12 @@ Validation Error
 
 #### Media type: `application/json`
 - Schema: [HTTPValidationError](api-schemas.md#httpvalidationerror)
+
+### Response `503`
+Service Unavailable
+
+#### Media type: `application/json`
+- Schema: [AIDependencyUnavailableResponse](api-schemas.md#aidependencyunavailableresponse)
 
 ### POST `/ai/release-decision/evaluate`
 Evaluate Release Decision Draft
@@ -804,6 +816,12 @@ Validation Error
 
 #### Media type: `application/json`
 - Schema: [HTTPValidationError](api-schemas.md#httpvalidationerror)
+
+### Response `503`
+Service Unavailable
+
+#### Media type: `application/json`
+- Schema: [AIDependencyUnavailableResponse](api-schemas.md#aidependencyunavailableresponse)
 
 ### GET `/ai/release-decision/presets`
 List Release Decision Presets
@@ -986,6 +1004,29 @@ Successful Response
 
 #### Media type: `application/json`
 - Schema: `{}`
+
+### GET `/ready`
+Ready
+
+Report whether mandatory AI dependencies can serve requests.
+- Operation ID: `ready_ready_get`
+- Tags: `system`
+- Security: Not specified in OpenAPI
+- Deprecated: no
+
+### Responses
+
+### Response `200`
+Successful Response
+
+#### Media type: `application/json`
+- Schema: [AIReadinessResponse](api-schemas.md#aireadinessresponse)
+
+### Response `503`
+Service Unavailable
+
+#### Media type: `application/json`
+- Schema: [AIReadinessUnavailableResponse](api-schemas.md#aireadinessunavailableresponse)
 
 ## vision
 

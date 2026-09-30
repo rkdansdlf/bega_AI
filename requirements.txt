@@ -7,7 +7,7 @@ oracledb>=2.5.0
 python-multipart>=0.0.29
 sse-starlette==3.4.4
 joblib==1.5.3
-google-generativeai==0.8.6
+google-genai==2.17.0
 httpx>=0.28.1
 openai>=2.38.0
 # Use CPU-only Torch to avoid downloading CUDA/nvidia libraries during image build.

@@ -113,7 +113,11 @@ async def _save_sync(
     filters_json은 psycopg3 %s 플레이스홀더에 ::jsonb 캐스트를 적용합니다.
     (coach.py의 response_json 저장 방식과 동일)
     """
-    ttl_secs = get_ttl_seconds(intent)
+    ttl_secs = get_ttl_seconds(
+        intent,
+        question=question_text,
+        filters=filters_json,
+    )
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_secs)
 
     # JSONB 직렬화 — None이면 DB에 NULL 저장

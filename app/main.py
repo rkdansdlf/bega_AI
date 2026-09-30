@@ -4,13 +4,24 @@
 애플리케이션의 핵심 구성 요소를 설정하는 팩토리 함수를 포함합니다.
 """
 
+from typing import Any, Literal
+
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
+from pydantic import BaseModel
 
 from .config import get_settings
+from .core.errors import (
+    AIDependencyUnavailable,
+    ai_dependency_unavailable_handler,
+)
+from .core.rag_runtime import (
+    RagDependencyUnavailable,
+    rag_dependency_unavailable_handler,
+)
 from .deprecation import LegacyApiDeprecationMiddleware
-from .deps import lifespan
+from .deps import get_readiness_report, lifespan
 from .internal_auth import require_ai_internal_token
 from .routers import (
     chat_stream,
@@ -23,6 +34,19 @@ from .routers import (
     release_decision,
 )
 from .streaming.http_errors import install_ai_stream_http_error_handler
+
+
+class AIReadinessResponse(BaseModel):
+    status: Literal["UP"]
+    components: dict[str, dict[str, Any]]
+
+
+class AIReadinessUnavailableResponse(BaseModel):
+    code: Literal["AI_DEPENDENCY_UNAVAILABLE"]
+    message: str
+    retryable: bool
+    status: Literal["NOT_READY"]
+    components: dict[str, dict[str, Any]]
 
 
 def _include_internal_router(
@@ -51,6 +75,7 @@ def create_app() -> FastAPI:
 
     # [Security] 운영 환경에서 내부 토큰 오설정(미설정/공개 기본값) 시 기동 거부.
     settings.validate_internal_token_security()
+    settings.validate_database_pool_budget()
 
     # Sentry Init
     import sentry_sdk
@@ -71,6 +96,14 @@ def create_app() -> FastAPI:
         docs_url="/docs" if api_docs_enabled else None,
         redoc_url="/redoc" if api_docs_enabled else None,
         openapi_url="/openapi.json" if api_docs_enabled else None,
+    )
+    app.add_exception_handler(
+        AIDependencyUnavailable,
+        ai_dependency_unavailable_handler,
+    )
+    app.add_exception_handler(
+        RagDependencyUnavailable,
+        rag_dependency_unavailable_handler,
     )
     install_ai_stream_http_error_handler(app)
     app.add_middleware(LegacyApiDeprecationMiddleware)
@@ -140,7 +173,7 @@ def create_app() -> FastAPI:
             },
         )
 
-        public_paths = {"/health"}
+        public_paths = {"/health", "/ready"}
         for path, operations in openapi_schema.get("paths", {}).items():
             if path not in public_paths:
                 for operation in operations.values():
@@ -158,7 +191,31 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["system"])
     async def health():
         """애플리케이션의 상태를 확인하는 헬스 체크 엔드포인트."""
-        return {"status": "ok"}
+        return {"status": "UP"}
+
+    @app.get(
+        "/ready",
+        tags=["system"],
+        response_model=AIReadinessResponse,
+        responses={503: {"model": AIReadinessUnavailableResponse}},
+    )
+    async def ready():
+        """Report whether mandatory AI dependencies can serve requests."""
+
+        report = await get_readiness_report()
+        if report["status"] != "UP":
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "code": "AI_DEPENDENCY_UNAVAILABLE",
+                    "message": "mandatory AI dependencies are unavailable",
+                    "retryable": True,
+                    **report,
+                },
+            )
+        return report
 
     return app
 
