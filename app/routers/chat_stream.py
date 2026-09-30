@@ -1410,6 +1410,7 @@ async def _chat_event_generator(
         "fallback_reason": result.get("fallback_reason"),
         "fingerprint": build_response_fingerprint(get_settings(), result),
         "claim_grounding": result.get("claim_grounding"),
+        "llm_attribution": result.get("llm_attribution"),
         "fallback_answer_used": bool(result.get("fallback_answer_used", False))
         or bool(answer_stream_error),
         "model_usage": result.get("model_usage", []),
@@ -1662,6 +1663,7 @@ async def _chat_live_event_generator(
         "fallback_reason": buffered_meta.get("fallback_reason"),
         "fingerprint": build_response_fingerprint(get_settings(), buffered_meta),
         "claim_grounding": buffered_meta.get("claim_grounding"),
+        "llm_attribution": buffered_meta.get("llm_attribution"),
         "fallback_answer_used": bool(buffered_meta.get("fallback_answer_used", False))
         or bool(answer_stream_error),
         "model_usage": buffered_meta.get("model_usage", []),

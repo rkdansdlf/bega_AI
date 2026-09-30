@@ -33,6 +33,7 @@ from .llm_provider import (
     ProviderRouter,
     UsageSink,
     build_router,
+    get_call_attribution,
     provider_health,
 )
 from .llm_usage_accounting import account_llm_usage, publish_circuit_states
@@ -1622,6 +1623,12 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _attribution_dict() -> Optional[Dict[str, Any]]:
+    """Actual provider/model that served the current request's last LLM call."""
+    attribution = get_call_attribution()
+    return attribution.to_dict() if attribution is not None else None
+
+
 def _build_retrieval_event_filter(
     final_filters: Dict[str, Any],
     *,
@@ -3116,12 +3123,15 @@ class RAGPipeline:
             async for chunk in self._llm_router().stream(messages, sink):
                 streamed.append(chunk)
                 yield chunk
+            attr = sink.attribution
             self._last_usage_account = self._account_usage(
                 LLMResult(
                     "".join(streamed),
-                    str(self.settings.llm_provider),
-                    None,
+                    (attr.actual_provider if attr else None)
+                    or str(self.settings.llm_provider),
+                    attr.actual_model if attr else None,
                     sink.usage,
+                    attribution=attr,
                 ),
                 messages,
             )
@@ -3693,6 +3703,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 "claim_grounding": build_runtime_grounding(
                     "".join(streamed_parts), docs
                 ),
+                "llm_attribution": _attribution_dict(),
             },
         }
 
@@ -4279,6 +4290,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
             "answer": answer,
             "citations": _build_citations(docs),
             "claim_grounding": build_runtime_grounding(answer, docs),
+            "llm_attribution": _attribution_dict(),
             "intent": intent,
             "retrieved": docs,
             "strategy": "rag_v3_enhanced",  # 업데이트된 버전 명시

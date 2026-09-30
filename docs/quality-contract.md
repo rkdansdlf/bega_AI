@@ -13,6 +13,7 @@
 | Relevance guard | 질의의 선수/팀/시즌과 충돌하는 chunk 를 컨텍스트 전에 제거 (`RAG_RELEVANCE_GUARD_ENABLED`) | `app/core/relevance_guard.py` |
 | Reranker | `score`(모델 없음) / `http`(cross-encoder rerank API, 실패 시 score 순서로 fail-open) | `app/core/reranker.py` |
 | Claim↔source | 답변 문장 → `rag_chunks.id` 매핑, 미지지 문장/숫자 보고 (`claim_grounding` meta) | `app/eval/grounding.py` |
+| 실제 호출 attribution | 요청(primary) vs 실제 provider/model, `fallback_depth`, `fallback_reason`(에러 클래스/`circuit_open`/`not_configured`). 스트림·일반 응답, fingerprint, 비용 집계, 캐시 provenance 가 모두 이 값을 사용 (`llm_attribution` meta) | `app/core/llm_provider.py` |
 | Fingerprint | prompt version/hash, planner/retrieval/reranker version, model, embedding signature 를 meta·캐시·eval 에 기록 | `app/core/fingerprint.py` |
 | Golden 평가 | retrieval(Recall@5/10, MRR, nDCG, wrong-source, zero-hit) 과 generation(unsupported/numeric/entity hallucination, citation P/R) 을 분리 측정, baseline 대비 회귀 시 exit 1 | `scripts/eval_rag_golden.py`, `evals/` |
 | CI 게이트 | `ai-pr-gate` 가 golden 평가를 실행 | `.github/workflows/ai-pr-gate.yml` |
@@ -43,7 +44,6 @@
   방지 필터까지만 제공하고, 구 generation 행을 보존하는 per-generation 저장은 크롤러(임베딩 소유자)
   과제다. 롤백은 구 signature 행이 남아 있을 때만 허용된다.
 - Oracle 읽기 경로(`oracle_rag.py`)에는 generation 게이트·relevance 컬럼 select 가 아직 없다.
-- 스트리밍 accounting 의 provider 라벨은 `LLM_PROVIDER` 기준이라 fallback 시 부정확할 수 있다.
 - Chunk 벤치마크는 `EMBED_PROVIDER=local` 이면 의미 없음(리포트에 `meaningful:false`).
 - Feedback: `POST /ai/chat/feedback`(내부 토큰) → `rag_answer_feedback`(migration 008). BFF 가 호출하도록 연동해야 데이터가 쌓이며, `mine_retrieval_events.py --with-feedback` 가 DOWN 평가를 골든 후보로 합친다.
 - `main` branch protection: `scripts/ops/apply_branch_protection.sh OWNER/REPO --apply` (required: Python Linting, Unit Tests, Security Scan, Container Image Scan; `ci.yml` 의 PR `paths:` 필터는 제거됨).

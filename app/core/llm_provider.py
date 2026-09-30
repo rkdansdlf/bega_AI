@@ -13,8 +13,18 @@ from __future__ import annotations
 
 import json
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, Sequence
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
 
 import httpx
 
@@ -41,19 +51,68 @@ class Usage:
 
 
 @dataclass
+class CallAttribution:
+    """Which provider/model *actually* served a call, versus what was asked.
+
+    ``fallback_depth`` is the actual provider's position in the configured
+    order (0 = the requested primary served it). ``fallback_reason`` is why the
+    providers ahead of it were not used: an error class, ``circuit_open`` or
+    ``not_configured``. Fingerprints, cost, traces and cache provenance must
+    all use this instead of the configured ``LLM_PROVIDER``.
+    """
+
+    requested_provider: Optional[str] = None
+    requested_model: Optional[str] = None
+    actual_provider: Optional[str] = None
+    actual_model: Optional[str] = None
+    fallback_depth: int = 0
+    fallback_reason: Optional[str] = None
+    attempts: List[Dict[str, str]] = field(default_factory=list)
+
+    @property
+    def fell_back(self) -> bool:
+        return self.fallback_depth > 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "requested_provider": self.requested_provider,
+            "requested_model": self.requested_model,
+            "actual_provider": self.actual_provider,
+            "actual_model": self.actual_model,
+            "fallback_depth": self.fallback_depth,
+            "fallback_reason": self.fallback_reason,
+            "attempts": list(self.attempts),
+        }
+
+
+# Per-request (per async context) record of the most recent call's attribution.
+# A ContextVar, not an instance attribute: RAG pipelines are shared across
+# concurrent requests.
+_last_attribution: ContextVar[Optional[CallAttribution]] = ContextVar(
+    "llm_last_attribution", default=None
+)
+
+
+def get_call_attribution() -> Optional[CallAttribution]:
+    return _last_attribution.get()
+
+
+@dataclass
 class LLMResult:
     text: str
     provider: str
     model: Optional[str] = None
     usage: Usage = field(default_factory=Usage)
     fallback_from: Optional[str] = None
+    attribution: Optional[CallAttribution] = None
 
 
 @dataclass
 class UsageSink:
-    """Collects usage from a stream (generators cannot return values)."""
+    """Collects usage/attribution from a stream (generators cannot return)."""
 
     usage: Usage = field(default_factory=Usage)
+    attribution: Optional[CallAttribution] = None
 
 
 def estimate_tokens(text: str) -> int:
@@ -335,23 +394,52 @@ class ProviderRouter:
         self.providers = list(providers)
         self.circuits = circuits or {p.name: ProviderCircuit(p.name) for p in providers}
 
-    def _candidates(self) -> List[LLMProvider]:
-        """Configured providers whose circuit admits traffic (order preserved)."""
-        out = []
+    def _plan(self) -> Tuple[List[LLMProvider], Dict[str, str]]:
+        """Usable providers in order, plus why each skipped one was skipped."""
+        usable: List[LLMProvider] = []
+        skipped: Dict[str, str] = {}
         for provider in self.providers:
             if not provider.is_configured():
-                continue
-            if not self.circuits[provider.name].allow_request():
+                skipped[provider.name] = "not_configured"
+            elif not self.circuits[provider.name].allow_request():
                 logger.warning("[LLM] circuit OPEN, skipping %s", provider.name)
-                continue
-            out.append(provider)
-        return out
+                skipped[provider.name] = "circuit_open"
+            else:
+                usable.append(provider)
+        return usable, skipped
+
+    def _attribution(
+        self,
+        actual: LLMProvider,
+        attempts: List[Dict[str, str]],
+        skipped: Dict[str, str],
+    ) -> CallAttribution:
+        primary = self.providers[0]
+        depth = self.providers.index(actual)
+        reason: Optional[str] = None
+        if depth:
+            ahead = self.providers[0].name
+            reason = skipped.get(ahead) or next(
+                (a["error"] for a in attempts if a["provider"] == ahead), None
+            )
+        history = [
+            {"provider": name, "outcome": why} for name, why in skipped.items()
+        ] + [{"provider": a["provider"], "outcome": a["error"]} for a in attempts]
+        history.append({"provider": actual.name, "outcome": "ok"})
+        return CallAttribution(
+            requested_provider=primary.name,
+            requested_model=getattr(primary, "model", None),
+            actual_provider=actual.name,
+            actual_model=getattr(actual, "model", None),
+            fallback_depth=depth,
+            fallback_reason=reason,
+            attempts=history,
+        )
 
     async def complete(self, messages: Messages) -> LLMResult:
         attempts: List[Dict[str, str]] = []
-        first: Optional[str] = None
-        for provider in self._candidates():
-            first = first or provider.name
+        candidates, skipped = self._plan()
+        for provider in candidates:
             circuit = self.circuits[provider.name]
             try:
                 with span("llm", "complete", provider=provider.name):
@@ -364,8 +452,13 @@ class ProviderRouter:
                 logger.error("[LLM] %s failed: %s", provider.name, exc)
                 continue
             circuit.record_success()
-            if attempts:
-                result.fallback_from = attempts[0]["provider"]
+            attribution = self._attribution(provider, attempts, skipped)
+            result.attribution = attribution
+            _last_attribution.set(attribution)
+            result.provider = provider.name
+            result.model = result.model or attribution.actual_model
+            if attribution.fell_back:
+                result.fallback_from = attribution.requested_provider
             return result
         raise AllProvidersFailed(
             attempts or [{"provider": "none", "error": "no_available_provider"}]
@@ -375,11 +468,19 @@ class ProviderRouter:
         self, messages: Messages, sink: Optional[UsageSink] = None
     ) -> AsyncIterator[str]:
         attempts: List[Dict[str, str]] = []
-        for provider in self._candidates():
+        candidates, skipped = self._plan()
+        for provider in candidates:
             circuit = self.circuits[provider.name]
             yielded = False
             try:
                 async for chunk in provider.stream(messages, sink):
+                    if not yielded and sink is not None:
+                        # Recorded at the first chunk so a mid-stream failure
+                        # is still attributed to the provider that spoke.
+                        sink.attribution = self._attribution(
+                            provider, attempts, skipped
+                        )
+                        _last_attribution.set(sink.attribution)
                     yielded = True
                     yield chunk
             except Exception as exc:  # noqa: BLE001
@@ -393,6 +494,9 @@ class ProviderRouter:
                     raise
                 continue
             circuit.record_success()
+            if not yielded and sink is not None:
+                sink.attribution = self._attribution(provider, attempts, skipped)
+                _last_attribution.set(sink.attribution)
             return
         raise AllProvidersFailed(
             attempts or [{"provider": "none", "error": "no_available_provider"}]

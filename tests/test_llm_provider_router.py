@@ -281,3 +281,169 @@ def test_gemini_message_conversion_folds_system_into_first_user():
     )
     assert contents[0]["role"] == "user" and "SYS" in contents[0]["parts"][0]["text"]
     assert contents[1]["role"] == "model"
+
+
+# --- actual provider/model attribution --------------------------------------
+from app.core.fingerprint import build_response_fingerprint  # noqa: E402
+from app.core.llm_provider import get_call_attribution  # noqa: E402
+
+
+class ModelProvider(FakeProvider):
+    def __init__(self, name, model, **kw):
+        super().__init__(name, **kw)
+        self.model = model
+
+
+def _router(primary, fallback, clock=None):
+    kw = {"clock": clock} if clock else {}
+    return ProviderRouter(
+        [primary, fallback],
+        {
+            primary.name: ProviderCircuit(primary.name, min_requests=2, **kw),
+            fallback.name: ProviderCircuit(fallback.name, **kw),
+        },
+    )
+
+
+def test_primary_success_is_depth_zero_with_requested_equals_actual():
+    r = _router(ModelProvider("gemini", "g-1"), ModelProvider("openrouter", "or-1"))
+    out = _run(r.complete([]))
+    a = out.attribution
+    assert (a.requested_provider, a.actual_provider) == ("gemini", "gemini")
+    assert (a.requested_model, a.actual_model) == ("g-1", "g-1")
+    assert a.fallback_depth == 0 and a.fallback_reason is None and not a.fell_back
+    assert out.fallback_from is None
+
+
+def test_fallback_records_actual_provider_model_and_reason():
+    r = _router(
+        ModelProvider("gemini", "g-1", error=_status_error(503)),
+        ModelProvider("openrouter", "or-deepseek"),
+    )
+    out = _run(r.complete([]))
+    a = out.attribution
+    assert a.requested_provider == "gemini" and a.requested_model == "g-1"
+    assert a.actual_provider == "openrouter" and a.actual_model == "or-deepseek"
+    assert a.fallback_depth == 1 and a.fell_back
+    assert a.fallback_reason == "HTTPStatusError"
+    assert out.provider == "openrouter" and out.fallback_from == "gemini"
+    assert [h["outcome"] for h in a.attempts] == ["HTTPStatusError", "ok"]
+
+
+def test_skipped_providers_are_explained_by_circuit_or_config():
+    unconfigured = _router(
+        ModelProvider("gemini", "g-1", configured=False),
+        ModelProvider("openrouter", "or-1"),
+    )
+    a = _run(unconfigured.complete([])).attribution
+    assert a.fallback_depth == 1 and a.fallback_reason == "not_configured"
+
+    clock = FakeClock()
+    bad = ModelProvider("gemini", "g-1", error=_status_error(503))
+    r = _router(bad, ModelProvider("openrouter", "or-1"), clock)
+    for _ in range(2):
+        _run(r.complete([]))
+    a = _run(r.complete([])).attribution
+    assert a.fallback_reason == "circuit_open" and bad.calls == 2
+
+
+def test_stream_attribution_reports_fallback_provider():
+    r = _router(
+        ModelProvider("gemini", "g-1", error=_status_error(429)),
+        ModelProvider("openrouter", "or-1"),
+    )
+    sink = UsageSink()
+
+    async def go():
+        return [c async for c in r.stream([], sink)]
+
+    assert _run(go()) == ["a", "b"]
+    assert sink.attribution.actual_provider == "openrouter"
+    assert sink.attribution.actual_model == "or-1"
+    assert sink.attribution.fallback_depth == 1
+
+
+def test_mid_stream_failure_is_still_attributed_to_the_provider_that_spoke():
+    class Half(ModelProvider):
+        async def stream(self, messages, sink=None):
+            yield "partial"
+            raise _status_error(503)
+
+    r = _router(Half("gemini", "g-1"), ModelProvider("openrouter", "or-1"))
+    sink = UsageSink()
+
+    async def go():
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in r.stream([], sink):
+                pass
+
+    _run(go())
+    assert sink.attribution.actual_provider == "gemini"
+
+
+def test_attribution_is_visible_through_the_request_context():
+    r = _router(
+        ModelProvider("gemini", "g-1", error=_status_error(503)),
+        ModelProvider("openrouter", "or-1"),
+    )
+
+    async def go():
+        await r.complete([])
+        return get_call_attribution()
+
+    assert _run(go()).actual_provider == "openrouter"
+
+
+def test_fingerprint_uses_actual_model_not_configured_provider():
+    settings = SimpleNamespace(
+        llm_provider="gemini",
+        gemini_model="configured-gemini",
+        rag_rerank_enabled=False,
+        embed_provider="openrouter",
+        embed_dim=1536,
+    )
+    attribution = {
+        "requested_provider": "gemini",
+        "actual_provider": "openrouter",
+        "actual_model": "deepseek/x",
+        "fallback_depth": 1,
+        "fallback_reason": "HTTPStatusError",
+    }
+    fp = build_response_fingerprint(settings, {"llm_attribution": attribution})
+    assert fp["model"] == "deepseek/x"
+    assert fp["llm_actual_provider"] == "openrouter"
+    assert fp["llm_requested_provider"] == "gemini"
+    assert fp["llm_fallback_depth"] == 1
+    assert fp["llm_fallback_reason"] == "HTTPStatusError"
+    plain = build_response_fingerprint(settings, {})
+    assert plain["model"] == "configured-gemini" and plain["llm_fallback_depth"] == 0
+
+
+def test_rag_stream_accounting_uses_actual_provider_after_fallback():
+    from app.core.rag import RAGPipeline, _attribution_dict
+
+    router = _router(
+        ModelProvider("gemini", "g-1", error=_status_error(503)),
+        ModelProvider("openrouter", "or-deepseek"),
+    )
+    pipeline = RAGPipeline.__new__(RAGPipeline)
+    pipeline.settings = SimpleNamespace(llm_provider="gemini")
+    pipeline._llm_router = lambda: router
+    captured = {}
+
+    def fake_account(result, messages):
+        captured["result"] = result
+        return {}
+
+    pipeline._account_usage = fake_account
+
+    async def go():
+        chunks = [c async for c in pipeline._generate_stream([])]
+        return chunks, _attribution_dict()
+
+    chunks, attribution = _run(go())
+    assert chunks == ["a", "b"]
+    assert captured["result"].provider == "openrouter"  # not LLM_PROVIDER
+    assert captured["result"].model == "or-deepseek"
+    assert attribution["actual_provider"] == "openrouter"
+    assert attribution["requested_provider"] == "gemini"

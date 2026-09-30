@@ -54,6 +54,9 @@ def _embedding_signature(settings: Any) -> Optional[str]:
 
 
 def _model_from_result(result: Mapping[str, Any], settings: Any) -> Optional[str]:
+    attribution = result.get("llm_attribution")
+    if isinstance(attribution, Mapping) and attribution.get("actual_model"):
+        return str(attribution["actual_model"])
     usage = result.get("model_usage") or []
     for entry in usage:
         if isinstance(entry, Mapping) and entry.get("model"):
@@ -69,6 +72,8 @@ def build_response_fingerprint(
     settings: Any, result: Optional[Mapping[str, Any]] = None
 ) -> Dict[str, Any]:
     result = result or {}
+    attribution = result.get("llm_attribution")
+    attribution = attribution if isinstance(attribution, Mapping) else {}
     return {
         "prompt_version": prompt_version(),
         "prompt_hash": prompt_hash(),
@@ -76,5 +81,10 @@ def build_response_fingerprint(
         "retrieval_version": RETRIEVAL_VERSION,
         "reranker_version": _reranker_version(settings),
         "model": _model_from_result(result, settings),
+        # What actually served the call vs. what was configured/requested.
+        "llm_requested_provider": attribution.get("requested_provider"),
+        "llm_actual_provider": attribution.get("actual_provider"),
+        "llm_fallback_depth": int(attribution.get("fallback_depth") or 0),
+        "llm_fallback_reason": attribution.get("fallback_reason"),
         "embedding_signature": _embedding_signature(settings),
     }
