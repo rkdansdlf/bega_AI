@@ -460,3 +460,203 @@ async def test_readiness_reflects_the_live_state_of_the_active_generation(conn):
     await conn.execute("DROP INDEX idx_rag_emb_g1")
     broken = await rag_readiness._probe_postgres(_Pool(conn), cfg)
     assert broken["rag_index"]["code"] == "RAG_VECTOR_INDEX_NOT_READY"
+
+
+# ─── concurrency: backfill vs live ingest ─────────────────────────────────────
+import asyncio  # noqa: E402
+
+
+async def _second_conn():
+    return await psycopg.AsyncConnection.connect(URL, autocommit=False)
+
+
+async def _gen_row(conn, source_row_id):
+    cur = await conn.execute(
+        """
+        SELECT e.content_hash, e.embedding::text
+        FROM rag_chunk_embeddings e JOIN rag_chunks r ON r.id = e.chunk_id
+        WHERE e.generation_id = 'g1' AND r.source_row_id = %s
+        """,
+        (source_row_id,),
+    )
+    return await cur.fetchone()
+
+
+async def test_backfill_does_not_overwrite_a_concurrent_newer_write(conn):
+    """T1 backfill reads chunk A, T2 rewrites A and mirrors it (uncommitted),
+    T1 reaches the write, T2 commits. The generation must end with T2's row."""
+    for i in range(3):
+        await insert_chunk(conn, i)
+    await eg.register_generation(
+        conn,
+        generation_id="g1",
+        embedding_model="m1",
+        embedding_dim=DIM_A,
+        embedding_version=1,
+        mirror_inline=True,
+    )
+    await eg.backfill_from_inline(conn, "g1")  # gen rows now exist for all chunks
+
+    writer = await _second_conn()
+    try:
+        # T2: crawler rewrites row-1 (new hash + new vector); trigger mirrors it,
+        # but the transaction has not committed yet.
+        await writer.execute(
+            "UPDATE rag_chunks SET content_hash = 'hash-1-v2', "
+            "embedding = %s::vector WHERE source_row_id = 'row-1'",
+            (lit(vec(DIM_A, 900)),),
+        )
+        # T1: a backfill pass starts while T2 is in flight.
+        # One pass only: extra passes would heal a stale overwrite after the fact and
+        # hide that it happened. The guarantee is that it never happens.
+        backfill = asyncio.create_task(
+            eg.backfill_from_inline(conn, "g1", max_passes=1)
+        )
+        await asyncio.sleep(0.6)  # let it reach the contended row
+        await writer.commit()
+        await asyncio.wait_for(backfill, timeout=10)
+    finally:
+        await writer.close()
+
+    # Checked immediately: a later healing pass would mask the race.
+    h, emb = await _gen_row(conn, "row-1")
+    assert h == "hash-1-v2", "backfill overwrote a newer generation row with stale data"
+    cur = await conn.execute(
+        "SELECT embedding::text FROM rag_chunks WHERE source_row_id = 'row-1'"
+    )
+    assert emb == (await cur.fetchone())[0], "hash and vector are mispaired"
+
+
+async def test_locked_rows_are_skipped_reported_and_picked_up_next_run(conn):
+    for i in range(4):
+        await insert_chunk(conn, i)
+    await eg.register_generation(
+        conn,
+        generation_id="g1",
+        embedding_model="m1",
+        embedding_dim=DIM_A,
+        embedding_version=1,
+        mirror_inline=True,
+    )
+    holder = await _second_conn()
+    try:
+        # A writer is mid-transaction on row-2 (row lock held, nothing committed).
+        await holder.execute(
+            "SELECT 1 FROM rag_chunks WHERE source_row_id = 'row-2' FOR UPDATE"
+        )
+        first = await eg.backfill_from_inline(conn, "g1", max_passes=2)
+        assert first["copied"] == 3  # rows 0, 1, 3
+        assert first["remaining"] == 1 and first["complete"] is False
+        assert first["passes"] == 2  # retried, then gave up honestly
+    finally:
+        await holder.rollback()
+        await holder.close()
+    second = await eg.backfill_from_inline(conn, "g1")
+    assert second["copied"] == 1 and second["complete"] is True
+
+
+async def test_write_embeddings_is_compare_and_set_on_the_chunk_hash(conn):
+    cid = await insert_chunk(conn, 0)
+    await eg.register_generation(
+        conn,
+        generation_id="g2",
+        embedding_model="m2",
+        embedding_dim=DIM_B,
+        embedding_version=1,
+    )
+    report: dict = {}
+    # Embedded from hash-0, chunk still has hash-0 -> written.
+    assert (
+        await eg.write_embeddings(
+            conn, "g2", [(cid, vec(DIM_B, 1), "hash-0")], report=report
+        )
+        == 1
+    )
+    assert report == {"written": 1, "stale_skipped": 0}
+
+    # The chunk is rewritten while a slow writer still holds a vector for hash-0.
+    await conn.execute(
+        "UPDATE rag_chunks SET content_hash = 'hash-0-v2' WHERE id = %s", (cid,)
+    )
+    await eg.write_embeddings(conn, "g2", [(cid, vec(DIM_B, 2), "hash-0-v2")])
+    fresh = await conn.execute(
+        "SELECT content_hash, embedding::text FROM rag_chunk_embeddings "
+        "WHERE generation_id='g2' AND chunk_id=%s",
+        (cid,),
+    )
+    fresh_row = await fresh.fetchone()
+    assert fresh_row[0] == "hash-0-v2"
+
+    report = {}
+    assert (
+        await eg.write_embeddings(
+            conn, "g2", [(cid, vec(DIM_B, 3), "hash-0")], report=report  # outdated
+        )
+        == 0
+    )
+    assert report == {"written": 0, "stale_skipped": 1}
+    again = await conn.execute(
+        "SELECT content_hash, embedding::text FROM rag_chunk_embeddings "
+        "WHERE generation_id='g2' AND chunk_id=%s",
+        (cid,),
+    )
+    assert await again.fetchone() == fresh_row  # the fresher row was not overwritten
+
+    # Removed chunks are skipped instead of raising an FK error.
+    report = {}
+    await eg.write_embeddings(conn, "g2", [(10**9, vec(DIM_B, 4), "x")], report=report)
+    assert report["stale_skipped"] == 1
+
+
+async def test_backfill_under_concurrent_rewrites_never_mispairs_hash_and_vector(conn):
+    import random
+
+    n = 30
+    for i in range(n):
+        await insert_chunk(conn, i)
+    await eg.register_generation(
+        conn,
+        generation_id="g1",
+        embedding_model="m1",
+        embedding_dim=DIM_A,
+        embedding_version=1,
+        mirror_inline=True,
+    )
+    writer = await psycopg.AsyncConnection.connect(URL, autocommit=True)
+    rng = random.Random(7)
+    done = asyncio.Event()
+
+    async def rewrite():
+        try:
+            for k in range(250):
+                i = rng.randrange(n)
+                await writer.execute(
+                    "UPDATE rag_chunks SET content_hash = %s, embedding = %s::vector "
+                    "WHERE source_row_id = %s",
+                    (f"h{i}-{k}", lit(vec(DIM_A, 1000 + k)), f"row-{i}"),
+                )
+        finally:
+            done.set()
+
+    async def backfill_loop():
+        while not done.is_set():
+            await eg.backfill_from_inline(conn, "g1", batch_size=4, max_passes=1)
+
+    try:
+        await asyncio.wait_for(asyncio.gather(rewrite(), backfill_loop()), timeout=60)
+    finally:
+        await writer.close()
+
+    final = await eg.backfill_from_inline(conn, "g1", max_passes=5)
+    assert final["complete"] is True and final["remaining"] == 0
+    cur = await conn.execute("""
+        SELECT count(*),
+               count(*) FILTER (WHERE e.content_hash IS DISTINCT FROM r.content_hash),
+               count(*) FILTER (WHERE e.embedding::text IS DISTINCT FROM r.embedding::text)
+        FROM rag_chunks r
+        LEFT JOIN rag_chunk_embeddings e
+               ON e.chunk_id = r.id AND e.generation_id = 'g1'
+        """)
+    total, wrong_hash, wrong_vec = await cur.fetchone()
+    assert total == n
+    assert wrong_hash == 0 and wrong_vec == 0

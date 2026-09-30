@@ -41,7 +41,7 @@
 ## 알려진 한계 (의도적으로 남김)
 
 - **물리 blue/green 운영 주의** (`RAG_EMBEDDING_STORE=generations`)
-  - 도입은 1회: `register g1 --mirror-inline` → `backfill g1`(현재 inline 벡터 복사, 재임베딩 불필요) →
+  - 도입은 1회: `register g1 --mirror-inline` → `backfill g1`(현재 inline 벡터 복사, 재임베딩 불필요. live ingest 와 동시에 실행해도 안전: 원본 행을 `FOR SHARE SKIP LOCKED` 로 읽어 쓰기 중인 행은 건너뛰고(트리거가 최신값을 미러링) 읽은 행은 쓰기 완료까지 갱신을 막는다. 건너뛴 행은 다음 pass 로 재시도하고 `remaining` 을 실제 테이블로 검증, 남으면 종료 코드 3. autocommit 연결에서 실행) →
     `build-index g1` → `activate g1` → 환경변수 전환 후 재시작. 도입 전에는 아무것도 바뀌지 않는다(기본 `inline`).
   - inline 로 쓰는 기존 writer(ingest/크롤러)는 DB 트리거가 signature 가 일치하는 세대(`mirror_inline`)로
     자동 미러링한다(임베딩 컬럼이 쓰일 때만 발동). **다른 모델의 새 세대**는 별도 writer 가

@@ -3,7 +3,7 @@
 
     manage_embedding_generation.py list
     manage_embedding_generation.py register g1 --model pplx-embed --dim 1536 --version 2 --mirror-inline
-    manage_embedding_generation.py backfill g1            # copy current inline vectors (no re-embed)
+    manage_embedding_generation.py backfill g1            # copy current inline vectors (no re-embed; safe with live ingest, exit 3 if incomplete)
     manage_embedding_generation.py build-index g1         # partial HNSW index (CONCURRENTLY)
     manage_embedding_generation.py audit g1
     manage_embedding_generation.py activate g1 [--min-coverage 0.995] [--force]
@@ -111,9 +111,21 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"registered {args.generation_id} (BUILDING)")
             elif args.cmd == "backfill":
                 out = await eg.backfill_from_inline(
-                    conn, args.generation_id, batch_size=args.batch_size
+                    conn,
+                    args.generation_id,
+                    batch_size=args.batch_size,
+                    max_passes=args.max_passes,
                 )
                 print(json.dumps(out, indent=2))
+                if not out["complete"]:
+                    # Rows were locked by in-flight writers on every pass. Not an
+                    # error, but do not proceed to build-index/activate on it.
+                    print(
+                        f"incomplete: {out['remaining']} rows still uncopied "
+                        "(locked by live writers); re-run backfill",
+                        file=sys.stderr,
+                    )
+                    return 3
             elif args.cmd == "build-index":
                 print(
                     json.dumps(
@@ -194,6 +206,13 @@ def build_parser() -> argparse.ArgumentParser:
     bf = sub.add_parser("backfill")
     bf.add_argument("generation_id")
     bf.add_argument("--batch-size", type=int, default=5000)
+    bf.add_argument(
+        "--max-passes",
+        type=int,
+        default=3,
+        help="retry passes for rows skipped because a writer held them (exit 3 "
+        "if still incomplete)",
+    )
     for name in ("build-index", "audit", "drop"):
         sub.add_parser(name).add_argument("generation_id")
     act = sub.add_parser("activate")

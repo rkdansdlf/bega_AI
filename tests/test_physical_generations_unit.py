@@ -265,3 +265,45 @@ def test_cli_parses_the_adoption_flow():
     assert p.parse_args(["rollback"]).cmd == "rollback"
     with pytest.raises(SystemExit):
         p.parse_args(["--store", "both", "list"])
+
+
+# --- backfill CLI outcome -------------------------------------------------------
+@pytest.mark.parametrize(
+    "result,expected_rc",
+    [
+        ({"copied": 5, "batches": 1, "passes": 1, "remaining": 0, "complete": True}, 0),
+        (
+            {"copied": 3, "batches": 1, "passes": 3, "remaining": 2, "complete": False},
+            3,
+        ),
+    ],
+)
+def test_backfill_cli_exits_nonzero_when_rows_remain(
+    monkeypatch, capsys, result, expected_rc
+):
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def fake_connect(url):
+        yield object()
+
+    async def fake_backfill(conn, gid, **kw):
+        assert kw["max_passes"] == 4
+        return result
+
+    monkeypatch.setattr(cli, "_connect", fake_connect)
+    monkeypatch.setattr(cli.eg, "backfill_from_inline", fake_backfill)
+    rc = cli.main(
+        [
+            "--db-url",
+            "x",
+            "--store",
+            "generations",
+            "backfill",
+            "g1",
+            "--max-passes",
+            "4",
+        ]
+    )
+    assert rc == expected_rc
+    assert ("incomplete" in capsys.readouterr().err) == (expected_rc == 3)

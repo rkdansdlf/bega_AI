@@ -423,87 +423,168 @@ async def write_embeddings(
     conn: Any,
     generation_id: str,
     rows: Any,
+    *,
+    report: Optional[Dict[str, int]] = None,
 ) -> int:
     """Upsert ``(chunk_id, embedding, content_hash)`` rows into a generation.
 
     This is the writer contract for a *new* embedding model (the crawler, or a
     re-embed job). Dimension is validated against the generation so a wrong-model
-    vector can never enter it. Returns the number of rows written.
+    vector can never enter it.
+
+    Compare-and-set: embedding a chunk takes time, and the chunk may be rewritten
+    meanwhile. When ``content_hash`` (the hash the vector was computed from) is
+    given, the row is written only if the chunk *still* has that hash — otherwise
+    a slow writer would put an outdated vector over a fresher row. Skipped rows
+    are counted in ``report["stale_skipped"]``; re-embed those chunks. A chunk
+    that no longer exists is skipped too. Returns the number of rows written.
     """
     generation = await _require_generation(conn, generation_id)
-    written = 0
+    written = stale = 0
     for chunk_id, embedding, content_hash in rows:
         if len(embedding) != generation.embedding_dim:
             raise GenerationError(
                 f"chunk {chunk_id}: embedding has {len(embedding)} dims, "
                 f"{generation_id} expects {generation.embedding_dim}"
             )
-        await conn.execute(
+        cur = await conn.execute(
             """
             INSERT INTO rag_chunk_embeddings
                 (generation_id, chunk_id, embedding, content_hash)
-            VALUES (%s, %s, %s::vector, %s)
+            SELECT %s, r.id, %s::vector, r.content_hash
+            FROM rag_chunks r
+            WHERE r.id = %s
+              AND (%s::text IS NULL OR r.content_hash IS NOT DISTINCT FROM %s::text)
             ON CONFLICT (generation_id, chunk_id) DO UPDATE
                 SET embedding = EXCLUDED.embedding,
                     content_hash = EXCLUDED.content_hash,
                     created_at = now()
             """,
-            (generation_id, int(chunk_id), _vector_literal(embedding), content_hash),
+            (
+                generation_id,
+                _vector_literal(embedding),
+                int(chunk_id),
+                content_hash,
+                content_hash,
+            ),
         )
-        written += 1
+        if int(getattr(cur, "rowcount", 1) or 0) > 0:
+            written += 1
+        else:
+            stale += 1
+    if report is not None:
+        report.update(written=written, stale_skipped=stale)
+    if stale:
+        logger.warning(
+            "[Generations] %s: %d embeddings skipped (chunk changed or removed "
+            "since they were computed)",
+            generation_id,
+            stale,
+        )
     return written
 
 
+async def _backfill_remaining(conn: Any, generation: Generation) -> int:
+    """Signature-matching inline rows that have no *fresh* row in the generation."""
+    cur = await conn.execute(
+        """
+        SELECT count(*)
+        FROM rag_chunks r
+        WHERE r.embedding IS NOT NULL
+          AND r.embedding_model = %s
+          AND r.embedding_dim = %s
+          AND r.embedding_version = %s
+          AND NOT EXISTS (
+              SELECT 1 FROM rag_chunk_embeddings e
+              WHERE e.generation_id = %s
+                AND e.chunk_id = r.id
+                AND e.content_hash IS NOT DISTINCT FROM r.content_hash
+          )
+        """,
+        (*generation.signature, generation.generation_id),
+    )
+    return int((await cur.fetchone())[0])
+
+
 async def backfill_from_inline(
-    conn: Any, generation_id: str, *, batch_size: int = 5000
-) -> Dict[str, int]:
+    conn: Any,
+    generation_id: str,
+    *,
+    batch_size: int = 5000,
+    max_passes: int = 3,
+) -> Dict[str, Any]:
     """Copy inline embeddings whose signature matches the generation.
 
     Adopting the physical store needs no re-embedding: the current model's
-    vectors already sit in ``rag_chunks.embedding``. Keyset-batched (autocommit
-    per batch) so it neither holds long locks nor needs one giant transaction.
-    Rows already present with a matching hash are left alone; changed content is
-    refreshed.
+    vectors already sit in ``rag_chunks.embedding``. Keyset-batched; run it on an
+    autocommit connection so each batch is its own short statement.
+
+    Safe alongside live ingest. Each batch reads its source rows with
+    ``FOR SHARE SKIP LOCKED``: a row a writer is updating right now is skipped
+    (the mirror trigger copies the writer's newer values when it commits), and a
+    row the batch does read cannot be changed until the batch's write finishes.
+    Without this, a batch could read a chunk, lose a race to a concurrent rewrite
+    and then overwrite the writer's fresher generation row with the outdated
+    snapshot. Skipped rows are picked up by the following pass; the result's
+    ``remaining`` is verified against the tables (0 means fully populated).
     """
     generation = await _require_generation(conn, generation_id)
-    last_id = 0
-    copied = batches = 0
-    while True:
-        cur = await conn.execute(
-            """
-            WITH batch AS (
-                SELECT id, embedding, content_hash
-                FROM rag_chunks
-                WHERE embedding IS NOT NULL
-                  AND embedding_model = %s
-                  AND embedding_dim = %s
-                  AND embedding_version = %s
-                  AND id > %s
-                ORDER BY id
-                LIMIT %s
-            ), ins AS (
-                INSERT INTO rag_chunk_embeddings
-                    (generation_id, chunk_id, embedding, content_hash)
-                SELECT %s, id, embedding, content_hash FROM batch
-                ON CONFLICT (generation_id, chunk_id) DO UPDATE
-                    SET embedding = EXCLUDED.embedding,
-                        content_hash = EXCLUDED.content_hash,
-                        created_at = now()
-                    WHERE rag_chunk_embeddings.content_hash
-                          IS DISTINCT FROM EXCLUDED.content_hash
-                RETURNING 1
+    copied = batches = passes = 0
+    remaining = -1
+    while passes < max(1, int(max_passes)):
+        passes += 1
+        last_id = 0
+        while True:
+            cur = await conn.execute(
+                """
+                WITH batch AS (
+                    SELECT id, embedding, content_hash
+                    FROM rag_chunks
+                    WHERE embedding IS NOT NULL
+                      AND embedding_model = %s
+                      AND embedding_dim = %s
+                      AND embedding_version = %s
+                      AND id > %s
+                    ORDER BY id
+                    LIMIT %s
+                    FOR SHARE SKIP LOCKED
+                ), ins AS (
+                    INSERT INTO rag_chunk_embeddings
+                        (generation_id, chunk_id, embedding, content_hash)
+                    SELECT %s, id, embedding, content_hash FROM batch
+                    ON CONFLICT (generation_id, chunk_id) DO UPDATE
+                        SET embedding = EXCLUDED.embedding,
+                            content_hash = EXCLUDED.content_hash,
+                            created_at = now()
+                        WHERE rag_chunk_embeddings.content_hash
+                              IS DISTINCT FROM EXCLUDED.content_hash
+                    RETURNING 1
+                )
+                SELECT (SELECT max(id) FROM batch), (SELECT count(*) FROM ins)
+                """,
+                (
+                    *generation.signature,
+                    last_id,
+                    int(batch_size),
+                    generation_id,
+                ),
             )
-            SELECT (SELECT max(id) FROM batch), (SELECT count(*) FROM ins)
-            """,
-            (*generation.signature, last_id, int(batch_size), generation_id),
-        )
-        max_id, inserted = await cur.fetchone()
-        if max_id is None:
+            max_id, inserted = await cur.fetchone()
+            if max_id is None:
+                break
+            last_id = int(max_id)
+            copied += int(inserted)
+            batches += 1
+        remaining = await _backfill_remaining(conn, generation)
+        if remaining == 0:
             break
-        last_id = int(max_id)
-        copied += int(inserted)
-        batches += 1
-    return {"copied": copied, "batches": batches}
+    return {
+        "copied": copied,
+        "batches": batches,
+        "passes": passes,
+        "remaining": remaining,
+        "complete": remaining == 0,
+    }
 
 
 async def _index_state(conn: Any, name: str) -> Optional[Tuple[bool, bool]]:
