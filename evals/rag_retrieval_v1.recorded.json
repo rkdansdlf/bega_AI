@@ -1,0 +1,18 @@
+{
+  "_comment": "Structural replay fixture for the offline gate. Regenerate against the real internal DB with: python scripts/eval_rag_golden.py retrieval --live --write-recorded",
+  "ret-team-season-001": [
+    {"source_table": "team_summary", "source_row_id": "team_id=LG|season_year=2025"},
+    {"source_table": "markdown_docs", "source_row_id": "lg-overview"}
+  ],
+  "ret-team-season-002": [
+    {"source_table": "team_summary", "source_row_id": "team_id=KIA|season_year=2024"}
+  ],
+  "ret-regulation-001": [
+    {"source_table": "kbo_regulations", "source_row_id": "tiebreaker"},
+    {"source_table": "kbo_definitions", "source_row_id": "tie"}
+  ],
+  "ret-definition-001": [
+    {"source_table": "kbo_definitions", "source_row_id": "ops"}
+  ],
+  "ret-no-answer-001": []
+}

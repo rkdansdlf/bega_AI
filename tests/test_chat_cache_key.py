@@ -4,12 +4,14 @@
 캐시 키 충돌 시 다른 사용자에게 잘못된 응답이 노출될 수 있으므로
 해시 결정론·필터 키 순서 독립성 검증이 핵심이다.
 """
+
 from __future__ import annotations
 
 from datetime import date
 
 from app.core.chat_cache_key import (
     CHAT_CACHE_SCHEMA_VERSION,
+    CURRENT_SEASON_CACHE_TTL_SECONDS,
     DEFAULT_TTL_SECONDS,
     INTENT_TTL_SECONDS,
     _normalize_filters,
@@ -18,9 +20,10 @@ from app.core.chat_cache_key import (
     get_ttl_seconds,
     has_temporal_keyword,
 )
-
+from app.core.time import kst_today
 
 # ── TestGetTTLSeconds ─────────────────────────────────────────────────────────
+
 
 class TestGetTTLSeconds:
     def test_stats_lookup_returns_correct_ttl(self):
@@ -33,7 +36,10 @@ class TestGetTTLSeconds:
         assert get_ttl_seconds("comparison") == INTENT_TTL_SECONDS["comparison"]
 
     def test_knowledge_explanation_returns_correct_ttl(self):
-        assert get_ttl_seconds("knowledge_explanation") == INTENT_TTL_SECONDS["knowledge_explanation"]
+        assert (
+            get_ttl_seconds("knowledge_explanation")
+            == INTENT_TTL_SECONDS["knowledge_explanation"]
+        )
 
     def test_unknown_intent_returns_default(self):
         assert get_ttl_seconds("nonexistent_intent") == DEFAULT_TTL_SECONDS
@@ -50,8 +56,40 @@ class TestGetTTLSeconds:
     def test_comparison_longer_than_recent_form(self):
         assert get_ttl_seconds("comparison") > get_ttl_seconds("recent_form")
 
+    def test_current_season_synonyms_cap_response_cache_at_five_minutes(self):
+        for question in ("올해 순위", "금년 성적", "이번 시즌 기록", "올시즌 MVP"):
+            assert (
+                get_ttl_seconds("player_profile", question=question)
+                == CURRENT_SEASON_CACHE_TTL_SECONDS
+            )
+
+    def test_explicit_kst_current_year_caps_response_cache_at_five_minutes(self):
+        assert (
+            get_ttl_seconds("comparison", question=f"{kst_today().year} 시즌 비교")
+            == CURRENT_SEASON_CACHE_TTL_SECONDS
+        )
+
+    def test_current_season_filter_caps_response_cache_at_five_minutes(self):
+        assert (
+            get_ttl_seconds(
+                "knowledge_explanation",
+                filters={"season_year": kst_today().year},
+            )
+            == CURRENT_SEASON_CACHE_TTL_SECONDS
+        )
+
+    def test_historical_filter_keeps_intent_ttl(self):
+        assert (
+            get_ttl_seconds(
+                "comparison",
+                filters={"season_year": 2024},
+            )
+            == INTENT_TTL_SECONDS["comparison"]
+        )
+
 
 # ── TestHasTemporalKeyword ────────────────────────────────────────────────────
+
 
 class TestHasTemporalKeyword:
     def test_오늘_returns_true(self):
@@ -68,6 +106,14 @@ class TestHasTemporalKeyword:
 
     def test_올시즌_returns_true(self):
         assert has_temporal_keyword("올시즌 홈런 1위") is True
+
+    def test_current_season_synonyms_return_true(self):
+        for question in (
+            "올해 KIA와 LG 비교",
+            "금년 홈런 순위",
+            "이번 시즌 팀 승률",
+        ):
+            assert has_temporal_keyword(question) is True
 
     def test_실시간_returns_true(self):
         assert has_temporal_keyword("실시간 순위") is True
@@ -108,9 +154,10 @@ class TestHasTemporalKeyword:
 
 # ── TestBuildChatCacheKey ─────────────────────────────────────────────────────
 
+
 class TestBuildChatCacheKey:
-    def test_schema_version_bumped_for_256_embedding_rollout(self):
-        assert CHAT_CACHE_SCHEMA_VERSION == "v12"
+    def test_schema_version_invalidates_entries_before_current_season_ttl_cap(self):
+        assert CHAT_CACHE_SCHEMA_VERSION == "v13"
 
     def test_returns_tuple_of_two(self):
         result = build_chat_cache_key(question="KIA 홈런")
@@ -188,6 +235,7 @@ class TestBuildChatCacheKey:
 
 # ── TestNormalizeFilters ──────────────────────────────────────────────────────
 
+
 class TestNormalizeFilters:
     def test_none_value_removed(self):
         result = _normalize_filters({"a": 1, "b": None})
@@ -221,6 +269,7 @@ class TestNormalizeFilters:
 
 
 # ── TestNormalizeQuestion ─────────────────────────────────────────────────────
+
 
 class TestNormalizeQuestion:
     def test_uppercased_lowercased(self):

@@ -1,7 +1,7 @@
 
 <div id="top"> <!-- HEADER STYLE: CLASSIC --> <div align="center">
 
-# AI SERVICE
+# AI 서비스
 
 <em>BEGA 플랫폼의 지능형 기능</em>
 
@@ -33,21 +33,21 @@
 
 ## 개요
 
-AI Service는 BEGA(Baseball Guide) 플랫폼의 지능형 기능을 지원하는 벡터 기반 RAG(검색 증강 생성) 서비스입니다. KBO 데이터베이스 위에 최신 LLM 제공자(OpenRouter 또는 Google Gemini)를 계층화하여, pgvector 저장소, SSE 스트리밍 채팅, 경량 의도 라우터를 통해 야구 정보를 제공합니다.
+AI 서비스는 BEGA(Baseball Guide) 플랫폼의 지능형 기능을 지원하는 벡터 기반 RAG(검색 증강 생성) 서비스입니다. KBO 데이터베이스 위에 최신 LLM 제공자(OpenRouter 또는 Google Gemini)를 계층화하여, pgvector 저장소, SSE 스트리밍 채팅, 경량 의도 라우터를 통해 야구 정보를 제공합니다.
 
 ### 야구 데이터 운영 원칙
 
 - 외부 야구 웹 조회나 크롤링은 사용하지 않습니다.
 - 야구 데이터는 내부 DB와 정적 문서만 사용합니다.
-- 경기 메타데이터가 부족하거나 정합성이 깨지면 `MANUAL_BASEBALL_DATA_REQUIRED` payload로 운영자 데이터를 요청합니다.
+- 경기 메타데이터가 부족하거나 정합성이 깨지면 `MANUAL_BASEBALL_DATA_REQUIRED` 페이로드로 운영자 데이터를 요청합니다.
 
-**왜 AI Service인가?**
+**AI 서비스인 이유**
 
 이 마이크로서비스는 다음을 통해 사용자 경험을 향상시킵니다:
 
 -   🎤 **음성-텍스트 변환:** OpenAI Whisper 기반 한국어 음성 인식
 -   🤖 **RAG 기반 챗봇:** 검색 증강 생성으로 정확한 야구 정보 제공
--   🔍 **하이브리드 검색:** pgvector + FTS(Full-Text Search) 결합
+-   🔍 **하이브리드 검색:** pgvector + FTS(전문 검색) 결합
 -   📊 **세이버메트릭스:** ERA-, wRC+ 등 고급 야구 지표 계산
 -   ⚡ **SSE 스트리밍:** 실시간 응답 스트리밍
 -   🧠 **의도 라우팅:** 질문 의도에 따른 최적화된 답변 생성
@@ -62,7 +62,7 @@ AI Service는 BEGA(Baseball Guide) 플랫폼의 지능형 기능을 지원하는
     
     -   HyDE(Hypothetical Document Embeddings) 기법 적용
     -   pgvector 벡터 유사도 검색
-    -   FTS(Full-Text Search) 키워드 검색
+    -   FTS(전문 검색) 키워드 검색
     -   하이브리드 검색으로 정확도 향상
 -   **의도 라우팅**
     
@@ -171,13 +171,13 @@ AI/
     ↓ HTTPS
 Caddy / Backend BFF (OCI:443)
     ↓
-FastAPI Application (8001)
+FastAPI 애플리케이션 (8001)
     ↓
-├── 의도 라우터 (Intent Router)
+├── 의도 라우터
 ├── RAG 파이프라인
 │   ├── HyDE 쿼리 생성
 │   ├── 하이브리드 검색 (pgvector + FTS)
-│   ├── 컨텍스트 생성 (Renderers)
+│   ├── 컨텍스트 생성 (렌더러)
 │   └── LLM 답변 생성
 ├── OpenRouter / Gemini API
 └── PostgreSQL + pgvector
@@ -200,7 +200,7 @@ FastAPI Application (8001)
 
 ### 설치
 
-소스에서 AI service를 빌드하고 종속성을 설치합니다:
+소스에서 AI 서비스를 빌드하고 종속성을 설치합니다:
 
 1.  **저장소 클론:**
     
@@ -552,7 +552,7 @@ SSE v2가 필요하면 `X-AI-Event-Version: 2`를 전송합니다. 버전 협상
 `error`, `perf` 필드를 포함합니다.
 ### 데이터 요청 정책
 ``` 
-데이터 부족 시 MANUAL_BASEBALL_DATA_REQUIRED payload 반환
+데이터 부족 시 MANUAL_BASEBALL_DATA_REQUIRED 페이로드 반환
 ```
 
  ### 임베딩 
@@ -580,9 +580,9 @@ curl http://localhost:8001/health
 
 ## RAG 흐름
 
-BEGA AI Service의 RAG(검색 증강 생성) 파이프라인은 다음 4단계로 구성됩니다:
+BEGA AI 서비스의 RAG(검색 증강 생성) 파이프라인은 다음 4단계로 구성됩니다:
 
-### 1. 의도 라우팅 (Intent Routing)
+### 1. 의도 라우팅
 
 `app/ml/intent_router.py`의 규칙 기반 분류기가 사용자 질문의 의도를 파악합니다:
 
@@ -591,7 +591,7 @@ BEGA AI Service의 RAG(검색 증강 생성) 파이프라인은 다음 4단계�
 -   용어 설명
 -   비교 분석
 
-### 2. 검색 (Retrieval)
+### 2. 검색
 
 **HyDE(Hypothetical Document Embeddings) 기법:**
 
@@ -600,7 +600,7 @@ BEGA AI Service의 RAG(검색 증강 생성) 파이프라인은 다음 4단계�
 **하이브리드 검색:**
 
 -   **벡터 검색**: pgvector를 사용한 의미론적 유사도 검색
--   **FTS 검색**: Full-Text Search를 통한 키워드 매칭
+-   **FTS 검색**: 전문 검색을 통한 키워드 매칭
 -   두 방식을 결합하여 정확도 최대화
 
 검색 대상:
@@ -608,7 +608,7 @@ BEGA AI Service의 RAG(검색 증강 생성) 파이프라인은 다음 4단계�
 -   KBO 데이터베이스의 통계 데이터
 -   `docs/kbo_metrics_explained.md` 등 정적 문서
 
-### 3. 컨텍스트 생성 (Context Generation)
+### 3. 컨텍스트 생성
 
 `app/core/renderers/`의 렌더러를 통해 검색된 데이터를 LLM 친화적 텍스트로 변환:
 
@@ -629,7 +629,7 @@ BEGA AI Service의 RAG(검색 증강 생성) 파이프라인은 다음 4단계�
 -   ERA-, wRC+, OPS+ 등
 -   선수별 순위 자동 산출
 
-### 4. 답변 생성 (Generation)
+### 4. 답변 생성
 
 최종 프롬프트 구성:
 

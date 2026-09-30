@@ -23,17 +23,7 @@ from ..observability.metrics import AI_LLM_FALLBACK_TOTAL
 from .baseball_agent import BaseballAgentRuntime
 
 logger = logging.getLogger(__name__)
-_gemini_configured = False
 OPENROUTER_BLOCKED_MODELS = {"openrouter/auto"}
-
-
-def _ensure_gemini_configured(settings: Any) -> None:
-    global _gemini_configured
-    if not _gemini_configured and getattr(settings, "gemini_api_key", None):
-        import google.generativeai as genai
-
-        genai.configure(api_key=settings.gemini_api_key)
-        _gemini_configured = True
 
 
 def _extract_text_from_openrouter_content(content: Any) -> str:
@@ -371,18 +361,16 @@ def build_baseball_llm_generator(settings: Any):
         model_override=None,
         usage_observer=None,
     ):
-        import google.generativeai as genai
-        from google.generativeai.types import GenerationConfig
+        from google import genai
+        from google.genai import types as genai_types
 
         if not settings.gemini_api_key:
             raise RuntimeError("Gemini API key is required.")
 
         effective_max_tokens = max_tokens or settings.max_output_tokens
-        _ensure_gemini_configured(settings)
         model_name = str(model_override or settings.gemini_model)
-        model = genai.GenerativeModel(model_name)
 
-        gemini_messages = []
+        gemini_messages: list[Any] = []
         system_instruction = ""
         for msg in messages:
             role = msg["role"]
@@ -391,29 +379,34 @@ def build_baseball_llm_generator(settings: Any):
                 system_instruction = content
             else:
                 gemini_role = "user" if role == "user" else "model"
-                gemini_messages.append({"role": gemini_role, "parts": [content]})
+                gemini_messages.append(
+                    genai_types.Content(
+                        role=gemini_role,
+                        parts=[genai_types.Part.from_text(text=str(content))],
+                    )
+                )
 
-        if system_instruction:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=system_instruction,
-            )
+        config = genai_types.GenerateContentConfig(
+            temperature=0.1,
+            max_output_tokens=effective_max_tokens,
+            system_instruction=system_instruction or None,
+        )
 
         attempt_chunks: list[str] = []
         attempt_observed = False
+        sdk_client = None
         try:
-            response = await model.generate_content_async(
-                gemini_messages,
-                generation_config=GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=effective_max_tokens,
-                ),
-                stream=True,
-            )
-            async for chunk in response:
-                if chunk.text:
-                    attempt_chunks.append(chunk.text)
-                    yield chunk.text
+            sdk_client = genai.Client(api_key=settings.gemini_api_key)
+            async with sdk_client.aio as client:
+                response = await client.models.generate_content_stream(
+                    model=model_name,
+                    contents=gemini_messages,
+                    config=config,
+                )
+                async for chunk in response:
+                    if chunk.text:
+                        attempt_chunks.append(chunk.text)
+                        yield chunk.text
         except Exception as exc:  # noqa: BLE001
             _notify_usage_observer(
                 usage_observer,
@@ -437,6 +430,11 @@ def build_baseball_llm_generator(settings: Any):
             )
             attempt_observed = True
         finally:
+            if sdk_client is not None:
+                try:
+                    sdk_client.close()
+                except Exception:  # noqa: BLE001
+                    llm_logger.exception("Gemini client close failed")
             if not attempt_observed:
                 _notify_usage_observer(
                     usage_observer,

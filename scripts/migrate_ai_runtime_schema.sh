@@ -19,6 +19,22 @@ psql --set ON_ERROR_STOP=1 \
   --file "${AI_ROOT}/app/db/migrations/004_ai_ingest_checkpoints.sql" \
   "${DB_URL}"
 
+psql --set ON_ERROR_STOP=1 \
+  --file "${AI_ROOT}/app/db/migrations/005_rag_runtime_compatibility.sql" \
+  "${DB_URL}"
+
+psql --set ON_ERROR_STOP=1 \
+  --file "${AI_ROOT}/app/db/migrations/006_chat_cache_provenance.sql" \
+  "${DB_URL}"
+
+psql --set ON_ERROR_STOP=1 \
+  --file "${AI_ROOT}/app/db/migrations/007_rag_embedding_generations.sql" \
+  "${DB_URL}"
+
+psql --set ON_ERROR_STOP=1 \
+  --file "${AI_ROOT}/app/db/migrations/008_rag_answer_feedback.sql" \
+  "${DB_URL}"
+
 case "${CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED:-false}" in
   1|true|TRUE|yes|YES)
     psql --set ON_ERROR_STOP=1 \

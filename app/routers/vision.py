@@ -11,9 +11,8 @@ from ..deps import require_ai_internal_token
 import httpx
 import base64
 import json
-import google.generativeai as genai
-from PIL import Image
-import io
+from google import genai
+from google.genai import types as genai_types
 import tempfile
 
 router = APIRouter(prefix="/vision", tags=["vision"])
@@ -46,6 +45,34 @@ def _clean_model_json_text(response_text: str) -> str:
 def _parse_model_json_response(response_text: str, response_model: Type[T]) -> T:
     data = json.loads(_clean_model_json_text(response_text))
     return response_model(**data)
+
+
+def _request_gemini_vision_json(
+    *,
+    prompt: str,
+    image_bytes: bytes,
+    content_type: str,
+    max_output_tokens: int,
+    response_model: Type[T],
+) -> T:
+    image_part = genai_types.Part.from_bytes(
+        data=image_bytes,
+        mime_type=content_type,
+    )
+    config = genai_types.GenerateContentConfig(
+        response_mime_type="application/json",
+        max_output_tokens=max_output_tokens,
+    )
+    with genai.Client(api_key=settings.gemini_api_key) as client:
+        response = client.models.generate_content(
+            model=settings.vision_model or "gemini-2.0-flash",
+            contents=[prompt, image_part],
+            config=config,
+        )
+    response_text = getattr(response, "text", None)
+    if not isinstance(response_text, str) or not response_text.strip():
+        raise RuntimeError("Gemini vision response content is empty")
+    return _parse_model_json_response(response_text, response_model)
 
 
 def _resolve_vision_model_candidates() -> list[str]:
@@ -272,16 +299,14 @@ async def analyze_ticket_image(
                     status_code=500, detail="Gemini API Key not configured"
                 )
 
-            genai.configure(api_key=settings.gemini_api_key)
-            model = genai.GenerativeModel(settings.vision_model or "gemini-2.0-flash")
-
-            def _load_image(image_bytes: bytes):
-                with Image.open(io.BytesIO(image_bytes)) as pil_image:
-                    return pil_image.copy()
-
-            image = await run_in_threadpool(_load_image, contents)
-            response = await run_in_threadpool(model.generate_content, [prompt, image])
-            response_text = response.text.strip()
+            return await run_in_threadpool(
+                _request_gemini_vision_json,
+                prompt=prompt,
+                image_bytes=contents,
+                content_type=content_type,
+                max_output_tokens=1000,
+                response_model=TicketInfo,
+            )
 
         else:
             # OpenRouter Implementation
@@ -292,8 +317,6 @@ async def analyze_ticket_image(
                 app_title="KBO Platform Ticket OCR",
                 response_model=TicketInfo,
             )
-
-        return _parse_model_json_response(response_text, TicketInfo)
 
     except HTTPException as exc:
         logger.warning(
@@ -353,16 +376,14 @@ async def classify_seat_view_image(
                     status_code=500, detail="Gemini API Key not configured"
                 )
 
-            genai.configure(api_key=settings.gemini_api_key)
-            model = genai.GenerativeModel(settings.vision_model or "gemini-2.0-flash")
-
-            def _load_image(image_bytes: bytes):
-                with Image.open(io.BytesIO(image_bytes)) as pil_image:
-                    return pil_image.copy()
-
-            image = await run_in_threadpool(_load_image, contents)
-            response = await run_in_threadpool(model.generate_content, [prompt, image])
-            response_text = response.text.strip()
+            return await run_in_threadpool(
+                _request_gemini_vision_json,
+                prompt=prompt,
+                image_bytes=contents,
+                content_type=content_type,
+                max_output_tokens=500,
+                response_model=SeatViewClassification,
+            )
         else:
             return await _request_openrouter_vision_json(
                 prompt=prompt,
@@ -371,8 +392,6 @@ async def classify_seat_view_image(
                 app_title="KBO Platform Seat View Classification",
                 response_model=SeatViewClassification,
             )
-
-        return _parse_model_json_response(response_text, SeatViewClassification)
 
     except HTTPException as exc:
         logger.warning(

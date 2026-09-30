@@ -1,6 +1,92 @@
 {
   "components": {
     "schemas": {
+      "AIDependencyUnavailableResponse": {
+        "properties": {
+          "code": {
+            "const": "AI_DEPENDENCY_UNAVAILABLE",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "title": "AIDependencyUnavailableResponse",
+        "type": "object"
+      },
+      "AIReadinessResponse": {
+        "properties": {
+          "components": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Components",
+            "type": "object"
+          },
+          "status": {
+            "const": "UP",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "components"
+        ],
+        "title": "AIReadinessResponse",
+        "type": "object"
+      },
+      "AIReadinessUnavailableResponse": {
+        "properties": {
+          "code": {
+            "const": "AI_DEPENDENCY_UNAVAILABLE",
+            "title": "Code",
+            "type": "string"
+          },
+          "components": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Components",
+            "type": "object"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "NOT_READY",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "status",
+          "components"
+        ],
+        "title": "AIReadinessUnavailableResponse",
+        "type": "object"
+      },
       "Body_analyze_ticket_image_ai_vision_ticket_post": {
         "properties": {
           "file": {
@@ -670,6 +756,110 @@
         "title": "EvidenceItem",
         "type": "object"
       },
+      "EvidenceProfile": {
+        "enum": [
+          "release_gate"
+        ],
+        "title": "EvidenceProfile",
+        "type": "string"
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "answer_key": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer Key"
+          },
+          "corrected_fact": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corrected Fact"
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
+          },
+          "question": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "rating": {
+            "enum": [
+              "UP",
+              "DOWN"
+            ],
+            "title": "Rating",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          }
+        },
+        "required": [
+          "question",
+          "rating"
+        ],
+        "title": "FeedbackRequest",
+        "type": "object"
+      },
+      "FeedbackResponse": {
+        "properties": {
+          "feedback_id": {
+            "title": "Feedback Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "feedback_id"
+        ],
+        "title": "FeedbackResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -688,6 +878,17 @@
           "content": {
             "title": "Content",
             "type": "string"
+          },
+          "league_type_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "League Type Code"
           },
           "player_id": {
             "anyOf": [
@@ -1007,14 +1208,11 @@
         "type": "object"
       },
       "ReleaseDecisionDraftRequest": {
+        "additionalProperties": false,
         "properties": {
-          "allowed_roots": {
-            "description": "Additional repo-relative allowed roots inside the workspace.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Allowed Roots",
-            "type": "array"
+          "evidence_profile": {
+            "$ref": "#/components/schemas/EvidenceProfile",
+            "default": "release_gate"
           },
           "max_output_tokens": {
             "default": 2200,
@@ -1024,8 +1222,8 @@
             "type": "integer"
           },
           "max_tool_rounds": {
-            "default": 6,
-            "maximum": 10.0,
+            "default": 3,
+            "maximum": 3.0,
             "minimum": 1.0,
             "title": "Max Tool Rounds",
             "type": "integer"
@@ -1046,14 +1244,6 @@
             "description": "Built-in scenario preset name.",
             "title": "Scenario",
             "type": "string"
-          },
-          "seed_paths": {
-            "description": "Additional repo-relative seed paths.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Seed Paths",
-            "type": "array"
           },
           "task_prompt": {
             "anyOf": [
@@ -2004,6 +2194,74 @@
           }
         ],
         "summary": "Chat Completion",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/ai/chat/feedback": {
+      "post": {
+        "operationId": "submit_feedback_ai_chat_feedback_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Internal-Api-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Internal-Api-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "InternalApiKey": []
+          }
+        ],
+        "summary": "Submit Feedback",
         "tags": [
           "chat"
         ]
@@ -2971,6 +3229,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIDependencyUnavailableResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -3033,6 +3301,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIDependencyUnavailableResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -3101,6 +3379,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIDependencyUnavailableResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -3309,6 +3597,25 @@
               ],
               "description": "팀명 (예: LG, KIA)",
               "title": "Team"
+            }
+          },
+          {
+            "description": "리그 코드 (예: KBO)",
+            "in": "query",
+            "name": "league",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "리그 코드 (예: KBO)",
+              "title": "League"
             }
           },
           {
@@ -3973,6 +4280,38 @@
         "summary": "Safety Check",
         "tags": [
           "moderation"
+        ]
+      }
+    },
+    "/ready": {
+      "get": {
+        "description": "Report whether mandatory AI dependencies can serve requests.",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIReadinessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIReadinessUnavailableResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Ready",
+        "tags": [
+          "system"
         ]
       }
     },

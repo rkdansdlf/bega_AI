@@ -50,6 +50,12 @@ from ..core.ratelimit import (
     rate_limit_chat_dependency,
     rate_limit_chat_voice_dependency,
 )
+from ..core.fingerprint import build_response_fingerprint
+from ..core.cache_provenance import (
+    build_cache_provenance,
+    is_cacheable_provenance,
+    restore_cache_provenance,
+)
 from ..core.chat_queue import ChatQueueFull, ChatQueueReservation, get_chat_queue
 from ..core.chat_cache_key import (
     CHAT_CACHE_SCHEMA_VERSION,
@@ -427,9 +433,7 @@ async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
     payload["model_usage"] = []
     payload["model_usage_complete"] = True
     payload["fallback_triggered"] = bool(payload.get("fallback_triggered", False))
-    payload["fallback_answer_used"] = bool(
-        payload.get("fallback_answer_used", False)
-    )
+    payload["fallback_answer_used"] = bool(payload.get("fallback_answer_used", False))
     return payload
 
 
@@ -466,6 +470,7 @@ async def _make_static_sse_response(
                     "fallback_answer_used": bool(
                         result.get("fallback_answer_used", False)
                     ),
+                    "fingerprint": build_response_fingerprint(get_settings(), result),
                     "grounding_mode": result.get("grounding_mode"),
                     "source_tier": result.get("source_tier"),
                     "answer_sources": result.get("answer_sources", []),
@@ -790,7 +795,9 @@ def _semantic_cache_rollout_percent(settings: Any) -> int:
     try:
         return max(
             0,
-            min(100, int(getattr(settings, "chat_semantic_cache_rollout_percent", 100))),
+            min(
+                100, int(getattr(settings, "chat_semantic_cache_rollout_percent", 100))
+            ),
         )
     except (TypeError, ValueError):
         return 0
@@ -989,7 +996,11 @@ async def _save_chat_response_caches(
     source_tier: Optional[str],
     response_text: str,
     model_name: Optional[str],
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> None:
+    if not is_cacheable_provenance(provenance):
+        logger.info("[ChatCache] skip save: no cacheable provenance")
+        return
     settings = get_settings()
     pool = get_connection_pool()
     async with pool.connection() as conn:
@@ -1001,6 +1012,7 @@ async def _save_chat_response_caches(
             intent=intent,
             response_text=response_text,
             model_name=model_name,
+            provenance=provenance,
         )
         if _is_semantic_cache_shadow_enabled(settings):
             await complete_semantic_shadow_observation(
@@ -1032,6 +1044,7 @@ async def _save_chat_response_caches(
             response_text=response_text,
             model_name=model_name,
             settings=settings,
+            provenance=provenance,
         )
 
 
@@ -1043,12 +1056,13 @@ def _build_cached_completion_payload(
 ) -> Dict[str, Any]:
     cache_mode = "semantic_cache" if semantic_cached else "cache"
     cached_text = _ensure_quality_answer_text(cached.get("response_text", ""))
+    prov = restore_cache_provenance(cached.get("provenance"))
     payload: Dict[str, Any] = {
         "answer": cached_text,
         "tool_calls": [],
         "tool_results": [],
-        "data_sources": [],
-        "verified": True,
+        "data_sources": prov["data_sources"],
+        "verified": prov["verified"],
         "visualizations": [],
         "intent": cached.get("intent"),
         "cached": True,
@@ -1058,9 +1072,13 @@ def _build_cached_completion_payload(
         "tool_execution_mode": "none",
         "grounding_mode": cache_mode,
         "source_tier": cache_mode,
-        "answer_sources": [],
-        "as_of_date": None,
-        "fallback_reason": None,
+        "answer_sources": prov["answer_sources"],
+        "as_of_date": prov["as_of_date"],
+        "fallback_reason": prov["fallback_reason"],
+        "origin_grounding_mode": prov["origin_grounding_mode"],
+        "origin_source_tier": prov["origin_source_tier"],
+        "provenance_hash": prov["provenance_hash"],
+        "fingerprint": prov["fingerprint"],
         "model_usage": [],
         "model_usage_complete": True,
         "cache_key_prefix": cache_key[:8],
@@ -1100,6 +1118,7 @@ def _make_cached_sse_response(
         response_text = _ensure_quality_answer_text(cached["response_text"])
         settings = get_settings()
         cache_mode = "semantic_cache" if semantic_cached else "cache"
+        prov = restore_cache_provenance(cached.get("provenance"))
 
         # status 이벤트: 캐시 히트 표시 (번개 이모지로 빠른 응답임을 암시)
         yield {
@@ -1123,8 +1142,8 @@ def _make_cached_sse_response(
                 {
                     "tool_calls": [],
                     "tool_results": [],
-                    "data_sources": [],
-                    "verified": True,
+                    "data_sources": prov["data_sources"],
+                    "verified": prov["verified"],
                     "visualizations": [],
                     "style": style,
                     "cached": True,
@@ -1135,9 +1154,13 @@ def _make_cached_sse_response(
                     "tool_execution_mode": "none",
                     "grounding_mode": cache_mode,
                     "source_tier": cache_mode,
-                    "answer_sources": [],
-                    "as_of_date": None,
-                    "fallback_reason": None,
+                    "answer_sources": prov["answer_sources"],
+                    "as_of_date": prov["as_of_date"],
+                    "fallback_reason": prov["fallback_reason"],
+                    "origin_grounding_mode": prov["origin_grounding_mode"],
+                    "origin_source_tier": prov["origin_source_tier"],
+                    "provenance_hash": prov["provenance_hash"],
+                    "fingerprint": prov["fingerprint"],
                     "model_usage": [],
                     "model_usage_complete": True,
                     "finish_reason": "completed",
@@ -1385,6 +1408,9 @@ async def _chat_event_generator(
         "answer_sources": result.get("answer_sources", []),
         "as_of_date": result.get("as_of_date"),
         "fallback_reason": result.get("fallback_reason"),
+        "fingerprint": build_response_fingerprint(get_settings(), result),
+        "claim_grounding": result.get("claim_grounding"),
+        "llm_attribution": result.get("llm_attribution"),
         "fallback_answer_used": bool(result.get("fallback_answer_used", False))
         or bool(answer_stream_error),
         "model_usage": result.get("model_usage", []),
@@ -1446,6 +1472,9 @@ async def _chat_event_generator(
                 source_tier=result.get("source_tier"),
                 response_text=full_response_text,
                 model_name=model_name,
+                provenance=build_cache_provenance(
+                    result, build_response_fingerprint(get_settings(), result)
+                ),
             )
             logger.info(
                 "[ChatCache] SAVED key=%s... intent=%s",
@@ -1632,6 +1661,9 @@ async def _chat_live_event_generator(
         "answer_sources": buffered_meta.get("answer_sources", []),
         "as_of_date": buffered_meta.get("as_of_date"),
         "fallback_reason": buffered_meta.get("fallback_reason"),
+        "fingerprint": build_response_fingerprint(get_settings(), buffered_meta),
+        "claim_grounding": buffered_meta.get("claim_grounding"),
+        "llm_attribution": buffered_meta.get("llm_attribution"),
         "fallback_answer_used": bool(buffered_meta.get("fallback_answer_used", False))
         or bool(answer_stream_error),
         "model_usage": buffered_meta.get("model_usage", []),
@@ -1691,6 +1723,10 @@ async def _chat_live_event_generator(
                 source_tier=buffered_meta.get("source_tier"),
                 response_text=full_response_text,
                 model_name=model_name,
+                provenance=build_cache_provenance(
+                    buffered_meta,
+                    build_response_fingerprint(get_settings(), buffered_meta),
+                ),
             )
             logger.info(
                 "[ChatCache] SAVED key=%s... intent=%s",
@@ -2172,6 +2208,9 @@ async def chat_completion(
                     source_tier=result.get("source_tier"),
                     response_text=full_response_text,
                     model_name=model_name,
+                    provenance=build_cache_provenance(
+                        result, build_response_fingerprint(get_settings(), result)
+                    ),
                 )
                 logger.info(
                     "[ChatCache] SAVED key=%s... intent=%s (completion)",

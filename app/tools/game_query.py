@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List, Any, Optional, TYPE_CHECKING
 import psycopg
 from psycopg.rows import dict_row
+from app.core.oracle_baseball import QueryDialect, is_oracle_baseball_connection
 from app.schemas.coach_tool_payload import (
     ClutchMomentLine,
     CoachMatchupPayload,
@@ -42,8 +43,12 @@ class GameQueryTool:
     3. 추측이나 해석 없이 실제 DB 데이터만 반환
     """
 
-    def __init__(self, connection: psycopg.AsyncConnection):
+    def __init__(self, connection: Any):
+        """``connection`` is a psycopg AsyncConnection, or an
+        ``OracleRagConnection``-wrapped oracledb connection when
+        ``AI_BASEBALL_DB_URL`` targets Oracle (see ``get_baseball_connection_pool``)."""
         self.connection = connection
+        self._is_oracle = is_oracle_baseball_connection(connection)
         self.team_resolver = TeamCodeResolver()
         self.team_resolution_metrics = get_team_resolution_metrics()
         self.TEAM_CODE_TO_NAME = self.team_resolver.code_to_name
@@ -67,6 +72,48 @@ class GameQueryTool:
         if getattr(self, "_mapping_load_pending", False):
             self._mapping_load_pending = False
             await self._load_team_mappings()
+
+    def _dialect(self) -> QueryDialect:
+        """Fresh per-query placeholder/param accumulator (see ``QueryDialect``)."""
+        return QueryDialect(self._is_oracle)
+
+    async def _cursor(self):
+        """Return a cursor whose ``fetchall``/``fetchone`` rows are consumed
+        via ``_fetchall_dicts``/``_fetchone_dict`` below — psycopg's
+        ``dict_row`` factory has no oracledb equivalent, so Oracle rows are
+        mapped to dicts by column name after the fact instead."""
+        if self._is_oracle:
+            # oracledb's AsyncConnection.cursor() is a plain method, not a
+            # coroutine — awaiting it raises (confirmed against a live ADB
+            # connection with oracledb 4.0.2; the fake-cursor unit tests
+            # can't catch this since they mock cursor() as async).
+            return self.connection.cursor()
+        return self.connection.cursor(row_factory=dict_row)
+
+    def _row_to_dict(self, cursor, row: Any) -> Dict[str, Any]:
+        if not self._is_oracle or row is None:
+            return row
+        columns = [str(col[0]).lower() for col in cursor.description or ()]
+        return dict(zip(columns, row, strict=False))
+
+    async def _fetchall_dicts(self, cursor) -> List[Dict[str, Any]]:
+        rows = await cursor.fetchall()
+        if not self._is_oracle:
+            return rows
+        return [self._row_to_dict(cursor, row) for row in rows]
+
+    async def _fetchone_dict(self, cursor) -> Optional[Dict[str, Any]]:
+        row = await cursor.fetchone()
+        return self._row_to_dict(cursor, row)
+
+    @staticmethod
+    async def _close_cursor(cursor) -> None:
+        close = getattr(cursor, "close", None)
+        if not callable(close):
+            return
+        result = close()
+        if hasattr(result, "__await__"):
+            await result
 
     async def _fetch_team_mapping_rows(
         self, connection: psycopg.AsyncConnection
@@ -212,31 +259,31 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor = await self._cursor()
 
             # 쿼리 조건 구성
+            dialect = self._dialect()
             where_conditions = []
-            query_params = []
 
             if game_id:
                 # game_id가 있으면 최우선 사용
-                where_conditions.append("g.game_id = %s")
-                query_params.append(game_id)
+                where_conditions.append(f"g.game_id = {dialect.bind(game_id)}")
             else:
                 # 다른 조건들로 검색
                 if date:
-                    where_conditions.append("DATE(g.game_date) = %s")
-                    query_params.append(date)
+                    where_conditions.append(dialect.date_eq("g.game_date", date))
 
                 if home_team:
                     variants_home = self.get_team_variants(home_team)
-                    where_conditions.append("g.home_team = ANY(%s)")
-                    query_params.append(variants_home)
+                    where_conditions.append(
+                        dialect.in_any("g.home_team", variants_home)
+                    )
 
                 if away_team:
                     variants_away = self.get_team_variants(away_team)
-                    where_conditions.append("g.away_team = ANY(%s)")
-                    query_params.append(variants_away)
+                    where_conditions.append(
+                        dialect.in_any("g.away_team", variants_away)
+                    )
 
             if not where_conditions:
                 result["error"] = "검색 조건이 필요합니다 (game_id, date, 또는 팀명)"
@@ -244,7 +291,7 @@ class GameQueryTool:
 
             # 기본 경기 정보 조회 쿼리 (실제 스키마에 맞게 수정)
             game_query = f"""
-                SELECT 
+                SELECT
                     g.game_id,
                     g.game_date,
                     g.home_team,
@@ -259,11 +306,11 @@ class GameQueryTool:
                 FROM game g
                 WHERE {" AND ".join(where_conditions)}
                 ORDER BY g.game_date DESC, g.game_id
-                LIMIT 10;
+                {dialect.limit(10)};
             """
 
-            await cursor.execute(game_query, query_params)
-            games = await cursor.fetchall()
+            await cursor.execute(game_query, dialect.execute_args())
+            games = await self._fetchall_dicts(cursor)
 
             if not games:
                 result["error"] = "조건에 맞는 경기를 찾을 수 없습니다"
@@ -276,14 +323,15 @@ class GameQueryTool:
                 game_id = game_dict["game_id"]
 
                 # 1. 이닝별 점수 조회
-                inning_query = """
+                inning_dialect = self._dialect()
+                inning_query = f"""
                     SELECT inning, team_side, runs
                     FROM game_inning_scores
-                    WHERE game_id = %s
+                    WHERE game_id = {inning_dialect.bind(game_id)}
                     ORDER BY inning, team_side;
                 """
-                await cursor.execute(inning_query, (game_id,))
-                innings = await cursor.fetchall()
+                await cursor.execute(inning_query, inning_dialect.execute_args())
+                innings = await self._fetchall_dicts(cursor)
 
                 box_score = {
                     "game_id": game_id,
@@ -318,15 +366,18 @@ class GameQueryTool:
                 # 단순 안타수 집계가 어렵다면 game_batting_stats에서 hits 컬럼을 sum
                 # (테이블 구조 확인이 안되므로 일반적인 구조 가정: hits 컬럼 존재 시)
 
-                stats_check_query = """
+                stats_dialect = self._dialect()
+                stats_check_query = f"""
                     SELECT team_code, SUM(hits) as total_hits, SUM(rbi) as total_rbi
                     FROM game_batting_stats
-                    WHERE game_id = %s
+                    WHERE game_id = {stats_dialect.bind(game_id)}
                     GROUP BY team_code
                 """
                 try:
-                    await cursor.execute(stats_check_query, (game_id,))
-                    team_stats = await cursor.fetchall()
+                    await cursor.execute(
+                        stats_check_query, stats_dialect.execute_args()
+                    )
+                    team_stats = await self._fetchall_dicts(cursor)
                     for stat in team_stats:
                         # team_code가 home_team인지 away_team인지 확인
                         # (DB에 저장된 team_code와 game 테이블의 팀 코드가 일치한다고 가정)
@@ -355,7 +406,7 @@ class GameQueryTool:
             result["error"] = f"박스스코어 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         return result
 
@@ -383,21 +434,20 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor = await self._cursor()
 
             # 쿼리 조건 구성
-            where_conditions = ["DATE(g.game_date) = %s"]
-            query_params = [date]
+            dialect = self._dialect()
+            where_conditions = [dialect.date_eq("g.game_date", date)]
 
             if team:
                 variants = self.get_team_variants(team)
-                where_conditions.append(
-                    "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))"
-                )
-                query_params.extend([variants, variants])
+                home_clause = dialect.in_any("g.home_team", variants)
+                away_clause = dialect.in_any("g.away_team", variants)
+                where_conditions.append(f"({home_clause} OR {away_clause})")
 
             query = f"""
-                SELECT 
+                SELECT
                     g.game_id,
                     g.game_date,
                     g.home_team,
@@ -414,8 +464,8 @@ class GameQueryTool:
                 ORDER BY g.game_date, g.game_id;
             """
 
-            await cursor.execute(query, query_params)
-            games = await cursor.fetchall()
+            await cursor.execute(query, dialect.execute_args())
+            games = await self._fetchall_dicts(cursor)
 
             if games:
                 result["games"] = [
@@ -432,7 +482,7 @@ class GameQueryTool:
             result["error"] = f"날짜별 경기 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         return result
 
@@ -465,18 +515,20 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor = await self._cursor()
+            dialect = self._dialect()
+            home_clause = dialect.in_any("g.home_team", team_variants)
+            away_clause = dialect.in_any("g.away_team", team_variants)
             where_conditions = [
-                "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))",
+                f"({home_clause} OR {away_clause})",
                 "g.game_status = 'COMPLETED'",
             ]
-            query_params: list[Any] = [team_variants, team_variants]
 
             if year is not None:
-                where_conditions.append("EXTRACT(YEAR FROM g.game_date) = %s")
-                query_params.append(year)
+                where_conditions.append(
+                    f"EXTRACT(YEAR FROM g.game_date) = {dialect.bind(year)}"
+                )
 
-            query_params.append(max(1, limit))
             query = f"""
                 SELECT
                     g.game_id,
@@ -491,10 +543,10 @@ class GameQueryTool:
                 FROM game g
                 WHERE {" AND ".join(where_conditions)}
                 ORDER BY g.game_date DESC, g.game_id DESC
-                LIMIT %s;
+                {dialect.limit(max(1, limit))};
             """
-            await cursor.execute(query, query_params)
-            rows = await cursor.fetchall()
+            await cursor.execute(query, dialect.execute_args())
+            rows = await self._fetchall_dicts(cursor)
 
             if rows:
                 normalized_variants = set(team_variants)
@@ -534,7 +586,7 @@ class GameQueryTool:
             result["error"] = f"최근 경기 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         return result
 
@@ -587,40 +639,46 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
-
-            # 쿼리 조건 구성
-            where_conditions = [
-                "((g.home_team = ANY(%s) AND g.away_team = ANY(%s)) OR "
-                "(g.home_team = ANY(%s) AND g.away_team = ANY(%s)))"
-            ]
+            cursor = await self._cursor()
 
             variants1 = self.get_team_variants(team1, year)
             variants2 = self.get_team_variants(team2, year)
 
-            query_params = [
-                variants1,
-                variants2,
-                variants2,
-                variants1,
-            ]
+            # 바인드는 렌더링되는 SQL 순서(SELECT의 CASE 먼저, 그다음 WHERE)와
+            # 맞춰 등록해야 한다 — PostgreSQL의 %s는 위치 기반이라 순서가 어긋나면
+            # 엉뚱한 값이 엉뚱한 자리에 들어간다.
+            dialect = self._dialect()
+            case_team1_win = dialect.in_any("g.winning_team", variants1)
+            case_team2_win = dialect.in_any("g.winning_team", variants2)
+
+            home1_away2 = (
+                dialect.in_any("g.home_team", variants1)
+                + " AND "
+                + dialect.in_any("g.away_team", variants2)
+            )
+            home2_away1 = (
+                dialect.in_any("g.home_team", variants2)
+                + " AND "
+                + dialect.in_any("g.away_team", variants1)
+            )
+            where_conditions = [f"(({home1_away2}) OR ({home2_away1}))"]
 
             if year:
-                where_conditions.append("EXTRACT(YEAR FROM g.game_date) = %s")
-                query_params.append(year)
+                where_conditions.append(
+                    f"EXTRACT(YEAR FROM g.game_date) = {dialect.bind(year)}"
+                )
             if season_id is not None:
-                where_conditions.append("g.season_id = %s")
-                query_params.append(season_id)
+                where_conditions.append(f"g.season_id = {dialect.bind(season_id)}")
             if as_of_game_date:
-                where_conditions.append("g.game_date < %s")
-                query_params.append(as_of_game_date)
+                where_conditions.append(
+                    f"g.game_date < {dialect.bind_date(as_of_game_date)}"
+                )
             if exclude_game_id:
-                where_conditions.append("g.game_id <> %s")
-                query_params.append(exclude_game_id)
+                where_conditions.append(f"g.game_id <> {dialect.bind(exclude_game_id)}")
 
             # 상세 경기 기록 조회
             games_query = f"""
-                SELECT 
+                SELECT
                     g.game_id,
                     g.game_date,
                     g.home_team,
@@ -630,9 +688,9 @@ class GameQueryTool:
                     g.game_status,
                     g.stadium,
                     g.winning_team,
-                    CASE 
-                        WHEN g.winning_team = ANY(%s) THEN 'team1_win'
-                        WHEN g.winning_team = ANY(%s) THEN 'team2_win'
+                    CASE
+                        WHEN {case_team1_win} THEN 'team1_win'
+                        WHEN {case_team2_win} THEN 'team2_win'
                         WHEN g.home_score = g.away_score THEN 'draw'
                         ELSE 'unknown'
                     END as game_result
@@ -640,12 +698,11 @@ class GameQueryTool:
                 WHERE {" AND ".join(where_conditions)}
                 AND g.game_status = 'COMPLETED'
                 ORDER BY g.game_date DESC
-                LIMIT %s;
+                {dialect.limit(limit)};
             """
 
-            games_params = [variants1, variants2] + query_params + [limit]
-            await cursor.execute(games_query, games_params)
-            games = await cursor.fetchall()
+            await cursor.execute(games_query, dialect.execute_args())
+            games = await self._fetchall_dicts(cursor)
 
             if games:
                 result["games"] = [
@@ -672,7 +729,7 @@ class GameQueryTool:
             result["error"] = f"팀 간 대결 기록 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         return result
 
@@ -706,20 +763,21 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor = await self._cursor()
 
-            where_conditions = ["g.game_date BETWEEN %s AND %s"]
-            query_params = [start_date, end_date]
+            dialect = self._dialect()
+            where_conditions = [
+                f"g.game_date BETWEEN {dialect.bind_date(start_date)} AND {dialect.bind_date(end_date)}"
+            ]
 
             if team:
                 variants = self.get_team_variants(team)
-                where_conditions.append(
-                    "(g.home_team = ANY(%s) OR g.away_team = ANY(%s))"
-                )
-                query_params.extend([variants, variants])
+                home_clause = dialect.in_any("g.home_team", variants)
+                away_clause = dialect.in_any("g.away_team", variants)
+                where_conditions.append(f"({home_clause} OR {away_clause})")
 
             query = f"""
-                SELECT 
+                SELECT
                     g.game_id,
                     g.game_date,
                     g.home_team,
@@ -734,8 +792,8 @@ class GameQueryTool:
                 ORDER BY g.game_date, g.game_id;
             """
 
-            await cursor.execute(query, query_params)
-            games = await cursor.fetchall()
+            await cursor.execute(query, dialect.execute_args())
+            games = await self._fetchall_dicts(cursor)
 
             if games:
                 result["games"] = [
@@ -752,7 +810,7 @@ class GameQueryTool:
             result["error"] = f"경기 일정 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         return result
 
@@ -909,19 +967,20 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor = await self._cursor()
 
-            query = """
+            dialect = self._dialect()
+            query = f"""
                 SELECT MAX(g.game_date) as final_game_date
                 FROM game g
                 LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
-                WHERE ks.season_year = %s
-                  AND ks.league_type_code = %s
+                WHERE ks.season_year = {dialect.bind(year)}
+                  AND ks.league_type_code = {dialect.bind(league_code)}
                   AND g.game_status = 'COMPLETED';
             """
 
-            await cursor.execute(query, (year, league_code))
-            row = await cursor.fetchone()
+            await cursor.execute(query, dialect.execute_args())
+            row = await self._fetchone_dict(cursor)
 
             if row and row["final_game_date"]:
                 final_date = row["final_game_date"]
@@ -941,7 +1000,7 @@ class GameQueryTool:
             result["error"] = f"마지막 경기 날짜 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         return result
 
@@ -1060,12 +1119,12 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor = await self._cursor()
 
             # 1. 경기 ID 찾기 (ID가 없는 경우)
             if not game_id and date:
-                where_clause = "DATE(game_date) = %s"
-                params = [date]
+                lookup_dialect = self._dialect()
+                where_clause = lookup_dialect.date_eq("game_date", date)
                 if team_name:
                     team_variants = self.get_team_variants(team_name)
                     logger.info(
@@ -1075,13 +1134,15 @@ class GameQueryTool:
                         team_variants,
                         self.team_resolver.query_mode,
                     )
-                    where_clause += " AND (home_team = ANY(%s) OR away_team = ANY(%s))"
-                    params.extend([team_variants, team_variants])
+                    home_clause = lookup_dialect.in_any("home_team", team_variants)
+                    away_clause = lookup_dialect.in_any("away_team", team_variants)
+                    where_clause += f" AND ({home_clause} OR {away_clause})"
 
                 await cursor.execute(
-                    f"SELECT game_id FROM game WHERE {where_clause} LIMIT 1", params
+                    f"SELECT game_id FROM game WHERE {where_clause} {lookup_dialect.limit(1)}",
+                    lookup_dialect.execute_args(),
                 )
-                row = await cursor.fetchone()
+                row = await self._fetchone_dict(cursor)
                 if row:
                     game_id = row["game_id"]
 
@@ -1090,17 +1151,17 @@ class GameQueryTool:
                 return result
 
             # 2. 라인업 조회 (새로 추가된 player_name, is_starter 컬럼 사용)
-            lineup_query = """
-                SELECT 
+            dialect = self._dialect()
+            lineup_query = f"""
+                SELECT
                     team_code,
                     player_name,
                     position,
                     batting_order,
                     is_starter
                 FROM game_lineups
-                WHERE game_id = %s
+                WHERE game_id = {dialect.bind(game_id)}
             """
-            params = [game_id]
 
             if team_name:
                 team_variants = self.get_team_variants(team_name)
@@ -1111,13 +1172,12 @@ class GameQueryTool:
                     team_variants,
                     self.team_resolver.query_mode,
                 )
-                lineup_query += " AND team_code = ANY(%s)"
-                params.append(team_variants)
+                lineup_query += f" AND {dialect.in_any('team_code', team_variants)}"
 
             lineup_query += " ORDER BY team_code, batting_order"
 
-            await cursor.execute(lineup_query, params)
-            rows = await cursor.fetchall()
+            await cursor.execute(lineup_query, dialect.execute_args())
+            rows = await self._fetchall_dicts(cursor)
 
             if rows:
                 result["lineups"] = [dict(row) for row in rows]
@@ -1138,7 +1198,7 @@ class GameQueryTool:
             result["error"] = f"라인업 조회 오류: {e}"
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         return result
 
@@ -1187,28 +1247,10 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor = await self._cursor()
 
             # 리그 타입 코드 매핑
             league_code_map = {"regular_season": 0, "korean_series": 5}
-
-            scoped_query = """
-                SELECT MAX(g.game_date) as last_game_date
-                FROM game g
-                LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
-                WHERE ks.season_year = %s
-                  AND ks.league_type_code = %s
-                  AND (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
-                  AND g.game_status = 'COMPLETED';
-            """
-            all_games_query = """
-                SELECT MAX(g.game_date) as last_game_date
-                FROM game g
-                LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
-                WHERE ks.season_year = %s
-                  AND (g.home_team = ANY(%s) OR g.away_team = ANY(%s))
-                  AND g.game_status = 'COMPLETED';
-            """
 
             logger.info(
                 "[GameQuery] team_resolution input_team=%s resolved_canonical=%s variants=%s query_mode=%s",
@@ -1223,10 +1265,19 @@ class GameQueryTool:
             league_code = league_code_map.get(league_type)
 
             if league_code is not None:
-                await cursor.execute(
-                    scoped_query, (year, league_code, team_variants, team_variants)
-                )
-                row = await cursor.fetchone()
+                scoped_dialect = self._dialect()
+                scoped_query = f"""
+                    SELECT MAX(g.game_date) as last_game_date
+                    FROM game g
+                    LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    WHERE ks.season_year = {scoped_dialect.bind(year)}
+                      AND ks.league_type_code = {scoped_dialect.bind(league_code)}
+                      AND ({scoped_dialect.in_any("g.home_team", team_variants)}
+                           OR {scoped_dialect.in_any("g.away_team", team_variants)})
+                      AND g.game_status = 'COMPLETED';
+                """
+                await cursor.execute(scoped_query, scoped_dialect.execute_args())
+                row = await self._fetchone_dict(cursor)
 
             if (not row or not row["last_game_date"]) and league_type != "all":
                 logger.info(
@@ -1235,10 +1286,18 @@ class GameQueryTool:
                     year,
                     league_type,
                 )
-                await cursor.execute(
-                    all_games_query, (year, team_variants, team_variants)
-                )
-                row = await cursor.fetchone()
+                all_games_dialect = self._dialect()
+                all_games_query = f"""
+                    SELECT MAX(g.game_date) as last_game_date
+                    FROM game g
+                    LEFT JOIN kbo_seasons ks ON g.season_id = ks.season_id
+                    WHERE ks.season_year = {all_games_dialect.bind(year)}
+                      AND ({all_games_dialect.in_any("g.home_team", team_variants)}
+                           OR {all_games_dialect.in_any("g.away_team", team_variants)})
+                      AND g.game_status = 'COMPLETED';
+                """
+                await cursor.execute(all_games_query, all_games_dialect.execute_args())
+                row = await self._fetchone_dict(cursor)
                 resolved_scope = "all"
 
             if row and row["last_game_date"]:
@@ -1261,7 +1320,7 @@ class GameQueryTool:
             result["error"] = str(e)
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         self._record_team_query_result(
             "get_team_last_game_date", team_name, year, result
@@ -1294,18 +1353,16 @@ class GameQueryTool:
 
         try:
             await self._ensure_team_mappings_loaded()
-            cursor = self.connection.cursor(row_factory=dict_row)
+            cursor = await self._cursor()
 
+            dialect = self._dialect()
             where_conditions = []
-            query_params = []
 
             if game_id:
-                where_conditions.append("game_id = %s")
-                query_params.append(game_id)
+                where_conditions.append(f"game_id = {dialect.bind(game_id)}")
 
             if date:
-                where_conditions.append("DATE(game_date) = %s")
-                query_params.append(date)
+                where_conditions.append(dialect.date_eq("game_date", date))
 
             if not where_conditions:
                 result["error"] = "game_id 또는 date 중 하나는 필요합니다"
@@ -1313,13 +1370,13 @@ class GameQueryTool:
 
             query = f"""
                 SELECT game_id, game_date, home_team, away_team, game_status
-                FROM game 
+                FROM game
                 WHERE {" AND ".join(where_conditions)}
                 ORDER BY game_date;
             """
 
-            await cursor.execute(query, query_params)
-            games = await cursor.fetchall()
+            await cursor.execute(query, dialect.execute_args())
+            games = await self._fetchall_dicts(cursor)
 
             if games:
                 result["exists"] = True
@@ -1334,7 +1391,7 @@ class GameQueryTool:
             result["error"] = f"경기 검증 오류: {e}"
         finally:
             if "cursor" in locals():
-                await cursor.close()
+                await self._close_cursor(cursor)
 
         return result
 

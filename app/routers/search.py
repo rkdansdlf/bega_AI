@@ -6,11 +6,37 @@ import time
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
-from ..deps import get_rag_pipeline, require_ai_internal_token
+from ..deps import (
+    get_rag_pipeline,
+    require_ai_internal_token,
+    require_rag_read_ready,
+)
 from ..core.entity_extractor import enhance_search_strategy
+from ..core.rag_runtime import RagDependencyUnavailable
 from ..core.ratelimit import rate_limit_debug_dependency
 
 router = APIRouter(prefix="/ai/search", tags=["search"])
+
+
+def _new_search_retrieval_state() -> Dict[str, Any]:
+    return {
+        "db_error": None,
+        "embedding_error": None,
+        "partial_errors": [],
+        "error_type": None,
+    }
+
+
+def _raise_search_dependency_error(
+    docs: List[Dict[str, Any]],
+    retrieval_state: Dict[str, Any],
+) -> None:
+    if docs:
+        return
+    if retrieval_state.get("embedding_error") is not None:
+        raise RagDependencyUnavailable("RAG_EMBEDDING_NOT_READY")
+    if retrieval_state.get("db_error") is not None:
+        raise RagDependencyUnavailable("RAG_STORAGE_UNAVAILABLE")
 
 
 class SearchAnalysisResponse(BaseModel):
@@ -30,10 +56,16 @@ async def debug_search(
     limit: int = Query(10, ge=1, le=50, description="검색 결과 개수"),
     year: Optional[int] = Query(None, description="시즌 연도 (예: 2025)"),
     team: Optional[str] = Query(None, description="팀명 (예: LG, KIA)"),
+    league: Optional[str] = Query(
+        None,
+        max_length=64,
+        description="리그 코드 (예: KBO)",
+    ),
     use_multi_query: bool = Query(True, description="다중 쿼리 검색 사용 여부"),
     pipeline=Depends(get_rag_pipeline),
     __: None = Depends(require_ai_internal_token),
     _: None = Depends(rate_limit_debug_dependency),
+    _ready: None = Depends(require_rag_read_ready),
 ):
     """
     검색 알고리즘을 자세히 분석하고 성능을 측정하는 디버깅 엔드포인트입니다.
@@ -52,16 +84,29 @@ async def debug_search(
         filters["season_year"] = year
     if team:
         filters["team_id"] = team.upper()
+    if league and league.strip():
+        filters["league_type_code"] = league.strip()
 
     # 2. 검색 수행
+    retrieval_state = _new_search_retrieval_state()
     if use_multi_query:
         docs = await pipeline.retrieve_with_multi_query(
-            q, entity_filter, filters=filters, limit=effective_limit
+            q,
+            entity_filter,
+            filters=filters,
+            limit=effective_limit,
+            retrieval_state=retrieval_state,
         )
         search_method = "multi_query_retrieval"
     else:
-        docs = await pipeline.retrieve(q, filters=filters, limit=effective_limit)
+        docs = await pipeline.retrieve(
+            q,
+            filters=filters,
+            limit=effective_limit,
+            retrieval_state=retrieval_state,
+        )
         search_method = "single_query_retrieval"
+    _raise_search_dependency_error(docs, retrieval_state)
 
     # 3. 성능 메트릭 계산
     execution_time = (time.time() - start_time) * 1000  # ms
@@ -157,6 +202,7 @@ async def compare_search_methods(
     pipeline=Depends(get_rag_pipeline),
     __: None = Depends(require_ai_internal_token),
     _: None = Depends(rate_limit_debug_dependency),
+    _ready: None = Depends(require_rag_read_ready),
 ):
     """
     단일 쿼리 검색과 다중 쿼리 검색 성능을 비교하는 엔드포인트입니다.
@@ -168,17 +214,27 @@ async def compare_search_methods(
 
     # 단일 쿼리 검색
     start_single = time.time()
-    docs_single = await pipeline.retrieve(q, filters=filters, limit=effective_limit)
+    single_state = _new_search_retrieval_state()
+    docs_single = await pipeline.retrieve(
+        q,
+        filters=filters,
+        limit=effective_limit,
+        retrieval_state=single_state,
+    )
+    _raise_search_dependency_error(docs_single, single_state)
     time_single = (time.time() - start_single) * 1000
 
     # 다중 쿼리 검색
     start_multi = time.time()
+    multi_state = _new_search_retrieval_state()
     docs_multi = await pipeline.retrieve_with_multi_query(
         q,
         entity_filter,
         filters=filters,
         limit=effective_limit,
+        retrieval_state=multi_state,
     )
+    _raise_search_dependency_error(docs_multi, multi_state)
     time_multi = (time.time() - start_multi) * 1000
 
     # 결과 비교 분석

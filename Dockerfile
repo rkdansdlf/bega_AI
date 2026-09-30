@@ -4,8 +4,9 @@ FROM python:3.14-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/home/appuser/.local/bin:${PATH}"
+    TZ=Asia/Seoul
 
 WORKDIR /app
 
@@ -25,13 +26,24 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN python3 -m pip install --upgrade pip && \
     python3 -m pip install --no-cache-dir --disable-pip-version-check -r requirements.txt && \
-    rm -rf /root/.cache/pip
+    rm -rf /root/.cache/pip && \
+    # pip vendors its own msgpack/setuptools (pip 26.2.1: msgpack 1.1.2,
+    # setuptools 70.3.0) that Trivy flags and no newer pip fixes. The runtime
+    # never installs packages, so drop pip from the final image.
+    python3 -m pip uninstall -y pip
 
-# Create non-root user
-RUN useradd -m -u 1000 appuser
+# Create the runtime identity and its only application-owned writable path.
+RUN useradd -m -u 1000 appuser && \
+    install -d -o appuser -g appuser -m 0750 /app/reports
 
-# Copy source code
-COPY --chown=appuser:appuser . .
+# Keep startup code root-owned so the runtime identity cannot persist changes.
+COPY app ./app
+COPY scripts ./scripts
+COPY docs ./docs
+COPY evals ./evals
+RUN find /app/app /app/scripts /app/docs /app/evals -type d -exec chmod 0555 {} + && \
+    find /app/app /app/scripts /app/docs /app/evals -type f -perm /111 -exec chmod 0555 {} + && \
+    find /app/app /app/scripts /app/docs /app/evals -type f ! -perm /111 -exec chmod 0444 {} +
 
 USER appuser
 
@@ -40,7 +52,7 @@ EXPOSE 8001
 
 # Health check endpoint
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -f http://localhost:8001/health || exit 1
+    CMD curl -f http://localhost:8001/ready || exit 1
 
 # Run the FastAPI application (no --reload in production; uvloop for async perf)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--loop", "uvloop", "--workers", "1"]
+CMD ["/usr/local/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--loop", "uvloop", "--workers", "1"]

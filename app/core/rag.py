@@ -26,6 +26,21 @@ from .embeddings import async_embed_query
 from .http_clients import get_shared_httpx_client
 from .prompts import FOLLOWUP_PROMPT, SYSTEM_PROMPT, HYDE_PROMPT
 from .retrieval import record_retrieval_event, similarity_search
+from .chat_model_usage import ModelPricingCatalog
+from .llm_provider import (
+    AllProvidersFailed,
+    LLMResult,
+    ProviderRouter,
+    UsageSink,
+    build_router,
+    get_call_attribution,
+    provider_health,
+)
+from .llm_usage_accounting import account_llm_usage, publish_circuit_states
+from ..eval.grounding import build_runtime_grounding
+from .relevance_guard import apply_relevance_guard
+from .reranker import build_reranker
+from .retrieval_policy import annotate_relaxation, protected_filter_keys
 from .oracle_rag import oracle_similarity_search
 from . import kbo_metrics
 from .entity_extractor import enhance_search_strategy
@@ -1608,6 +1623,12 @@ def _build_static_kbo_faq_result(query: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _attribution_dict() -> Optional[Dict[str, Any]]:
+    """Actual provider/model that served the current request's last LLM call."""
+    attribution = get_call_attribution()
+    return attribution.to_dict() if attribution is not None else None
+
+
 def _build_retrieval_event_filter(
     final_filters: Dict[str, Any],
     *,
@@ -1622,6 +1643,9 @@ def _build_retrieval_event_filter(
     )
     event_filter["fallback_used"] = bool(fallback_used)
     event_filter["fallback_stage"] = fallback_stage or "none"
+    event_filter.update(
+        annotate_relaxation(final_filters or {}, event_filter["actual_filters"])
+    )
     return event_filter
 
 
@@ -2295,6 +2319,7 @@ def _process_stat_doc_cached(
         wrc_plus = _get_safe_stat(meta, "wrc_plus")
         ops_plus = _get_safe_stat(meta, "ops_plus")
         war = _get_safe_stat(meta, "war")
+        estimated_metrics: List[str] = []
         ops_val = _get_safe_stat(meta, "ops")
         obp = _get_safe_stat(meta, "obp")
         slg = _get_safe_stat(meta, "slg")
@@ -2331,6 +2356,7 @@ def _process_stat_doc_cached(
         )
         if ops_plus is None and ops_val and league_ops:
             ops_plus = (ops_val / league_ops) * 100
+            estimated_metrics.append("OPS+")
 
         woba_val = kbo_metrics.woba(
             walks,
@@ -2346,8 +2372,11 @@ def _process_stat_doc_cached(
         )
         if wrc_plus is None and woba_val is not None and pa > 0:
             wrc_plus = kbo_metrics.wrc_plus(woba_val, pa, _LEAGUE_CONTEXT)
+            if wrc_plus is not None:
+                estimated_metrics.append("wRC+")
 
         if war is None and woba_val is not None:
+            estimated_metrics.append("WAR")
             war = kbo_metrics.war_batter(
                 woba_val,
                 pa,
@@ -2378,6 +2407,12 @@ def _process_stat_doc_cached(
             "rbi": rbi,
             "steals": steals,
             "score": score,
+            "estimated_metrics": sorted(set(estimated_metrics)),
+            "metric_provenance": (
+                kbo_metrics.metric_provenance(estimated_metrics, _LEAGUE_CONTEXT)
+                if estimated_metrics
+                else None
+            ),
         }, None
 
     return None, None
@@ -2521,6 +2556,7 @@ class RAGPipeline:
         connection: Optional[psycopg.AsyncConnection] = None,
         pool: Optional[AsyncConnectionPool] = None,
         rag_pool: Optional[Any] = None,
+        baseball_pool: Optional[Any] = None,
         agent_runtime: BaseballAgentRuntime | None = None,
         context_formatter: Optional[ContextFormatter] = None,
         wpa_calculator: Optional["WPACalculator"] = None,
@@ -2531,6 +2567,7 @@ class RAGPipeline:
         self.connection = connection
         self._pool = pool
         self._rag_pool = rag_pool
+        self._baseball_pool = baseball_pool
         self._oracle_rag = getattr(rag_pool or pool, "backend", None) == "oracle"
         self.query_transformer = QueryTransformer(self._generate)
         self.context_formatter = context_formatter or ContextFormatter()
@@ -2561,6 +2598,20 @@ class RAGPipeline:
             yield self.connection
 
     @asynccontextmanager
+    async def _checkout_baseball_conn(self) -> AsyncIterator[Any]:
+        """Borrow the baseball-only pool for the agent's GameQueryTool.
+
+        Mirrors ``_checkout_rag_conn`` — GameStrategist/MatchPredictor still
+        read baseball through the shared general connection (see the comment
+        in ``AgentRequestContext.create``), so this only affects GameQueryTool.
+        """
+        pool = self._baseball_pool or self._pool
+        if pool is not None:
+            async with pool.connection() as conn:
+                yield conn
+        else:
+            yield self.connection
+
     async def _build_operator_or_static_kbo_result(
         self, query: str
     ) -> Optional[Dict[str, Any]]:
@@ -2576,7 +2627,9 @@ class RAGPipeline:
         static_result = _build_static_kbo_faq_result(query)
         if static_result is not None:
             return static_result
-        if bool(getattr(self.settings, "operator_data_fast_path_enabled", False)) and is_operator_data_query(query):
+        if bool(
+            getattr(self.settings, "operator_data_fast_path_enabled", False)
+        ) and is_operator_data_query(query):
             return _build_manual_baseball_data_required_result(query)
         return None
 
@@ -2872,6 +2925,59 @@ class RAGPipeline:
             return True
         return False
 
+    async def _guard_and_rerank(
+        self,
+        query: str,
+        docs: List[Dict[str, Any]],
+        *,
+        final_filters: Dict[str, Any],
+        intent: str,
+        is_regulation: bool,
+        retrieval_state: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Drop chunks that contradict the asked player/team/season, then rerank."""
+        info: Dict[str, Any] = {
+            "relevance_guard_dropped": 0,
+            "reranker": "none",
+            "reranker_version": None,
+            "reranker_degraded": False,
+        }
+        if docs and bool(getattr(self.settings, "rag_relevance_guard_enabled", True)):
+            protected = protected_filter_keys(
+                final_filters, intent=intent, is_regulation=is_regulation
+            )
+            constraints = {k: final_filters.get(k) for k in protected}
+            guard = apply_relevance_guard(docs, constraints)
+            if guard.dropped:
+                logger.info(
+                    "[RAG] relevance guard dropped %d/%d docs: %s",
+                    len(guard.dropped),
+                    len(docs),
+                    guard.reasons[:3],
+                )
+                info["relevance_guard_dropped"] = len(guard.dropped)
+                docs = guard.kept
+        reranker = build_reranker(self.settings) if docs else None
+        if reranker is not None:
+            candidate_limit = max(
+                1, int(getattr(self.settings, "rag_rerank_candidate_limit", 20) or 20)
+            )
+            context_limit = max(
+                1, int(getattr(self.settings, "rag_context_limit", 10) or 10)
+            )
+            outcome = await reranker.rerank(
+                query, docs[:candidate_limit], context_limit
+            )
+            docs = outcome.docs
+            info.update(
+                reranker=outcome.reranker,
+                reranker_version=outcome.version,
+                reranker_degraded=outcome.degraded,
+            )
+        if retrieval_state is not None:
+            retrieval_state["retrieval_quality"] = info
+        return docs
+
     def _rerank_docs(self, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """v1 rerank interface; disabled by default and uses existing scores only."""
         if not bool(getattr(self.settings, "rag_rerank_enabled", False)):
@@ -2908,6 +3014,7 @@ class RAGPipeline:
         actual_filters: Optional[Dict[str, Any]] = None,
         fallback_used: bool = False,
         fallback_stage: Optional[str] = "none",
+        quality_info: Optional[Dict[str, Any]] = None,
     ) -> None:
         selected = selected_docs if selected_docs is not None else docs
         rewritten_queries = [
@@ -2945,6 +3052,8 @@ class RAGPipeline:
                 fallback_used=fallback_used,
                 fallback_stage=fallback_stage,
             )
+        if quality_info:
+            metadata_filter = {**metadata_filter, **quality_info}
         latency_ms = int((_rag_perf_counter() - retrieval_started_at) * 1000)
         try:
             async with self._checkout_conn() as conn:
@@ -2965,81 +3074,67 @@ class RAGPipeline:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RAG] Failed to record retrieval event: %s", exc)
 
-    async def _generate(self, messages: Sequence[Dict[str, str]]) -> str:
-        provider = self.settings.llm_provider
-        _llm_start = _rag_perf_counter()
+    def _llm_router(self) -> ProviderRouter:
+        return build_router(self.settings)
 
+    def _account_usage(
+        self, result: LLMResult, messages: Sequence[Dict[str, str]]
+    ) -> Optional[Dict[str, Any]]:
+        """Record provider-reported (or estimated) usage; never raises."""
         try:
-            if provider == "gemini":
-                result = await self._generate_with_gemini(messages)
-            elif provider == "openrouter":
-                result = await self._generate_with_openrouter(messages)
-            else:
-                raise RuntimeError(f"지원되지 않는 LLM 공급자: {provider}")
-            try:
-                AI_LLM_CALL_DURATION_SECONDS.labels(
-                    provider=provider, route="rag"
-                ).observe(_rag_perf_counter() - _llm_start)
-            except Exception:  # noqa: BLE001
-                pass
-            return result
-        except Exception as e:
-            logger.error(f"[RAG] Primary LLM provider '{provider}' failed: {e}")
+            raw = getattr(self.settings, "chat_model_pricing_json", None)
+            catalog = ModelPricingCatalog.from_json(raw) if raw else None
+            row = account_llm_usage(result, messages=messages, catalog=catalog)
+            publish_circuit_states(provider_health()["circuits"])
+            return row
+        except Exception:  # noqa: BLE001
+            logger.debug("[RAG] usage accounting failed", exc_info=True)
+            return None
 
-            # Try fallback provider
-            fallback_provider = "gemini" if provider == "openrouter" else "openrouter"
-
-            # Check if fallback is available
-            if fallback_provider == "gemini" and self.settings.gemini_api_key:
-                logger.info("[RAG] Attempting fallback to Gemini")
-                try:
-                    fb_result = await self._generate_with_gemini(messages)
-                    try:
-                        AI_LLM_CALL_DURATION_SECONDS.labels(
-                            provider="gemini", route="rag_fallback"
-                        ).observe(_rag_perf_counter() - _llm_start)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return fb_result
-                except Exception as fallback_e:
-                    logger.error(f"[RAG] Fallback to Gemini also failed: {fallback_e}")
-            elif fallback_provider == "openrouter" and self.settings.openrouter_api_key:
-                logger.info("[RAG] Attempting fallback to OpenRouter")
-                try:
-                    fb_result = await self._generate_with_openrouter(messages)
-                    try:
-                        AI_LLM_CALL_DURATION_SECONDS.labels(
-                            provider="openrouter", route="rag_fallback"
-                        ).observe(_rag_perf_counter() - _llm_start)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return fb_result
-                except Exception as fallback_e:
-                    logger.error(
-                        f"[RAG] Fallback to OpenRouter also failed: {fallback_e}"
-                    )
-
-            # All providers failed
+    async def _generate(self, messages: Sequence[Dict[str, str]]) -> str:
+        """Generate via the provider router (primary → fallback, circuit-aware)."""
+        llm_start = _rag_perf_counter()
+        try:
+            result = await self._llm_router().complete(messages)
+        except AllProvidersFailed as exc:
+            logger.error("[RAG] all LLM providers failed: %s", exc)
             raise RuntimeError(
-                f"모든 LLM 제공자가 실패했습니다. 주 제공자({provider}): {e}"
-            )
+                f"모든 LLM 제공자가 실패했습니다. 주 제공자({self.settings.llm_provider}): {exc}"
+            ) from exc
+        self._last_llm_result = result
+        self._last_usage_account = self._account_usage(result, messages)
+        try:
+            AI_LLM_CALL_DURATION_SECONDS.labels(
+                provider=result.provider,
+                route="rag_fallback" if result.fallback_from else "rag",
+            ).observe(_rag_perf_counter() - llm_start)
+        except Exception:  # noqa: BLE001
+            pass
+        return result.text
 
     async def _generate_stream(
         self, messages: Sequence[Dict[str, str]]
     ) -> Iterator[str]:
         """스트리밍 모드로 답변을 생성합니다."""
-        provider = self.settings.llm_provider
-
+        sink = UsageSink()
+        self._last_stream_usage = sink
+        streamed: List[str] = []
         try:
-            if provider == "gemini":
-                async for chunk in self._generate_stream_with_gemini(messages):
-                    yield chunk
-            elif provider == "openrouter":
-                async for chunk in self._generate_stream_with_openrouter(messages):
-                    yield chunk
-            else:
-                # 스트리밍 미지원 시 일반 생성 결과 반환
-                yield await self._generate(messages)
+            async for chunk in self._llm_router().stream(messages, sink):
+                streamed.append(chunk)
+                yield chunk
+            attr = sink.attribution
+            self._last_usage_account = self._account_usage(
+                LLMResult(
+                    "".join(streamed),
+                    (attr.actual_provider if attr else None)
+                    or str(self.settings.llm_provider),
+                    attr.actual_model if attr else None,
+                    sink.usage,
+                    attribution=attr,
+                ),
+                messages,
+            )
         except Exception as e:
             logger.error(
                 f"[RAG] Stream generation failed ({type(e).__name__}): {e}. Falling back to completion."
@@ -3049,248 +3144,6 @@ class RAGPipeline:
             except Exception as fe:
                 logger.error(f"[RAG] Completion fallback also failed: {fe}")
                 yield "죄송합니다. 답변 생성 중 오류가 발생했습니다."
-
-    async def _generate_stream_with_gemini(
-        self, messages: Sequence[Dict[str, str]]
-    ) -> Iterator[str]:
-        """Gemini API를 사용하여 스트리밍 답변을 생성합니다."""
-        if not self.settings.gemini_api_key:
-            raise RuntimeError("Gemini API 키가 없습니다.")
-
-        gemini_contents = []
-        system_instructions = ""
-
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "system":
-                system_instructions += content + "\n\n"
-            elif role == "user":
-                user_content = content
-                if system_instructions and not gemini_contents:
-                    user_content = f"System Instruction:\n{system_instructions}\n\nUser Question:\n{content}"
-                gemini_contents.append(
-                    {"role": "user", "parts": [{"text": user_content}]}
-                )
-            elif role == "assistant":
-                gemini_contents.append({"role": "model", "parts": [{"text": content}]})
-
-        model = self.settings.gemini_model or "gemini-1.5-flash"
-        url = f"https://generativelanguage.googleapis.com/v1/models/{model}:streamGenerateContent"
-        params = {"key": self.settings.gemini_api_key, "alt": "sse"}
-
-        payload = {
-            "contents": gemini_contents,
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": self.settings.max_output_tokens,
-            },
-        }
-
-        client = get_shared_httpx_client(
-            "gemini",
-            timeout=httpx.Timeout(60.0, connect=10.0, read=60.0, pool=10.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
-        async with client.stream(
-            "POST", url, json=payload, params=params, timeout=60.0
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    try:
-                        data = json.loads(line[6:])
-                        chunk = (
-                            data.get("candidates", [{}])[0]
-                            .get("content", {})
-                            .get("parts", [{}])[0]
-                            .get("text", "")
-                        )
-                        if chunk:
-                            yield chunk
-                    except Exception:
-                        continue
-
-    async def _generate_stream_with_openrouter(
-        self, messages: Sequence[Dict[str, str]]
-    ) -> Iterator[str]:
-        """OpenRouter API를 사용하여 스트리밍 답변을 생성합니다."""
-        if not self.settings.openrouter_api_key:
-            raise RuntimeError("OpenRouter API 키가 없습니다.")
-
-        headers = {
-            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": self.settings.openrouter_referer or "",
-            "X-Title": self.settings.openrouter_app_title or "",
-        }
-        payload = {
-            "model": self.settings.openrouter_model,
-            "messages": list(messages),
-            "stream": True,
-            "max_tokens": self.settings.max_output_tokens,
-        }
-
-        url = f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions"
-        client = get_shared_httpx_client(
-            "openrouter",
-            timeout=httpx.Timeout(60.0, connect=10.0, read=60.0, pool=10.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
-
-        async with client.stream(
-            "POST", url, json=payload, headers=headers, timeout=60.0
-        ) as response:
-            if response.status_code != 200:
-                body = await response.aread()
-                logger.error(
-                    f"[RAG] OpenRouter stream error {response.status_code}: {body[:300]!r}"
-                )
-                response.raise_for_status()
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    if line == "data: [DONE]":
-                        break
-                    try:
-                        data = json.loads(line[6:])
-                        chunk = (
-                            data.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("content", "")
-                        )
-                        if chunk:
-                            yield chunk
-                    except Exception:
-                        continue
-
-    @llm_retry
-    async def _generate_with_openrouter(
-        self, messages: Sequence[Dict[str, str]]
-    ) -> str:
-        if not self.settings.openrouter_api_key:
-            raise RuntimeError(
-                "OpenRouter를 사용하려면 OPENROUTER_API_KEY가 필요합니다."
-            )
-
-        headers = {
-            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": self.settings.openrouter_referer or "",
-            "X-Title": self.settings.openrouter_app_title or "",
-        }
-        payload = {
-            "model": self.settings.openrouter_model,
-            "messages": list(messages),
-            "max_tokens": self.settings.max_output_tokens,
-            "temperature": 0.1,
-        }
-
-        client = get_shared_httpx_client(
-            "openrouter",
-            timeout=httpx.Timeout(120.0, connect=10.0, read=60.0, pool=10.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
-        response = await client.post(
-            f"{self.settings.openrouter_base_url.rstrip('/')}/chat/completions",
-            json=payload,
-            headers=headers,
-        )
-
-        response.raise_for_status()
-        data = response.json()
-
-        choices = data.get("choices", [])
-        if not choices:
-            error_msg = (
-                f"OpenRouter 응답에 choices가 없습니다. Keys: {list(data.keys())}"
-            )
-            logger.error(f"[OpenRouter] {error_msg}")
-            raise RuntimeError(error_msg)
-
-        message = choices[0].get("message", {})
-        content = message.get("content", "")
-
-        if not content:
-            error_msg = (
-                f"OpenRouter 응답이 비어 있습니다. Message keys: {list(message.keys())}"
-            )
-            logger.error(f"[OpenRouter] {error_msg}")
-            raise RuntimeError(error_msg)
-
-        return content
-
-    @llm_retry
-    async def _generate_with_gemini(self, messages: Sequence[Dict[str, str]]) -> str:
-        """Google Gemini API를 사용하여 응답을 생성합니다."""
-        if not self.settings.gemini_api_key:
-            raise RuntimeError("Gemini를 사용하려면 GEMINI_API_KEY가 필요합니다.")
-
-        # Convert OpenAI format messages to Gemini format
-        gemini_contents = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-
-            if role == "system":
-                # Gemini doesn't have system role, prepend to first user message
-                if not gemini_contents:
-                    gemini_contents.append(
-                        {
-                            "role": "user",
-                            "parts": [{"text": f"System: {content}\n\nUser: "}],
-                        }
-                    )
-                else:
-                    # Prepend to existing user message
-                    if gemini_contents[-1]["role"] == "user":
-                        gemini_contents[-1]["parts"][0]["text"] = (
-                            f"System: {content}\n\n"
-                            + gemini_contents[-1]["parts"][0]["text"]
-                        )
-            elif role == "user":
-                gemini_contents.append({"role": "user", "parts": [{"text": content}]})
-            elif role == "assistant":
-                gemini_contents.append({"role": "model", "parts": [{"text": content}]})
-
-        payload = {
-            "contents": gemini_contents,
-            "generationConfig": {
-                "maxOutputTokens": self.settings.max_output_tokens,
-                "temperature": 0.1,
-            },
-        }
-
-        model = self.settings.gemini_model or "gemini-1.5-flash"
-        url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
-        params = {"key": self.settings.gemini_api_key}
-
-        client = get_shared_httpx_client(
-            "gemini",
-            timeout=httpx.Timeout(60.0, connect=10.0, read=60.0, pool=10.0),
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
-        response = await client.post(url, json=payload, params=params)
-
-        response.raise_for_status()
-        data = response.json()
-
-        candidates = data.get("candidates", [])
-        if not candidates:
-            error_msg = (
-                f"Gemini 응답에 candidates가 없습니다. Keys: {list(data.keys())}"
-            )
-            logger.error(f"[Gemini] {error_msg}")
-            raise RuntimeError(error_msg)
-
-        content = candidates[0].get("content", {})
-        parts = content.get("parts", [])
-
-        if not parts or not parts[0].get("text"):
-            error_msg = f"Gemini 응답이 비어 있습니다. Content: {content}"
-            logger.warning(f"[Gemini] {error_msg}")
-            return "Gemini가 응답을 생성하지 못했습니다. (빈 응답)"
-
-        return parts[0]["text"]
 
     def _is_statistical_query(self, query: str, entity_filter) -> bool:
         """
@@ -3421,8 +3274,10 @@ class RAGPipeline:
 
         try:
             # 야구 에이전트를 통한 처리 시도
-            async with self._checkout_conn() as conn:
-                with self.agent_runtime.request_context(conn):
+            async with self._checkout_conn() as conn, self._checkout_baseball_conn() as baseball_conn:
+                with self.agent_runtime.request_context(
+                    conn, baseball_connection=baseball_conn
+                ):
                     agent_result = await self.baseball_agent.process_query(
                         query,
                         {
@@ -3435,9 +3290,7 @@ class RAGPipeline:
                     )
 
             if agent_result["verified"] and not agent_result.get("error"):
-                logger.info(
-                    "[RAG] Agent successfully handled query with verified data"
-                )
+                logger.info("[RAG] Agent successfully handled query with verified data")
                 perf = agent_result.get("perf") or {}
                 if not isinstance(perf, dict):
                     perf = {}
@@ -3657,8 +3510,10 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     "[RAG] Agent fast-path query detected, trying agent stream first"
                 )
                 try:
-                    async with self._checkout_conn() as conn:
-                        with self.agent_runtime.request_context(conn):
+                    async with self._checkout_conn() as conn, self._checkout_baseball_conn() as baseball_conn:
+                        with self.agent_runtime.request_context(
+                            conn, baseball_connection=baseball_conn
+                        ):
                             async for event in self.baseball_agent.process_query_stream(
                                 query,
                                 context={
@@ -3751,6 +3606,15 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                     retrieval_state=retrieval_state,
                 )
 
+        docs = await self._guard_and_rerank(
+            query,
+            docs,
+            final_filters=final_filters,
+            intent=intent,
+            is_regulation=is_regulation,
+            retrieval_state=retrieval_state,
+        )
+
         docs = _sort_docs_for_context(
             docs,
             is_regulation=is_regulation,
@@ -3824,11 +3688,24 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         messages.append({"role": "user", "content": prompt})
 
         # 스트리밍 답변 생성
+        streamed_parts: List[str] = []
         async for chunk in self._generate_stream(messages):
+            streamed_parts.append(chunk)
             yield {
                 "type": "answer_chunk",
                 "content": chunk,
             }
+        # claim ↔ rag_chunks id provenance for the streamed answer.
+        yield {
+            "type": "metadata",
+            "data": {
+                "intent": intent,
+                "claim_grounding": build_runtime_grounding(
+                    "".join(streamed_parts), docs
+                ),
+                "llm_attribution": _attribution_dict(),
+            },
+        }
 
     @_observe_rag_total
     async def run(
@@ -4142,8 +4019,18 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 fallback_stage = "without_source_table"
                 logger.info(f"[RAG] Fallback without source_table: {len(docs)} docs")
 
-            # If still no results, try without team filter
-            if not docs and "team_id" in fallback_filters:
+            # If still no results, try without team filter — only for queries
+            # that are not about a specific team (core entity guard).
+            if (
+                not docs
+                and "team_id" in fallback_filters
+                and "team_id"
+                not in protected_filter_keys(
+                    final_filters,
+                    intent=intent,
+                    is_regulation=is_regulation,
+                )
+            ):
                 fallback_filters.pop("team_id")
                 docs = await _run_retrieve(
                     query,
@@ -4161,7 +4048,14 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
 
             # Final fallback: only keep year and league filters
             if not docs:
-                minimal_filters = {}
+                minimal_filters = {
+                    key: final_filters[key]
+                    for key in protected_filter_keys(
+                        final_filters,
+                        intent=intent,
+                        is_regulation=is_regulation,
+                    )
+                }
                 if "season_year" in final_filters:
                     minimal_filters["season_year"] = final_filters["season_year"]
                 if "meta.league" in final_filters:
@@ -4289,8 +4183,15 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 },
             }
 
+        docs = await self._guard_and_rerank(
+            query,
+            docs,
+            final_filters=final_filters,
+            intent=intent,
+            is_regulation=is_regulation,
+            retrieval_state=retrieval_state,
+        )
         retrieved_docs = list(docs)
-        docs = self._rerank_docs(docs)
         asyncio.create_task(
             self._record_retrieval_event(
                 query=query,
@@ -4309,6 +4210,7 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
                 actual_filters=actual_filters,
                 fallback_used=fallback_used,
                 fallback_stage=fallback_stage,
+                quality_info=retrieval_state.get("retrieval_quality"),
             )
         )
 
@@ -4387,6 +4289,8 @@ KBO 야구와 관련된 다음과 같은 질문들을 도와드릴 수 있습니
         return {
             "answer": answer,
             "citations": _build_citations(docs),
+            "claim_grounding": build_runtime_grounding(answer, docs),
+            "llm_attribution": _attribution_dict(),
             "intent": intent,
             "retrieved": docs,
             "strategy": "rag_v3_enhanced",  # 업데이트된 버전 명시

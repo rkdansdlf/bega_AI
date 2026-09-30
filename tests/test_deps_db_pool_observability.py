@@ -101,9 +101,59 @@ def test_general_and_ingest_pools_are_distinct_and_bounded(monkeypatch) -> None:
 
     assert general_pool is not ingest_pool
     assert captured[0]["min_size"] == 1
-    assert captured[0]["max_size"] == 30
+    assert captured[0]["max_size"] == 16
     assert captured[1]["min_size"] == 1
     assert captured[1]["max_size"] == 2
+
+
+def test_vector_index_readiness_rejects_invalid_concurrent_index() -> None:
+    report = deps._vector_index_readiness(
+        (
+            False,
+            True,
+            "hnsw",
+            "public",
+            "rag_chunks",
+            "CREATE INDEX idx ON public.rag_chunks USING hnsw "
+            "((embedding::halfvec(1536)) halfvec_cosine_ops)",
+        ),
+        expected_index="idx_rag_chunks_embedding_halfvec_hnsw",
+        quantization="halfvec",
+    )
+
+    assert report["ready"] is False
+    assert report["reason"] == "invalid_or_unexpected_definition"
+
+
+def test_vector_index_readiness_accepts_valid_halfvec_hnsw_definition() -> None:
+    report = deps._vector_index_readiness(
+        (
+            True,
+            True,
+            "hnsw",
+            "public",
+            "rag_chunks",
+            "CREATE INDEX idx ON public.rag_chunks USING hnsw "
+            "((embedding::halfvec(1536)) halfvec_cosine_ops)",
+        ),
+        expected_index="idx_rag_chunks_embedding_halfvec_hnsw",
+        quantization="halfvec",
+    )
+
+    assert report["ready"] is True
+
+
+def test_optional_release_model_failure_does_not_degrade_core_readiness() -> None:
+    checks = {
+        "db_general": {"ready": True},
+        "model_configuration": {"ready": True},
+        "release_decision_model_circuit": {
+            "ready": False,
+            "required": False,
+        },
+    }
+
+    assert deps._required_checks_ready(checks) is True
 
 
 def test_required_pool_startup_closes_both_pools_on_failure(monkeypatch) -> None:
@@ -128,8 +178,12 @@ def test_required_pool_startup_closes_both_pools_on_failure(monkeypatch) -> None
 
     general_pool = _LifecyclePool()
     ingest_pool = _LifecyclePool(RuntimeError("ingest pool unavailable"))
+    baseball_pool = _LifecyclePool()
+    rag_pool = _LifecyclePool()
     monkeypatch.setattr(deps, "_connection_pool", general_pool)
     monkeypatch.setattr(deps, "_ingest_connection_pool", ingest_pool, raising=False)
+    monkeypatch.setattr(deps, "_baseball_connection_pool", baseball_pool)
+    monkeypatch.setattr(deps, "_rag_connection_pool", rag_pool)
     monkeypatch.setattr(deps, "_prepare_schema", AsyncMock())
 
     with pytest.raises(RuntimeError, match="ingest pool unavailable"):
@@ -142,6 +196,8 @@ def test_required_pool_startup_closes_both_pools_on_failure(monkeypatch) -> None
     assert general_pool.opened is True
     assert general_pool.closed is True
     assert ingest_pool.closed is True
+    assert baseball_pool.closed is True
+    assert rag_pool.closed is True
     assert deps._connection_pool is None
     assert deps._ingest_connection_pool is None
 
@@ -181,8 +237,12 @@ def test_required_pool_startup_preserves_open_error_when_pool_close_fails(
         open_error=open_error,
         close_error=PoolCloseError("secret close detail"),
     )
+    baseball_pool = _LifecyclePool()
+    rag_pool = _LifecyclePool()
     monkeypatch.setattr(deps, "_connection_pool", general_pool)
     monkeypatch.setattr(deps, "_ingest_connection_pool", ingest_pool)
+    monkeypatch.setattr(deps, "_baseball_connection_pool", baseball_pool)
+    monkeypatch.setattr(deps, "_rag_connection_pool", rag_pool)
     monkeypatch.setattr(deps, "_prepare_schema", AsyncMock())
 
     with pytest.raises(PoolOpenError) as raised:
@@ -195,6 +255,8 @@ def test_required_pool_startup_preserves_open_error_when_pool_close_fails(
     assert raised.value is open_error
     assert ingest_pool.close_calls == 1
     assert general_pool.close_calls == 1
+    assert baseball_pool.close_calls == 1
+    assert rag_pool.close_calls == 1
 
 
 def test_close_ingest_pool_is_idempotent(monkeypatch) -> None:

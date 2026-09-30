@@ -64,6 +64,20 @@ def test_oracle_url_is_translated_without_logging_credentials() -> None:
     assert args["dsn"] == "adb_high/ignored"
 
 
+def test_oracle_wallet_password_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TNS_ADMIN", "/wallet")
+    monkeypatch.delenv("OCI_WALLET_PASSWORD", raising=False)
+
+    args = _oracle_connect_args("oracle+oracledb://rag_user:db-pass@adb_high")
+
+    assert "wallet_password" not in args
+
+    monkeypatch.setenv("OCI_WALLET_PASSWORD", "wallet-pass")
+    args = _oracle_connect_args("oracle+oracledb://rag_user:db-pass@adb_high")
+
+    assert args["wallet_password"] == "wallet-pass"
+
+
 def test_oracle_filter_builder_parameterizes_source_and_metadata_filters() -> None:
     clauses, params = _bind_filter_clauses(
         {
@@ -84,6 +98,13 @@ def test_oracle_filter_builder_parameterizes_source_and_metadata_filters() -> No
     assert metadata_clause.startswith("JSON_VALUE(meta, '$.league') = :")
     assert params["filter_season_year"] == 2025
     assert params[metadata_bind] == "정규시즌"
+
+
+def test_oracle_filter_builder_maps_league_type_code_to_writer_column() -> None:
+    clauses, params = _bind_filter_clauses({"league_type_code": "KBO"})
+
+    assert "league_type_code = :filter_league_type_code" in clauses
+    assert params["filter_league_type_code"] == "KBO"
 
 
 @pytest.mark.asyncio
@@ -212,6 +233,7 @@ async def test_oracle_upsert_merges_vectors_and_commits() -> None:
         records=records,
         embeddings=[[0.1, 0.2, 0.3]],
         season_year=2025,
+        league_type_code="KBO",
         player_id="1",
     )
 
@@ -219,7 +241,57 @@ async def test_oracle_upsert_merges_vectors_and_commits() -> None:
     assert raw.commits == 1
     assert "MERGE INTO rag_chunks" in cursor.executed[0][0]
     assert cursor.executed[0][1]["source_table"] == "player_basic"
+    assert cursor.executed[0][1]["league_type_code"] == "KBO"
+    assert "target.league_type_code = :league_type_code" in cursor.executed[0][0]
+    insert_clause = cursor.executed[0][0].split("WHEN NOT MATCHED THEN INSERT", 1)[1]
+    assert "league_type_code" in insert_clause
+    assert ":league_type_code" in insert_clause
     assert "INSERT INTO rag_chunk_terms" in cursor.executed[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_oracle_upsert_league_code_change_null_and_retry_keep_one_identity() -> (
+    None
+):
+    cursor = _Cursor([(1,)], [])
+    raw = _Connection(cursor)
+    connection = OracleRagConnection(raw)
+    records = [
+        (
+            1,
+            "league:1",
+            "리그 문서",
+            "검색 가능한 리그 문서 내용",
+            {"content_hash": "hash", "metadata": {}},
+        )
+    ]
+
+    for league_type_code in ("KBO", "KBO", "FUTURES", None):
+        count = await upsert_oracle_rag_chunks(
+            connection,
+            source_table="league_document",
+            records=records,
+            embeddings=[[0.1, 0.2, 0.3]],
+            league_type_code=league_type_code,
+        )
+        assert count == 1
+
+    merge_calls = [
+        (sql, params)
+        for sql, params in cursor.executed
+        if "MERGE INTO rag_chunks" in sql
+    ]
+    assert len(merge_calls) == 4
+    assert [params["league_type_code"] for _, params in merge_calls] == [
+        "KBO",
+        "KBO",
+        "FUTURES",
+        None,
+    ]
+    assert all(
+        "target.source_row_id = incoming.source_row_id" in sql for sql, _ in merge_calls
+    )
+    assert raw.commits == 4
 
 
 @pytest.mark.asyncio

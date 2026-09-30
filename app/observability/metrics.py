@@ -151,6 +151,25 @@ AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL = Counter(
     ["role", "provider", "model"],
 )
 
+AI_LLM_USAGE_TOKENS_TOTAL = Counter(
+    "ai_llm_usage_tokens_total",
+    "LLM tokens by provider/model/kind. usage_source=provider is the "
+    "provider-reported (billable) count; estimate is a local fallback.",
+    ["provider", "model", "token_type", "usage_source"],
+)
+
+AI_LLM_USAGE_COST_USD_TOTAL = Counter(
+    "ai_llm_usage_cost_usd_total",
+    "Catalog-priced LLM cost in USD from provider-reported token usage.",
+    ["provider", "model", "usage_source"],
+)
+
+AI_LLM_CIRCUIT_STATE = Gauge(
+    "ai_llm_circuit_state",
+    "LLM provider circuit state (0=CLOSED, 1=HALF_OPEN, 2=OPEN).",
+    ["provider"],
+)
+
 AI_MODEL_USAGE_OUTCOME_TOTAL = Counter(
     "ai_model_usage_outcome_total",
     "Model usage pricing and call outcomes.",
@@ -342,7 +361,7 @@ AI_COACH_DYNAMIC_PROMPT_CHARS = Histogram(
 AI_DB_POOL_SIZE = Gauge(
     "ai_db_pool_size",
     "Current PostgreSQL connection pool state.",
-    ["state"],  # max|min|available|requests_waiting
+    ["pool", "state"],  # pool + capacity/wait/error states
 )
 
 AI_CHAT_QUEUE_DEPTH = Gauge(
@@ -438,7 +457,10 @@ __all__ = [
     "AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL",
     "AI_INGEST_WATERMARK_LAG_SECONDS",
     "AI_LLM_CALL_DURATION_SECONDS",
+    "AI_LLM_CIRCUIT_STATE",
     "AI_LLM_FALLBACK_TOTAL",
+    "AI_LLM_USAGE_COST_USD_TOTAL",
+    "AI_LLM_USAGE_TOKENS_TOTAL",
     "AI_LLM_RETRY_ATTEMPTS_TOTAL",
     "AI_MODEL_USAGE_COST_ESTIMATE_USD_TOTAL",
     "AI_MODEL_USAGE_OUTCOME_TOTAL",

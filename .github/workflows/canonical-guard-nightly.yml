@@ -5,10 +5,14 @@ on:
     - cron: "30 17 * * *" # KST 02:30
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   outside-regression:
     name: Outside Window Regression Report
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       TEAM_CODE_READ_MODE: canonical_only
       TEAM_CODE_CANONICAL_WINDOW_START: "2021"
@@ -27,6 +31,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
@@ -58,3 +63,4 @@ jobs:
         with:
           name: ai-outside-window-regression-report
           path: outside_window_regression.json
+          retention-days: 7

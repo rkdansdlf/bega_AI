@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 from types import SimpleNamespace
 
 from app.agents.release_decision_agent import (
+    SCENARIO_PRESETS,
     ReleaseDecisionDraft,
     ResponsesReleaseDecisionAgent,
     WorkspaceDocumentTools,
@@ -59,6 +62,44 @@ def test_workspace_document_tools_rejects_paths_outside_workspace(
         assert "escapes workspace" in str(exc)
     else:
         raise AssertionError("expected traversal path to be rejected")
+
+
+def test_workspace_document_tools_fail_closed_without_valid_root(
+    tmp_path: Path,
+) -> None:
+    try:
+        WorkspaceDocumentTools(tmp_path, ["missing"])
+    except ValueError as exc:
+        assert "valid allowed document root" in str(exc)
+    else:
+        raise AssertionError("missing allowlist roots must not expose the workspace")
+
+
+def test_workspace_document_tools_rejects_log_and_symlink_files(tmp_path: Path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "secret.log").write_text("secret", encoding="utf-8")
+    target = docs_dir / "gate.md"
+    target.write_text("# Gate", encoding="utf-8")
+    (docs_dir / "alias.md").symlink_to(target)
+
+    tools = WorkspaceDocumentTools(tmp_path, ["docs"])
+
+    assert tools.list_documents("docs/*")["matches"] == ["docs/gate.md"]
+
+
+def test_all_release_profiles_reference_readable_allowlisted_seed_documents() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    # Seed documents live in the monorepo root; a standalone bega_AI checkout
+    # (CI) has no such tree, so there is nothing to validate there.
+    if not (repository_root / "docs").is_dir():
+        pytest.skip("monorepo docs tree is not present in this checkout")
+
+    for preset in SCENARIO_PRESETS.values():
+        tools = WorkspaceDocumentTools(repository_root, preset.allowed_roots)
+        for seed_path in preset.seed_paths:
+            document = tools.read_document(seed_path, max_lines=1)
+            assert document["path"] == seed_path
 
 
 def test_render_release_decision_markdown_contains_key_sections() -> None:

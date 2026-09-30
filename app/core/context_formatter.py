@@ -255,8 +255,13 @@ class ContextFormatter:
                     f"**OPS+**: {kbo_metrics.describe_metric_ko('OPS+', player_data['ops_plus'], 0)}"
                 )
             if player_data.get("wrc_plus"):
+                wrc_label = (
+                    "wRC+(추정)"
+                    if "wRC+" in (player_data.get("estimated_metrics") or [])
+                    else "wRC+"
+                )
                 context_parts.append(
-                    f"**wRC+**: {kbo_metrics.describe_metric_ko('WRC+', player_data['wrc_plus'], 0)}"
+                    f"**{wrc_label}**: {kbo_metrics.describe_metric_ko('WRC+', player_data['wrc_plus'], 0)}"
                 )
             if player_data.get("war"):
                 context_parts.append(
@@ -358,9 +363,13 @@ class ContextFormatter:
             for i, b in enumerate(processed_data["batters"][:10], 1):
                 ops_val = f"{b['ops']:.3f}" if b.get("ops") else "-"
                 wrc_val = f"{b['wrc_plus']:.0f}" if b.get("wrc_plus") else "-"
+                if wrc_val != "-" and "wRC+" in (b.get("estimated_metrics") or []):
+                    wrc_val += "(추정)"
                 hr_val = str(int(b["home_runs"])) if b.get("home_runs") else "-"
                 rbi_val = str(int(b["rbi"])) if b.get("rbi") else "-"
                 war_val = f"{b['war']:.1f}" if b.get("war") else "-"
+                if war_val != "-" and "WAR" in (b.get("estimated_metrics") or []):
+                    war_val += "(추정)"
                 row = f"| {i} | {b['name']} | {b['team']} | {ops_val} | {wrc_val} | {hr_val} | {rbi_val} | {war_val} |"
                 context_parts.append(row)
 
@@ -458,20 +467,23 @@ class ContextFormatter:
     ) -> str:
         """타자 한 줄 요약을 포맷합니다."""
         base = f"{batter['name']}({batter['team']})"
+        est = batter.get("estimated_metrics") or []
+        wrc_tag = "wRC+(추정)" if "wRC+" in est else "wRC+"
+        war_tag = "WAR(추정)" if "WAR" in est else "WAR"
 
         if focus_stat == "ops" and batter.get("ops"):
-            return f"{base} — **OPS {batter['ops']:.3f}**, wRC+ {batter.get('wrc_plus', 0):.0f}, {batter['pa']} PA"
+            return f"{base} — **OPS {batter['ops']:.3f}**, {wrc_tag} {batter.get('wrc_plus', 0):.0f}, {batter['pa']} PA"
         elif focus_stat == "home_runs" and batter.get("home_runs"):
             return f"{base} — **HR {int(batter['home_runs'])}**, RBI {int(batter.get('rbi', 0))}, OPS {batter.get('ops', 0):.3f}"
         elif focus_stat == "war" and batter.get("war"):
-            return f"{base} — **WAR {batter['war']:.1f}**, wRC+ {batter.get('wrc_plus', 0):.0f}, OPS {batter.get('ops', 0):.3f}"
+            return f"{base} — **{war_tag} {batter['war']:.1f}**, {wrc_tag} {batter.get('wrc_plus', 0):.0f}, OPS {batter.get('ops', 0):.3f}"
         else:
             # 기본 종합 정보
             metrics = []
             if batter.get("ops"):
                 metrics.append(f"OPS {batter['ops']:.3f}")
             if batter.get("wrc_plus"):
-                metrics.append(f"wRC+ {batter['wrc_plus']:.0f}")
+                metrics.append(f"{wrc_tag} {batter['wrc_plus']:.0f}")
             if batter.get("home_runs"):
                 metrics.append(f"HR {int(batter['home_runs'])}")
             return f"{base} — {', '.join(metrics)}, {batter['pa']} PA"

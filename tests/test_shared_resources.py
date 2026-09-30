@@ -74,7 +74,8 @@ def test_rag_pipeline_uses_shared_runtime_provider_when_runtime_is_unset(
             self.shared_agent = object()
 
         @contextmanager
-        def request_context(self, connection):
+        def request_context(self, connection, *, baseball_connection=None):
+            del baseball_connection
             captured["request_context_connection"] = connection
             yield
 
@@ -97,6 +98,49 @@ def test_rag_pipeline_uses_shared_runtime_provider_when_runtime_is_unset(
     assert captured["settings"] is get_settings()
     assert pipeline.agent_runtime is fake_runtime
     assert pipeline.baseball_agent is fake_runtime.shared_agent
+
+
+@pytest.mark.asyncio
+async def test_checkout_baseball_conn_borrows_the_baseball_pool_when_set() -> None:
+    class _FakeConn:
+        pass
+
+    class _FakePool:
+        def __init__(self) -> None:
+            self.opened_with: object = None
+
+        def connection(self):
+            pool = self
+
+            class _Ctx:
+                async def __aenter__(self):
+                    pool.opened_with = "borrowed"
+                    return _FakeConn()
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            return _Ctx()
+
+    baseball_pool = _FakePool()
+    pipeline = RAGPipeline(
+        settings=get_settings(),
+        connection=MagicMock(),
+        baseball_pool=baseball_pool,
+    )
+
+    async with pipeline._checkout_baseball_conn() as conn:
+        assert isinstance(conn, _FakeConn)
+    assert baseball_pool.opened_with == "borrowed"
+
+
+@pytest.mark.asyncio
+async def test_checkout_baseball_conn_falls_back_to_the_shared_connection() -> None:
+    shared_connection = MagicMock()
+    pipeline = RAGPipeline(settings=get_settings(), connection=shared_connection)
+
+    async with pipeline._checkout_baseball_conn() as conn:
+        assert conn is shared_connection
 
 
 def test_rag_try_agent_first_runs_inside_runtime_request_context() -> None:
@@ -128,7 +172,8 @@ def test_rag_try_agent_first_runs_inside_runtime_request_context() -> None:
             self.shared_agent = _FakeAgent()
 
         @contextmanager
-        def request_context(self, connection):
+        def request_context(self, connection, *, baseball_connection=None):
+            del baseball_connection
             captured["request_context_connection"] = connection
             yield
 
@@ -194,23 +239,25 @@ async def test_openrouter_stream_generator_initializes_shared_client_with_timeou
         captured["client_kwargs"] = kwargs
         return _FakeClient()
 
-    monkeypatch.setattr("app.core.rag.get_shared_httpx_client", _fake_shared_client)
+    monkeypatch.setattr(
+        "app.core.llm_provider.get_shared_httpx_client", _fake_shared_client
+    )
 
-    pipeline = RAGPipeline.__new__(RAGPipeline)
-    pipeline.settings = SimpleNamespace(
-        openrouter_api_key="test-key",
-        openrouter_referer="",
-        openrouter_app_title="",
-        openrouter_model="test-model",
-        max_output_tokens=16,
-        openrouter_base_url="https://openrouter.test/api/v1",
+    from app.core.llm_provider import OpenRouterProvider
+
+    provider = OpenRouterProvider(
+        SimpleNamespace(
+            openrouter_api_key="test-key",
+            openrouter_referer="",
+            openrouter_app_title="",
+            openrouter_model="test-model",
+            max_output_tokens=16,
+            openrouter_base_url="https://openrouter.test/api/v1",
+        )
     )
 
     chunks = [
-        chunk
-        async for chunk in pipeline._generate_stream_with_openrouter(
-            [{"role": "user", "content": "hi"}]
-        )
+        chunk async for chunk in provider.stream([{"role": "user", "content": "hi"}])
     ]
 
     assert chunks == []

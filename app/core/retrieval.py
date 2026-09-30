@@ -18,7 +18,10 @@ from psycopg.errors import QueryCanceled, UndefinedTable
 from psycopg import OperationalError as PsycopgOperationalError
 from psycopg import InterfaceError as PsycopgInterfaceError
 from ..config import DEFAULT_EMBED_DIM, Settings, get_settings
+from .embedding_generations import generation_filter_sql, get_active_generation
+from ..observability.tracing import traced
 from .exceptions import DBRetrievalError
+from .retrieval_policy import protected_filter_keys, resolve_filter_column
 from ..observability.metrics import AI_RETRIEVAL_FALLBACK_LEVEL_TOTAL
 
 logger = logging.getLogger(__name__)
@@ -183,6 +186,7 @@ async def _rag_chunks_exists(
         return False
 
 
+@traced("retrieval", "similarity_search")
 async def similarity_search(
     conn: psycopg.AsyncConnection,
     embedding: Sequence[float],
@@ -298,16 +302,28 @@ async def similarity_search(
         for key, value in cleaned_filters.items():
             if value is None:
                 continue
-            # JSON field filtering support (e.g., "meta.league")
-            if "." in key:
-                json_field, json_key = key.rsplit(".", 1)
-                if json_field == "meta":
-                    json_field = "metadata"
-                filter_clauses.append(f"{json_field}->>%s = %s")
+            # Key is an SQL identifier: resolve through the allowlist
+            # (raises InvalidRetrievalFilter on anything unknown).
+            column, json_key = resolve_filter_column(key)
+            if json_key is not None:
+                filter_clauses.append(f"{column}->>%s = %s")
                 filter_params.extend([json_key, value])
             else:
-                filter_clauses.append(f"{key} = %s")
+                filter_clauses.append(f"{column} = %s")
                 filter_params.append(value)
+
+    # Blue/green guard: only chunks embedded with the ACTIVE generation's
+    # signature may be returned, so old/new embeddings never mix.
+    if bool(getattr(active_settings, "rag_generation_gate_enabled", False)):
+        try:
+            generation = await get_active_generation(conn)
+        except Exception as exc:  # noqa: BLE001 - registry absent/unreadable
+            logger.warning("[Search] generation gate skipped: %s", type(exc).__name__)
+            generation = None
+        gate_sql, gate_params = generation_filter_sql(generation)
+        if gate_sql:
+            filter_clauses.append(gate_sql)
+            filter_params.extend(gate_params)
 
     where_clause = " AND ".join(filter_clauses)
 
@@ -353,6 +369,9 @@ async def similarity_search(
             c.id,
             r.title,
             r.content,
+            r.season_year,
+            r.team_id,
+            r.player_id,
             r.source_table,
             r.source_row_id,
             COALESCE(NULLIF(r.metadata, '{{}}'::jsonb), r.meta, '{{}}'::jsonb) AS meta,
@@ -397,6 +416,9 @@ async def similarity_search(
                id,
                title,
                content,
+               season_year,
+               team_id,
+               player_id,
                source_table,
                source_row_id,
                COALESCE(NULLIF(metadata, '{{}}'::jsonb), meta, '{{}}'::jsonb) AS meta,
@@ -492,8 +514,8 @@ async def similarity_search_with_fallback(
     결과 수가 min_results 미만이면 다음 단계 필터로 재시도:
       Level 1: 모든 필터 적용 (season_year + team_id + source_table)
       Level 2: source_table 제거
-      Level 3: team_id 제거
-      Level 4: season_year 제거 (내부 필터만 유지)
+      (team_id / season_year 는 factual 질의에서 보호되어 제거되지 않는다.
+       intent 가 설명형(RELAXABLE_INTENTS)일 때만 Level 3/4 로 완화한다.)
 
     Returns:
         (결과 리스트, 사용된 레벨 설명 문자열)
@@ -509,7 +531,9 @@ async def similarity_search_with_fallback(
     internal_filters = {k: v for k, v in base_filters.items() if k in internal_keys}
 
     # 사용자 필터에서 단계별로 제거할 키 목록
-    removable_keys = list(_FALLBACK_FILTER_KEYS)
+    # 핵심 entity(player/team/season)는 factual 질의에서 절대 완화하지 않는다.
+    protected = protected_filter_keys(base_filters, intent=intent)
+    removable_keys = [k for k in _FALLBACK_FILTER_KEYS if k not in protected]
     current_filters = {k: v for k, v in base_filters.items() if k not in internal_keys}
 
     for level in range(len(removable_keys) + 1):

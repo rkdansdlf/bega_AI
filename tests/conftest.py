@@ -40,9 +40,43 @@ if "PIL" not in sys.modules:
 # old 256-d rollout would see dimension assertions fail against code that is
 # correct. Tests must read the declared default, not the operator's env.
 #
+# The same mechanism also reads the workspace root ``.env`` (not just
+# ``.env.prod``), and it leaks the primary AI storage URLs too. A developer
+# workspace ``.env`` with ``OCI_DB_URL=oracle+oracledb://...`` (Oracle RAG
+# local testing) poisons ``database_url``/``rag_db_url``/``baseball_db_url``
+# for the rest of the pytest process, which flips ``is_oracle_rag_url()``
+# branches in tests that never touch Oracle themselves — e.g.
+# ``test_database_pool_budget.py::test_pool_factories_use_configured_limits``
+# silently takes the ``OracleRagPool`` branch instead of the mocked
+# ``_create_async_connection_pool`` factory it asserts against, only when the
+# full suite collects a module that imports
+# ``scripts.batch_coach_matchup_cache`` first. Guard the whole DB-URL
+# fallback chain (``database_url``'s priority order plus the two split
+# overrides), not just ``OCI_DB_URL`` alone.
+#
+# ``AI_INGEST_WORKER_ENABLED`` leaks the same way, and it bit harder than a
+# plain env fallback: a workspace ``.env`` with ``AI_INGEST_WORKER_ENABLED=false``
+# (set for real Oracle-RAG local testing) silently overrides even an
+# *explicit* ``Settings(ingest_worker_enabled=True)`` constructor kwarg —
+# pydantic-settings resolves a field with ``validation_alias`` against its
+# alias-named env var ahead of a same-instantiation kwarg passed under the
+# plain field name, `populate_by_name=True` notwithstanding. That flipped
+# ``test_oracle_rag_config.py::test_oracle_rag_requires_postgresql_batch_worker_to_be_disabled``
+# from "raises" to "silently permits", only in the full suite.
+#
 # We snapshot a clean baseline for these keys before any test module is
 # collected, then restore it and reset the cached settings around every test.
-_ENV_BASELINE_KEYS = ("AI_VECTOR_QUANTIZATION", "EMBED_DIM", "EMBED_MODEL")
+_ENV_BASELINE_KEYS = (
+    "AI_VECTOR_QUANTIZATION",
+    "EMBED_DIM",
+    "EMBED_MODEL",
+    "OCI_DB_URL",
+    "POSTGRES_DB_URL",
+    "SUPABASE_DB_URL",
+    "AI_RAG_DB_URL",
+    "AI_BASEBALL_DB_URL",
+    "AI_INGEST_WORKER_ENABLED",
+)
 _env_baseline: dict[str, str | None] = {}
 
 

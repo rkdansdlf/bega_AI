@@ -47,10 +47,12 @@ CREATE TABLE IF NOT EXISTS chat_response_cache (
     model_name     VARCHAR(100),
     hit_count      INTEGER      NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    expires_at     TIMESTAMPTZ  NOT NULL
+    expires_at     TIMESTAMPTZ  NOT NULL,
+    provenance_json JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_chat_cache_expires_at ON chat_response_cache(expires_at);
 CREATE INDEX IF NOT EXISTS idx_chat_cache_created_at ON chat_response_cache(created_at);
+ALTER TABLE chat_response_cache ADD COLUMN IF NOT EXISTS provenance_json JSONB;
 """
 
 
@@ -72,7 +74,8 @@ async def _get_sync(conn, cache_key: str) -> Optional[Dict[str, Any]]:
     """
     cur = await conn.execute(
         """
-        SELECT response_text, intent, model_name, hit_count, expires_at
+        SELECT response_text, intent, model_name, hit_count, expires_at,
+               provenance_json
         FROM   chat_response_cache
         WHERE  cache_key = %s
           AND  expires_at > now()
@@ -84,13 +87,14 @@ async def _get_sync(conn, cache_key: str) -> Optional[Dict[str, Any]]:
     if row is None:
         return None
 
-    response_text, intent, model_name, hit_count, expires_at = row
+    response_text, intent, model_name, hit_count, expires_at, provenance = row
     return {
         "response_text": response_text,
         "intent": intent,
         "model_name": model_name,
         "hit_count": hit_count,
         "expires_at": expires_at,
+        "provenance": provenance,
     }
 
 
@@ -103,6 +107,7 @@ async def _save_sync(
     intent: Optional[str],
     response_text: str,
     model_name: Optional[str],
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     캐시 항목을 저장합니다.
@@ -113,7 +118,11 @@ async def _save_sync(
     filters_json은 psycopg3 %s 플레이스홀더에 ::jsonb 캐스트를 적용합니다.
     (coach.py의 response_json 저장 방식과 동일)
     """
-    ttl_secs = get_ttl_seconds(intent)
+    ttl_secs = get_ttl_seconds(
+        intent,
+        question=question_text,
+        filters=filters_json,
+    )
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_secs)
 
     # JSONB 직렬화 — None이면 DB에 NULL 저장
@@ -127,9 +136,9 @@ async def _save_sync(
         """
         INSERT INTO chat_response_cache
             (cache_key, question_text, filters_json, intent,
-             response_text, model_name, expires_at)
+             response_text, model_name, expires_at, provenance_json)
         VALUES
-            (%s, %s, %s::jsonb, %s, %s, %s, %s)
+            (%s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
         ON CONFLICT (cache_key) DO UPDATE
         SET
             question_text = EXCLUDED.question_text,
@@ -138,6 +147,7 @@ async def _save_sync(
             response_text = EXCLUDED.response_text,
             model_name = EXCLUDED.model_name,
             expires_at = EXCLUDED.expires_at,
+            provenance_json = EXCLUDED.provenance_json,
             hit_count = 0,
             created_at = now()
         """,
@@ -149,6 +159,11 @@ async def _save_sync(
             response_text,
             model_name,
             expires_at,
+            (
+                json.dumps(provenance, ensure_ascii=False, sort_keys=True)
+                if provenance
+                else None
+            ),
         ),
     )
 
@@ -273,6 +288,7 @@ async def save_to_cache(
     intent: Optional[str],
     response_text: str,
     model_name: Optional[str],
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     LLM 응답을 캐시에 저장합니다.
@@ -289,6 +305,7 @@ async def save_to_cache(
             intent=intent,
             response_text=response_text,
             model_name=model_name,
+            provenance=provenance,
         )
     except Exception as exc:
         # 키 앞 8자만 로깅 (전체 해시 노출 방지)

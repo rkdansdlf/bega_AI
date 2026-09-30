@@ -25,7 +25,7 @@ from .retrieval import _vector_literal
 
 logger = logging.getLogger(__name__)
 
-FILTERS_HASH_SCHEMA_VERSION = "chat_semantic_filters_v1"
+FILTERS_HASH_SCHEMA_VERSION = "chat_semantic_filters_v2"
 
 
 CREATE_TABLE_SQL = f"""
@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS chat_semantic_response_cache (
     embedding_signature VARCHAR(180) NOT NULL,
     hit_count           INTEGER      NOT NULL DEFAULT 0,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    expires_at          TIMESTAMPTZ  NOT NULL
+    expires_at          TIMESTAMPTZ  NOT NULL,
+    provenance_json     JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_chat_semantic_cache_lookup
     ON chat_semantic_response_cache(filters_hash, embedding_signature, expires_at);
@@ -54,6 +55,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_semantic_cache_expires_at
     ON chat_semantic_response_cache(expires_at);
 ALTER TABLE chat_semantic_response_cache
     ADD COLUMN IF NOT EXISTS source_tier VARCHAR(50);
+ALTER TABLE chat_semantic_response_cache
+    ADD COLUMN IF NOT EXISTS provenance_json JSONB;
 """
 
 CREATE_SHADOW_OBSERVATION_TABLE_SQL = """
@@ -176,6 +179,7 @@ async def _get_semantic_sync(
                    hit_count,
                    expires_at,
                    created_at,
+                   provenance_json,
                    (1 - (question_embedding <=> %s::vector)) AS similarity
             FROM chat_semantic_response_cache
             WHERE expires_at > now()
@@ -183,7 +187,8 @@ async def _get_semantic_sync(
               AND embedding_signature = %s
         )
         SELECT cache_key, question_text, filters_json, response_text, intent,
-               model_name, source_tier, hit_count, expires_at, similarity
+               model_name, source_tier, hit_count, expires_at, similarity,
+               provenance_json
         FROM candidates
         WHERE similarity >= %s
         ORDER BY similarity DESC, created_at DESC
@@ -212,6 +217,7 @@ async def _get_semantic_sync(
         hit_count,
         expires_at,
         similarity,
+        provenance,
     ) = row
     return {
         "cache_key": cache_key,
@@ -224,6 +230,7 @@ async def _get_semantic_sync(
         "hit_count": hit_count,
         "expires_at": expires_at,
         "similarity": float(similarity or 0.0),
+        "provenance": provenance,
     }
 
 
@@ -239,12 +246,17 @@ async def _save_semantic_sync(
     response_text: str,
     model_name: Optional[str],
     settings: Settings,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> None:
     embedding = _coerce_embedding(question_embedding)
     if not embedding:
         return
 
-    ttl_secs = get_ttl_seconds(intent)
+    ttl_secs = get_ttl_seconds(
+        intent,
+        question=question_text,
+        filters=filters_json,
+    )
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_secs)
     vector_str = _vector_literal(embedding)
     filters_hash = _build_filters_hash(filters_json)
@@ -256,9 +268,9 @@ async def _save_semantic_sync(
         INSERT INTO chat_semantic_response_cache
             (cache_key, question_text, question_embedding, filters_hash,
              filters_json, intent, source_tier, response_text, model_name,
-             embedding_signature, expires_at)
+             embedding_signature, expires_at, provenance_json)
         VALUES
-            (%s, %s, %s::vector, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
+            (%s, %s, %s::vector, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s::jsonb)
         ON CONFLICT (cache_key) DO UPDATE
         SET
             question_text = EXCLUDED.question_text,
@@ -271,6 +283,7 @@ async def _save_semantic_sync(
             model_name = EXCLUDED.model_name,
             embedding_signature = EXCLUDED.embedding_signature,
             expires_at = EXCLUDED.expires_at,
+            provenance_json = EXCLUDED.provenance_json,
             hit_count = 0,
             created_at = now()
         """,
@@ -286,6 +299,11 @@ async def _save_semantic_sync(
             model_name,
             embedding_signature,
             expires_at,
+            (
+                json.dumps(provenance, ensure_ascii=False, sort_keys=True)
+                if provenance
+                else None
+            ),
         ),
     )
 
@@ -358,12 +376,10 @@ async def _cleanup_semantic_sync(conn) -> int:
     deleted: int = getattr(result, "rowcount", 0) or 0
     if deleted:
         logger.info("[ChatSemanticCache] Cleaned up %d expired entries", deleted)
-    shadow_result = await conn.execute(
-        """
+    shadow_result = await conn.execute("""
         DELETE FROM chat_semantic_cache_shadow_observation
         WHERE observed_at < now() - interval '30 days'
-        """
-    )
+        """)
     shadow_deleted: int = getattr(shadow_result, "rowcount", 0) or 0
     if shadow_deleted:
         logger.info(
@@ -419,6 +435,7 @@ async def save_semantic_cache(
     response_text: str,
     model_name: Optional[str],
     settings: Settings,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> None:
     try:
         await _save_semantic_sync(
@@ -432,6 +449,7 @@ async def save_semantic_cache(
             response_text=response_text,
             model_name=model_name,
             settings=settings,
+            provenance=provenance,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(

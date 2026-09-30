@@ -15,9 +15,11 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Protocol, Tuple
+from urllib.parse import quote
 
+from app.core.time import kst_today
 from app.observability.metrics import AI_EMBEDDING_CACHE_TOTAL
 
 logger = logging.getLogger(__name__)
@@ -34,7 +36,7 @@ def _record_cache_result(backend: str, hit: bool) -> None:
 
 def _calculate_embedding_ttl(query: str) -> Optional[int]:
     """활성 시즌(현재 연도) 쿼리는 3시간 TTL, 역사 데이터는 None(백엔드 기본값 사용)."""
-    if str(datetime.now().year) in query:
+    if str(kst_today().year) in query:
         return 3 * 3600
     return None
 
@@ -45,6 +47,8 @@ class EmbeddingCacheBackend(Protocol):
     async def set(
         self, key: str, embedding: List[float], *, ttl: Optional[int] = None
     ) -> None: ...
+
+    async def healthcheck(self) -> bool: ...
 
 
 class InMemoryLRUBackend:
@@ -91,23 +95,36 @@ class InMemoryLRUBackend:
             while len(self._store) > self._max_size:
                 self._store.popitem(last=False)
 
+    async def healthcheck(self) -> bool:
+        return True
+
 
 class RedisEmbeddingBackend:
     """Redis 기반 임베딩 캐시. ``redis.asyncio.Redis`` 클라이언트 사용."""
 
     backend_label = "redis"
 
-    def __init__(self, client, ttl_seconds: int, key_prefix: str = "embed") -> None:
+    def __init__(
+        self,
+        client,
+        ttl_seconds: int,
+        key_prefix: str = "embed",
+        operation_timeout_seconds: float = 2.0,
+    ) -> None:
         self._client = client
         self._ttl = max(1, int(ttl_seconds))
         self._prefix = key_prefix
+        self._operation_timeout = max(0.001, float(operation_timeout_seconds))
 
     def _full_key(self, key: str) -> str:
         return f"{self._prefix}:{key}"
 
     async def get(self, key: str) -> Optional[List[float]]:
         try:
-            raw = await self._client.get(self._full_key(key))
+            raw = await asyncio.wait_for(
+                self._client.get(self._full_key(key)),
+                timeout=self._operation_timeout,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[EmbedCache] Redis GET failed key=%s err=%s", key, exc)
             _record_cache_result(self.backend_label, hit=False)
@@ -130,20 +147,62 @@ class RedisEmbeddingBackend:
         try:
             payload = json.dumps(embedding)
             effective_ttl = ttl if ttl is not None else self._ttl
-            await self._client.set(self._full_key(key), payload, ex=effective_ttl)
+            await asyncio.wait_for(
+                self._client.set(self._full_key(key), payload, ex=effective_ttl),
+                timeout=self._operation_timeout,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[EmbedCache] Redis SET failed key=%s err=%s", key, exc)
+
+    async def healthcheck(self) -> bool:
+        try:
+            return bool(
+                await asyncio.wait_for(
+                    self._client.ping(),
+                    timeout=self._operation_timeout,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[EmbedCache] Redis healthcheck failed: %s", exc)
+            return False
 
 
 _backend_instance: Optional[EmbeddingCacheBackend] = None
 _backend_lock = asyncio.Lock()
 
 
+def _resolve_redis_url() -> Optional[str]:
+    direct_url = os.getenv("EMBEDDING_CACHE_REDIS_URL") or os.getenv("REDIS_URL")
+    if direct_url:
+        return direct_url
+    password_file = os.getenv("EMBEDDING_CACHE_REDIS_PASSWORD_FILE")
+    if not password_file:
+        return None
+    try:
+        password = Path(password_file).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning(
+            "[EmbedCache] Redis password file is unavailable: %s",
+            type(exc).__name__,
+        )
+        return None
+    if not password:
+        return None
+    host = (os.getenv("EMBEDDING_CACHE_REDIS_HOST") or "ai-redis").strip()
+    port = int(os.getenv("EMBEDDING_CACHE_REDIS_PORT", "6379"))
+    database = int(os.getenv("EMBEDDING_CACHE_REDIS_DB", "0"))
+    username = (os.getenv("EMBEDDING_CACHE_REDIS_USERNAME") or "kbo_ai").strip()
+    return (
+        f"redis://{quote(username, safe='')}:{quote(password, safe='')}"
+        f"@{host}:{port}/{database}"
+    )
+
+
 def _build_redis_backend() -> Optional[EmbeddingCacheBackend]:
-    url = os.getenv("EMBEDDING_CACHE_REDIS_URL") or os.getenv("REDIS_URL")
+    url = _resolve_redis_url()
     if not url:
         logger.warning(
-            "[EmbedCache] EMBEDDING_CACHE_BACKEND=redis but no REDIS_URL/EMBEDDING_CACHE_REDIS_URL "
+            "[EmbedCache] EMBEDDING_CACHE_BACKEND=redis but no Redis credential source "
             "configured — falling back to in-memory backend"
         )
         return None
@@ -155,7 +214,17 @@ def _build_redis_backend() -> Optional[EmbeddingCacheBackend]:
         )
         return None
     try:
-        client = redis_asyncio.from_url(url, decode_responses=True)
+        operation_timeout = max(
+            0.001,
+            float(os.getenv("EMBEDDING_CACHE_REDIS_TIMEOUT_SECONDS", "2.0")),
+        )
+        client = redis_asyncio.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=operation_timeout,
+            socket_timeout=operation_timeout,
+            retry_on_timeout=False,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[EmbedCache] Redis client init failed: %s — using in-memory", exc
@@ -163,7 +232,11 @@ def _build_redis_backend() -> Optional[EmbeddingCacheBackend]:
         return None
     ttl = int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS", "86400"))
     logger.info("[EmbedCache] Redis backend ready ttl=%ds prefix=embed", ttl)
-    return RedisEmbeddingBackend(client, ttl_seconds=ttl)
+    return RedisEmbeddingBackend(
+        client,
+        ttl_seconds=ttl,
+        operation_timeout_seconds=operation_timeout,
+    )
 
 
 async def get_backend() -> EmbeddingCacheBackend:
