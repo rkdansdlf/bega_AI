@@ -5,7 +5,15 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from .oracle_rag import acquire_cursor, oracle_rag_readiness
+from .oracle_rag import (
+    acquire_cursor,
+    oracle_rag_readiness,
+    resolve_oracle_generation,
+)
+from .retrieval_contract import (
+    RetrievalContractViolation,
+    missing_required_capabilities,
+)
 from .rag_runtime import (
     RagBackend,
     RagConfigurationError,
@@ -185,6 +193,19 @@ async def _probe_postgres(pool: Any, settings: Any) -> dict[str, dict[str, objec
 
 
 async def _probe_oracle(pool: Any, settings: Any) -> dict[str, dict[str, object]]:
+    try:
+        active_index_version = resolve_oracle_generation(settings)
+    except RetrievalContractViolation:
+        # Gate enabled but no active generation configured: serving would mix
+        # generations, so the backend is not ready (fail closed).
+        return {
+            "rag_storage": _up("RAG_STORAGE_READY"),
+            "rag_schema": _down(
+                "RETRIEVAL_CONTRACT_NOT_MET", reason="no_active_generation"
+            ),
+            "rag_vector": _down("RETRIEVAL_CONTRACT_NOT_MET"),
+            "rag_index": _down("RETRIEVAL_CONTRACT_NOT_MET"),
+        }
     async with pool.connection(timeout=1.5) as conn:
         cursor = await acquire_cursor(conn)
         try:
@@ -195,7 +216,20 @@ async def _probe_oracle(pool: Any, settings: Any) -> dict[str, dict[str, object]
         oracle = await oracle_rag_readiness(
             conn,
             expected_dim=max(1, int(settings.embed_dim)),
+            active_index_version=active_index_version,
         )
+    contract_missing = missing_required_capabilities(oracle.get("contract") or {})
+    if contract_missing or not oracle.get("generation_ok", True):
+        return {
+            "rag_storage": _up("RAG_STORAGE_READY"),
+            "rag_schema": _down(
+                "RETRIEVAL_CONTRACT_NOT_MET",
+                missing_capabilities=contract_missing,
+                generation_ok=bool(oracle.get("generation_ok", True)),
+            ),
+            "rag_vector": _down("RETRIEVAL_CONTRACT_NOT_MET"),
+            "rag_index": _down("RETRIEVAL_CONTRACT_NOT_MET"),
+        }
     vectors = int(oracle.get("vector_rows") or 0)
     matching = int(oracle.get("matching_dim_rows") or 0)
     missing = int(oracle.get("missing_rows") or 0)

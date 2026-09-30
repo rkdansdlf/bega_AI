@@ -43,6 +43,16 @@ class _DummyCursor:
         return False
 
 
+def _assert_rows_preserved(result, rows) -> None:
+    """Source columns are untouched; the shared retrieval contract keys are added."""
+    assert len(result) == len(rows)
+    for got, want in zip(result, rows):
+        assert {key: got[key] for key in want} == want
+        assert got["retrieval_backend"] == "postgres"
+        for key in ("season_year", "team_id", "player_id", "index_generation"):
+            assert key in got
+
+
 class _DummyConnection:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
@@ -96,7 +106,7 @@ async def test_similarity_search_hybrid_rrf_uses_union_and_stable_param_order() 
         keyword=keyword,
     )
 
-    assert result == rows
+    _assert_rows_preserved(result, rows)
     assert conn.last_cursor is not None
     # _ensure_pgvector_session uses its own cursor (SET search_path + SET ivfflat.probes).
     # The main-query cursor only sees: SET LOCAL statement_timeout + the SELECT.
@@ -159,7 +169,7 @@ async def test_similarity_search_without_keyword_keeps_vector_path() -> None:
         keyword=None,
     )
 
-    assert result == rows
+    _assert_rows_preserved(result, rows)
     assert conn.last_cursor is not None
     assert len(conn.last_cursor.executed) == 2
 
@@ -175,9 +185,7 @@ async def test_similarity_search_without_keyword_keeps_vector_path() -> None:
     assert "(expires_at IS NULL OR expires_at > now())" in sql
     assert "(valid_from IS NULL OR valid_from <= now())" in sql
     assert "(valid_to IS NULL OR valid_to > now())" in sql
-    assert (
-        "ORDER BY embedding::halfvec(1536) <=> %s::halfvec(1536) ASC" in sql
-    )
+    assert "ORDER BY embedding::halfvec(1536) <=> %s::halfvec(1536) ASC" in sql
     assert params == [expected_vector, "game_inning_scores", 2025, expected_vector, 3]
 
 
@@ -205,7 +213,7 @@ async def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> 
         keyword=None,
     )
 
-    assert result == rows
+    _assert_rows_preserved(result, rows)
     assert conn.last_cursor is not None
 
     timeout_sql, _ = conn.last_cursor.executed[0]
@@ -218,7 +226,9 @@ async def test_similarity_search_internal_opt_in_allows_game_inning_scores() -> 
 
 
 @pytest.mark.asyncio
-async def test_similarity_search_internal_exclude_source_tables_appends_filters() -> None:
+async def test_similarity_search_internal_exclude_source_tables_appends_filters() -> (
+    None
+):
     rows = [
         {
             "id": 11,
@@ -244,7 +254,7 @@ async def test_similarity_search_internal_exclude_source_tables_appends_filters(
         keyword=None,
     )
 
-    assert result == rows
+    _assert_rows_preserved(result, rows)
     assert conn.last_cursor is not None
 
     timeout_sql, _ = conn.last_cursor.executed[0]
@@ -264,8 +274,17 @@ async def test_similarity_search_internal_exclude_source_tables_appends_filters(
 
 
 @pytest.mark.asyncio
-async def test_similarity_search_internal_source_table_filter_is_parameterized() -> None:
-    rows = [{"id": 12, "source_table": "kbo_regulations", "similarity": 0.8}]
+async def test_similarity_search_internal_source_table_filter_is_parameterized() -> (
+    None
+):
+    rows = [
+        {
+            "id": 12,
+            "source_table": "kbo_regulations",
+            "source_row_id": "r:12",
+            "similarity": 0.8,
+        }
+    ]
     conn = _DummyConnection(rows)
 
     result = await similarity_search(
@@ -275,7 +294,7 @@ async def test_similarity_search_internal_source_table_filter_is_parameterized()
         filters={"source_table_in": ["kbo_regulations", "markdown_docs"]},
     )
 
-    assert result == rows
+    _assert_rows_preserved(result, rows)
     assert conn.last_cursor is not None
     sql, params = conn.last_cursor.executed[1]
     assert "source_table_in = %s" not in sql
@@ -342,6 +361,7 @@ async def test_record_retrieval_event_swallows_event_insert_failure() -> None:
 
 # ── RRF k intent-aware 테스트 ─────────────────────────────────────────────────
 
+
 def test_resolve_rrf_k_player_profile_returns_30() -> None:
     assert _resolve_rrf_k("player_profile") == 30
 
@@ -364,4 +384,8 @@ def test_resolve_rrf_k_empty_string_returns_60() -> None:
 
 def test_rrf_k_by_intent_dict_covers_expected_intents() -> None:
     """_RRF_K_BY_INTENT에 player_profile, stats_lookup, comparison 세 키가 있어야 한다."""
-    assert set(_RRF_K_BY_INTENT.keys()) == {"player_profile", "stats_lookup", "comparison"}
+    assert set(_RRF_K_BY_INTENT.keys()) == {
+        "player_profile",
+        "stats_lookup",
+        "comparison",
+    }
