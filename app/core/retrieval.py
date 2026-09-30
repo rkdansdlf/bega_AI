@@ -6,6 +6,7 @@
 환경 변수 USE_FIRESTORE_SEARCH 설정은 과거 호환 전용이며 현재는 PostgreSQL pgvector 검색만 지원합니다.
 """
 
+import asyncio
 import logging
 import json
 import os
@@ -26,6 +27,7 @@ from .embedding_generations import (
 )
 from ..observability.tracing import traced
 from .exceptions import DBRetrievalError
+from .request_scope import current_scope
 from .retrieval_contract import (
     RetrievalContractViolation,
     enforce_result_contract,
@@ -138,6 +140,29 @@ def _embedding_distance_sql(
     return f"{column} <=> %s::vector"
 
 
+async def _pinned_for_request(key: str, loader: Any) -> Any:
+    """Resolve once per request, then reuse.
+
+    Every retrieval of one request (including parallel multi-query / HyDE tasks)
+    must read the same embedding generation; otherwise an activation landing
+    mid-request would mix generations inside one answer. Outside a request
+    (scripts, tests) there is no scope and each call resolves normally.
+    """
+    scope = current_scope()
+    if scope is None:
+        return await loader()
+    if key in scope:
+        return scope[key]
+    # Serialise the first resolution: parallel child tasks that start before any
+    # value is pinned would otherwise each query the registry and could land on
+    # different generations if an activation happens between their queries.
+    lock = scope.setdefault("_lock", asyncio.Lock())
+    async with lock:
+        if key not in scope:
+            scope[key] = await loader()
+        return scope[key]
+
+
 async def _resolve_physical_generation(conn: Any, settings: Settings) -> Any:
     """Active generation for the physical store, or ``None`` in inline mode.
 
@@ -148,7 +173,14 @@ async def _resolve_physical_generation(conn: Any, settings: Settings) -> Any:
     if str(getattr(settings, "rag_embedding_store", "inline")) != STORE_GENERATIONS:
         return None
     try:
-        generation = await get_active_generation(conn, extended=True)
+        generation = await _pinned_for_request(
+            "physical_generation",
+            lambda: get_active_generation(
+                conn,
+                extended=True,
+                ttl=getattr(settings, "rag_generation_cache_ttl_s", None),
+            ),
+        )
     except Exception as exc:  # noqa: BLE001
         raise RetrievalContractViolation(
             "RAG_EMBEDDING_STORE=generations requires migrations 007+009 "
@@ -398,7 +430,13 @@ async def similarity_search(
         getattr(active_settings, "rag_generation_gate_enabled", False)
     ):
         try:
-            generation = await get_active_generation(conn)
+            generation = await _pinned_for_request(
+                "gate_generation",
+                lambda: get_active_generation(
+                    conn,
+                    ttl=getattr(active_settings, "rag_generation_cache_ttl_s", None),
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - registry absent/unreadable
             logger.warning("[Search] generation gate skipped: %s", type(exc).__name__)
             generation = None

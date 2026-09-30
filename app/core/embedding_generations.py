@@ -30,7 +30,8 @@ from typing import Any, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_COVERAGE = 0.995
-_ACTIVE_CACHE_TTL_S = 30.0
+_ACTIVE_CACHE_TTL_S = 5.0  # default; RAG_GENERATION_CACHE_TTL_S overrides
+DEFAULT_DROP_GRACE_S = 60.0
 _active_cache: Dict[str, Any] = {"at": 0.0, "value": None}
 _active_cache_ext: Dict[str, Any] = {"at": 0.0, "value": None}
 
@@ -107,11 +108,17 @@ async def get_generation(
 
 
 async def get_active_generation(
-    conn: Any, *, use_cache: bool = True, extended: bool = False
+    conn: Any,
+    *,
+    use_cache: bool = True,
+    extended: bool = False,
+    ttl: Optional[float] = None,
 ) -> Optional[Generation]:
+    """ACTIVE generation, cached per process for ``ttl`` seconds (0 = never)."""
     cache = _active_cache_ext if extended else _active_cache
     now = time.monotonic()
-    if use_cache and now - cache["at"] < _ACTIVE_CACHE_TTL_S:
+    max_age = _ACTIVE_CACHE_TTL_S if ttl is None else max(0.0, float(ttl))
+    if use_cache and max_age > 0 and now - cache["at"] < max_age:
         return cache["value"]
     select = _SELECT_EXT if extended else _SELECT
     cur = await conn.execute(f"{select} WHERE status = 'ACTIVE'")
@@ -279,6 +286,17 @@ async def _log_event(
     )
 
 
+def _propagation(cache_ttl_s: Optional[float]) -> Dict[str, Any]:
+    """How long until *other* processes stop reading the previous generation.
+
+    The activating process invalidates its own cache immediately; every other
+    process keeps its cached lookup for at most ``RAG_GENERATION_CACHE_TTL_S``.
+    Requests already in flight finish on the generation they started with.
+    """
+    ttl = _ACTIVE_CACHE_TTL_S if cache_ttl_s is None else max(0.0, float(cache_ttl_s))
+    return {"max_propagation_seconds": ttl}
+
+
 async def activate_generation(
     conn: Any,
     generation_id: str,
@@ -286,6 +304,7 @@ async def activate_generation(
     min_coverage: float = DEFAULT_MIN_COVERAGE,
     force: bool = False,
     store: str = STORE_INLINE,
+    cache_ttl_s: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Atomically make ``generation_id`` ACTIVE after a coverage audit.
 
@@ -336,11 +355,12 @@ async def activate_generation(
         "previous_id": previous.generation_id if previous else None,
         "changed": True,
         "audit": audit,
+        **_propagation(cache_ttl_s),
     }
 
 
 async def rollback_generation(
-    conn: Any, *, store: str = STORE_INLINE
+    conn: Any, *, store: str = STORE_INLINE, cache_ttl_s: Optional[float] = None
 ) -> Dict[str, Any]:
     """Reactivate the generation that was ACTIVE before the last activation."""
     extended = store == STORE_GENERATIONS
@@ -393,7 +413,11 @@ async def rollback_generation(
             audit,
         )
     reset_active_cache()
-    return {"generation_id": previous_id, "audit": audit}
+    return {
+        "generation_id": previous_id,
+        "audit": audit,
+        **_propagation(cache_ttl_s),
+    }
 
 
 def generation_filter_sql(generation: Optional[Generation]) -> Tuple[str, list]:
@@ -635,12 +659,19 @@ async def build_generation_index(conn: Any, generation_id: str) -> Dict[str, Any
     return {"generation_id": generation_id, "index": name, "ready": True}
 
 
-async def drop_generation_data(conn: Any, generation_id: str) -> Dict[str, Any]:
+async def drop_generation_data(
+    conn: Any,
+    generation_id: str,
+    *,
+    grace_seconds: float = DEFAULT_DROP_GRACE_S,
+) -> Dict[str, Any]:
     """Delete a generation's embeddings and index to reclaim space.
 
     Refused for the ACTIVE generation and for the current rollback target (the
     generation the last activation replaced), so a rollback is never destroyed
-    by housekeeping.
+    by housekeeping. Also refused for ``grace_seconds`` after the generation
+    stopped being active: other processes may still hold it in their cache (see
+    ``RAG_GENERATION_CACHE_TTL_S``) and would read an emptied generation.
     """
     generation = await _require_generation(conn, generation_id)
     if generation.status == "ACTIVE":
@@ -655,6 +686,20 @@ async def drop_generation_data(conn: Any, generation_id: str) -> Dict[str, Any]:
         raise GenerationError(
             f"{generation_id} is the current rollback target; activate another "
             "generation or roll back first"
+        )
+    cur = await conn.execute(
+        """
+        SELECT EXTRACT(EPOCH FROM (now() - max(created_at)))
+        FROM rag_embedding_generation_events
+        WHERE previous_id = %s AND action IN ('ACTIVATE', 'ROLLBACK')
+        """,
+        (generation_id,),
+    )
+    row = await cur.fetchone()
+    if row is not None and row[0] is not None and float(row[0]) < grace_seconds:
+        raise GenerationError(
+            f"{generation_id} stopped being active {float(row[0]):.0f}s ago; other "
+            f"instances may still read it. Retry after {grace_seconds:.0f}s"
         )
     name = index_name_for(generation_id)
     await conn.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")

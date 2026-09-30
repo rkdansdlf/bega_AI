@@ -307,3 +307,143 @@ def test_backfill_cli_exits_nonzero_when_rows_remain(
     )
     assert rc == expected_rc
     assert ("incomplete" in capsys.readouterr().err) == (expected_rc == 3)
+
+
+# ─── cache TTL, request pinning, propagation ──────────────────────────────────
+from app.core import request_scope  # noqa: E402
+
+
+class _CountingConn:
+    def __init__(self, row):
+        self.row, self.queries = row, 0
+
+    async def execute(self, sql, params=None):
+        self.queries += 1
+        return _Cur(self.row)
+
+
+G1_ROW = ("g1", "m", 256, 1, "ACTIVE")
+
+
+def test_cache_ttl_is_honoured_and_zero_disables_caching(monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(eg.time, "monotonic", lambda: clock["t"])
+
+    conn = _CountingConn(G1_ROW)
+    for _ in range(3):
+        _run(eg.get_active_generation(conn, ttl=5))
+    assert conn.queries == 1  # cached
+    clock["t"] += 4.9
+    _run(eg.get_active_generation(conn, ttl=5))
+    assert conn.queries == 1
+    clock["t"] += 0.2  # 5.1s > ttl
+    _run(eg.get_active_generation(conn, ttl=5))
+    assert conn.queries == 2
+
+    eg.reset_active_cache()
+    zero = _CountingConn(G1_ROW)
+    for _ in range(3):
+        _run(eg.get_active_generation(zero, ttl=0))
+    assert zero.queries == 3  # ttl=0: look up every time
+
+
+def test_activation_in_this_process_invalidates_the_cache_immediately():
+    conn = _CountingConn(G1_ROW)
+    _run(eg.get_active_generation(conn, ttl=300))
+    eg.reset_active_cache()  # what activate/rollback/build-index/drop call
+    _run(eg.get_active_generation(conn, ttl=300))
+    assert conn.queries == 2
+
+
+def test_propagation_window_is_reported_to_operators():
+    assert eg._propagation(2.5) == {"max_propagation_seconds": 2.5}
+    assert eg._propagation(None)["max_propagation_seconds"] == eg._ACTIVE_CACHE_TTL_S
+    assert eg._propagation(-3) == {"max_propagation_seconds": 0.0}
+
+
+def test_generation_cache_ttl_setting(monkeypatch):
+    monkeypatch.delenv("RAG_GENERATION_CACHE_TTL_S", raising=False)
+    assert Settings().rag_generation_cache_ttl_s == 5.0
+    monkeypatch.setenv("RAG_GENERATION_CACHE_TTL_S", "0")
+    assert Settings().rag_generation_cache_ttl_s == 0.0
+    for bad in ("-1", "301"):
+        monkeypatch.setenv("RAG_GENERATION_CACHE_TTL_S", bad)
+        with pytest.raises(Exception):
+            Settings()
+
+
+def test_request_scope_pins_one_generation_for_every_task_of_a_request():
+    calls = {"n": 0}
+
+    async def loader():
+        calls["n"] += 1
+        await asyncio.sleep(0.02)  # the window in which an activation could land
+        return f"gen-{calls['n']}"
+
+    async def scenario():
+        token = request_scope.begin_request_scope()
+        try:
+            # Parallel children (multi-query / HyDE) race to resolve first.
+            got = await asyncio.gather(
+                *(
+                    retrieval._pinned_for_request("physical_generation", loader)
+                    for _ in range(6)
+                )
+            )
+            later = await retrieval._pinned_for_request("physical_generation", loader)
+        finally:
+            request_scope.end_request_scope(token)
+        return got, later
+
+    got, later = _run(scenario())
+    assert set(got) == {"gen-1"} and later == "gen-1"
+    assert calls["n"] == 1  # resolved once for the whole request
+
+
+def test_without_a_request_scope_nothing_is_pinned():
+    calls = {"n": 0}
+
+    async def loader():
+        calls["n"] += 1
+        return calls["n"]
+
+    async def scenario():
+        return [
+            await retrieval._pinned_for_request("physical_generation", loader)
+            for _ in range(3)
+        ]
+
+    assert _run(scenario()) == [1, 2, 3]  # scripts/tests keep normal behaviour
+
+
+def test_each_http_request_gets_its_own_scope():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.observability.tracing import RequestIdMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    seen = []
+
+    @app.get("/x")
+    async def x():
+        scope = request_scope.current_scope()
+        assert scope is not None and scope == {}
+        scope["physical_generation"] = "pinned"
+        seen.append(id(scope))
+        return {"ok": True}
+
+    client = TestClient(app)
+    client.get("/x")
+    client.get("/x")
+    assert len(set(seen)) == 2  # no leakage between requests
+    assert request_scope.current_scope() is None
+
+
+def test_activate_cli_explains_how_long_other_instances_take(capsys):
+    cli._note_propagation({"changed": True, "max_propagation_seconds": 5.0})
+    err = capsys.readouterr().err
+    assert "within 5s" in err and "/ready" in err
+    cli._note_propagation({"changed": False, "max_propagation_seconds": 5.0})
+    assert capsys.readouterr().err == ""  # nothing switched, nothing to say

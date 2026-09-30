@@ -18,6 +18,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Iterator, Optional
 
+from app.core.request_scope import begin_request_scope, end_request_scope
+
 REQUEST_ID_HEADER = "X-Request-ID"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
 
@@ -79,6 +81,7 @@ class RequestIdMiddleware:
         )
         request_id = sanitize_request_id(raw)
         token = request_id_var.set(request_id)
+        scope_token = begin_request_scope()
         _bind(request_id)
 
         async def send_with_id(message: dict) -> None:
@@ -95,6 +98,7 @@ class RequestIdMiddleware:
         try:
             await self.app(scope, receive, send_with_id)
         finally:
+            end_request_scope(scope_token)
             request_id_var.reset(token)
             _unbind()
 

@@ -66,6 +66,25 @@ async def _connect(db_url: str | None):
         await pool.close()
 
 
+def _cache_ttl() -> float:
+    from app.config import get_settings
+
+    return float(getattr(get_settings(), "rag_generation_cache_ttl_s", 5.0))
+
+
+def _note_propagation(out: dict) -> None:
+    """Switching is instant here but not everywhere: say so."""
+    seconds = out.get("max_propagation_seconds")
+    if out.get("changed", True) and seconds is not None:
+        print(
+            f"note: this process switched immediately; other instances converge "
+            f"within {seconds:.0f}s (RAG_GENERATION_CACHE_TTL_S). In-flight requests "
+            "finish on the generation they started with. Verify with /ready "
+            "(rag_vector.generation) on each instance.",
+            file=sys.stderr,
+        )
+
+
 def _default_store() -> str:
     from app.config import get_settings
 
@@ -153,20 +172,26 @@ async def _run(args: argparse.Namespace) -> int:
                     min_coverage=args.min_coverage,
                     force=args.force,
                     store=store,
+                    cache_ttl_s=_cache_ttl(),
                 )
                 print(json.dumps(out, indent=2, default=str))
+                _note_propagation(out)
             elif args.cmd == "rollback":
-                print(
-                    json.dumps(
-                        await eg.rollback_generation(conn, store=store),
-                        indent=2,
-                        default=str,
-                    )
+                out = await eg.rollback_generation(
+                    conn, store=store, cache_ttl_s=_cache_ttl()
                 )
+                print(json.dumps(out, indent=2, default=str))
+                _note_propagation(out)
             elif args.cmd == "drop":
                 print(
                     json.dumps(
-                        await eg.drop_generation_data(conn, args.generation_id),
+                        await eg.drop_generation_data(
+                            conn,
+                            args.generation_id,
+                            grace_seconds=max(
+                                eg.DEFAULT_DROP_GRACE_S, 3 * _cache_ttl()
+                            ),
+                        ),
                         indent=2,
                     )
                 )

@@ -431,6 +431,13 @@ class Settings(BaseSettings):
     rag_embedding_store: Literal["inline", "generations"] = Field(
         "inline", validation_alias="RAG_EMBEDDING_STORE"
     )
+    # How long a process may reuse its lookup of the ACTIVE embedding generation.
+    # This bounds how long *other* instances keep serving the previous generation
+    # after an activate/rollback (the activating process invalidates at once).
+    # 0 = look it up on every search (one indexed single-row query).
+    rag_generation_cache_ttl_s: float = Field(
+        5.0, ge=0.0, le=300.0, validation_alias="RAG_GENERATION_CACHE_TTL_S"
+    )
     rag_relevance_guard_enabled: bool = Field(
         True, validation_alias="RAG_RELEVANCE_GUARD_ENABLED"
     )

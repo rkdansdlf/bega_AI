@@ -214,7 +214,10 @@ async def test_new_generation_coexists_and_rollback_restores_the_old_one(conn):
     # Housekeeping: the failed generation can be dropped; the ACTIVE one cannot.
     with pytest.raises(eg.GenerationError, match="ACTIVE"):
         await eg.drop_generation_data(conn, "g1")
-    dropped = await eg.drop_generation_data(conn, "g2")
+    # g2 stopped being active moments ago: other instances may still read it.
+    with pytest.raises(eg.GenerationError, match="stopped being active"):
+        await eg.drop_generation_data(conn, "g2")
+    dropped = await eg.drop_generation_data(conn, "g2", grace_seconds=0)
     assert dropped["deleted_rows"] == N
     cur = await conn.execute("SELECT to_regclass('idx_rag_emb_g2')")
     assert (await cur.fetchone())[0] is None
@@ -660,3 +663,119 @@ async def test_backfill_under_concurrent_rewrites_never_mispairs_hash_and_vector
     total, wrong_hash, wrong_vec = await cur.fetchone()
     assert total == n
     assert wrong_hash == 0 and wrong_vec == 0
+
+
+async def test_a_request_keeps_one_generation_even_if_activation_lands_mid_request(
+    conn,
+):
+    from app.core import request_scope
+
+    await seed_g1(conn)
+    await eg.build_generation_index(conn, "g1")
+    await eg.activate_generation(conn, "g1", store="generations")
+    await eg.register_generation(
+        conn,
+        generation_id="g2",
+        embedding_model="m2",
+        embedding_dim=DIM_B,
+        embedding_version=1,
+    )
+    cur = await conn.execute("SELECT id, content_hash FROM rag_chunks ORDER BY id")
+    rows = [
+        (cid, vec(DIM_B, N - 1 - i), h)
+        for i, (cid, h) in enumerate(await cur.fetchall())
+    ]
+    await eg.write_embeddings(conn, "g2", rows)
+    await eg.build_generation_index(conn, "g2")
+
+    cfg = settings(
+        rag_generation_cache_ttl_s=0
+    )  # no process cache: only the pin matters
+    token = request_scope.begin_request_scope()
+    try:
+        first = await search(conn, 3, DIM_A, settings=cfg)
+        # An operator activates g2 while this request is still retrieving.
+        await eg.activate_generation(conn, "g2", store="generations")
+        second = await search(
+            conn, 3, DIM_A, settings=cfg
+        )  # same request, e.g. multi-query
+    finally:
+        request_scope.end_request_scope(token)
+
+    assert {r["index_generation"] for r in first + second} == {"g1"}  # never mixed
+    assert second[0]["source_row_id"] == "row-3"
+
+    # The next request (new scope) sees the new generation.
+    token = request_scope.begin_request_scope()
+    try:
+        nxt = await search(conn, 3, DIM_B, settings=cfg)
+    finally:
+        request_scope.end_request_scope(token)
+    assert nxt[0]["index_generation"] == "g2"
+    assert nxt[0]["source_row_id"] == f"row-{N - 1 - 3}"
+
+
+async def test_ttl_zero_sees_an_activation_made_elsewhere_immediately(conn):
+    """A second process cannot be invalidated by us; with ttl=0 it needs no invalidation."""
+    await seed_g1(conn)
+    await eg.build_generation_index(conn, "g1")
+    await eg.activate_generation(conn, "g1", store="generations")
+    await eg.register_generation(
+        conn,
+        generation_id="g2",
+        embedding_model="m2",
+        embedding_dim=DIM_B,
+        embedding_version=1,
+    )
+    cur = await conn.execute("SELECT id, content_hash FROM rag_chunks ORDER BY id")
+    rows = [(cid, vec(DIM_B, i), h) for i, (cid, h) in enumerate(await cur.fetchall())]
+    await eg.write_embeddings(conn, "g2", rows)
+    await eg.build_generation_index(conn, "g2")
+
+    cached = settings(rag_generation_cache_ttl_s=300)
+    assert (await search(conn, 3, DIM_A, settings=cached))[0][
+        "index_generation"
+    ] == "g1"
+
+    other = await psycopg.AsyncConnection.connect(URL, autocommit=True)
+    try:
+        # "Another instance" flips the pointer; this process's cache is not reset.
+        await other.execute(
+            "UPDATE rag_embedding_generations SET status='READY' WHERE generation_id='g1'"
+        )
+        await other.execute(
+            "UPDATE rag_embedding_generations SET status='ACTIVE' WHERE generation_id='g2'"
+        )
+    finally:
+        await other.close()
+
+    stale = await search(conn, 3, DIM_A, settings=cached)
+    assert stale[0]["index_generation"] == "g1"  # the documented lag window
+    fresh = await search(
+        conn, 3, DIM_B, settings=settings(rag_generation_cache_ttl_s=0)
+    )
+    assert fresh[0]["index_generation"] == "g2"  # ttl=0 closes it
+
+
+async def test_activate_and_rollback_report_the_propagation_window(conn):
+    await seed_g1(conn)
+    await eg.build_generation_index(conn, "g1")
+    out = await eg.activate_generation(conn, "g1", store="generations", cache_ttl_s=2)
+    assert out["max_propagation_seconds"] == 2.0
+    await eg.register_generation(
+        conn,
+        generation_id="g2",
+        embedding_model="m2",
+        embedding_dim=DIM_B,
+        embedding_version=1,
+    )
+    cur = await conn.execute("SELECT id, content_hash FROM rag_chunks ORDER BY id")
+    await eg.write_embeddings(
+        conn,
+        "g2",
+        [(c, vec(DIM_B, i), h) for i, (c, h) in enumerate(await cur.fetchall())],
+    )
+    await eg.build_generation_index(conn, "g2")
+    await eg.activate_generation(conn, "g2", store="generations")
+    back = await eg.rollback_generation(conn, store="generations", cache_ttl_s=7)
+    assert back["max_propagation_seconds"] == 7.0
