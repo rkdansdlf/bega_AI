@@ -26,7 +26,11 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN python3 -m pip install --upgrade pip && \
     python3 -m pip install --no-cache-dir --disable-pip-version-check -r requirements.txt && \
-    rm -rf /root/.cache/pip
+    rm -rf /root/.cache/pip && \
+    # pip vendors its own msgpack/setuptools (pip 26.2.1: msgpack 1.1.2,
+    # setuptools 70.3.0) that Trivy flags and no newer pip fixes. The runtime
+    # never installs packages, so drop pip from the final image.
+    python3 -m pip uninstall -y pip
 
 # Create the runtime identity and its only application-owned writable path.
 RUN useradd -m -u 1000 appuser && \

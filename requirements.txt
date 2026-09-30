@@ -14,8 +14,6 @@ openai>=2.38.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 # Torch 2.13 removes the setuptools<82 cap; pin the patched release.
 setuptools==83.0.0
-# Transitive via CacheControl; GHSA-6v7p-g79w-8964 is fixed in 1.2.1.
-msgpack>=1.2.1
 torch==2.13.0
 sentence-transformers==5.5.1
 tqdm>=4.67.3
