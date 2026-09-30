@@ -28,6 +28,15 @@ else:
     # lob_to_text() stays as a passthrough safety net.
     oracledb.defaults.fetch_lobs = False
 
+from .retrieval_contract import (
+    RetrievalContractViolation,
+    backend_capabilities,
+    enforce_result_contract,
+    entity_constraints,
+    normalize_result,
+    resolve_backend_filters,
+)
+
 logger = logging.getLogger(__name__)
 _ORACLE_SCHEMES = ("oracle+oracledb://", "oracle://")
 _RETRIEVABLE_STATUSES = ("ACTIVE", "INDEXED")
@@ -61,6 +70,57 @@ _RAG_SOURCE_TABLES = {
     "player_id",
     "index_version",
 }
+# Columns present on Oracle rag_chunks that the shared filter policy can target.
+_ORACLE_FILTER_COLUMNS = frozenset(
+    {"source_table", "team_id", "season_year", "league_type_code", "player_id"}
+)
+# Oracle-only keys: sparse-postings date narrowing and the index version.
+_ORACLE_EXTRA_FILTER_KEYS = frozenset({"game_date", "index_version"})
+_ENTITY_SELECT = "season_year, team_id, player_id"
+
+
+_AUTO: Any = object()
+
+
+def _generation_or_default(value: Any) -> str | None:
+    """Explicit value wins; the ``_AUTO`` default reads the process settings so
+    every caller (RAG, tools) gets the gate without extra plumbing."""
+    if value is _AUTO:
+        from ..config import get_settings
+
+        return resolve_oracle_generation(get_settings())
+    return value
+
+
+def resolve_oracle_generation(settings: Any) -> str | None:
+    """Active ``index_version`` when the generation gate is on, else ``None``.
+
+    Fails closed: the gate enabled without a configured active version would
+    silently serve every generation, which is exactly what the gate prevents.
+    """
+    if not bool(getattr(settings, "rag_generation_gate_enabled", False)):
+        return None
+    version = str(
+        getattr(settings, "rag_oracle_active_index_version", "") or ""
+    ).strip()
+    if not version:
+        raise RetrievalContractViolation(
+            "RAG_GENERATION_GATE_ENABLED requires RAG_ORACLE_ACTIVE_INDEX_VERSION "
+            "for the Oracle backend"
+        )
+    return version
+
+
+def oracle_capabilities(active_index_version: str | None) -> dict[str, Any]:
+    """What the Oracle retriever can enforce (see ``retrieval_contract``)."""
+    return backend_capabilities(
+        backend="oracle",
+        supported_columns=_ORACLE_FILTER_COLUMNS,
+        # The gate is enforceable (index_version); "on" is a config choice.
+        generation_gate=True,
+        # No valid_from/valid_to/expires_at columns: lifecycle is index_status.
+        temporal_filters=False,
+    )
 
 
 def is_oracle_rag_url(value: str | None) -> bool:
@@ -260,23 +320,37 @@ def _bind_filter_clauses(
     *,
     table_alias: str | None = None,
     require_embedding: bool = True,
+    active_index_version: str | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Build parameterized Oracle predicates from shared RAG filters."""
+    """Build parameterized Oracle predicates from shared RAG filters.
+
+    Unknown or unenforceable keys raise (shared allowlist) instead of being
+    dropped: a silently ignored filter widens the search scope.
+    """
     prefix = f"{table_alias}." if table_alias else ""
     clauses = [f"{prefix}index_status IN ('ACTIVE', 'INDEXED')"]
     if require_embedding:
         clauses.insert(0, f"{prefix}embedding_vector IS NOT NULL")
     params: dict[str, Any] = {}
+    if active_index_version:
+        clauses.append(f"{prefix}index_version = :active_index_version")
+        params["active_index_version"] = active_index_version
     if not filters:
         return clauses, params
-    excluded = filters.get("_exclude_source_tables", ())
+    resolved = resolve_backend_filters(
+        filters,
+        backend="oracle",
+        supported_columns=_ORACLE_FILTER_COLUMNS,
+        extra_keys=_ORACLE_EXTRA_FILTER_KEYS,
+    )
+    excluded = resolved.get("_exclude_source_tables", ())
     if isinstance(excluded, str):
         excluded = (excluded,)
     for index, value in enumerate(excluded or ()):
         key = f"excluded_source_{index}"
         clauses.append(f"{prefix}source_table <> :{key}")
         params[key] = str(value)
-    included = filters.get("source_table_in", ())
+    included = resolved.get("source_table_in", ())
     if isinstance(included, str):
         included = (included,)
     include_keys = []
@@ -286,17 +360,31 @@ def _bind_filter_clauses(
         params[key] = str(value)
     if include_keys:
         clauses.append(f"{prefix}source_table IN ({', '.join(include_keys)})")
-    for key, value in filters.items():
-        if value is None or key.startswith("_") or key == "source_table_in":
+    for key, value in resolved.items():
+        if (
+            value is None
+            or key.startswith("_")
+            or key
+            in (
+                "source_table_in",
+                "game_date",
+            )
+        ):
             continue
-        if key not in _RAG_SOURCE_TABLES:
-            if key.startswith("meta."):
-                bind_key = f"meta_{len(params)}"
-                json_key = key[5:].replace("'", "''")
-                clauses.append(
-                    f"JSON_VALUE({prefix}meta, '$.{json_key}') = :{bind_key}"
+        if key.startswith("meta."):
+            # Key already validated against ^[A-Za-z0-9_]{1,64}$ (no quoting
+            # tricks possible), so it is safe as a JSON path literal.
+            bind_key = f"meta_{len(params)}"
+            clauses.append(f"JSON_VALUE({prefix}meta, '$.{key[5:]}') = :{bind_key}")
+            params[bind_key] = str(value)
+            continue
+        if key == "index_version" and active_index_version:
+            # An explicit filter may not widen past the active generation.
+            if str(value) != active_index_version:
+                raise RetrievalContractViolation(
+                    f"index_version filter {value!r} conflicts with the active "
+                    f"generation {active_index_version!r}"
                 )
-                params[bind_key] = str(value)
             continue
         bind_key = f"filter_{key}"
         clauses.append(f"{prefix}{key} = :{bind_key}")
@@ -369,9 +457,12 @@ async def _oracle_dense_similarity_search(
     filters: Mapping[str, Any] | None = None,
     document_type: str | None = None,
     game_date: str | None = None,
+    active_index_version: str | None = None,
 ) -> list[dict[str, Any]]:
     """Search Oracle native VECTOR rows by cosine distance."""
-    clauses, params = _bind_filter_clauses(filters)
+    clauses, params = _bind_filter_clauses(
+        filters, active_index_version=active_index_version
+    )
     candidate_limit = max(int(result_limit), 1)
     params["query_vector"] = array.array("f", [float(value) for value in embedding])
     # APPROX FIRST lets Oracle answer via the HNSW index; an exact
@@ -379,6 +470,7 @@ async def _oracle_dense_similarity_search(
     sql = f"""
         SELECT id, title, content, source_table, source_row_id, meta,
                content_hash, index_version, index_status, indexed_at, updated_at,
+               season_year, team_id, player_id,
                VECTOR_DISTANCE(embedding_vector, :query_vector, COSINE) AS distance
         FROM rag_chunks
         WHERE {" AND ".join(clauses)}
@@ -414,6 +506,10 @@ async def _oracle_dense_similarity_search(
                         "topic_key": meta.get("topic_key"),
                         "content_hash": row.get("content_hash"),
                         "updated_at": row.get("updated_at"),
+                        "season_year": row.get("season_year"),
+                        "team_id": row.get("team_id"),
+                        "player_id": row.get("player_id"),
+                        "index_version": row.get("index_version"),
                         "similarity": similarity,
                         "keyword_rank_val": 0.0,
                         "combined_score": similarity,
@@ -439,6 +535,7 @@ async def _oracle_sparse_search(
     *,
     candidate_limit: int,
     filters: Mapping[str, Any] | None = None,
+    active_index_version: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return bounded sparse candidates from Oracle term postings.
 
@@ -484,6 +581,9 @@ async def _oracle_sparse_search(
             f"sparse_id_{index}": chunk_id
             for index, (chunk_id, _score) in enumerate(merged_ids)
         }
+        generation_sql = ""
+        if active_index_version:
+            generation_sql = " AND index_version = :active_index_version"
         # Narrow identity fetch: no CLOBs here; full hydration happens later
         # for just the fused survivors.
         await cursor.execute(
@@ -491,9 +591,13 @@ async def _oracle_sparse_search(
                 SELECT id, source_table, source_row_id
                 FROM rag_chunks
                 WHERE id IN ({", ".join(f":{key}" for key in identity_params)})
-                  AND index_status IN ('ACTIVE', 'INDEXED')
+                  AND index_status IN ('ACTIVE', 'INDEXED'){generation_sql}
             """,
-            identity_params,
+            (
+                {**identity_params, "active_index_version": active_index_version}
+                if active_index_version
+                else identity_params
+            ),
         )
         identity_rows = {
             int(row[0]): (row[1], row[2]) for row in await cursor.fetchall()
@@ -530,6 +634,7 @@ async def _hydrate_oracle_rows(
     connection: OracleRagConnection,
     chunk_ids: Sequence[int],
     filters: Mapping[str, Any] | None = None,
+    active_index_version: str | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Fetch full rows for the fused survivors only."""
     if not chunk_ids:
@@ -541,11 +646,13 @@ async def _hydrate_oracle_rows(
         filters,
         table_alias=None,
         require_embedding=False,
+        active_index_version=active_index_version,
     )
     params.update(extra_params)
     sql = f"""
         SELECT id, title, content, source_table, source_row_id, meta,
-               content_hash, index_version, index_status, indexed_at, updated_at
+               content_hash, index_version, index_status, indexed_at, updated_at,
+               season_year, team_id, player_id
         FROM rag_chunks
         WHERE id IN ({", ".join(f":{key}" for key in params)})
           AND {" AND ".join(clauses)}
@@ -626,8 +733,73 @@ async def oracle_similarity_search(
     document_type: str | None = None,
     game_date: str | None = None,
     intent: str = "",
+    active_index_version: Any = _AUTO,
 ) -> list[dict[str, Any]]:
-    """Run Oracle dense retrieval and optional sparse RRF fusion."""
+    """Run Oracle dense retrieval and optional sparse RRF fusion.
+
+    Every returned row satisfies ``retrieval_contract`` (entity scope,
+    provenance keys, generation); a violation raises rather than degrading.
+    """
+    active_index_version = _generation_or_default(active_index_version)
+    # Validate up front so a bad filter fails before any database round trip.
+    _bind_filter_clauses(filters, active_index_version=active_index_version)
+    rows = await _oracle_similarity_search_rows(
+        connection,
+        embedding,
+        limit=limit,
+        filters=filters,
+        keyword=keyword,
+        document_type=document_type,
+        game_date=game_date,
+        intent=intent,
+        active_index_version=active_index_version,
+    )
+    return _finalize_oracle_rows(
+        rows, filters=filters, active_index_version=active_index_version
+    )
+
+
+def _finalize_oracle_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    filters: Mapping[str, Any] | None,
+    active_index_version: str | None,
+) -> list[dict[str, Any]]:
+    normalized = [
+        normalize_result(
+            row,
+            backend="oracle",
+            index_generation=(
+                f"oracle:{row.get('index_version')}"
+                if row.get("index_version")
+                else (
+                    f"oracle:{active_index_version}" if active_index_version else None
+                )
+            ),
+        )
+        for row in rows
+    ]
+    enforce_result_contract(
+        normalized,
+        backend="oracle",
+        require_generation=bool(active_index_version),
+        constraints=entity_constraints(filters),
+    )
+    return normalized
+
+
+async def _oracle_similarity_search_rows(
+    connection: OracleRagConnection,
+    embedding: Sequence[float],
+    *,
+    limit: int,
+    filters: Mapping[str, Any] | None,
+    keyword: str | None,
+    document_type: str | None,
+    game_date: str | None,
+    intent: str,
+    active_index_version: str | None,
+) -> list[dict[str, Any]]:
     requested_limit = max(int(limit), 1)
     dense_rows = await _oracle_dense_similarity_search(
         connection,
@@ -638,6 +810,7 @@ async def oracle_similarity_search(
         filters=filters,
         document_type=document_type,
         game_date=game_date,
+        active_index_version=active_index_version,
     )
     if not _search_tokens(keyword):
         return dense_rows[:requested_limit]
@@ -647,6 +820,7 @@ async def oracle_similarity_search(
             keyword,
             candidate_limit=max(requested_limit * 4, 80),
             filters=filters,
+            active_index_version=active_index_version,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -668,7 +842,12 @@ async def oracle_similarity_search(
         if row.get("content") is None and isinstance(row.get("id"), int)
     }
     if missing_ids:
-        hydrated = await _hydrate_oracle_rows(connection, sorted(missing_ids), filters)
+        hydrated = await _hydrate_oracle_rows(
+            connection,
+            sorted(missing_ids),
+            filters,
+            active_index_version=active_index_version,
+        )
         fused = [
             row
             for row in fused
@@ -690,8 +869,10 @@ async def oracle_exact_document_search(
     *,
     limit: int,
     source_tables: Sequence[str],
+    active_index_version: Any = _AUTO,
 ) -> list[dict[str, Any]]:
     """Return exact-term document matches using Oracle CLOB substring search."""
+    active_index_version = _generation_or_default(active_index_version)
     normalized_terms = [
         str(term).strip().casefold() for term in terms if str(term).strip()
     ]
@@ -703,6 +884,10 @@ async def oracle_exact_document_search(
         key = f"source_{index}"
         source_binds.append(f":{key}")
         params[key] = source_table
+    generation_sql = ""
+    if active_index_version:
+        generation_sql = " AND index_version = :active_index_version"
+        params["active_index_version"] = active_index_version
     term_clauses = []
     for index, term in enumerate(normalized_terms[:4]):
         key = f"term_{index}"
@@ -713,10 +898,11 @@ async def oracle_exact_document_search(
         )
     sql = f"""
         SELECT id, title, content, source_table, source_row_id, meta,
+               index_version, season_year, team_id, player_id,
                1.0 AS similarity, 1.0 AS combined_score
         FROM rag_chunks
         WHERE source_table IN ({", ".join(source_binds)})
-          AND index_status IN ('ACTIVE', 'INDEXED')
+          AND index_status IN ('ACTIVE', 'INDEXED'){generation_sql}
           AND ({" OR ".join(term_clauses)})
         ORDER BY id
         FETCH FIRST {max(1, int(limit))} ROWS ONLY
@@ -733,7 +919,9 @@ async def oracle_exact_document_search(
             row["meta"] = meta
             row["metadata"] = meta
             rendered_rows.append(row)
-        return rendered_rows
+        return _finalize_oracle_rows(
+            rendered_rows, filters=None, active_index_version=active_index_version
+        )
     finally:
         close = getattr(cursor, "close", None)
         if callable(close):
@@ -952,8 +1140,13 @@ async def oracle_rag_readiness(
     *,
     expected_index: str = "IDX_RAG_CHUNKS_EMBEDDING_HNSW",
     expected_dim: int = DEFAULT_EMBED_DIM,
+    active_index_version: str | None = None,
 ) -> dict[str, Any]:
-    """Check Oracle row coverage, native vector dimension, and HNSW index."""
+    """Check Oracle row coverage, native vector dimension, and HNSW index.
+
+    With ``active_index_version`` set, also reports how many retrievable rows
+    belong to that generation; rows of other versions are never served.
+    """
     cursor = await acquire_cursor(connection)
     try:
         await cursor.execute(
@@ -963,10 +1156,16 @@ async def oracle_rag_readiness(
                 (SELECT COUNT(*) FROM rag_chunks WHERE embedding_vector IS NOT NULL) AS vector_rows,
                 (SELECT COUNT(*) FROM rag_chunks WHERE embedding_vector IS NULL AND index_status IN ('ACTIVE', 'INDEXED')) AS missing_rows,
                 (SELECT COUNT(*) FROM rag_chunks WHERE embedding_vector IS NOT NULL AND VECTOR_DIMENSION_COUNT(embedding_vector) = :expected_dim) AS matching_dim_rows,
-                (SELECT COUNT(*) FROM user_indexes WHERE index_name = :expected_index AND status = 'VALID' AND visibility = 'VISIBLE') AS valid_index_rows
+                (SELECT COUNT(*) FROM user_indexes WHERE index_name = :expected_index AND status = 'VALID' AND visibility = 'VISIBLE') AS valid_index_rows,
+                (SELECT COUNT(*) FROM rag_chunks WHERE index_status IN ('ACTIVE', 'INDEXED')) AS retrievable_rows,
+                (SELECT COUNT(*) FROM rag_chunks WHERE index_status IN ('ACTIVE', 'INDEXED') AND index_version = :active_index_version) AS active_generation_rows
             FROM dual
             """,
-            {"expected_dim": expected_dim, "expected_index": expected_index.upper()},
+            {
+                "expected_dim": expected_dim,
+                "expected_index": expected_index.upper(),
+                "active_index_version": active_index_version or "",
+            },
         )
         row = _row_mapping(cursor, await cursor.fetchone())
         total = int(row.get("total_rows") or 0)
@@ -974,6 +1173,11 @@ async def oracle_rag_readiness(
         missing = int(row.get("missing_rows") or 0)
         matching = int(row.get("matching_dim_rows") or 0)
         valid_index = int(row.get("valid_index_rows") or 0)
+        retrievable = int(row.get("retrievable_rows") or 0)
+        in_generation = int(row.get("active_generation_rows") or 0)
+        generation_ok = active_index_version is None or (
+            retrievable > 0 and in_generation == retrievable
+        )
         return {
             "ready": bool(
                 total
@@ -981,7 +1185,13 @@ async def oracle_rag_readiness(
                 and not missing
                 and matching == vectors
                 and valid_index == 1
+                and generation_ok
             ),
+            "active_index_version": active_index_version,
+            "retrievable_rows": retrievable,
+            "active_generation_rows": in_generation,
+            "generation_ok": generation_ok,
+            "contract": oracle_capabilities(active_index_version),
             "total_rows": total,
             "vector_rows": vectors,
             "missing_rows": missing,

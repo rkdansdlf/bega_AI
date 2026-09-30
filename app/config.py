@@ -421,6 +421,11 @@ class Settings(BaseSettings):
     rag_generation_gate_enabled: bool = Field(
         False, validation_alias="RAG_GENERATION_GATE_ENABLED"
     )
+    # Oracle backend generation identity: rag_chunks.index_version to serve when
+    # RAG_GENERATION_GATE_ENABLED=true (Oracle has no generation registry).
+    rag_oracle_active_index_version: Optional[str] = Field(
+        None, validation_alias="RAG_ORACLE_ACTIVE_INDEX_VERSION"
+    )
     rag_relevance_guard_enabled: bool = Field(
         True, validation_alias="RAG_RELEVANCE_GUARD_ENABLED"
     )

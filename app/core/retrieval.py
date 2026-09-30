@@ -21,6 +21,11 @@ from ..config import DEFAULT_EMBED_DIM, Settings, get_settings
 from .embedding_generations import generation_filter_sql, get_active_generation
 from ..observability.tracing import traced
 from .exceptions import DBRetrievalError
+from .retrieval_contract import (
+    enforce_result_contract,
+    entity_constraints,
+    normalize_result,
+)
 from .retrieval_policy import protected_filter_keys, resolve_filter_column
 from ..observability.metrics import AI_RETRIEVAL_FALLBACK_LEVEL_TOTAL
 
@@ -314,6 +319,7 @@ async def similarity_search(
 
     # Blue/green guard: only chunks embedded with the ACTIVE generation's
     # signature may be returned, so old/new embeddings never mix.
+    generation = None
     if bool(getattr(active_settings, "rag_generation_gate_enabled", False)):
         try:
             generation = await get_active_generation(conn)
@@ -477,7 +483,23 @@ async def similarity_search(
         bool(keyword),
     )
 
-    return [dict(row) for row in rows]
+    # Same result contract as the Oracle path: entity scope + provenance keys,
+    # with the requested entity constraints re-verified on what came back.
+    normalized = [
+        normalize_result(
+            dict(row),
+            backend="postgres",
+            index_generation=generation.generation_id if generation else None,
+        )
+        for row in rows
+    ]
+    enforce_result_contract(
+        normalized,
+        backend="postgres",
+        require_generation=generation is not None,
+        constraints=entity_constraints(cleaned_filters),
+    )
+    return normalized
 
 
 # intent별 RRF k 값: 낮을수록 상위 결과에 집중, 높을수록 더 넓은 풀

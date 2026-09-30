@@ -14,6 +14,7 @@
 | Reranker | `score`(모델 없음) / `http`(cross-encoder rerank API, 실패 시 score 순서로 fail-open) | `app/core/reranker.py` |
 | Claim↔source | 답변 문장 → `rag_chunks.id` 매핑, 미지지 문장/숫자 보고 (`claim_grounding` meta) | `app/eval/grounding.py` |
 | 실제 호출 attribution | 요청(primary) vs 실제 provider/model, `fallback_depth`, `fallback_reason`(에러 클래스/`circuit_open`/`not_configured`). 스트림·일반 응답, fingerprint, 비용 집계, 캐시 provenance 가 모두 이 값을 사용 (`llm_attribution` meta) | `app/core/llm_provider.py` |
+| 백엔드 통합 계약 | PostgreSQL/Oracle 이 같은 계약을 따른다: 필터는 공통 allowlist 로 해석하고 **미지원/미지 키는 무시하지 않고 거부**(Oracle 의 기존 silent-drop 제거, JSON path 는 검증된 키만), 결과 행은 entity scope(`season_year`/`team_id`/`player_id`)와 `retrieval_backend`/`index_generation` 을 항상 포함, 요청한 entity 제약을 반환 행에서 재검증(위반 시 fail closed), Oracle generation 게이트(`index_version`), 필수 capability 미충족·게이트 설정 누락·활성 generation 커버리지 부족 시 `/ready` DOWN(`RETRIEVAL_CONTRACT_NOT_MET`) | `app/core/retrieval_contract.py`, `oracle_rag.py`, `rag_readiness.py` |
 | Fingerprint | prompt version/hash, planner/retrieval/reranker version, model, embedding signature 를 meta·캐시·eval 에 기록 | `app/core/fingerprint.py` |
 | Golden 평가 | retrieval(Recall@5/10, MRR, nDCG, wrong-source, zero-hit) 과 generation(unsupported/numeric/entity hallucination, citation P/R) 을 분리 측정, baseline 대비 회귀 시 exit 1 | `scripts/eval_rag_golden.py`, `evals/` |
 | CI 게이트 | `ai-pr-gate` 가 golden 평가를 실행 | `.github/workflows/ai-pr-gate.yml` |
@@ -43,7 +44,7 @@
   `vector` 컬럼이라 같은 테이블에 구/신 임베딩이 공존할 수 없다. 여기서는 포인터 전환·감사·혼합
   방지 필터까지만 제공하고, 구 generation 행을 보존하는 per-generation 저장은 크롤러(임베딩 소유자)
   과제다. 롤백은 구 signature 행이 남아 있을 때만 허용된다.
-- Oracle 읽기 경로(`oracle_rag.py`)에는 generation 게이트·relevance 컬럼 select 가 아직 없다.
+- Oracle 에는 generation 레지스트리가 없어 활성 generation 을 `RAG_ORACLE_ACTIVE_INDEX_VERSION`(= `rag_chunks.index_version`) 설정으로 지정한다. 전환은 설정 변경 + 재시작이며 PostgreSQL 같은 원자적 포인터/롤백은 아니다. Oracle 은 `valid_from/valid_to/expires_at` 컬럼이 없어 수명주기를 `index_status` 로만 판단한다(capability `temporal_filters=false`, 정보용).
 - Chunk 벤치마크는 `EMBED_PROVIDER=local` 이면 의미 없음(리포트에 `meaningful:false`).
 - Feedback: `POST /ai/chat/feedback`(내부 토큰) → `rag_answer_feedback`(migration 008). BFF 가 호출하도록 연동해야 데이터가 쌓이며, `mine_retrieval_events.py --with-feedback` 가 DOWN 평가를 골든 후보로 합친다.
 - `main` branch protection: `scripts/ops/apply_branch_protection.sh OWNER/REPO --apply` (required: Python Linting, Unit Tests, Security Scan, Container Image Scan; `ci.yml` 의 PR `paths:` 필터는 제거됨).
