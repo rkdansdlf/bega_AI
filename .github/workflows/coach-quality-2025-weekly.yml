@@ -9,6 +9,9 @@ concurrency:
   group: coach-cache-operations
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   quality-loop-2025:
     name: Coach Quality Loop (2025 Regular, 10 Teams)
@@ -43,6 +46,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
@@ -91,3 +95,4 @@ jobs:
             /tmp/coach_cleanup_2025_execute.json
             /tmp/coach_quality_2025_weekly.json
             /tmp/coach_quality_gate_2025_weekly.json
+          retention-days: 7

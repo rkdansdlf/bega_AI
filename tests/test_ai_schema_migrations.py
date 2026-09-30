@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_DIR = ROOT / "app" / "db" / "migrations"
 MANAGED_MIGRATION_SCRIPT = ROOT / "scripts" / "migrate_ai_runtime_schema.sh"
@@ -56,9 +55,7 @@ def test_ingest_orchestration_migration_defines_durable_run_and_watermark_tables
 
 
 def test_ingest_checkpoint_migration_defines_durable_progress_table():
-    sql = (MIGRATION_DIR / "004_ai_ingest_checkpoints.sql").read_text(
-        encoding="utf-8"
-    )
+    sql = (MIGRATION_DIR / "004_ai_ingest_checkpoints.sql").read_text(encoding="utf-8")
 
     assert "CREATE TABLE IF NOT EXISTS ai_ingest_checkpoints" in sql
     assert "PRIMARY KEY (run_id, source_table)" in sql
@@ -73,12 +70,36 @@ def test_ingest_checkpoint_migration_defines_durable_progress_table():
     ) in sql
 
 
+def test_rag_runtime_compatibility_migration_is_additive_and_preserves_provenance():
+    sql = (MIGRATION_DIR / "005_rag_runtime_compatibility.sql").read_text(
+        encoding="utf-8"
+    )
+
+    for column in (
+        "content_tsv",
+        "metadata",
+        "source_type",
+        "source_uri",
+        "embedding_model",
+        "embedding_dim",
+        "is_active",
+    ):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in sql
+    assert "vector_dims(embedding)" in sql
+    assert "source_uri = source_url" in sql
+    assert "does not infer embedding_model" in sql
+    assert "CREATE TABLE IF NOT EXISTS rag_retrieval_events" in sql
+    assert "DROP TABLE" not in sql
+    assert "DELETE FROM" not in sql
+
+
 def test_managed_migration_script_applies_ingest_checkpoint_migration_in_order():
     script = MANAGED_MIGRATION_SCRIPT.read_text(encoding="utf-8")
     migration_paths = (
         '"${AI_ROOT}/app/db/migrations/001_ai_runtime_cache.sql"',
         '"${AI_ROOT}/app/db/migrations/003_ai_ingest_orchestration.sql"',
         '"${AI_ROOT}/app/db/migrations/004_ai_ingest_checkpoints.sql"',
+        '"${AI_ROOT}/app/db/migrations/005_rag_runtime_compatibility.sql"',
     )
 
     assert all(path in script for path in migration_paths)
@@ -94,7 +115,8 @@ def test_data_sync_runbook_documents_persistent_checkpoint_operations():
     for statement in (
         "Managed migration script applies `001_ai_runtime_cache.sql` -> "
         "`003_ai_ingest_orchestration.sql` -> "
-        "`004_ai_ingest_checkpoints.sql`.",
+        "`004_ai_ingest_checkpoints.sql` -> "
+        "`005_rag_runtime_compatibility.sql`.",
         "Compatibility startup applies `003_ai_ingest_orchestration.sql` -> "
         "`004_ai_ingest_checkpoints.sql`.",
         "Exactly one `ai_ingest_checkpoints` row per `(run_id, source_table)` "

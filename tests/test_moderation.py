@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -29,6 +29,12 @@ def secured_client() -> TestClient:
 
 def _settings(**overrides):
     base = {
+        "llm_provider": "openrouter",
+        "openrouter_api_key": None,
+        "openrouter_base_url": "https://openrouter.ai/api/v1",
+        "openrouter_model": "openrouter/free",
+        "openrouter_referer": "https://kbo-platform.test",
+        "openrouter_app_title": "KBO Platform Test",
         "gemini_api_key": None,
         "gemini_model": "gemini-2.0-flash",
         "moderation_high_risk_keywords": ["죽어", "병신"],
@@ -117,23 +123,86 @@ def test_moderation_no_api_key_low_risk_allows(
     assert body["riskLevel"] == "LOW"
 
 
+def test_moderation_openrouter_provider_uses_model_without_gemini_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(openrouter_api_key="openrouter-test-key")
+    monkeypatch.setattr("app.routers.moderation.get_settings", lambda: settings)
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"category":"SAFE","reason":"정상 콘텐츠",'
+                                '"action":"ALLOW","riskLevel":"LOW"}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        async def post(self, url: str, **kwargs: object) -> FakeResponse:
+            captured["url"] = url
+            captured.update(kwargs)
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        moderation,
+        "get_shared_httpx_client",
+        lambda *args, **kwargs: FakeClient(),
+        raising=False,
+    )
+
+    response = client.post(
+        "/moderation/safety-check",
+        json={"content": "오늘 경기 정말 재밌었어요!"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "category": "SAFE",
+        "reason": "정상 콘텐츠",
+        "action": "ALLOW",
+        "decisionSource": "MODEL",
+        "riskLevel": "LOW",
+    }
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["json"] == {
+        "model": "openrouter/free",
+        "messages": [
+            {
+                "role": "user",
+                "content": ANY,
+            }
+        ],
+        "temperature": 0.0,
+        "max_tokens": 300,
+        "response_format": {"type": "json_object"},
+    }
+
+
 def test_moderation_model_runtime_error_uses_fallback_rule(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         "app.routers.moderation.get_settings",
-        lambda: _settings(gemini_api_key="test-key"),
+        lambda: _settings(llm_provider="gemini", gemini_api_key="test-key"),
     )
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.models.generate_content.side_effect = RuntimeError("model unavailable")
     monkeypatch.setattr(
-        "app.routers.moderation.genai.configure",
-        lambda **_: None,
-    )
-
-    mock_model = MagicMock()
-    mock_model.generate_content.side_effect = RuntimeError("model unavailable")
-    monkeypatch.setattr(
-        "app.routers.moderation.genai.GenerativeModel",
-        lambda *_: mock_model,
+        "app.routers.moderation.genai.Client",
+        lambda **_: mock_client,
     )
 
     response = client.post(
@@ -152,20 +221,16 @@ def test_moderation_model_parse_error_high_risk_uses_fallback_block(
 ) -> None:
     monkeypatch.setattr(
         "app.routers.moderation.get_settings",
-        lambda: _settings(gemini_api_key="test-key"),
+        lambda: _settings(llm_provider="gemini", gemini_api_key="test-key"),
     )
-    monkeypatch.setattr(
-        "app.routers.moderation.genai.configure",
-        lambda **_: None,
-    )
-
     mock_response = MagicMock()
     mock_response.text = "not-a-json-response"
-    mock_model = MagicMock()
-    mock_model.generate_content.return_value = mock_response
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.models.generate_content.return_value = mock_response
     monkeypatch.setattr(
-        "app.routers.moderation.genai.GenerativeModel",
-        lambda *_: mock_model,
+        "app.routers.moderation.genai.Client",
+        lambda **_: mock_client,
     )
 
     response = client.post(

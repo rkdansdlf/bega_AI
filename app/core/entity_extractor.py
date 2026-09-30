@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import logging
 from difflib import SequenceMatcher
 
+from app.core.time import kst_today
+
 logger = logging.getLogger(__name__)
 
 
@@ -409,7 +411,7 @@ def extract_year(query: str) -> Optional[int]:
     """질문에서 연도를 추출합니다. (4자리 및 2자리 연도 지원)"""
     import datetime as dt
 
-    current_year = dt.datetime.now().year
+    current_year = kst_today().year
 
     # 1. 4자리 연도 패턴 ("2024년", "1999시즌" 등)
     full_year_patterns = [
@@ -446,7 +448,7 @@ def extract_year(query: str) -> Optional[int]:
     # 3. 상대적 연도 표현
     if re.search(r"(작년|지난해)", query):
         return current_year - 1
-    elif re.search(r"(올해|금년|이번해)", query):
+    elif re.search(r"(올해|금년|이번해|이번\s*시즌|올\s*시즌)", query):
         return current_year
     elif re.search(r"재작년", query):
         return current_year - 2
@@ -637,7 +639,7 @@ def extract_game_date(query: str) -> Optional[str]:
     """질문에서 경기 날짜를 추출합니다."""
     import datetime as dt
 
-    today = dt.date.today()
+    today = kst_today()
 
     # 1. 상대적 날짜 표현
     if re.search(r"(어제|지난\s*경기)", query):

@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from psycopg.rows import dict_row
 
+from app.core.time import kst_today
 from app.tools.team_code_resolver import TeamCodeResolver
 from app.tools.team_display import resolve_team_display_name
 
@@ -82,7 +83,7 @@ async def try_build_operator_fast_path_result(
 
     try:
         resolver = TeamCodeResolver()
-        today_value = today or date.today()
+        today_value = today or kst_today()
         if _is_lineup_query(normalized_query):
             result = await _lineup_result(conn, normalized_query, resolver, today_value)
             if result is not None:

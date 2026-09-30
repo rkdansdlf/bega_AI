@@ -245,7 +245,9 @@ def test_ready_returns_standard_degraded_contract(monkeypatch):
 
     monkeypatch.setattr(main_module, "get_readiness_report", degraded)
     app = main_module.create_app()
-    route = next(route for route in app.routes if getattr(route, "path", "") == "/ready")
+    route = next(
+        route for route in app.routes if getattr(route, "path", "") == "/ready"
+    )
 
     response = asyncio.run(route.endpoint())
 
@@ -264,9 +266,9 @@ def test_ready_returns_standard_degraded_contract(monkeypatch):
         },
     }
     openapi = app.openapi()
-    response_schema = openapi["paths"]["/ready"]["get"]["responses"]["503"][
-        "content"
-    ]["application/json"]["schema"]
+    response_schema = openapi["paths"]["/ready"]["get"]["responses"]["503"]["content"][
+        "application/json"
+    ]["schema"]
     assert response_schema["$ref"].endswith("/AIReadinessUnavailableResponse")
 
 

@@ -245,14 +245,16 @@ async def test_openrouter_stream_generator_initializes_shared_client_with_timeou
 
     from app.core.llm_provider import OpenRouterProvider
 
-    provider = OpenRouterProvider(SimpleNamespace(
-        openrouter_api_key="test-key",
-        openrouter_referer="",
-        openrouter_app_title="",
-        openrouter_model="test-model",
-        max_output_tokens=16,
-        openrouter_base_url="https://openrouter.test/api/v1",
-    ))
+    provider = OpenRouterProvider(
+        SimpleNamespace(
+            openrouter_api_key="test-key",
+            openrouter_referer="",
+            openrouter_app_title="",
+            openrouter_model="test-model",
+            max_output_tokens=16,
+            openrouter_base_url="https://openrouter.test/api/v1",
+        )
+    )
 
     chunks = [
         chunk async for chunk in provider.stream([{"role": "user", "content": "hi"}])

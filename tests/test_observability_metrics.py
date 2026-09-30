@@ -78,11 +78,14 @@ def test_metric_objects_accept_labels_and_observations() -> None:
     ).inc()
     AI_RAG_STAGE_DURATION_SECONDS.labels(stage="embed").observe(0.05)
     AI_LLM_CALL_DURATION_SECONDS.labels(provider="test", route="rag").observe(1.2)
-    AI_DB_POOL_SIZE.labels(state="available").set(7)
+    AI_DB_POOL_SIZE.labels(pool="general", state="available").set(7)
 
-    assert _read_metric_value(
-        "ai_llm_retry_attempts_total", {"provider": "test", "error_class": "429"}
-    ) >= 1.0
+    assert (
+        _read_metric_value(
+            "ai_llm_retry_attempts_total", {"provider": "test", "error_class": "429"}
+        )
+        >= 1.0
+    )
 
 
 def test_ingest_metrics_use_only_bounded_labels() -> None:

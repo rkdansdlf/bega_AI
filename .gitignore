@@ -48,8 +48,16 @@ test_rag_search.py
 !/tests/test_semantic_cache_shadow_eval.py
 !/tests/test_cleanup_embedding_256_warnings.py
 !/tests/test_coach_cleanup_workflows.py
+!/tests/test_coach_auto_brief_ops_window.py
+!/tests/test_business_time.py
+!/tests/test_database_pool_budget.py
+!/tests/test_model_circuit.py
+!/tests/test_oracle_baseball.py
 !/tests/test_hnsw_migration.py
 !/tests/test_rag_storage_schema.py
+!/tests/test_rag_runtime_contract.py
+!/tests/test_rag_readiness_contract.py
+!/tests/test_rag_http_contract.py
 !/tests/test_analyze_operator_data_required.py
 !/tests/test_build_operator_data_handoff.py
 !/tests/test_operator_data_db_prereqs.py

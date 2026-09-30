@@ -45,13 +45,13 @@ def mock_genai():
 
 
 @pytest.fixture
-def mock_image_open():
-    with patch("app.routers.vision.Image.open") as mock:
+def mock_genai_types():
+    with patch("app.routers.vision.genai_types", create=True) as mock:
         yield mock
 
 
 def test_analyze_ticket_gemini_success(
-    client, mock_settings, mock_genai, mock_image_open
+    client, mock_settings, mock_genai, mock_genai_types
 ):
     # Configure settings for Gemini
     mock_settings.llm_provider = "gemini"
@@ -59,15 +59,14 @@ def test_analyze_ticket_gemini_success(
     mock_settings.vision_model = "gemini-2.0-flash"
 
     # Mock Gemini response
-    mock_model = MagicMock()
+    mock_sdk_client = MagicMock()
     mock_response = MagicMock()
     mock_response.text = '{"date": "2024-05-05", "stadium": "Jamsil", "homeTeam": "LG", "awayTeam": "Doosan"}'
-    mock_model.generate_content.return_value = mock_response
-    mock_genai.GenerativeModel.return_value = mock_model
-
-    # Mock Image.open
-    mock_image = MagicMock()
-    mock_image_open.return_value = mock_image
+    mock_sdk_client.models.generate_content.return_value = mock_response
+    mock_sdk_client.__enter__.return_value = mock_sdk_client
+    mock_genai.Client.return_value = mock_sdk_client
+    image_part = object()
+    mock_genai_types.Part.from_bytes.return_value = image_part
 
     # Create dummy image file
     files = {"file": ("ticket.jpg", b"fake_image_content", "image/jpeg")}
@@ -81,9 +80,14 @@ def test_analyze_ticket_gemini_success(
     assert data["homeTeam"] == "LG"
 
     # Verify Gemini was called
-    mock_genai.configure.assert_called_with(api_key="test_key")
-    mock_genai.GenerativeModel.assert_called_with("gemini-2.0-flash")
-    mock_model.generate_content.assert_called_once()
+    mock_genai.Client.assert_called_once_with(api_key="test_key")
+    mock_genai_types.Part.from_bytes.assert_called_once_with(
+        data=b"fake_image_content",
+        mime_type="image/jpeg",
+    )
+    generate_call = mock_sdk_client.models.generate_content.call_args.kwargs
+    assert generate_call["model"] == "gemini-2.0-flash"
+    assert generate_call["contents"][1] is image_part
 
 
 def test_analyze_ticket_openrouter_success(client, mock_settings):

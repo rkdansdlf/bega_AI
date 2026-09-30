@@ -17,39 +17,107 @@ from app.agents.runtime_factory import (
 )
 
 
-def _install_fake_gemini_sdk(monkeypatch, model_class: type[Any]) -> None:
-    fake_genai = ModuleType("google.generativeai")
-    fake_genai.GenerativeModel = model_class
-    fake_genai_types = ModuleType("google.generativeai.types")
-    fake_genai_types.GenerationConfig = lambda **kwargs: kwargs
-    google_module = sys.modules.get("google")
-    if google_module is None:
-        google_module = ModuleType("google")
-        monkeypatch.setitem(sys.modules, "google", google_module)
+def _install_fake_google_genai_sdk(
+    monkeypatch,
+    chunks: list[str],
+) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    fake_genai = ModuleType("google.genai")
+    fake_types = ModuleType("google.genai.types")
 
-    monkeypatch.setitem(sys.modules, "google.generativeai", fake_genai)
-    monkeypatch.setitem(sys.modules, "google.generativeai.types", fake_genai_types)
-    monkeypatch.setattr(google_module, "generativeai", fake_genai, raising=False)
-    monkeypatch.setattr(fake_genai, "types", fake_genai_types, raising=False)
+    class _Part:
+        @staticmethod
+        def from_text(*, text: str):
+            return {"text": text}
+
+    class _Content:
+        def __init__(self, *, role: str, parts: list[Any]) -> None:
+            self.role = role
+            self.parts = parts
+
+    class _Config:
+        def __init__(self, **kwargs: Any) -> None:
+            self.__dict__.update(kwargs)
+
+    class _Models:
+        async def generate_content_stream(self, **kwargs: Any):
+            calls.append(dict(kwargs))
+
+            async def _response():
+                for text in chunks:
+                    yield SimpleNamespace(text=text)
+
+            return _response()
+
+    class _AsyncClient:
+        def __init__(self) -> None:
+            self.models = _Models()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+    class _Client:
+        def __init__(self, *, api_key: str) -> None:
+            calls.append({"api_key": api_key})
+            self.aio = _AsyncClient()
+
+        def close(self) -> None:
+            calls.append({"closed": True})
+
+    fake_genai.Client = _Client
+    fake_types.Part = _Part
+    fake_types.Content = _Content
+    fake_types.GenerateContentConfig = _Config
+
+    google_module = sys.modules.get("google") or ModuleType("google")
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+    monkeypatch.setattr(google_module, "genai", fake_genai, raising=False)
+
+    deprecated = ModuleType("google.generativeai")
+    deprecated.configure = lambda **_kwargs: None
+
+    def _deprecated_model(*_args: Any, **_kwargs: Any):
+        raise AssertionError("deprecated google.generativeai SDK was used")
+
+    deprecated.GenerativeModel = _deprecated_model
+    monkeypatch.setitem(sys.modules, "google.generativeai", deprecated)
+    monkeypatch.setattr(google_module, "generativeai", deprecated, raising=False)
+    return calls
 
 
-def test_install_fake_gemini_sdk_replaces_existing_parent_attribute(monkeypatch) -> None:
-    class _FakeModel:
-        pass
+@pytest.mark.asyncio
+async def test_gemini_generator_uses_google_genai_async_stream(monkeypatch) -> None:
+    calls = _install_fake_google_genai_sdk(monkeypatch, ["new ", "sdk"])
+    generator = build_baseball_llm_generator(
+        SimpleNamespace(
+            llm_provider="gemini",
+            gemini_api_key="test-key",
+            gemini_model="gemini-2.0-flash",
+            max_output_tokens=512,
+        )
+    )
 
-    fake_google = ModuleType("google")
-    stale_genai = ModuleType("google.generativeai")
-    fake_google.generativeai = stale_genai
-    monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setitem(sys.modules, "google.generativeai", stale_genai)
+    chunks = [
+        chunk
+        async for chunk in generator(
+            [
+                {"role": "system", "content": "Answer briefly."},
+                {"role": "user", "content": "hello"},
+            ]
+        )
+    ]
 
-    _install_fake_gemini_sdk(monkeypatch, _FakeModel)
-
-    import google.generativeai as genai
-
-    assert fake_google.generativeai is genai
-    assert genai is sys.modules["google.generativeai"]
-    assert genai.types is sys.modules["google.generativeai.types"]
+    assert chunks == ["new ", "sdk"]
+    assert calls[0] == {"api_key": "test-key"}
+    request = calls[1]
+    assert request["model"] == "gemini-2.0-flash"
+    assert request["config"].system_instruction == "Answer briefly."
+    assert calls[-1] == {"closed": True}
 
 
 def test_openrouter_model_candidates_include_gpt_oss_fallback() -> None:
@@ -234,28 +302,7 @@ async def test_openrouter_empty_choices_retry_reports_each_attempt(monkeypatch) 
 @pytest.mark.asyncio
 async def test_gemini_generator_reports_generation_attempt(monkeypatch) -> None:
     observations: list[dict[str, object]] = []
-
-    class _FakeChunk:
-        def __init__(self, text: str) -> None:
-            self.text = text
-
-    class _FakeModel:
-        def __init__(self, model_name: str, **kwargs: Any) -> None:
-            self.model_name = model_name
-
-        async def generate_content_async(self, *args: Any, **kwargs: Any):
-            async def _response():
-                yield _FakeChunk("gemini ")
-                yield _FakeChunk("response")
-
-            return _response()
-
-    monkeypatch.setattr(
-        runtime_factory,
-        "_ensure_gemini_configured",
-        lambda settings: None,
-    )
-    _install_fake_gemini_sdk(monkeypatch, _FakeModel)
+    _install_fake_google_genai_sdk(monkeypatch, ["gemini ", "response"])
     generator = build_baseball_llm_generator(
         SimpleNamespace(
             llm_provider="gemini",
@@ -608,8 +655,7 @@ async def test_openrouter_observer_snapshot_cannot_mutate_later_attempts(
     messages = [{"role": "user", "content": "hello"}]
 
     chunks = [
-        chunk
-        async for chunk in generator(messages, usage_observer=mutating_observer)
+        chunk async for chunk in generator(messages, usage_observer=mutating_observer)
     ]
 
     assert chunks == ["retry success"]
@@ -634,9 +680,7 @@ async def test_openrouter_early_close_reports_one_failed_attempt(monkeypatch) ->
             return None
 
         async def aiter_lines(self):
-            yield "data: " + json.dumps(
-                {"choices": [{"delta": {"content": "first"}}]}
-            )
+            yield "data: " + json.dumps({"choices": [{"delta": {"content": "first"}}]})
             yield "data: [DONE]"
 
     class _FakeStreamContext:
@@ -693,27 +737,7 @@ async def test_gemini_early_close_reports_one_failed_attempt_without_warning(
     monkeypatch,
 ) -> None:
     observations: list[dict[str, object]] = []
-
-    class _FakeChunk:
-        def __init__(self, text: str) -> None:
-            self.text = text
-
-    class _FakeModel:
-        def __init__(self, model_name: str, **kwargs: Any) -> None:
-            self.model_name = model_name
-
-        async def generate_content_async(self, *args: Any, **kwargs: Any):
-            async def _response():
-                yield _FakeChunk("first")
-
-            return _response()
-
-    monkeypatch.setattr(
-        runtime_factory,
-        "_ensure_gemini_configured",
-        lambda settings: None,
-    )
-    _install_fake_gemini_sdk(monkeypatch, _FakeModel)
+    _install_fake_google_genai_sdk(monkeypatch, ["first"])
     generator = build_baseball_llm_generator(
         SimpleNamespace(
             llm_provider="gemini",

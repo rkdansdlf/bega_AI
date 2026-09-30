@@ -433,9 +433,7 @@ async def _build_static_chat_result(question: str) -> Optional[Dict[str, Any]]:
     payload["model_usage"] = []
     payload["model_usage_complete"] = True
     payload["fallback_triggered"] = bool(payload.get("fallback_triggered", False))
-    payload["fallback_answer_used"] = bool(
-        payload.get("fallback_answer_used", False)
-    )
+    payload["fallback_answer_used"] = bool(payload.get("fallback_answer_used", False))
     return payload
 
 
@@ -797,7 +795,9 @@ def _semantic_cache_rollout_percent(settings: Any) -> int:
     try:
         return max(
             0,
-            min(100, int(getattr(settings, "chat_semantic_cache_rollout_percent", 100))),
+            min(
+                100, int(getattr(settings, "chat_semantic_cache_rollout_percent", 100))
+            ),
         )
     except (TypeError, ValueError):
         return 0
@@ -1722,7 +1722,8 @@ async def _chat_live_event_generator(
                 response_text=full_response_text,
                 model_name=model_name,
                 provenance=build_cache_provenance(
-                    buffered_meta, build_response_fingerprint(get_settings(), buffered_meta)
+                    buffered_meta,
+                    build_response_fingerprint(get_settings(), buffered_meta),
                 ),
             )
             logger.info(
@@ -2206,8 +2207,8 @@ async def chat_completion(
                     response_text=full_response_text,
                     model_name=model_name,
                     provenance=build_cache_provenance(
-                    result, build_response_fingerprint(get_settings(), result)
-                ),
+                        result, build_response_fingerprint(get_settings(), result)
+                    ),
                 )
                 logger.info(
                     "[ChatCache] SAVED key=%s... intent=%s (completion)",

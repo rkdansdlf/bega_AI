@@ -295,9 +295,7 @@ class TestRunDbDownPath:
                         "mock", cause=psycopg.OperationalError("conn failed")
                     ),
                 ):
-                    with patch(
-                        "app.core.rag.record_retrieval_event"
-                    ) as mock_event:
+                    with patch("app.core.rag.record_retrieval_event") as mock_event:
                         with patch.object(
                             pipeline,
                             "_generate",
@@ -311,7 +309,9 @@ class TestRunDbDownPath:
         result, mock_event = asyncio.run(run())
         assert result["strategy"] == "llm_knowledge_db_unavailable"
         assert result["citations"] == []
-        assert result["answer"].startswith("⚠️ 현재 KBO 통계 DB에 일시적으로 접속할 수 없어")
+        assert result["answer"].startswith(
+            "⚠️ 현재 KBO 통계 DB에 일시적으로 접속할 수 없어"
+        )
         assert "DB 장애로 인한 일반 지식 기반 답변입니다." in result["answer"]
         assert mock_event.call_args.kwargs["success"] is False
         assert mock_event.call_args.kwargs["error_type"] == "db_unavailable"
@@ -355,21 +355,23 @@ class TestRunDbDownPath:
                 new_callable=AsyncMock,
                 return_value=[0.1] * 768,
             ):
-                    with patch(
-                        "app.core.rag.similarity_search",
-                        return_value=[],
+                with patch(
+                    "app.core.rag.similarity_search",
+                    return_value=[],
+                ):
+                    with patch.object(
+                        pipeline,
+                        "_generate",
+                        new_callable=AsyncMock,
+                        return_value="답변",
                     ):
-                        with patch.object(
-                            pipeline,
-                            "_generate",
-                            new_callable=AsyncMock,
-                            return_value="답변",
-                        ):
-                            return await pipeline.run("테스트")
+                        return await pipeline.run("테스트")
 
         result = asyncio.run(run())
         assert result["strategy"] == "rag_v3_enhanced"
-        assert result["answer"].startswith("저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다.")
+        assert result["answer"].startswith(
+            "저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다."
+        )
 
     def test_run_records_actual_fallback_filters_and_expanded_citation(self):
         """fallback이 필터를 완화하면 최초/실제 필터와 확장 citation을 남긴다."""
@@ -426,7 +428,9 @@ class TestRunDbDownPath:
             return []
 
         async def run():
-            with patch("app.core.rag.enhance_search_strategy", return_value=search_strategy):
+            with patch(
+                "app.core.rag.enhance_search_strategy", return_value=search_strategy
+            ):
                 with patch.object(
                     pipeline, "_is_statistical_query", return_value=False
                 ):
@@ -436,7 +440,9 @@ class TestRunDbDownPath:
                         with patch.object(
                             pipeline, "_is_regulation_query", return_value=False
                         ):
-                            with patch.object(pipeline, "_is_game_query", return_value=False):
+                            with patch.object(
+                                pipeline, "_is_game_query", return_value=False
+                            ):
                                 with patch.object(
                                     pipeline,
                                     "_is_game_flow_narrative_query",
@@ -491,8 +497,7 @@ class TestRunDbDownPath:
         from app.core.rag import _resolve_default_season_year
 
         assert (
-            _resolve_default_season_year(Settings(default_kbo_season_year=2031))
-            == 2031
+            _resolve_default_season_year(Settings(default_kbo_season_year=2031)) == 2031
         )
 
         with patch("app.core.rag.datetime") as mock_datetime:
@@ -611,9 +616,7 @@ class TestRunZeroHitContext:
                 return_value=[0.1] * 768,
             ):
                 with patch("app.core.rag.similarity_search", return_value=[]):
-                    with patch(
-                        "app.core.rag.record_retrieval_event"
-                    ) as mock_event:
+                    with patch("app.core.rag.record_retrieval_event") as mock_event:
                         with patch.object(
                             pipeline, "_generate", side_effect=mock_generate
                         ):
@@ -629,6 +632,8 @@ class TestRunZeroHitContext:
         # LLM에 전달된 마지막 user 메시지에 zero-hit 가이드가 포함되어야 함
         user_content = captured_messages["messages"][-1]["content"]
         assert "가능한 원인" in user_content or "검색 결과 없음" in user_content
-        assert result["answer"].startswith("저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다.")
+        assert result["answer"].startswith(
+            "저장된 KBO 데이터에서는 관련 근거를 찾지 못했습니다."
+        )
         assert mock_event.call_args.kwargs["success"] is False
         assert mock_event.call_args.kwargs["error_type"] == "zero_hit"

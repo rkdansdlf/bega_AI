@@ -2620,7 +2620,9 @@ class RAGPipeline:
         static_result = _build_static_kbo_faq_result(query)
         if static_result is not None:
             return static_result
-        if bool(getattr(self.settings, "operator_data_fast_path_enabled", False)) and is_operator_data_query(query):
+        if bool(
+            getattr(self.settings, "operator_data_fast_path_enabled", False)
+        ) and is_operator_data_query(query):
             return _build_manual_baseball_data_required_result(query)
         return None
 
@@ -3278,9 +3280,7 @@ class RAGPipeline:
                     )
 
             if agent_result["verified"] and not agent_result.get("error"):
-                logger.info(
-                    "[RAG] Agent successfully handled query with verified data"
-                )
+                logger.info("[RAG] Agent successfully handled query with verified data")
                 perf = agent_result.get("perf") or {}
                 if not isinstance(perf, dict):
                     perf = {}

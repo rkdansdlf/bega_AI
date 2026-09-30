@@ -376,12 +376,10 @@ async def _cleanup_semantic_sync(conn) -> int:
     deleted: int = getattr(result, "rowcount", 0) or 0
     if deleted:
         logger.info("[ChatSemanticCache] Cleaned up %d expired entries", deleted)
-    shadow_result = await conn.execute(
-        """
+    shadow_result = await conn.execute("""
         DELETE FROM chat_semantic_cache_shadow_observation
         WHERE observed_at < now() - interval '30 days'
-        """
-    )
+        """)
     shadow_deleted: int = getattr(shadow_result, "rowcount", 0) or 0
     if shadow_deleted:
         logger.info(

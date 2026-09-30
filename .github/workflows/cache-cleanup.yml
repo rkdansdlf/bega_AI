@@ -23,6 +23,9 @@ concurrency:
   group: coach-cache-operations
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   cleanup:
     name: Clean Expired Coach Cache (Scoped)
@@ -58,6 +61,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
@@ -95,3 +99,4 @@ jobs:
           name: coach-cache-cleanup
           path: /tmp/coach_cleanup.json
           if-no-files-found: ignore
+          retention-days: 7

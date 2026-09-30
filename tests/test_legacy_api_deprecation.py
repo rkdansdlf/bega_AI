@@ -13,7 +13,6 @@ from app.deprecation import (
     LegacyApiDeprecationMiddleware,
 )
 
-
 EXPECTED_DEPRECATED_OPERATIONS = {
     ("POST", "/coach/analyze", "POST", "/ai/coach/analyze"),
     ("POST", "/coach/cache/reset", "POST", "/ai/coach/cache/reset"),
@@ -86,9 +85,7 @@ def test_legacy_response_has_deprecation_headers(
     assert response.headers["Deprecation"] == "true"
     assert response.headers["X-Deprecation"] == "true"
     assert response.headers["X-Legacy-Endpoint"] == f"{method} {path}"
-    assert response.headers["Link"] == (
-        f'<{canonical_path}>; rel="successor-version"'
-    )
+    assert response.headers["Link"] == (f'<{canonical_path}>; rel="successor-version"')
 
 
 def test_canonical_response_has_no_deprecation_headers() -> None:
@@ -124,8 +121,7 @@ def test_legacy_request_emits_structured_warning(caplog) -> None:
     assert response.status_code == 200
     assert (
         "deprecated_api_operation method=POST legacy_path=/coach/analyze "
-        "canonical_method=POST canonical_path=/ai/coach/analyze"
-        in caplog.text
+        "canonical_method=POST canonical_path=/ai/coach/analyze" in caplog.text
     )
 
 
@@ -148,8 +144,7 @@ def test_openapi_marks_exactly_seven_deprecated_operations() -> None:
 
     assert len(operations) == 35
     assert deprecated == {
-        (method, path)
-        for method, path, _, _ in EXPECTED_DEPRECATED_OPERATIONS
+        (method, path) for method, path, _, _ in EXPECTED_DEPRECATED_OPERATIONS
     }
 
 

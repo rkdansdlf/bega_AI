@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-
 REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "coach_analysis_cache": (
         "cache_key",

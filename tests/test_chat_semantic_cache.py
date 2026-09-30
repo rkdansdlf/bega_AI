@@ -181,7 +181,10 @@ def test_semantic_cache_vector_index_sql_uses_hnsw() -> None:
 def test_semantic_cache_ddl_creates_shadow_observation_table() -> None:
     normalized = " ".join(CREATE_SHADOW_OBSERVATION_TABLE_SQL.lower().split())
 
-    assert "create table if not exists chat_semantic_cache_shadow_observation" in normalized
+    assert (
+        "create table if not exists chat_semantic_cache_shadow_observation"
+        in normalized
+    )
     assert "fresh_answer text" in normalized
     assert "idx_chat_semantic_shadow_observed_at" in normalized
 

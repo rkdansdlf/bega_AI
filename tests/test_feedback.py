@@ -78,7 +78,11 @@ def test_feedback_is_stored_with_fingerprint(monkeypatch):
 
 @pytest.mark.parametrize(
     "body",
-    [{"question": "q", "rating": "MAYBE"}, {"question": "", "rating": "UP"}, {"rating": "UP"}],
+    [
+        {"question": "q", "rating": "MAYBE"},
+        {"question": "", "rating": "UP"},
+        {"rating": "UP"},
+    ],
 )
 def test_feedback_validation(monkeypatch, body):
     res = _client(monkeypatch, _Pool()).post("/ai/chat/feedback", json=body)
@@ -123,8 +127,17 @@ def test_cli_merges_feedback_file(tmp_path):
     out = tmp_path / "c.jsonl"
     assert (
         miner.main(
-            ["--events-file", str(events), "--feedback-file", str(fbk), "--out", str(out)]
+            [
+                "--events-file",
+                str(events),
+                "--feedback-file",
+                str(fbk),
+                "--out",
+                str(out),
+            ]
         )
         == 0
     )
-    assert json.loads(out.read_text(encoding="utf-8").splitlines()[0])["question"] == "q"
+    assert (
+        json.loads(out.read_text(encoding="utf-8").splitlines()[0])["question"] == "q"
+    )

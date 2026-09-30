@@ -82,6 +82,36 @@ def test_runtime_reuses_shared_agent_and_rebinds_request_context(monkeypatch):
     assert document_query_two.connection is conn_two
 
 
+def test_request_context_routes_game_query_tool_to_the_baseball_connection(
+    monkeypatch,
+):
+    """GameQueryTool alone gets the baseball-pool connection when one is
+    supplied (see AgentRequestContext.create) — every other tool keeps using
+    the shared general connection, matching RAGPipeline's rag_pool pattern."""
+    monkeypatch.setattr(agent_module, "DatabaseQueryTool", _FakeTool)
+    monkeypatch.setattr(agent_module, "RegulationQueryTool", _FakeTool)
+    monkeypatch.setattr(agent_module, "GameQueryTool", _FakeTool)
+    monkeypatch.setattr(agent_module, "DocumentQueryTool", _FakeTool)
+
+    runtime = BaseballAgentRuntime(
+        llm_generator=_fake_llm_generator,
+        settings=SimpleNamespace(),
+    )
+    general_conn = SimpleNamespace(label="general")
+    baseball_conn = SimpleNamespace(label="baseball")
+
+    with runtime.request_context(general_conn, baseball_connection=baseball_conn):
+        shared_agent = runtime.shared_agent
+        assert shared_agent.connection is general_conn
+        assert shared_agent.db_query_tool.connection is general_conn
+        assert shared_agent.game_query_tool.connection is baseball_conn
+
+    # No baseball_connection supplied -> GameQueryTool falls back to the
+    # shared connection, matching pre-split behavior exactly.
+    with runtime.request_context(general_conn):
+        assert runtime.shared_agent.game_query_tool.connection is general_conn
+
+
 def test_runtime_request_context_resets_after_exit(monkeypatch):
     monkeypatch.setattr(agent_module, "DatabaseQueryTool", _FakeDbTool)
     monkeypatch.setattr(agent_module, "RegulationQueryTool", _FakeTool)

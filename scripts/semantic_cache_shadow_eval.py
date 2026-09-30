@@ -29,7 +29,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.core.semantic_cache_equivalence import check_equivalence  # noqa: E402
 
-
 MANUAL_DATA_CONTRACT = "MANUAL_BASEBALL_DATA_REQUIRED"
 NUMERIC_FACT_PATTERN = re.compile(r"(?<![0-9A-Za-z가-힣])[-+]?\d+(?:[.,]\d+)*(?:%)?")
 DEFAULT_RELEASE_MIN_SAMPLES = 100
@@ -113,9 +112,9 @@ def compare_answers(cached_answer: str, fresh_answer: str) -> Dict[str, Any]:
     cached_len = len(str(cached_answer or ""))
     fresh_len = len(str(fresh_answer or ""))
     length_ratio = round(cached_len / max(fresh_len, 1), 4)
-    manual_contract_match = (
-        MANUAL_DATA_CONTRACT in str(cached_answer or "")
-    ) == (MANUAL_DATA_CONTRACT in str(fresh_answer or ""))
+    manual_contract_match = (MANUAL_DATA_CONTRACT in str(cached_answer or "")) == (
+        MANUAL_DATA_CONTRACT in str(fresh_answer or "")
+    )
     return {
         "token_jaccard": jaccard,
         "length_ratio": length_ratio,
@@ -197,7 +196,11 @@ async def enrich_fresh_answers(
                     base_url=base_url,
                     internal_api_key=internal_api_key,
                     question=str(item.get("question") or ""),
-                    filters=item.get("filters") if isinstance(item.get("filters"), dict) else None,
+                    filters=(
+                        item.get("filters")
+                        if isinstance(item.get("filters"), dict)
+                        else None
+                    ),
                 )
             enriched.append(item)
     return enriched

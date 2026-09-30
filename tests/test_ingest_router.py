@@ -20,7 +20,9 @@ class _FakeCursor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...] | None]] = []
 
-    async def execute(self, query: str, params: tuple[object, ...] | None = None) -> None:
+    async def execute(
+        self, query: str, params: tuple[object, ...] | None = None
+    ) -> None:
         self.calls.append((query, params))
 
     async def fetchall(self) -> list[tuple[object, ...]]:
@@ -107,7 +109,9 @@ def test_ingest_document_suffixes_multi_chunk_source_rows(monkeypatch) -> None:
         conn.cursor_obj.calls[0][0]
         == "SET search_path TO public, extensions, security;"
     )
-    params = [call[1] for call in conn.cursor_obj.calls if call[1] and len(call[1]) == 25]
+    params = [
+        call[1] for call in conn.cursor_obj.calls if call[1] and len(call[1]) == 25
+    ]
     assert [item[21] for item in params] == ["rule-2#part1", "rule-2#part2"]
     assert [item[22] for item in params] == [
         "Multipart Doc (분할 1)",
@@ -123,7 +127,9 @@ def test_ingest_document_embeds_duplicate_batch_content_once(monkeypatch) -> Non
         captured_embed_inputs.append(list(chunks))
         return [[0.1, 0.2] for _ in chunks]
 
-    duplicate_chunk = "KBO 규정 설명과 경기 운영 기준을 충분히 담은 검색 가능한 문장입니다."
+    duplicate_chunk = (
+        "KBO 규정 설명과 경기 운영 기준을 충분히 담은 검색 가능한 문장입니다."
+    )
     monkeypatch.setattr(
         ingest,
         "smart_chunks",
@@ -150,7 +156,9 @@ def test_ingest_document_embeds_duplicate_batch_content_once(monkeypatch) -> Non
     assert result == {"status": "ok", "chunks": 2, "skipped": 0}
 
 
-def test_ingest_document_skips_sensitive_chunk_and_stores_valid_chunk(monkeypatch) -> None:
+def test_ingest_document_skips_sensitive_chunk_and_stores_valid_chunk(
+    monkeypatch,
+) -> None:
     captured_embed_inputs: list[list[str]] = []
 
     async def fake_embed_texts(chunks, settings):
@@ -248,6 +256,7 @@ def test_ingest_document_uses_oracle_upsert_and_part_cleanup(monkeypatch) -> Non
     payload = ingest.IngestPayload(
         title="Oracle Doc",
         content="body",
+        league_type_code=" KBO ",
         source_table="kbo_regulations",
         source_row_id="rule-oracle",
     )
@@ -255,11 +264,24 @@ def test_ingest_document_uses_oracle_upsert_and_part_cleanup(monkeypatch) -> Non
     result = asyncio.run(ingest.ingest_document(payload, object(), None, None))
 
     assert result == {"status": "ok", "chunks": 2, "stored": 2, "skipped": 0}
+    assert captured["league_type_code"] == "KBO"
     assert captured["source_prefix"] == "rule-oracle"
     assert captured["active_source_row_ids"] == [
         "rule-oracle#part1",
         "rule-oracle#part2",
     ]
+
+
+def test_ingest_payload_normalizes_empty_league_type_code_to_null() -> None:
+    payload = ingest.IngestPayload(
+        title="Oracle Doc",
+        content="body",
+        league_type_code="   ",
+        source_table="kbo_regulations",
+        source_row_id="rule-oracle-empty-league",
+    )
+
+    assert payload.league_type_code is None
 
 
 RUN_ID = UUID("44444444-4444-4444-8444-444444444444")
@@ -278,7 +300,11 @@ def _run_record(status=IngestRunStatus.QUEUED, *, table_summary=None):
         request=request,
         status=status,
         requested_at=REQUESTED_AT,
-        finished_at=REQUESTED_AT if status not in {IngestRunStatus.QUEUED, IngestRunStatus.RUNNING} else None,
+        finished_at=(
+            REQUESTED_AT
+            if status not in {IngestRunStatus.QUEUED, IngestRunStatus.RUNNING}
+            else None
+        ),
         error_code=(
             "MANUAL_BASEBALL_DATA_REQUIRED"
             if status is IngestRunStatus.MANUAL_BASEBALL_DATA_REQUIRED
@@ -312,9 +338,7 @@ def test_run_ingestion_job_persists_queue_request_without_background_task() -> N
         trigger_source="backend_scheduled",
     )
 
-    response = asyncio.run(
-        ingest.run_ingestion_job(payload, store, None, None)
-    )
+    response = asyncio.run(ingest.run_ingestion_job(payload, store, None, None))
 
     assert response.status_code == 202
     assert json.loads(response.body) == {

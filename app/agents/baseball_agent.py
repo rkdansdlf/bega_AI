@@ -44,6 +44,7 @@ from .chat_renderers import ChatRendererRegistry
 from .tool_caller import ToolCaller, ToolCall, ToolDefinition, ToolResult
 
 from ..observability.tracing import span
+
 logger = logging.getLogger(__name__)
 _PLANNER_CACHE_LOCK = RLock()
 _PLANNER_CACHE: "OrderedDict[str, tuple[float, Dict[str, Any]]]" = OrderedDict()
@@ -4136,8 +4137,7 @@ class BaseballStatisticsAgent:
         except (TypeError, ValueError):
             return False
         return any(
-            parameter.name == keyword
-            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            parameter.name == keyword or parameter.kind == inspect.Parameter.VAR_KEYWORD
             for parameter in parameters
         )
 
@@ -6348,9 +6348,7 @@ class BaseballStatisticsAgent:
                 ):
                     team_name = self._detect_team_alias_from_query(query)
                     year_match = re.search(r"(20\d{2})년", query)
-                    year = (
-                        int(year_match.group(1)) if year_match else kst_today().year
-                    )
+                    year = int(year_match.group(1)) if year_match else kst_today().year
                     if team_name:
                         heuristic_tool_calls = self._build_team_fast_path_tool_calls(
                             query, team_name, year
@@ -9426,6 +9424,7 @@ class BaseballStatisticsAgent:
                 # --- Year Correction Logic ---
                 try:
                     from ..core.entity_extractor import extract_entities_from_query
+
                     entity_filter = extract_entities_from_query(query)
                     now = kst_now()
                     current_year = now.year

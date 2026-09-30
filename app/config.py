@@ -100,9 +100,7 @@ class Settings(BaseSettings):
         6, validation_alias="AI_BASEBALL_DB_POOL_MAX_SIZE"
     )
     rag_db_pool_max_size: int = Field(8, validation_alias="AI_RAG_DB_POOL_MAX_SIZE")
-    db_connection_budget: int = Field(
-        32, validation_alias="AI_DB_CONNECTION_BUDGET"
-    )
+    db_connection_budget: int = Field(32, validation_alias="AI_DB_CONNECTION_BUDGET")
     # `auto` keeps local/dev startup compatibility. `managed` requires the
     # migration role to provision the schema before the AI process starts.
     ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
@@ -427,13 +425,19 @@ class Settings(BaseSettings):
         True, validation_alias="RAG_RELEVANCE_GUARD_ENABLED"
     )
     # score | http. "score" only reorders by existing scores (no model).
-    rag_reranker_provider: str = Field("score", validation_alias="RAG_RERANKER_PROVIDER")
+    rag_reranker_provider: str = Field(
+        "score", validation_alias="RAG_RERANKER_PROVIDER"
+    )
     rag_reranker_url: Optional[str] = Field(None, validation_alias="RAG_RERANKER_URL")
-    rag_reranker_model: Optional[str] = Field(None, validation_alias="RAG_RERANKER_MODEL")
+    rag_reranker_model: Optional[str] = Field(
+        None, validation_alias="RAG_RERANKER_MODEL"
+    )
     rag_reranker_api_key: Optional[str] = Field(
         None, validation_alias="RAG_RERANKER_API_KEY"
     )
-    rag_reranker_timeout_s: float = Field(3.0, validation_alias="RAG_RERANKER_TIMEOUT_S")
+    rag_reranker_timeout_s: float = Field(
+        3.0, validation_alias="RAG_RERANKER_TIMEOUT_S"
+    )
 
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
@@ -597,9 +601,7 @@ class Settings(BaseSettings):
     def _validate_ai_db_schema_mode(cls, value: str) -> str:
         allowed = {"auto", "managed"}
         if value not in allowed:
-            raise ValueError(
-                f"AI_DB_SCHEMA_MODE must be one of {sorted(allowed)}"
-            )
+            raise ValueError(f"AI_DB_SCHEMA_MODE must be one of {sorted(allowed)}")
         return value
 
     @field_validator("rag_backend")
@@ -824,9 +826,7 @@ class Settings(BaseSettings):
         return value
 
     @field_validator("chat_model_pricing_json")
-    def _validate_chat_model_pricing_json(
-        cls, value: Optional[str]
-    ) -> Optional[str]:
+    def _validate_chat_model_pricing_json(cls, value: Optional[str]) -> Optional[str]:
         try:
             ModelPricingCatalog.from_json(value)
         except ValueError as exc:

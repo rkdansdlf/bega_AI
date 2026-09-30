@@ -46,7 +46,6 @@ from ..observability.metrics import (
     normalize_ingest_trigger_source,
 )
 
-
 logger = logging.getLogger(__name__)
 
 _TRANSIENT_HEARTBEAT_EXCEPTIONS = (
@@ -181,7 +180,9 @@ class IngestWorker:
                 )
             else:
                 terminal_status = IngestRunStatus.SUCCEEDED
-                if bool(getattr(self.settings, "ingest_cache_invalidation_enabled", True)):
+                if bool(
+                    getattr(self.settings, "ingest_cache_invalidation_enabled", True)
+                ):
                     await self.cache_invalidator(run.request)
         finally:
             heartbeat_task.cancel()
@@ -304,9 +305,9 @@ class IngestWorker:
                 if current is None or watermark > current:
                     latest_by_label[table_label] = watermark
             for table_label, watermark in latest_by_label.items():
-                AI_INGEST_WATERMARK_LAG_SECONDS.labels(
-                    source_table=table_label
-                ).set(self._watermark_lag_seconds(watermark))
+                AI_INGEST_WATERMARK_LAG_SECONDS.labels(source_table=table_label).set(
+                    self._watermark_lag_seconds(watermark)
+                )
 
     async def _heartbeat_loop(
         self,
@@ -328,9 +329,7 @@ class IngestWorker:
         )
 
         while True:
-            safe_deadline = (
-                last_confirmed + float(self.lease_seconds) - safety_margin
-            )
+            safe_deadline = last_confirmed + float(self.lease_seconds) - safety_margin
             remaining = safe_deadline - loop.time()
             if remaining <= 0:
                 self._record_heartbeat_exhausted(
@@ -514,16 +513,18 @@ class IngestWorker:
             ):
                 continue
             table_label = self._table_label(source_table)
-            AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(
-                source_table=table_label
-            ).inc(table_result.written_chunks)
-            AI_INGEST_TABLE_SOURCE_ROWS_TOTAL.labels(
-                source_table=table_label
-            ).inc(table_result.source_rows)
+            AI_INGEST_TABLE_WRITTEN_CHUNKS_TOTAL.labels(source_table=table_label).inc(
+                table_result.written_chunks
+            )
+            AI_INGEST_TABLE_SOURCE_ROWS_TOTAL.labels(source_table=table_label).inc(
+                table_result.source_rows
+            )
 
     @staticmethod
     def _watermark_lag_seconds(watermark: datetime) -> float:
         normalized = watermark
         if normalized.tzinfo is None:
             normalized = normalized.replace(tzinfo=UTC)
-        return max(0.0, (datetime.now(UTC) - normalized.astimezone(UTC)).total_seconds())
+        return max(
+            0.0, (datetime.now(UTC) - normalized.astimezone(UTC)).total_seconds()
+        )

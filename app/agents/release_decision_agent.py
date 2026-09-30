@@ -71,7 +71,7 @@ SCENARIO_PRESETS: dict[str, ScenarioPreset] = {
             "docs/qa/prediction_stage1_sync_summary_latest.md",
             "docs/qa/prediction_stage1_monitoring_20260305_20260306.md",
         ),
-        allowed_roots=("docs/qa", "scripts"),
+        allowed_roots=("docs/qa",),
     ),
     "stadium_release": ScenarioPreset(
         name="stadium_release",
@@ -85,7 +85,7 @@ SCENARIO_PRESETS: dict[str, ScenarioPreset] = {
             "docs/qa/stadium-guide-smoke-staging-20260304.md",
             "docs/qa/stadium-food-response-runbook-20260304.md",
         ),
-        allowed_roots=("docs/qa", "reports", "bega_backend/docs"),
+        allowed_roots=("docs/qa",),
     ),
 }
 
@@ -159,7 +159,7 @@ class WorkspaceDocumentTools:
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.max_file_bytes = max_file_bytes
-        self.allowed_extensions = {".md", ".txt", ".json", ".log", ".ndjson"}
+        self.allowed_extensions = {".md", ".txt", ".json"}
         self.allowed_roots = self._normalize_allowed_roots(allowed_roots)
         self._text_cache: dict[Path, str] = {}
 
@@ -172,6 +172,9 @@ class WorkspaceDocumentTools:
     def _normalize_allowed_roots(self, roots: Sequence[Path | str]) -> list[Path]:
         normalized: list[Path] = []
         for root in roots:
+            raw_root = root if isinstance(root, Path) else Path(root)
+            if raw_root.is_symlink():
+                continue
             if isinstance(root, Path) and root.is_absolute():
                 candidate = root.resolve()
             else:
@@ -179,10 +182,12 @@ class WorkspaceDocumentTools:
             if candidate.exists() and self._is_within_workspace(candidate):
                 normalized.append(candidate)
         if not normalized:
-            normalized.append(self.workspace_root)
+            raise ValueError("at least one valid allowed document root is required")
         return normalized
 
     def _is_allowed(self, path: Path) -> bool:
+        if path.is_symlink():
+            return False
         resolved = path.resolve()
         if resolved.suffix.lower() not in self.allowed_extensions:
             return False
@@ -345,6 +350,8 @@ class ResponsesReleaseDecisionAgent:
         model: str | None = None,
         max_tool_rounds: int = 6,
         max_output_tokens: int = 2200,
+        request_timeout_seconds: float = 75.0,
+        max_attempts: int = 3,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.tools = WorkspaceDocumentTools(
@@ -356,7 +363,11 @@ class ResponsesReleaseDecisionAgent:
             raise ValueError(
                 "OPENAI_API_KEY is required to use ResponsesReleaseDecisionAgent"
             )
-        self.client = client or OpenAI(api_key=resolved_api_key)
+        self.client = client or OpenAI(
+            api_key=resolved_api_key,
+            timeout=max(1.0, float(request_timeout_seconds)),
+            max_retries=max(0, int(max_attempts) - 1),
+        )
         self.model = model or os.environ.get("OPENAI_RESPONSES_MODEL", "gpt-4.1-mini")
         self.max_tool_rounds = max(1, int(max_tool_rounds))
         self.max_output_tokens = max(400, int(max_output_tokens))

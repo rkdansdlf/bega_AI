@@ -13,12 +13,13 @@ import hashlib
 import json
 import re
 import unicodedata
-from datetime import date
 from typing import Any, Dict, Optional, Tuple
+
+from app.core.time import kst_today
 
 # 캐시 스키마 버전.
 # 프롬프트·정규화 방식이 변경될 때 올리면 기존 캐시가 자동 미스 처리됨.
-CHAT_CACHE_SCHEMA_VERSION = "v12"
+CHAT_CACHE_SCHEMA_VERSION = "v13"
 
 # intent별 TTL (초 단위).
 # stats_lookup/comparison/recent_form은 짧게, 선수 프로필·규정 설명은 길게.
@@ -33,6 +34,8 @@ INTENT_TTL_SECONDS: Dict[str, int] = {
     "freeform": 12 * 3600,  # 12h - 기타 (기본값)
 }
 DEFAULT_TTL_SECONDS = 12 * 3600
+CURRENT_SEASON_CACHE_TTL_SECONDS = 5 * 60
+CURRENT_SEASON_TERMS = ("올해", "금년", "이번 시즌", "올시즌")
 
 # 실시간 키워드 감지 집합.
 # 아래 키워드가 포함된 질문은 캐싱을 건너뜀 (오늘 경기, 현재 순위 등).
@@ -52,6 +55,9 @@ TEMPORAL_KEYWORDS = frozenset(
         "순위표",
         "오늘의",
         "올시즌",  # 진행 중인 시즌 → 실시간 통계 변동
+        "올해",
+        "금년",
+        "이번 시즌",
         "예상",  # 현재 데이터 기반 전망 → 자주 바뀔 수 있음
         "전망",  # 동상: 현재 흐름에 따라 변동
     }
@@ -102,11 +108,39 @@ def _normalize_filters(filters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def get_ttl_seconds(intent: Optional[str]) -> int:
+def _is_current_season_query(
+    question: str | None,
+    filters: Optional[Dict[str, Any]],
+) -> bool:
+    normalized = _normalize_question(question or "")
+    current_year = kst_today().year
+    if any(term in normalized for term in CURRENT_SEASON_TERMS):
+        return True
+    if re.search(rf"(?<!\d){current_year}(?:년)?(?!\d)", normalized):
+        return True
+    normalized_filters = _normalize_filters(filters)
+    for key in ("season_year", "season", "year"):
+        value = normalized_filters.get(key)
+        if value is not None and str(value).strip() == str(current_year):
+            return True
+    return False
+
+
+def get_ttl_seconds(
+    intent: Optional[str],
+    *,
+    question: str | None = None,
+    filters: Optional[Dict[str, Any]] = None,
+) -> int:
     """intent 문자열을 기반으로 TTL(초)를 반환합니다."""
-    if not intent:
-        return DEFAULT_TTL_SECONDS
-    return INTENT_TTL_SECONDS.get(intent, DEFAULT_TTL_SECONDS)
+    ttl_seconds = (
+        INTENT_TTL_SECONDS.get(intent, DEFAULT_TTL_SECONDS)
+        if intent
+        else DEFAULT_TTL_SECONDS
+    )
+    if _is_current_season_query(question, filters):
+        return min(ttl_seconds, CURRENT_SEASON_CACHE_TTL_SECONDS)
+    return ttl_seconds
 
 
 def has_temporal_keyword(question: str) -> bool:
@@ -119,7 +153,7 @@ def has_temporal_keyword(question: str) -> bool:
     normalized = question.lower()
     if any(kw in normalized for kw in TEMPORAL_KEYWORDS):
         return True
-    current_year_marker = f"{date.today().year}년"
+    current_year_marker = f"{kst_today().year}년"
     if current_year_marker in normalized and any(
         kw in normalized
         for kw in (

@@ -159,6 +159,32 @@ def test_rag_url_splits_without_dragging_the_caches_along(build_settings) -> Non
     assert settings.baseball_db_url.endswith("/bb")
 
 
+def test_oracle_baseball_url_selects_the_native_baseball_pool(monkeypatch) -> None:
+    """Same branch shape as the RAG pool — baseball reuses the SQL-dialect
+    approach (see ``QueryDialect``) rather than a parallel storage model, but
+    the pool selection itself is identical: Oracle scheme -> Oracle pool."""
+    from types import SimpleNamespace
+
+    import app.deps as deps
+    from app.core.oracle_baseball import OracleBaseballPool
+
+    monkeypatch.setattr(deps, "_baseball_connection_pool", None)
+    monkeypatch.setattr(
+        deps,
+        "get_settings",
+        lambda: SimpleNamespace(
+            baseball_db_url="oracle+oracledb://bb_user:password@adb_medium",
+            ai_baseball_db_url="oracle+oracledb://bb_user:password@adb_medium",
+            baseball_db_pool_max_size=4,
+        ),
+    )
+
+    pool = deps.get_baseball_connection_pool()
+
+    assert isinstance(pool, OracleBaseballPool)
+    assert pool.backend == "oracle"
+
+
 def test_oracle_rag_url_selects_the_native_rag_pool(monkeypatch) -> None:
     from types import SimpleNamespace
 
@@ -170,8 +196,10 @@ def test_oracle_rag_url_selects_the_native_rag_pool(monkeypatch) -> None:
         deps,
         "get_settings",
         lambda: SimpleNamespace(
-            rag_db_url="oracle+oracledb://rag_user:password@adb_high",
-            ai_rag_db_url="oracle+oracledb://rag_user:password@adb_high",
+            app_env="local",
+            rag_profile="local-oracle",
+            rag_backend="oracle",
+            ai_rag_db_url=("oracle+oracledb://rag_user:password@oracle-db/FREEPDB1"),
             rag_db_pool_max_size=4,
         ),
     )

@@ -100,7 +100,9 @@ def merge_feedback(
             report["candidates"].append(cand)
         cand["observed_count"] += 1
         if "negative_feedback" not in cand["failure_modes"]:
-            cand["failure_modes"] = sorted(cand["failure_modes"] + ["negative_feedback"])
+            cand["failure_modes"] = sorted(
+                cand["failure_modes"] + ["negative_feedback"]
+            )
         if row.get("corrected_fact"):
             cand.setdefault("corrected_facts", []).append(str(row["corrected_fact"]))
     report["candidates"].sort(key=lambda c: (-c["observed_count"], c["question"]))

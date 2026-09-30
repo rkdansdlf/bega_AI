@@ -4,6 +4,7 @@ similarity_search_with_fallback() 단위 테스트.
 DB 연결 없이 similarity_search를 mock으로 교체하여 4단계 필터 완화 로직,
 내부 필터 보존, min_results 경계값, 반환 형식을 검증한다.
 """
+
 from __future__ import annotations
 
 import sys
@@ -32,11 +33,13 @@ CONN = MagicMock()  # psycopg.Connection mock (실제 DB 호출 없음)
 
 _PATCH_TARGET = "app.core.retrieval.similarity_search"
 
+
 def _full_filters() -> Dict[str, Any]:
     return {"season_year": 2024, "team_id": "KIA", "source_table": "batting_season"}
 
 
 # ── TestFallbackLevelProgression ──────────────────────────────────────────────
+
 
 class TestFallbackLevelProgression:
     @pytest.mark.asyncio
@@ -74,7 +77,10 @@ class TestFallbackLevelProgression:
         side_effects = [[], [], [MOCK_DOC]]
         with patch(_PATCH_TARGET, side_effect=side_effects) as mock_ss:
             results, level = await similarity_search_with_fallback(
-                CONN, DUMMY_EMBEDDING, limit=5, filters=_full_filters(),
+                CONN,
+                DUMMY_EMBEDDING,
+                limit=5,
+                filters=_full_filters(),
                 intent="knowledge_explanation",
             )
         assert level == "level_3"
@@ -91,7 +97,10 @@ class TestFallbackLevelProgression:
         side_effects = [[], [], [], [MOCK_DOC]]
         with patch(_PATCH_TARGET, side_effect=side_effects) as mock_ss:
             results, level = await similarity_search_with_fallback(
-                CONN, DUMMY_EMBEDDING, limit=5, filters=_full_filters(),
+                CONN,
+                DUMMY_EMBEDDING,
+                limit=5,
+                filters=_full_filters(),
                 intent="knowledge_explanation",
             )
         assert level == "level_4"
@@ -109,7 +118,10 @@ class TestFallbackLevelProgression:
         """모든 레벨 소진 시 빈 리스트와 exhausted 레벨 문자열 반환."""
         with patch(_PATCH_TARGET, return_value=[]) as mock_ss:
             results, level = await similarity_search_with_fallback(
-                CONN, DUMMY_EMBEDDING, limit=5, filters=_full_filters(),
+                CONN,
+                DUMMY_EMBEDDING,
+                limit=5,
+                filters=_full_filters(),
                 intent="knowledge_explanation",
             )
         assert results == []
@@ -124,6 +136,7 @@ class TestFallbackLevelProgression:
 
 
 # ── TestFallbackFilterIsolation ───────────────────────────────────────────────
+
 
 class TestFallbackFilterIsolation:
     @pytest.mark.asyncio
@@ -194,6 +207,7 @@ class TestFallbackFilterIsolation:
 
 # ── TestFallbackMinResults ────────────────────────────────────────────────────
 
+
 class TestFallbackMinResults:
     @pytest.mark.asyncio
     async def test_min_results_default_is_1(self):
@@ -232,6 +246,7 @@ class TestFallbackMinResults:
 
 # ── TestFallbackReturnFormat ──────────────────────────────────────────────────
 
+
 class TestFallbackReturnFormat:
     @pytest.mark.asyncio
     async def test_return_type_is_tuple(self):
@@ -258,19 +273,25 @@ class TestFallbackReturnFormat:
             )
         assert isinstance(level, str)
 
-    @pytest.mark.parametrize("num_empty,expected_level", [
-        (0, "level_1"),
-        (1, "level_2"),
-        (2, "level_3"),
-        (3, "level_4"),
-    ])
+    @pytest.mark.parametrize(
+        "num_empty,expected_level",
+        [
+            (0, "level_1"),
+            (1, "level_2"),
+            (2, "level_3"),
+            (3, "level_4"),
+        ],
+    )
     @pytest.mark.asyncio
     async def test_level_string_format(self, num_empty, expected_level):
         """각 fallback 레벨이 올바른 문자열 형식으로 반환됨."""
         side_effects = [[]] * num_empty + [[MOCK_DOC]]
         with patch(_PATCH_TARGET, side_effect=side_effects):
             _, level = await similarity_search_with_fallback(
-                CONN, DUMMY_EMBEDDING, limit=5, filters=_full_filters(),
+                CONN,
+                DUMMY_EMBEDDING,
+                limit=5,
+                filters=_full_filters(),
                 intent="knowledge_explanation",
             )
         assert level == expected_level

@@ -126,9 +126,10 @@ def _oracle_connect_args(conninfo: str) -> dict[str, Any]:
         # wallet_location for the TLS identity (cwallet.sso).
         args["config_dir"] = tns_admin
         args["wallet_location"] = tns_admin
-        # Autonomous wallets generated with the user password reuse it as the
-        # PEM passphrase (same fallback as src/db/engine.py).
-        wallet_password = os.getenv("OCI_WALLET_PASSWORD") or args["password"] or None
+        # Thin mode needs the password chosen when the wallet was downloaded.
+        # It is independent from the database user's password; never guess it
+        # from the credential-bearing connection URL.
+        wallet_password = os.getenv("OCI_WALLET_PASSWORD") or None
         if wallet_password:
             args["wallet_password"] = wallet_password
     return args
@@ -761,17 +762,18 @@ _ORACLE_RAG_MERGE_SQL = """
         target.indexed_at = :indexed_at,
         target.embedding_vector = :embedding_vector,
         target.season_year = :season_year,
+        target.league_type_code = :league_type_code,
         target.team_id = :team_id,
         target.player_id = :player_id,
         target.updated_at = :indexed_at
     WHEN NOT MATCHED THEN INSERT (
         source_table, source_row_id, title, content, meta, content_hash,
         index_version, index_status, indexed_at, embedding_vector,
-        season_year, team_id, player_id, created_at, updated_at
+        season_year, league_type_code, team_id, player_id, created_at, updated_at
     ) VALUES (
         :source_table, :source_row_id, :title, :content, :meta, :content_hash,
         :index_version, 'ACTIVE', :indexed_at, :embedding_vector,
-        :season_year, :team_id, :player_id, :indexed_at, :indexed_at
+        :season_year, :league_type_code, :team_id, :player_id, :indexed_at, :indexed_at
     )
 """
 
@@ -876,6 +878,7 @@ async def upsert_oracle_rag_chunks(
     records: Sequence[tuple[Any, str, str, str, Mapping[str, Any]]],
     embeddings: Sequence[Sequence[float] | None],
     season_year: int | None = None,
+    league_type_code: str | None = None,
     team_id: str | None = None,
     player_id: str | None = None,
     source_prefix: str | None = None,
@@ -906,6 +909,7 @@ async def upsert_oracle_rag_chunks(
                         "f", [float(value) for value in embedding]
                     ),
                     "season_year": season_year,
+                    "league_type_code": league_type_code,
                     "team_id": team_id,
                     "player_id": player_id,
                 },

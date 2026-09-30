@@ -46,7 +46,7 @@ def test_initialize_shared_baseball_agent_runtime_is_idempotent(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_agent_uses_request_context_and_shared_agent(monkeypatch):
-    request_context_calls: list[tuple[str, object]] = []
+    request_context_calls: list[tuple[str, object, object]] = []
     shared_agent = object()
 
     class _FakeRuntime:
@@ -54,25 +54,29 @@ async def test_get_agent_uses_request_context_and_shared_agent(monkeypatch):
             self.shared_agent = shared_agent
 
         @contextmanager
-        def request_context(self, connection):
-            request_context_calls.append(("enter", connection))
+        def request_context(self, connection, *, baseball_connection=None):
+            request_context_calls.append(("enter", connection, baseball_connection))
             try:
                 yield
             finally:
-                request_context_calls.append(("exit", connection))
+                request_context_calls.append(("exit", connection, baseball_connection))
 
     monkeypatch.setattr(
         deps, "get_shared_baseball_agent_runtime", lambda: _FakeRuntime()
     )
 
     conn_one = object()
-    agent_dependency = deps.get_agent(conn_one)
+    baseball_conn_one = object()
+    agent_dependency = deps.get_agent(conn_one, baseball_conn_one)
 
     assert await anext(agent_dependency) is shared_agent
-    assert request_context_calls == [("enter", conn_one)]
+    assert request_context_calls == [("enter", conn_one, baseball_conn_one)]
     with pytest.raises(StopAsyncIteration):
         await anext(agent_dependency)
-    assert request_context_calls == [("enter", conn_one), ("exit", conn_one)]
+    assert request_context_calls == [
+        ("enter", conn_one, baseball_conn_one),
+        ("exit", conn_one, baseball_conn_one),
+    ]
 
 
 def test_get_rag_pipeline_uses_shared_runtime(monkeypatch):
@@ -87,9 +91,39 @@ def test_get_rag_pipeline_uses_shared_runtime(monkeypatch):
     monkeypatch.setattr(deps, "get_shared_baseball_agent_runtime", lambda: fake_runtime)
     monkeypatch.setattr(deps, "RAGPipeline", _FakePipeline)
     monkeypatch.setattr(deps, "get_rag_connection_pool", lambda: fake_pool)
+    monkeypatch.setattr(deps, "get_baseball_connection_pool", lambda: fake_pool)
 
     pipeline = deps.get_rag_pipeline()
 
     assert pipeline is not None
     assert captured["agent_runtime"] is fake_runtime
     assert captured["pool"] is fake_pool
+    # Neither pool declares an "oracle" backend here, so both split-pool
+    # kwargs stay None — GameQueryTool/RAG retrieval keep using `pool`.
+    assert captured["rag_pool"] is None
+    assert captured["baseball_pool"] is None
+
+
+def test_get_rag_pipeline_passes_the_oracle_baseball_pool_through(monkeypatch):
+    """Mirrors the RAG pool's Oracle branch — see get_rag_pipeline()'s
+    docstring. Only an Oracle-backed baseball pool is passed as
+    `baseball_pool`; RAGPipeline falls back to the general pool otherwise."""
+    captured: dict[str, object] = {}
+    fake_runtime = object()
+    fake_general_pool = SimpleNamespace(backend="postgres")
+    fake_baseball_pool = SimpleNamespace(backend="oracle")
+
+    class _FakePipeline:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(deps, "get_shared_baseball_agent_runtime", lambda: fake_runtime)
+    monkeypatch.setattr(deps, "RAGPipeline", _FakePipeline)
+    monkeypatch.setattr(deps, "get_rag_connection_pool", lambda: fake_general_pool)
+    monkeypatch.setattr(
+        deps, "get_baseball_connection_pool", lambda: fake_baseball_pool
+    )
+
+    deps.get_rag_pipeline()
+
+    assert captured["baseball_pool"] is fake_baseball_pool
