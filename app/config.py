@@ -8,7 +8,7 @@ import logging
 import json
 import os
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Literal, Optional
 from urllib.parse import urlparse
 
 from pydantic import Field, PrivateAttr, field_validator
@@ -425,6 +425,11 @@ class Settings(BaseSettings):
     # RAG_GENERATION_GATE_ENABLED=true (Oracle has no generation registry).
     rag_oracle_active_index_version: Optional[str] = Field(
         None, validation_alias="RAG_ORACLE_ACTIVE_INDEX_VERSION"
+    )
+    # inline: rag_chunks.embedding (default). generations: per-generation rows in
+    # rag_chunk_embeddings (migration 009) served from the ACTIVE generation.
+    rag_embedding_store: Literal["inline", "generations"] = Field(
+        "inline", validation_alias="RAG_EMBEDDING_STORE"
     )
     rag_relevance_guard_enabled: bool = Field(
         True, validation_alias="RAG_RELEVANCE_GUARD_ENABLED"

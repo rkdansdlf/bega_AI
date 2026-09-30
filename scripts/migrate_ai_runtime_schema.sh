@@ -35,6 +35,12 @@ psql --set ON_ERROR_STOP=1 \
   --file "${AI_ROOT}/app/db/migrations/008_rag_answer_feedback.sql" \
   "${DB_URL}"
 
+# Physical embedding generations. Inert until RAG_EMBEDDING_STORE=generations;
+# requires 005 (rag_chunks columns) and 007 (generation registry).
+psql --set ON_ERROR_STOP=1 \
+  --file "${AI_ROOT}/app/db/migrations/009_rag_chunk_embeddings.sql" \
+  "${DB_URL}"
+
 case "${CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED:-false}" in
   1|true|TRUE|yes|YES)
     psql --set ON_ERROR_STOP=1 \
