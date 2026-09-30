@@ -6,8 +6,15 @@
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Iterable, Optional
 import math
+
+# 자체 계산(추정) 지표의 계산식 버전. 공식 기록(DB 저장값)과 구분하기 위해
+# 응답 provenance 에 함께 기록한다. 계산식/기본 상수를 바꾸면 올린다.
+METRIC_METHOD_VERSION = "kbo_metrics_v1"
+DEFAULT_CONSTANTS_SOURCE = "default_placeholder"
+# 자체 계산이 "추정"으로 표기되어야 하는 지표들.
+DERIVED_METRICS = frozenset({"wRC+", "OPS+", "WAR", "wOBA", "FIP", "ERA-", "FIP-"})
 
 
 @dataclass
@@ -34,6 +41,36 @@ class LeagueContext:
     runs_per_win: float = 10.0
     lg_ra9: float = 4.50
     fip_const: float = 3.10
+    # 상수의 출처. 시즌별로 보정된 값이 아니면 기본값(placeholder)이다.
+    season: Optional[int] = None
+    constants_source: str = DEFAULT_CONSTANTS_SOURCE
+
+    @property
+    def is_season_calibrated(self) -> bool:
+        return self.season is not None and (
+            self.constants_source != DEFAULT_CONSTANTS_SOURCE
+        )
+
+
+def metric_provenance(
+    metrics: Iterable[str], ctx: Optional["LeagueContext"] = None
+) -> Dict[str, Any]:
+    """자체 계산 지표의 provenance. 공식 기록이 아님을 명시한다."""
+    ctx = ctx or LeagueContext()
+    return {
+        "estimated": True,
+        "estimated_metrics": sorted(set(metrics)),
+        "metric_method": "simplified_formula",
+        "metric_version": METRIC_METHOD_VERSION,
+        "league_context_source": ctx.constants_source,
+        "league_context_season": ctx.season,
+        "season_calibrated": ctx.is_season_calibrated,
+    }
+
+
+def estimated_label(metric: str, ctx: Optional["LeagueContext"] = None) -> str:
+    """사용자 노출용 라벨: 보정되지 않은 상수로 계산된 값은 '(추정)'."""
+    return f"{metric}(추정)"
 
 
 def slg(H: int, doubles: int, triples: int, HR: int, AB: int) -> Optional[float]:

@@ -34,6 +34,7 @@ REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = {
         "hit_count",
         "created_at",
         "expires_at",
+        "provenance_json",
     ),
     "chat_semantic_response_cache": (
         "cache_key",
@@ -49,6 +50,7 @@ REQUIRED_COLUMNS: Mapping[str, tuple[str, ...]] = {
         "hit_count",
         "created_at",
         "expires_at",
+        "provenance_json",
     ),
     "chat_semantic_cache_shadow_observation": (
         "id",

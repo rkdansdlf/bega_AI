@@ -10,8 +10,10 @@ CREATE TABLE IF NOT EXISTS chat_response_cache (
     model_name     VARCHAR(100),
     hit_count      INTEGER      NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    expires_at     TIMESTAMPTZ  NOT NULL
+    expires_at     TIMESTAMPTZ  NOT NULL,
+    provenance_json JSONB
 );
+ALTER TABLE chat_response_cache ADD COLUMN IF NOT EXISTS provenance_json JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_chat_cache_expires_at ON chat_response_cache(expires_at);
 CREATE INDEX IF NOT EXISTS idx_chat_cache_created_at ON chat_response_cache(created_at);

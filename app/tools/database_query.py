@@ -4380,7 +4380,7 @@ class DatabaseQueryTool:
         }.get(form_status, "보합세")
         return (
             f"{player_name}는 {status_label}입니다. "
-            f"시즌 wRC+ {_round_metric(wrc_plus, 1) or 0:.1f}, OPS+ {_round_metric(ops_plus, 1) or 0:.1f}, "
+            f"시즌 wRC+(추정) {_round_metric(wrc_plus, 1) or 0:.1f}, OPS+(추정) {_round_metric(ops_plus, 1) or 0:.1f}, "
             f"최근 OPS {_round_metric(recent_ops, 3) or 0:.3f}, ISO {_round_metric(recent_iso, 3) or 0:.3f}, "
             f"최근 WPA/PA {_format_signed_metric(recent_wpa_per_pa, 4)}가 겹칩니다."
         )
@@ -4578,6 +4578,9 @@ class DatabaseQueryTool:
                             "plate_appearances": plate_appearances,
                             "ops_plus": _round_metric(ops_plus, 1),
                             "wrc_plus": _round_metric(wrc_plus, 1),
+                            "metric_provenance": kbo_metrics.metric_provenance(
+                                ["wRC+", "OPS+"], _LEAGUE_CONTEXT
+                            ),
                         },
                         "recent_metrics": recent_window,
                         "clutch_metrics": {

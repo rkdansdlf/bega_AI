@@ -420,7 +420,8 @@ class TestRunDbDownPath:
 
         async def fake_retrieve(_query, *, filters=None, **_kwargs):
             calls.append(dict(filters or {}))
-            if filters == {"season_year": 2025}:
+            # Only a doc for a *different* team (no team filter) exists.
+            if "team_id" not in (filters or {}):
                 return [fake_doc]
             return []
 
@@ -467,26 +468,22 @@ class TestRunDbDownPath:
             return result, mock_event
 
         result, mock_event = asyncio.run(run())
-        assert calls == [
-            {"source_table": "markdown_docs", "team_id": "LG", "season_year": 2025},
-            {"team_id": "LG", "season_year": 2025},
-            {"season_year": 2025},
-        ]
+        # 핵심 entity(team_id/season_year)는 절대 완화되지 않는다.
+        assert calls, "retrieval must have been attempted"
+        assert all(
+            c.get("team_id") == "LG" and c.get("season_year") == 2025 for c in calls
+        )
+        assert {"team_id": "LG", "season_year": 2025} in calls
         metadata_filter = mock_event.call_args.kwargs["metadata_filter"]
         assert metadata_filter["original_filters"] == search_strategy["db_filters"]
-        assert metadata_filter["actual_filters"] == {"season_year": 2025}
+        assert metadata_filter["actual_filters"]["team_id"] == "LG"
+        assert metadata_filter["actual_filters"]["season_year"] == 2025
         assert metadata_filter["fallback_used"] is True
-        assert metadata_filter["fallback_stage"] == "without_team_id"
-        citation = result["citations"][0]
-        assert citation["id"] == 42
-        assert citation["title"] == "LG 2025"
-        assert citation["source_table"] == "team_summary"
-        assert citation["source_row_id"] == "team_id=LG|season_year=2025"
-        assert citation["source_uri"] == "db:team_summary:team_id=LG|season_year=2025"
-        assert citation["similarity"] == 0.81
-        assert citation["combined_score"] == 0.05
-        assert citation["quality_score"] == 0.85
-        assert citation["topic_key"] == "kbo.team.2025.lg"
+        assert metadata_filter["constraint_relaxed"] is True
+        assert "team_id" not in metadata_filter["relaxed_fields"]
+        assert "season_year" not in metadata_filter["relaxed_fields"]
+        # 다른 팀 문서만 존재 → 근거 없음으로 처리되어 인용되지 않는다.
+        assert not result.get("citations")
 
     def test_default_season_year_prefers_setting_then_current_year(self):
         """기준 시즌은 설정값을 우선하고, 없으면 현재 연도로 폴백해야 한다."""

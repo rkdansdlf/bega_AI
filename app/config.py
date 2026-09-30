@@ -6,6 +6,7 @@
 
 import logging
 import json
+import os
 from functools import lru_cache
 from typing import List, Optional
 from urllib.parse import urlparse
@@ -29,7 +30,6 @@ DEFAULT_VISION_MODEL = "google/gemma-4-31b-it:free"
 DEFAULT_VISION_FALLBACK_MODELS = "mistralai/mistral-small-3.2-24b-instruct"
 DEFAULT_EMBED_DIM = 1536
 DEFAULT_OPENROUTER_EMBED_MODEL = "perplexity/pplx-embed-v1-4b"
-ORACLE_RAG_URL_PREFIXES = ("oracle+oracledb://", "oracle://")
 
 
 class Settings(BaseSettings):
@@ -87,7 +87,22 @@ class Settings(BaseSettings):
     # 요청마다 쓰기가 발생하므로 여기로 따라가지 않고 database_url 에 남는다.
     # oracle+oracledb URL이면 RAG 전용 pool만 python-oracledb를 사용한다.
     ai_rag_db_url: Optional[str] = Field(None, validation_alias="AI_RAG_DB_URL")
+    # RAG 저장소는 URL scheme로 추론하지 않는다. profile/backend를 명시해야
+    # writer, reader, readiness가 하나의 adapter를 공유할 수 있다.
+    rag_profile: Optional[str] = Field(None, validation_alias="RAG_PROFILE")
+    rag_backend: Optional[str] = Field(None, validation_alias="RAG_BACKEND")
     oracle_tns_admin: Optional[str] = Field(None, validation_alias="TNS_ADMIN")
+    db_pool_max_size: int = Field(16, validation_alias="AI_DB_POOL_MAX_SIZE")
+    ingest_db_pool_max_size: int = Field(
+        2, validation_alias="AI_INGEST_DB_POOL_MAX_SIZE"
+    )
+    baseball_db_pool_max_size: int = Field(
+        6, validation_alias="AI_BASEBALL_DB_POOL_MAX_SIZE"
+    )
+    rag_db_pool_max_size: int = Field(8, validation_alias="AI_RAG_DB_POOL_MAX_SIZE")
+    db_connection_budget: int = Field(
+        32, validation_alias="AI_DB_CONNECTION_BUDGET"
+    )
     # `auto` keeps local/dev startup compatibility. `managed` requires the
     # migration role to provision the schema before the AI process starts.
     ai_db_schema_mode: str = Field("auto", validation_alias="AI_DB_SCHEMA_MODE")
@@ -106,14 +121,20 @@ class Settings(BaseSettings):
     _legacy_source_db_warned: bool = PrivateAttr(default=False)
 
     def model_post_init(self, __context) -> None:
-        if (
-            self.ai_rag_db_url
-            and self.ai_rag_db_url.lower().startswith(ORACLE_RAG_URL_PREFIXES)
-            and self.ingest_worker_enabled
-        ):
+        if self.rag_backend in {"oracle", "fake"} and self.ingest_worker_enabled:
             raise RuntimeError(
                 "AI_INGEST_WORKER_ENABLED=false is required when AI_RAG_DB_URL "
-                "uses Oracle; the background batch writer is PostgreSQL-only"
+                "and RAG_BACKEND select a non-PostgreSQL backend; the background batch writer "
+                "is PostgreSQL-only"
+            )
+        if (
+            self.rag_backend == "postgres"
+            and self.ingest_worker_enabled
+            and (self.ai_rag_db_url or self.oci_db_url or self.legacy_source_db_url)
+        ):
+            raise RuntimeError(
+                "AI_INGEST_WORKER_ENABLED=false is required unless the worker and "
+                "runtime use the same selected PostgreSQL RAG URL"
             )
         if (
             self.llm_provider == "openrouter"
@@ -149,6 +170,13 @@ class Settings(BaseSettings):
     openai_embed_model: str = Field(
         "text-embedding-3-small", validation_alias="OPENAI_EMBED_MODEL"
     )
+    ai_model_max_concurrency: int = Field(
+        4, validation_alias="AI_MODEL_MAX_CONCURRENCY"
+    )
+    ai_model_request_deadline_seconds: float = Field(
+        75.0, validation_alias="AI_MODEL_REQUEST_DEADLINE_SECONDS"
+    )
+    ai_model_max_attempts: int = Field(3, validation_alias="AI_MODEL_MAX_ATTEMPTS")
 
     # --- OpenRouter 설정 ---
     openrouter_api_key: Optional[str] = Field(
@@ -325,8 +353,8 @@ class Settings(BaseSettings):
 
     # --- 검색(Retrieval) 관련 설정 ---
     # 200,000+ chunk 환경에서 top-k=3은 recall이 낮아 오답률을 높인다.
-    # 운영(.env)은 24로 오버라이드되어 있고, 본 기본값은 dev/test 시 합리적인 동작을 보장.
-    default_search_limit: int = Field(10, validation_alias="DEFAULT_SEARCH_LIMIT")
+    # 운영과 dev/test가 같은 retrieval profile을 사용해 회귀를 조기에 드러낸다.
+    default_search_limit: int = Field(24, validation_alias="DEFAULT_SEARCH_LIMIT")
     default_kbo_season_year: Optional[int] = Field(
         None, validation_alias="DEFAULT_KBO_SEASON_YEAR"
     )
@@ -388,6 +416,24 @@ class Settings(BaseSettings):
         20, validation_alias="RAG_RERANK_CANDIDATE_LIMIT"
     )
     rag_context_limit: int = Field(10, validation_alias="RAG_CONTEXT_LIMIT")
+    ingest_cache_invalidation_enabled: bool = Field(
+        True, validation_alias="INGEST_CACHE_INVALIDATION_ENABLED"
+    )
+    # Restrict retrieval to the ACTIVE embedding generation (migration 007).
+    rag_generation_gate_enabled: bool = Field(
+        False, validation_alias="RAG_GENERATION_GATE_ENABLED"
+    )
+    rag_relevance_guard_enabled: bool = Field(
+        True, validation_alias="RAG_RELEVANCE_GUARD_ENABLED"
+    )
+    # score | http. "score" only reorders by existing scores (no model).
+    rag_reranker_provider: str = Field("score", validation_alias="RAG_RERANKER_PROVIDER")
+    rag_reranker_url: Optional[str] = Field(None, validation_alias="RAG_RERANKER_URL")
+    rag_reranker_model: Optional[str] = Field(None, validation_alias="RAG_RERANKER_MODEL")
+    rag_reranker_api_key: Optional[str] = Field(
+        None, validation_alias="RAG_RERANKER_API_KEY"
+    )
+    rag_reranker_timeout_s: float = Field(3.0, validation_alias="RAG_RERANKER_TIMEOUT_S")
 
     # --- SSE / 채팅 관련 설정 ---
     # Coach 분석 등 상세 응답에 충분한 토큰 수 필요 (기본값 4096)
@@ -528,6 +574,14 @@ class Settings(BaseSettings):
 
     # --- Monitoring ---
     sentry_dsn: Optional[str] = Field(None, validation_alias="SENTRY_DSN")
+    # 0.0–1.0. Default 1.0 preserves the previous fixed behaviour; lower it in
+    # production (e.g. 0.1) to cut tracing/profiling overhead and cost.
+    sentry_traces_sample_rate: float = Field(
+        1.0, ge=0.0, le=1.0, validation_alias="SENTRY_TRACES_SAMPLE_RATE"
+    )
+    sentry_profiles_sample_rate: float = Field(
+        1.0, ge=0.0, le=1.0, validation_alias="SENTRY_PROFILES_SAMPLE_RATE"
+    )
 
     @field_validator("embed_provider")
     def _validate_embed_provider(cls, value: str) -> str:
@@ -548,6 +602,45 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("rag_backend")
+    def _validate_rag_backend(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        allowed = {"oracle", "postgres", "fake"}
+        if normalized not in allowed:
+            raise ValueError(f"RAG_BACKEND must be one of {sorted(allowed)}")
+        return normalized
+
+    @field_validator("rag_profile")
+    def _validate_rag_profile(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        allowed = {"test", "local-oracle", "local-postgres", "production"}
+        if normalized not in allowed:
+            raise ValueError(f"RAG_PROFILE must be one of {sorted(allowed)}")
+        return normalized
+
+    @field_validator(
+        "db_pool_max_size",
+        "ingest_db_pool_max_size",
+        "baseball_db_pool_max_size",
+        "rag_db_pool_max_size",
+        "db_connection_budget",
+        "ai_model_max_concurrency",
+        "ai_model_max_attempts",
+    )
+    def _validate_positive_resource_limit(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("resource limits must be >= 1")
+        return value
+
+    @field_validator("ai_model_request_deadline_seconds")
+    def _validate_model_deadline(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("AI_MODEL_REQUEST_DEADLINE_SECONDS must be > 0")
+        return value
 
     @field_validator("ingest_worker_poll_seconds")
     def _validate_ingest_worker_poll_seconds(cls, value: float) -> float:
@@ -858,6 +951,27 @@ class Settings(BaseSettings):
                 "when APP_ENV=production."
             )
 
+    @property
+    def configured_db_connection_total(self) -> int:
+        return sum(
+            (
+                self.db_pool_max_size,
+                self.ingest_db_pool_max_size,
+                self.baseball_db_pool_max_size,
+                self.rag_db_pool_max_size,
+            )
+        )
+
+    def validate_database_pool_budget(self) -> None:
+        """Fail fast when configured pools can exceed the process DB budget."""
+
+        configured = self.configured_db_connection_total
+        if configured > self.db_connection_budget:
+            raise RuntimeError(
+                "AI database pool allocation exceeds AI_DB_CONNECTION_BUDGET: "
+                f"configured={configured} budget={self.db_connection_budget}"
+            )
+
     @staticmethod
     def _parse_string_list(raw_value: str) -> List[str]:
         raw = (raw_value or "").strip()
@@ -991,4 +1105,7 @@ def get_settings() -> Settings:
     `lru_cache`를 사용하여 설정 객체를 한 번만 생성하고 캐시하여,
     애플리케이션 전체에서 동일한 설정 인스턴스를 사용하도록 보장합니다.
     """
+    explicit_env_only = (os.getenv("BEGA_EXPLICIT_ENV_ONLY") or "").strip().lower()
+    if explicit_env_only in {"1", "true", "yes", "on"}:
+        return Settings(_env_file=None)
     return Settings()

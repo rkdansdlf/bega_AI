@@ -1,0 +1,10 @@
+{
+  "gen-grounded-001": {
+    "answer": "LG 트윈스는 2025 시즌 85승 57패 2무를 기록했습니다. 승률은 0.599입니다.",
+    "cited_sources": ["team_summary:team_id=LG|season_year=2025"]
+  },
+  "gen-non-answer-001": {
+    "answer": "제공된 데이터에서 확인할 수 없습니다.",
+    "cited_sources": []
+  }
+}

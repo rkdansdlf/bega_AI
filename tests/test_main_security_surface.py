@@ -1,3 +1,6 @@
+import asyncio
+import json
+
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
@@ -33,6 +36,7 @@ def test_create_app_disables_docs_and_metrics_by_default_in_production(monkeypat
     assert "/metrics" not in paths
     assert "/ai/metrics" not in paths
     assert "/health" in paths
+    assert "/ready" in paths
     assert _has_cors_middleware(app) is False
 
 
@@ -173,6 +177,7 @@ def test_create_app_registers_every_business_router_with_internal_auth(monkeypat
 
     assert [router for router, _args, _kwargs in registrations] == [
         main_module.chat_stream.router,
+        main_module.feedback.router,
         main_module.search.router,
         main_module.ingest.router,
         main_module.vision.router,
@@ -190,7 +195,7 @@ def test_create_app_registers_every_business_router_with_internal_auth(monkeypat
         )
         for _router, _args, kwargs in registrations
     )
-    assert direct_registrations == [("get", "/health")]
+    assert direct_registrations == [("get", "/health"), ("get", "/ready")]
 
     assert TestClient(app).get("/health").status_code == 200
 
@@ -209,6 +214,7 @@ def test_openapi_marks_business_operations_as_internal(monkeypatch):
         {"InternalApiKey": []}
     ]
     assert "security" not in schema["paths"]["/health"]["get"]
+    assert "security" not in schema["paths"]["/ready"]["get"]
     assert schema["components"]["securitySchemes"]["InternalApiKey"] == {
         "type": "apiKey",
         "in": "header",
@@ -217,6 +223,51 @@ def test_openapi_marks_business_operations_as_internal(monkeypatch):
             "AI 내부 호출용 키. Authorization Bearer 토큰을 사용할 수 있습니다."
         ),
     }
+
+
+def test_ready_returns_standard_degraded_contract(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "local-test-token")
+    get_settings.cache_clear()
+
+    from app import main as main_module
+
+    async def degraded():
+        return {
+            "status": "NOT_READY",
+            "components": {
+                "rag_schema": {
+                    "status": "DOWN",
+                    "code": "RAG_SCHEMA_NOT_READY",
+                }
+            },
+        }
+
+    monkeypatch.setattr(main_module, "get_readiness_report", degraded)
+    app = main_module.create_app()
+    route = next(route for route in app.routes if getattr(route, "path", "") == "/ready")
+
+    response = asyncio.run(route.endpoint())
+
+    assert response.status_code == 503
+    payload = json.loads(response.body)
+    assert payload == {
+        "code": "AI_DEPENDENCY_UNAVAILABLE",
+        "message": "mandatory AI dependencies are unavailable",
+        "retryable": True,
+        "status": "NOT_READY",
+        "components": {
+            "rag_schema": {
+                "status": "DOWN",
+                "code": "RAG_SCHEMA_NOT_READY",
+            }
+        },
+    }
+    openapi = app.openapi()
+    response_schema = openapi["paths"]["/ready"]["get"]["responses"]["503"][
+        "content"
+    ]["application/json"]["schema"]
+    assert response_schema["$ref"].endswith("/AIReadinessUnavailableResponse")
 
 
 def test_deps_reexports_canonical_internal_auth_dependency():

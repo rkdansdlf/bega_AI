@@ -20,6 +20,7 @@ from scripts.ingest_from_kbo import (
     ingest,
 )
 
+from .cache_invalidation import invalidate_for_ingest_run
 from .ingest_runs import (
     IngestLeaseLostError,
     IngestRunMode,
@@ -65,7 +66,9 @@ class IngestWorker:
         settings: Any,
         owner: str | None = None,
         ingest_function: Callable[..., IngestExecutionResult] = ingest,
+        cache_invalidator: Callable[[Any], Any] | None = None,
     ) -> None:
+        self.cache_invalidator = cache_invalidator or invalidate_for_ingest_run
         self.store = store
         self.settings = settings
         self.owner = owner or self._default_owner()
@@ -178,6 +181,8 @@ class IngestWorker:
                 )
             else:
                 terminal_status = IngestRunStatus.SUCCEEDED
+                if bool(getattr(self.settings, "ingest_cache_invalidation_enabled", True)):
+                    await self.cache_invalidator(run.request)
         finally:
             heartbeat_task.cancel()
             try:

@@ -1,0 +1,9 @@
+{
+  "cases": 2,
+  "pass_rate": 1.0,
+  "unsupported_claim_rate": 0.0,
+  "numeric_hallucination_rate": 0.0,
+  "entity_hallucination_rate": 0.0,
+  "citation_precision": 1.0,
+  "citation_recall": 1.0
+}

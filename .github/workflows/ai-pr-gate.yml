@@ -6,6 +6,7 @@ on:
     paths:
       - 'app/**'
       - 'contracts/**'
+      - 'evals/**'
       - 'scripts/**'
       - 'tests/**'
       - 'main.py'
@@ -36,12 +37,23 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev
+
+      - name: Golden RAG evaluation gate (retrieval + generation)
+        env:
+          PYTHONPATH: .
+        run: |
+          python scripts/eval_rag_golden.py retrieval \
+            --baseline evals/baselines/retrieval_v1.json
+          python scripts/eval_rag_golden.py generation \
+            --baseline evals/baselines/generation_v1.json
 
       - name: Run AI PR gate tests
         env:
