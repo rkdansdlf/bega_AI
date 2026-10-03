@@ -15,7 +15,7 @@ openai>=2.38.0
 # Torch 2.13 removes the setuptools<82 cap; pin the patched release.
 setuptools==83.0.0
 torch==2.13.0
-sentence-transformers==5.5.1
+sentence-transformers==5.6.1
 tqdm>=4.67.3
 firebase-admin>=7.4.0
 google-cloud-firestore>=2.27.0
