@@ -32,8 +32,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_MIN_COVERAGE = 0.995
 _ACTIVE_CACHE_TTL_S = 5.0  # default; RAG_GENERATION_CACHE_TTL_S overrides
 DEFAULT_DROP_GRACE_S = 60.0
-_active_cache: Dict[str, Any] = {"at": 0.0, "value": None}
-_active_cache_ext: Dict[str, Any] = {"at": 0.0, "value": None}
+# "at" is None until a lookup has happened. Never encode "never" as 0.0:
+# time.monotonic() counts from boot, so on a host up for less than the TTL a
+# zero timestamp looks fresh and would serve a cached None.
+_active_cache: Dict[str, Any] = {"at": None, "value": None}
+_active_cache_ext: Dict[str, Any] = {"at": None, "value": None}
 
 STORE_INLINE = "inline"
 STORE_GENERATIONS = "generations"
@@ -118,7 +121,13 @@ async def get_active_generation(
     cache = _active_cache_ext if extended else _active_cache
     now = time.monotonic()
     max_age = _ACTIVE_CACHE_TTL_S if ttl is None else max(0.0, float(ttl))
-    if use_cache and max_age > 0 and now - cache["at"] < max_age:
+    cached_at = cache["at"]
+    if (
+        use_cache
+        and max_age > 0
+        and cached_at is not None
+        and now - cached_at < max_age
+    ):
         return cache["value"]
     select = _SELECT_EXT if extended else _SELECT
     cur = await conn.execute(f"{select} WHERE status = 'ACTIVE'")
@@ -129,7 +138,7 @@ async def get_active_generation(
 
 def reset_active_cache() -> None:
     for cache in (_active_cache, _active_cache_ext):
-        cache.update(at=0.0, value=None)
+        cache.update(at=None, value=None)
 
 
 async def register_generation(

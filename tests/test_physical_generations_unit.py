@@ -447,3 +447,26 @@ def test_activate_cli_explains_how_long_other_instances_take(capsys):
     assert "within 5s" in err and "/ready" in err
     cli._note_propagation({"changed": False, "max_propagation_seconds": 5.0})
     assert capsys.readouterr().err == ""  # nothing switched, nothing to say
+
+
+@pytest.mark.parametrize("uptime_s", [0.5, 3.0, 100.0])
+def test_a_never_populated_or_reset_cache_always_queries_even_on_a_freshly_booted_host(
+    monkeypatch, uptime_s
+):
+    """time.monotonic() counts from boot. "Never looked up" must not be encoded as
+    time zero, or on a host up for less than the TTL a reset/empty cache looks fresh
+    and serves ``None`` ("no active generation") without touching the database."""
+    monkeypatch.setattr(eg.time, "monotonic", lambda: uptime_s)
+    eg.reset_active_cache()
+
+    conn = _CountingConn(G1_ROW)
+    first = _run(eg.get_active_generation(conn, ttl=300))
+    assert conn.queries == 1 and first is not None and first.generation_id == "g1"
+
+    eg.reset_active_cache()
+    again = _run(eg.get_active_generation(conn, ttl=300))
+    assert conn.queries == 2 and again is not None
+
+    ext = _CountingConn(G1_ROW)
+    _run(eg.get_active_generation(ext, ttl=300, extended=True))
+    assert ext.queries == 1
