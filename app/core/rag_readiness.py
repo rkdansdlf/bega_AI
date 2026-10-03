@@ -113,6 +113,87 @@ async def _close_cursor(cursor: Any) -> None:
             await result
 
 
+async def _probe_physical_generation(conn: Any) -> dict[str, object]:
+    """Live state of the ACTIVE generation for the physical embedding store.
+
+    Reads the index from pg_index (not the registry's ``index_ready`` flag) so a
+    dropped or invalidated index is caught even if the registry is stale.
+    """
+    try:
+        cursor = await conn.execute("""
+            SELECT g.generation_id, g.embedding_dim,
+                   EXISTS (
+                       SELECT 1 FROM pg_index i
+                       JOIN pg_class c ON c.oid = i.indexrelid
+                       WHERE c.relname = 'idx_rag_emb_'
+                             || replace(g.generation_id, '-', '_')
+                         AND i.indisvalid AND i.indisready
+                   ) AS index_live,
+                   EXISTS (
+                       SELECT 1 FROM rag_chunk_embeddings e
+                       WHERE e.generation_id = g.generation_id LIMIT 1
+                   ) AS has_rows
+            FROM rag_embedding_generations g
+            WHERE g.status = 'ACTIVE'
+            """)
+    except Exception:  # noqa: BLE001 - migrations 007/009 not applied
+        return {"error": "registry_unavailable"}
+    row = await cursor.fetchone()
+    if row is None:
+        return {"error": "no_active_generation"}
+    return {
+        "generation_id": str(row[0]),
+        "dimension": int(row[1]),
+        "index_live": bool(row[2]),
+        "has_rows": bool(row[3]),
+    }
+
+
+def _physical_components(
+    table_ready: bool, extension_ready: bool, physical: dict[str, object]
+) -> dict[str, dict[str, object]]:
+    """Readiness for ``RAG_EMBEDDING_STORE=generations`` (fail closed)."""
+    base_ok = table_ready and extension_ready
+    error = physical.get("error")
+    if error:
+        code = (
+            "RAG_GENERATION_NOT_ACTIVE"
+            if error == "no_active_generation"
+            else "RAG_GENERATION_REGISTRY_UNAVAILABLE"
+        )
+        return {
+            "rag_storage": _up("RAG_STORAGE_READY"),
+            "rag_schema": (
+                _up("RAG_SCHEMA_READY")
+                if table_ready
+                else _down("RAG_SCHEMA_NOT_READY")
+            ),
+            "rag_vector": _down(code),
+            "rag_index": _down(code),
+        }
+    dim = int(physical["dimension"])
+    return {
+        "rag_storage": _up("RAG_STORAGE_READY"),
+        "rag_schema": (
+            _up("RAG_SCHEMA_READY") if table_ready else _down("RAG_SCHEMA_NOT_READY")
+        ),
+        "rag_vector": (
+            _up(
+                "RAG_VECTOR_READY",
+                dimension=dim,
+                generation=physical["generation_id"],
+            )
+            if base_ok and physical["has_rows"]
+            else _down("RAG_VECTOR_CAPABILITY_NOT_READY", dimension=dim)
+        ),
+        "rag_index": (
+            _up("RAG_VECTOR_INDEX_READY", generation=physical["generation_id"])
+            if physical["index_live"]
+            else _down("RAG_VECTOR_INDEX_NOT_READY")
+        ),
+    }
+
+
 async def _probe_postgres(pool: Any, settings: Any) -> dict[str, dict[str, object]]:
     expected_index = (
         "idx_rag_chunks_embedding_halfvec_hnsw"
@@ -160,6 +241,9 @@ async def _probe_postgres(pool: Any, settings: Any) -> dict[str, dict[str, objec
             (expected_index,),
         )
         row = await cursor.fetchone()
+        physical = None
+        if str(getattr(settings, "rag_embedding_store", "inline")) == "generations":
+            physical = await _probe_physical_generation(conn)
 
     table_ready = bool(row and row[0])
     extension_ready = bool(row and row[1])
@@ -167,6 +251,8 @@ async def _probe_postgres(pool: Any, settings: Any) -> dict[str, dict[str, objec
     index_ready = bool(row and len(row) > 3 and row[3])
     expected_type = f"vector({max(1, int(settings.embed_dim))})"
     dimension_ready = embedding_type == expected_type
+    if physical is not None:
+        return _physical_components(table_ready, extension_ready, physical)
     return {
         "rag_storage": _up("RAG_STORAGE_READY"),
         "rag_schema": (

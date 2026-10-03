@@ -189,7 +189,7 @@ async def test_retrieval_generation_gate_only_when_enabled(monkeypatch, enabled)
     from app.config import get_settings
     from tests.test_retrieval import _DummyConnection
 
-    async def _active(conn):
+    async def _active(conn, **kw):
         return eg.Generation("g2", "new-model", 1536, 2, "ACTIVE")
 
     monkeypatch.setattr(retrieval, "get_active_generation", _active)

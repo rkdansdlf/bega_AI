@@ -20,7 +20,7 @@
 | CI 게이트 | `ai-pr-gate` 가 golden 평가를 실행 | `.github/workflows/ai-pr-gate.yml` |
 | Ingest→캐시 무효화 | ingest 성공 시 영향 범위(season / 시즌 미지정 시 전체 non-stable) 캐시 삭제 | `app/core/cache_invalidation.py` |
 | Semantic cache 동등성 | season/team scope, answer scope, answerability, source, freshness 불일치를 shadow 평가에서 실패 처리 | `app/core/semantic_cache_equivalence.py` |
-| Embedding generation | 레지스트리 + 커버리지 감사 후 원자적 활성화/롤백 + 검색 시 활성 signature 필터 | `app/core/embedding_generations.py`, migration `007` |
+| Embedding generation | 레지스트리 + 커버리지 감사 후 원자적 활성화/롤백. **물리 저장소**(`RAG_EMBEDDING_STORE=generations`, migration `009`): `rag_chunk_embeddings(generation_id, chunk_id, embedding, content_hash)` 에 세대별 행이 공존하고 세대별 partial HNSW 인덱스로 검색한다. 내용이 바뀌었는데 재임베딩되지 않은 행(`content_hash` 불일치)은 절대 서빙하지 않는다. inline 모드는 기존 signature 필터 | `app/core/embedding_generations.py`, `retrieval.py`, migrations `007`/`009` |
 | Provider adapter/circuit | Gemini/OpenRouter 전송을 `LLMProvider` 로 분리, provider 별 CLOSED/OPEN/HALF_OPEN | `app/core/llm_provider.py`, `provider_circuit.py` |
 | 실제 usage | provider 보고 토큰 우선(`usage_source=provider`), 없을 때만 estimate | `app/core/llm_usage_accounting.py` |
 | Trace | `X-Request-ID` 미들웨어 + retrieval/tool/llm span (Sentry, OTel 있으면 사용) | `app/observability/tracing.py` |
@@ -40,10 +40,22 @@
 
 ## 알려진 한계 (의도적으로 남김)
 
-- **물리적 blue/green 미완**: `rag_chunks` 는 `(source_table, source_row_id)` 유니크 + 단일
-  `vector` 컬럼이라 같은 테이블에 구/신 임베딩이 공존할 수 없다. 여기서는 포인터 전환·감사·혼합
-  방지 필터까지만 제공하고, 구 generation 행을 보존하는 per-generation 저장은 크롤러(임베딩 소유자)
-  과제다. 롤백은 구 signature 행이 남아 있을 때만 허용된다.
+- **물리 blue/green 운영 주의** (`RAG_EMBEDDING_STORE=generations`)
+  - 도입은 1회: `register g1 --mirror-inline` → `backfill g1`(현재 inline 벡터 복사, 재임베딩 불필요. live ingest 와 동시에 실행해도 안전: 원본 행을 `FOR SHARE SKIP LOCKED` 로 읽어 쓰기 중인 행은 건너뛰고(트리거가 최신값을 미러링) 읽은 행은 쓰기 완료까지 갱신을 막는다. 건너뛴 행은 다음 pass 로 재시도하고 `remaining` 을 실제 테이블로 검증, 남으면 종료 코드 3. autocommit 연결에서 실행) →
+    `build-index g1` → `activate g1` → 환경변수 전환 후 재시작. 도입 전에는 아무것도 바뀌지 않는다(기본 `inline`).
+  - inline 로 쓰는 기존 writer(ingest/크롤러)는 DB 트리거가 signature 가 일치하는 세대(`mirror_inline`)로
+    자동 미러링한다(임베딩 컬럼이 쓰일 때만 발동). **다른 모델의 새 세대**는 별도 writer 가
+    `embedding_generations.write_embeddings` 또는 `rag_chunk_embeddings` 로 직접 써야 한다(크롤러 과제).
+  - 세대 전환 = 포인터 flip, 롤백 = 손대지 않은 구 세대 행으로 복귀. 롤백 대상 세대는 `drop` 이 거부한다.
+  - **전환의 전파 지연**: 활성 세대 조회는 프로세스별 캐시(`RAG_GENERATION_CACHE_TTL_S`, 기본 5초, 0=매 검색 조회)다.
+    activate/rollback 을 실행한 프로세스는 즉시 전환되지만 **다른 인스턴스는 최대 TTL 동안 이전 세대를 읽는다**
+    (CLI 가 `max_propagation_seconds` 와 함께 안내). 수렴은 각 인스턴스의 `/ready`(`rag_vector.generation`)로 확인한다.
+  - **요청 단위 고정**: 한 요청(병렬 multi-query/HyDE 태스크 포함)은 처음 해석한 세대를 끝까지 쓴다. 요청 도중 활성화가 일어나도
+    한 답변이 두 세대를 섞어 읽지 않으며, 진행 중 요청은 시작한 세대로 끝난다(`request_scope`, 스코프별 락으로 첫 해석 직렬화).
+  - **drop 유예**: 활성에서 내려온 지 `max(60초, 3×TTL)` 이내의 세대는 `drop` 이 거부한다(캐시가 남은 인스턴스가 빈 세대를 읽지 않도록).
+  - 미검증: 실 DB(로컬 pgvector 17)에서 전 흐름과 partial HNSW 사용(EXPLAIN)까지 검증했지만, **운영 규모(수십만 행)의
+    인덱스 빌드 시간·`maintenance_work_mem`·질의 지연은 측정하지 않았다.** 세대 공존 중에는 벡터 저장 공간이 세대 수만큼
+    늘고, inline 쓰기에 트리거 오버헤드가 붙는다. Oracle 경로는 해당 없음(위 `index_version` 설정 방식).
 - Oracle 에는 generation 레지스트리가 없어 활성 generation 을 `RAG_ORACLE_ACTIVE_INDEX_VERSION`(= `rag_chunks.index_version`) 설정으로 지정한다. 전환은 설정 변경 + 재시작이며 PostgreSQL 같은 원자적 포인터/롤백은 아니다. Oracle 은 `valid_from/valid_to/expires_at` 컬럼이 없어 수명주기를 `index_status` 로만 판단한다(capability `temporal_filters=false`, 정보용).
 - Chunk 벤치마크는 `EMBED_PROVIDER=local` 이면 의미 없음(리포트에 `meaningful:false`).
 - Feedback: `POST /ai/chat/feedback`(내부 토큰) → `rag_answer_feedback`(migration 008). BFF 가 호출하도록 연동해야 데이터가 쌓이며, `mine_retrieval_events.py --with-feedback` 가 DOWN 평가를 골든 후보로 합친다.

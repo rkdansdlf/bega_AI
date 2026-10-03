@@ -6,6 +6,7 @@
 환경 변수 USE_FIRESTORE_SEARCH 설정은 과거 호환 전용이며 현재는 PostgreSQL pgvector 검색만 지원합니다.
 """
 
+import asyncio
 import logging
 import json
 import os
@@ -18,10 +19,17 @@ from psycopg.errors import QueryCanceled, UndefinedTable
 from psycopg import OperationalError as PsycopgOperationalError
 from psycopg import InterfaceError as PsycopgInterfaceError
 from ..config import DEFAULT_EMBED_DIM, Settings, get_settings
-from .embedding_generations import generation_filter_sql, get_active_generation
+from .embedding_generations import (
+    STORE_GENERATIONS,
+    GENERATION_ID_RE,
+    generation_filter_sql,
+    get_active_generation,
+)
 from ..observability.tracing import traced
 from .exceptions import DBRetrievalError
+from .request_scope import current_scope
 from .retrieval_contract import (
+    RetrievalContractViolation,
     enforce_result_contract,
     entity_constraints,
     normalize_result,
@@ -132,9 +140,100 @@ def _embedding_distance_sql(
     return f"{column} <=> %s::vector"
 
 
+async def _pinned_for_request(key: str, loader: Any) -> Any:
+    """Resolve once per request, then reuse.
+
+    Every retrieval of one request (including parallel multi-query / HyDE tasks)
+    must read the same embedding generation; otherwise an activation landing
+    mid-request would mix generations inside one answer. Outside a request
+    (scripts, tests) there is no scope and each call resolves normally.
+    """
+    scope = current_scope()
+    if scope is None:
+        return await loader()
+    if key in scope:
+        return scope[key]
+    # Serialise the first resolution: parallel child tasks that start before any
+    # value is pinned would otherwise each query the registry and could land on
+    # different generations if an activation happens between their queries.
+    lock = scope.setdefault("_lock", asyncio.Lock())
+    async with lock:
+        if key not in scope:
+            scope[key] = await loader()
+        return scope[key]
+
+
+async def _resolve_physical_generation(conn: Any, settings: Settings) -> Any:
+    """Active generation for the physical store, or ``None`` in inline mode.
+
+    Fails closed: in ``generations`` mode a missing registry, missing migration
+    009 or no ACTIVE generation means nothing may be served (silently falling
+    back to inline rows would reintroduce the mixed-generation risk).
+    """
+    if str(getattr(settings, "rag_embedding_store", "inline")) != STORE_GENERATIONS:
+        return None
+    try:
+        generation = await _pinned_for_request(
+            "physical_generation",
+            lambda: get_active_generation(
+                conn,
+                extended=True,
+                ttl=getattr(settings, "rag_generation_cache_ttl_s", None),
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RetrievalContractViolation(
+            "RAG_EMBEDDING_STORE=generations requires migrations 007+009 "
+            f"({type(exc).__name__})"
+        ) from exc
+    if generation is None:
+        raise RetrievalContractViolation(
+            "RAG_EMBEDDING_STORE=generations but no generation is ACTIVE"
+        )
+    if not GENERATION_ID_RE.match(generation.generation_id):
+        raise RetrievalContractViolation("active generation id is not a valid token")
+    if not generation.index_ready:
+        logger.warning(
+            "[Search] active generation %s has no ready ANN index; queries will "
+            "scan sequentially",
+            generation.generation_id,
+        )
+    return generation
+
+
+def _physical_sql_parts(generation: Any) -> Dict[str, str]:
+    """SQL fragments for reading one generation's embeddings.
+
+    The generation id is inlined as a validated literal (not a bind parameter)
+    so the planner can match the generation's partial HNSW index, and the
+    ``embedding::halfvec(dim)`` expression is exactly the indexed expression.
+    """
+    gid = generation.generation_id
+    dim = int(generation.embedding_dim)
+    fresh = "e.content_hash IS NOT DISTINCT FROM r.content_hash"
+    return {
+        "distance": f"e.embedding::halfvec({dim}) <=> %s::halfvec({dim})",
+        "from": (
+            "rag_chunk_embeddings e JOIN rag_chunks r "
+            f"ON r.id = e.chunk_id AND e.generation_id = '{gid}' AND {fresh}"
+        ),
+        "keyword_guard": (
+            "EXISTS (SELECT 1 FROM rag_chunk_embeddings e2 "
+            f"WHERE e2.chunk_id = r.id AND e2.generation_id = '{gid}' "
+            "AND e2.content_hash IS NOT DISTINCT FROM r.content_hash)"
+        ),
+        "final_join": (
+            "LEFT JOIN rag_chunk_embeddings e "
+            f"ON e.chunk_id = r.id AND e.generation_id = '{gid}' AND {fresh}"
+        ),
+    }
+
+
 async def _ensure_pgvector_session(
     conn: psycopg.AsyncConnection,
     settings: Optional[Settings] = None,
+    *,
+    force_hnsw: bool = False,
 ) -> None:
     """pgvector 검색 세션 설정을 보정합니다.
 
@@ -145,7 +244,11 @@ async def _ensure_pgvector_session(
     """
     active_settings = _resolve_settings(settings)
     mode = (active_settings.ai_vector_index or "auto").lower().strip()
-    if mode == "auto":
+    if force_hnsw:
+        # Physical generations use per-generation HNSW indexes on another table;
+        # auto-detection only inspects rag_chunks and would pick ivfflat GUCs.
+        mode = "hnsw"
+    elif mode == "auto":
         mode = await _detect_active_index(conn)
 
     async with conn.cursor() as cursor:
@@ -275,7 +378,10 @@ async def similarity_search(
             include_game_inning_scores = True
 
     # 기본값: PostgreSQL pgvector 사용
-    filter_clauses: List[str] = ["embedding IS NOT NULL"]  # 임베딩이 없는 문서는 제외
+    physical = await _resolve_physical_generation(conn, active_settings)
+    # 임베딩이 없는 문서는 제외. Physical store: the join to the active generation's
+    # embeddings guarantees it (and `embedding` would be ambiguous there).
+    filter_clauses: List[str] = ["TRUE" if physical else "embedding IS NOT NULL"]
     if bool(getattr(active_settings, "rag_retrieval_active_filter_enabled", True)):
         filter_clauses.extend(
             [
@@ -319,10 +425,18 @@ async def similarity_search(
 
     # Blue/green guard: only chunks embedded with the ACTIVE generation's
     # signature may be returned, so old/new embeddings never mix.
-    generation = None
-    if bool(getattr(active_settings, "rag_generation_gate_enabled", False)):
+    generation = physical
+    if physical is None and bool(
+        getattr(active_settings, "rag_generation_gate_enabled", False)
+    ):
         try:
-            generation = await get_active_generation(conn)
+            generation = await _pinned_for_request(
+                "gate_generation",
+                lambda: get_active_generation(
+                    conn,
+                    ttl=getattr(active_settings, "rag_generation_cache_ttl_s", None),
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - registry absent/unreadable
             logger.warning("[Search] generation gate skipped: %s", type(exc).__name__)
             generation = None
@@ -337,6 +451,16 @@ async def similarity_search(
     vector_str = _vector_literal(embedding)
     embedding_distance = _embedding_distance_sql(active_settings)
     row_embedding_distance = _embedding_distance_sql(active_settings, table_alias="r")
+    vector_from = "rag_chunks"
+    keyword_guard = ""
+    final_join = ""
+    if physical is not None:
+        parts = _physical_sql_parts(physical)
+        embedding_distance = parts["distance"]
+        row_embedding_distance = parts["distance"]
+        vector_from = parts["from"]
+        keyword_guard = f" AND {parts['keyword_guard']}"
+        final_join = parts["final_join"]
 
     # 최종 SQL 쿼리를 구성합니다.
     # <=> 연산자: pgvector에서 코사인 거리(1 - 코사인 유사도)를 계산합니다.
@@ -352,7 +476,7 @@ async def similarity_search(
             SELECT
                 id,
                 ROW_NUMBER() OVER (ORDER BY {embedding_distance} ASC) AS vector_rank
-            FROM rag_chunks
+            FROM {vector_from}
             WHERE {where_clause}
             LIMIT %s * 2
         ),
@@ -363,7 +487,7 @@ async def similarity_search(
                 ROW_NUMBER() OVER (ORDER BY ts_rank(r.content_tsv, kq.query) DESC) AS keyword_rank
             FROM rag_chunks r
             CROSS JOIN keyword_query kq
-            WHERE {where_clause} AND r.content_tsv @@ kq.query
+            WHERE {where_clause} AND r.content_tsv @@ kq.query{keyword_guard}
             LIMIT %s * 2
         ),
         candidates AS (
@@ -399,6 +523,7 @@ async def similarity_search(
             ) AS combined_score
         FROM candidates c
         JOIN rag_chunks r ON r.id = c.id
+        {final_join}
         LEFT JOIN vector_search v ON v.id = c.id
         LEFT JOIN keyword_search k ON k.id = c.id
         ORDER BY combined_score DESC, similarity DESC
@@ -417,29 +542,32 @@ async def similarity_search(
         )
     else:
         # 키워드 없는 경우 순수 벡터 검색
+        # Physical store joins two tables that share content_hash/created_at, so
+        # every selected column is alias-qualified there (harmless inline too).
+        pre = "r." if physical is not None else ""
         sql = f"""
         SELECT
-               id,
-               title,
-               content,
-               season_year,
-               team_id,
-               player_id,
-               source_table,
-               source_row_id,
-               COALESCE(NULLIF(metadata, '{{}}'::jsonb), meta, '{{}}'::jsonb) AS meta,
-               metadata,
-               source_type,
-               source_uri,
-               topic_key,
-               content_hash,
-               valid_from,
-               valid_to,
-               expires_at,
-               updated_at,
-               quality_score,
+               {pre}id,
+               {pre}title,
+               {pre}content,
+               {pre}season_year,
+               {pre}team_id,
+               {pre}player_id,
+               {pre}source_table,
+               {pre}source_row_id,
+               COALESCE(NULLIF({pre}metadata, '{{}}'::jsonb), {pre}meta, '{{}}'::jsonb) AS meta,
+               {pre}metadata,
+               {pre}source_type,
+               {pre}source_uri,
+               {pre}topic_key,
+               {pre}content_hash,
+               {pre}valid_from,
+               {pre}valid_to,
+               {pre}expires_at,
+               {pre}updated_at,
+               {pre}quality_score,
                (1 - ({embedding_distance})) as similarity
-        FROM rag_chunks
+        FROM {vector_from}
         WHERE {where_clause}
         ORDER BY {embedding_distance} ASC
         LIMIT %s
@@ -451,7 +579,9 @@ async def similarity_search(
     try:
         # _ensure_pgvector_session이 인덱스 종류에 맞는 GUC(hnsw.ef_search 또는
         # ivfflat.probes)를 설정한다. 여기서는 쿼리 타임아웃만 별도로 제한한다.
-        await _ensure_pgvector_session(conn, active_settings)
+        await _ensure_pgvector_session(
+            conn, active_settings, force_hnsw=physical is not None
+        )
         async with conn.cursor(row_factory=dict_row) as cur:
             statement_timeout_ms = max(
                 1, int(active_settings.retrieval_statement_timeout_ms)
