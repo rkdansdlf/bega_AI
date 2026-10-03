@@ -12,7 +12,11 @@ jobs:
   outside-regression:
     name: Outside Window Regression Report
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The report script alone takes 27-34 min and has grown from ~17 min over the last
+    # two weeks. 30 min (added in #24) cancelled every run since 2026-09-30; the
+    # previous implicit limit was 360. Keep headroom while the runtime is
+    # investigated, but stay well below the default so a real hang is still caught.
+    timeout-minutes: 90
     env:
       TEAM_CODE_READ_MODE: canonical_only
       TEAM_CODE_CANONICAL_WINDOW_START: "2021"
