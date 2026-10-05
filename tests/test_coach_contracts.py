@@ -23,6 +23,13 @@ from tests.coach_test_support import (
     _install_coach_endpoint_cache_hit,
 )
 
+# Hang guard for the dry-run subprocess, not a performance budget: importing the
+# app takes ~10s on an idle machine and several times that under load.
+_SMOKE_SUBPROCESS_TIMEOUT_SECONDS = float(
+    os.getenv("COACH_SMOKE_TEST_TIMEOUT_SECONDS", "120")
+)
+
+
 def test_assess_game_evidence_requires_summary_for_review_only():
     from app.routers import coach as coach_router
 
@@ -191,7 +198,7 @@ def test_coach_llm_smoke_script_dry_run_does_not_print_secret():
         cwd=project_root,
         text=True,
         capture_output=True,
-        timeout=20,
+        timeout=_SMOKE_SUBPROCESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr
@@ -219,7 +226,7 @@ def test_coach_llm_smoke_script_prints_resolved_models_for_dry_run(monkeypatch):
         env=env,
         text=True,
         capture_output=True,
-        timeout=20,
+        timeout=_SMOKE_SUBPROCESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr
