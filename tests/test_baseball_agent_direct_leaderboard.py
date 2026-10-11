@@ -21,8 +21,20 @@ def _leaderboard_result() -> ToolResult:
         "position": "batting",
         "total_qualified_players": 10,
         "leaderboard": [
-            {"player_id": 68525, "player_name": "선수A", "team_code": "LT", "team_name": "롯데 자이언츠", "stat_value": 27},
-            {"player_id": 68106, "player_name": "선수B", "team_code": "LG", "team_name": "LG 트윈스", "stat_value": 26},
+            {
+                "player_id": 68525,
+                "player_name": "선수A",
+                "team_code": "LT",
+                "team_name": "롯데 자이언츠",
+                "stat_value": 27,
+            },
+            {
+                "player_id": 68106,
+                "player_name": "선수B",
+                "team_code": "LG",
+                "team_name": "LG 트윈스",
+                "stat_value": 26,
+            },
         ],
     }
     return ToolResult(success=True, data=data, message="leaderboard ok")
