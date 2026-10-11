@@ -11375,6 +11375,25 @@ class BaseballStatisticsAgent:
 
         return None
 
+    def _build_direct_leaderboard_answer(
+        self,
+        query: str,
+        tool_results: List[ToolResult],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """채팅 응답에서 리더보드 도구 결과가 있으면 결정적 렌더링 답변을 돌려준다."""
+        if not isinstance(context, dict) or context.get("persona") != "chat":
+            return None
+        for result in tool_results:
+            if not result.success or not isinstance(result.data, dict):
+                continue
+            if "leaderboard" not in result.data:
+                continue
+            answer = self._build_leaderboard_chat_answer(query, result.data)
+            if answer:
+                return answer
+        return None
+
     async def _generate_verified_answer(
         self,
         query: str,
@@ -11541,6 +11560,18 @@ class BaseballStatisticsAgent:
         if direct_latest_answer:
             return {
                 "answer": direct_latest_answer,
+                "verified": True,
+                "data_sources": data_sources,
+                "error": None,
+            }
+
+        # 리더보드 조회는 LLM 이 표의 값을 옮기다 틀릴 수 있어 도구 결과를 그대로 렌더링한다.
+        direct_leaderboard_answer = self._build_direct_leaderboard_answer(
+            query, tool_results, context=context
+        )
+        if direct_leaderboard_answer:
+            return {
+                "answer": direct_leaderboard_answer,
                 "verified": True,
                 "data_sources": data_sources,
                 "error": None,
