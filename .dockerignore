@@ -3,6 +3,8 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+.env.*
+!.env.example
 README.md
 .git/
 .gitignore
