@@ -687,6 +687,49 @@ SERIAL_DB_TOOL_NAMES = {
 }
 
 
+# 개수형 지표는 리더보드 상위권에 0 이 나오면 정상이 아니라 집계 결함일 가능성이 높다.
+# 비율형 지표(avg, era 등)와 오름차순 조회는 0 이 정상일 수 있으므로 검사하지 않는다.
+_COUNTING_LEADERBOARD_STATS = frozenset(
+    {
+        "home_runs",
+        "hits",
+        "rbi",
+        "runs",
+        "stolen_bases",
+        "wins",
+        "saves",
+        "holds",
+        "strikeouts",
+    }
+)
+_LEADERBOARD_QUALITY_TOP_N = 5
+
+
+def _leaderboard_data_quality_issue(data: Dict[str, Any]) -> Optional[str]:
+    """상위 기록이 집계 결함으로 의심되면 사유를 돌려준다. 정상이면 None."""
+    stat = str(data.get("stat_name") or "").lower()
+    if stat not in _COUNTING_LEADERBOARD_STATS:
+        return None
+    if str(data.get("sort_order") or "DESC").upper() != "DESC":
+        return None
+    rows = data.get("leaderboard") or data.get("leaders") or []
+    top = rows[:_LEADERBOARD_QUALITY_TOP_N]
+    if len(top) < _LEADERBOARD_QUALITY_TOP_N:
+        return None
+    zero_count = 0
+    for row in top:
+        try:
+            if float(row.get("stat_value")) == 0:
+                zero_count += 1
+        except (TypeError, ValueError, AttributeError):
+            continue
+    if zero_count:
+        return (
+            f"상위 {len(top)}명 중 {zero_count}명의 {stat} 값이 0으로 기록되어 있습니다"
+        )
+    return None
+
+
 class BaseballStatisticsAgent:
     """
     야구 통계 전문 에이전트
@@ -10524,6 +10567,16 @@ class BaseballStatisticsAgent:
         leaderboard = data.get("leaderboard") or data.get("leaders") or []
         if not leaderboard:
             return None
+
+        quality_issue = _leaderboard_data_quality_issue(data)
+        if quality_issue:
+            season = self._format_deterministic_metric(data.get("year"))
+            season_label = f"{season}년" if season != "확인 불가" else "해당 시즌"
+            return (
+                f"{season_label} 기록 데이터에 확인이 필요합니다. {quality_issue}. "
+                "집계가 완전하지 않을 수 있어 순위를 확정할 수 없습니다. "
+                "원본 데이터를 점검한 뒤 다시 확인해 주세요."
+            )
 
         decision = self._resolve_chat_intent(query, extract_entities_from_query(query))
         registry_answer = self.chat_renderer_registry.render_leaderboard(
