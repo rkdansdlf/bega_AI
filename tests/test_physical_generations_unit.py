@@ -224,89 +224,12 @@ def test_register_rejects_oversized_dimension_and_bad_ids():
             )
 
 
-def test_write_embeddings_rejects_wrong_dimension_before_writing():
-    class Conn:
-        def __init__(self):
-            self.writes = 0
-
-        async def execute(self, sql, params=None):
-            if "INSERT INTO rag_chunk_embeddings" in sql:
-                self.writes += 1
-            return _Cur(("g1", "m", 8, 1, "BUILDING", False, False))
-
-    conn = Conn()
-    with pytest.raises(eg.GenerationError, match="dims"):
-        _run(eg.write_embeddings(conn, "g1", [(1, [0.0] * 4, "h")]))
-    assert conn.writes == 0
 
 
 # --- CLI ------------------------------------------------------------------------
-def test_cli_parses_the_adoption_flow():
-    p = cli.build_parser()
-    a = p.parse_args(
-        [
-            "register",
-            "g1",
-            "--model",
-            "m",
-            "--dim",
-            "1536",
-            "--version",
-            "2",
-            "--mirror-inline",
-        ]
-    )
-    assert a.cmd == "register" and a.mirror_inline is True
-    assert p.parse_args(["backfill", "g1", "--batch-size", "100"]).batch_size == 100
-    for cmd in ("build-index", "audit", "drop"):
-        assert p.parse_args([cmd, "g1"]).generation_id == "g1"
-    act = p.parse_args(["--store", "generations", "activate", "g1", "--force"])
-    assert act.store == "generations" and act.force is True
-    assert p.parse_args(["rollback"]).cmd == "rollback"
-    with pytest.raises(SystemExit):
-        p.parse_args(["--store", "both", "list"])
 
 
 # --- backfill CLI outcome -------------------------------------------------------
-@pytest.mark.parametrize(
-    "result,expected_rc",
-    [
-        ({"copied": 5, "batches": 1, "passes": 1, "remaining": 0, "complete": True}, 0),
-        (
-            {"copied": 3, "batches": 1, "passes": 3, "remaining": 2, "complete": False},
-            3,
-        ),
-    ],
-)
-def test_backfill_cli_exits_nonzero_when_rows_remain(
-    monkeypatch, capsys, result, expected_rc
-):
-    import contextlib
-
-    @contextlib.asynccontextmanager
-    async def fake_connect(url):
-        yield object()
-
-    async def fake_backfill(conn, gid, **kw):
-        assert kw["max_passes"] == 4
-        return result
-
-    monkeypatch.setattr(cli, "_connect", fake_connect)
-    monkeypatch.setattr(cli.eg, "backfill_from_inline", fake_backfill)
-    rc = cli.main(
-        [
-            "--db-url",
-            "x",
-            "--store",
-            "generations",
-            "backfill",
-            "g1",
-            "--max-passes",
-            "4",
-        ]
-    )
-    assert rc == expected_rc
-    assert ("incomplete" in capsys.readouterr().err) == (expected_rc == 3)
 
 
 # ─── cache TTL, request pinning, propagation ──────────────────────────────────

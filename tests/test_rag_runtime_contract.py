@@ -187,16 +187,6 @@ def test_production_profile_still_rejects_fake_backend() -> None:
     assert raised.value.code == "RAG_PROFILE_BACKEND_MISMATCH"
 
 
-def test_postgres_batch_worker_rejects_a_split_rag_destination() -> None:
-    with pytest.raises(RuntimeError, match="same selected PostgreSQL RAG URL"):
-        _settings(
-            app_env="local",
-            rag_profile="local-postgres",
-            rag_backend="postgres",
-            postgres_db_url="postgresql://local:local@postgres:5432/general",
-            ai_rag_db_url="postgresql://local:local@postgres:5432/rag",
-            ingest_worker_enabled=True,
-        )
 
 
 def test_postgres_batch_worker_is_allowed_only_on_the_unsplit_selected_url() -> None:

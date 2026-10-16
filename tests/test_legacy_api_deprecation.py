@@ -142,7 +142,7 @@ def test_openapi_marks_exactly_seven_deprecated_operations() -> None:
         if definition.get("deprecated") is True
     }
 
-    assert len(operations) == 35
+    assert len(operations) == 32  # three /ai/ingest operations retired with the writer path
     assert deprecated == {
         (method, path) for method, path, _, _ in EXPECTED_DEPRECATED_OPERATIONS
     }

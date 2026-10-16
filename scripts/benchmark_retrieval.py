@@ -21,7 +21,7 @@ from app.config import get_settings
 from app.core.chunking import legacy_window_chunks, smart_chunks
 from app.core.embeddings import async_embed_query, async_embed_texts
 from app.core.rag import _context_source_priority
-from scripts.ingest_from_kbo import (
+from scripts.rag_source_chunks import (
     TABLE_PROFILES,
     build_static_source_row_id,
     read_static_profile_content,

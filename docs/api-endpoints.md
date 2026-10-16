@@ -5,8 +5,8 @@
 > Regenerate with: `python scripts/export_openapi_contract.py`
 
 Version: `0.1.0`
-Paths: **34**
-Operations: **35**
+Paths: **31**
+Operations: **32**
 
 ## chat
 
@@ -536,109 +536,6 @@ Successful Response
 
 #### Media type: `application/json`
 - Schema: [CoachAutoBriefOpsHealthResponse](api-schemas.md#coachautobriefopshealthresponse)
-
-### Response `422`
-Validation Error
-
-#### Media type: `application/json`
-- Schema: [HTTPValidationError](api-schemas.md#httpvalidationerror)
-
-## ingest
-
-### POST `/ai/ingest/`
-Ingest Document
-- Operation ID: `ingest_document_ai_ingest__post`
-- Tags: `ingest`
-- Security: `InternalApiKey`
-- Deprecated: no
-
-#### Parameters
-
-| Name | In | Required | Schema | Description | Example |
-| --- | --- | --- | --- | --- | --- |
-| `Authorization` | header | no | `string` |  |  |
-| `X-Internal-Api-Key` | header | no | `string` |  |  |
-
-### Request body
-- Required: **yes**
-
-#### Media type: `application/json`
-- Schema: [IngestPayload](api-schemas.md#ingestpayload)
-
-### Responses
-
-### Response `200`
-Successful Response
-
-#### Media type: `application/json`
-- Schema: `{}`
-
-### Response `422`
-Validation Error
-
-#### Media type: `application/json`
-- Schema: [HTTPValidationError](api-schemas.md#httpvalidationerror)
-
-### POST `/ai/ingest/run`
-Run Ingestion Job
-
-Persist or deduplicate a durable internal-DB ingestion run.
-- Operation ID: `run_ingestion_job_ai_ingest_run_post`
-- Tags: `ingest`
-- Security: `InternalApiKey`
-- Deprecated: no
-
-#### Parameters
-
-| Name | In | Required | Schema | Description | Example |
-| --- | --- | --- | --- | --- | --- |
-| `Authorization` | header | no | `string` |  |  |
-| `X-Internal-Api-Key` | header | no | `string` |  |  |
-
-### Request body
-- Required: **yes**
-
-#### Media type: `application/json`
-- Schema: [RunIngestPayload](api-schemas.md#runingestpayload)
-
-### Responses
-
-### Response `200`
-Successful Response
-
-#### Media type: `application/json`
-- Schema: `{}`
-
-### Response `422`
-Validation Error
-
-#### Media type: `application/json`
-- Schema: [HTTPValidationError](api-schemas.md#httpvalidationerror)
-
-### GET `/ai/ingest/runs/{run_id}`
-Get Ingestion Run
-
-Return only sanitized durable run status fields.
-- Operation ID: `get_ingestion_run_ai_ingest_runs__run_id__get`
-- Tags: `ingest`
-- Security: `InternalApiKey`
-- Deprecated: no
-
-#### Parameters
-
-| Name | In | Required | Schema | Description | Example |
-| --- | --- | --- | --- | --- | --- |
-| `run_id` | path | yes | `string (uuid)` |  |  |
-| `Authorization` | header | no | `string` |  |  |
-| `X-Internal-Api-Key` | header | no | `string` |  |  |
-
-### Responses
-
-### Response `200`
-Successful Response
-
-#### Media type: `application/json`
-- Schema: `{}`
 
 ### Response `422`
 Validation Error

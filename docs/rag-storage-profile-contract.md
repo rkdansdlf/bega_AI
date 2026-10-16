@@ -28,11 +28,11 @@ database URLs and opens no network connection.
 | Concern | Oracle selection | PostgreSQL selection | Owner / code path |
 | --- | --- | --- | --- |
 | Runtime factory | `OracleRagPool` | tagged `PostgresRagPool` | `app/deps.py`, `app/core/rag_runtime.py` |
-| Manual ingest writer | `MERGE` into `rag_chunks`, refresh `rag_chunk_terms` | `INSERT .. ON CONFLICT` into `rag_chunks` | `app/routers/ingest.py`, `app/core/oracle_rag.py`, `app/core/rag_storage.py` |
+| Ingest writer | none. Retired; the crawler (KBO_playwright) writes `rag_chunks` | none. Retired | `scripts/retired/`, `app/db/retired/` (not live) |
 | Search reader | Oracle native vector + sparse term search | pgvector + PostgreSQL FTS | `app/core/rag.py`, `app/core/retrieval.py`, `app/tools/document_query.py` |
 | Readiness | Oracle connection, table/vector coverage, HNSW index | PostgreSQL connection, table, vector extension/dimension, HNSW index | `app/core/rag_readiness.py` |
 | API dependency | same `get_rag_connection_pool()` singleton | same singleton | ingest, search pipeline, document/regulation tools, readiness |
-| Background batch writer | disabled | allowed only when unsplit `POSTGRES_DB_URL` is the selected destination | `app/config.py`, `app/core/ingest_worker.py`, `scripts/ingest_from_kbo.py` |
+| Background batch writer | none. Removed with the ingest worker | none. Removed | `tests/test_rag_chunks_read_only_guard.py` enforces no live writes |
 
 The PostgreSQL worker remains PostgreSQL-specific. It writes through
 `settings.database_url`, so configuration rejects the worker when
@@ -119,16 +119,16 @@ not claim them.
 
 PostgreSQL acceptance schema artifacts are owned in the AI service:
 
-- `app/db/schema.sql` creates pgvector `rag_chunks`, support tables, and indexes.
-- `app/db/migrations/005_rag_runtime_compatibility.sql` is additive
-  compatibility for an existing PostgreSQL `rag_chunks` table.
-- `app/db/rag_storage_indexes_concurrent.sql` and
-  `scripts/create_vector_index.py` are operator-run PostgreSQL index paths.
+`rag_chunks` DDL, its indexes, and its compatibility migrations are owned by the
+crawler (KBO_playwright), per CLAUDE.md "데이터 소유권". The AI service does not
+create, alter, index, or write it:
 
-`app/db/schema_contract.py` remains a PostgreSQL-only validator. Its note that
-`rag_chunks` belongs to a backend/data migration path now resolves to the
-dedicated Oracle owner above only when `RAG_BACKEND=oracle`; PostgreSQL
-acceptance ownership remains in the AI artifacts listed here.
+- `app/db/schema.sql` keeps only AI-runtime-owned tables.
+- The former `rag_chunks` DDL, migration `005`, migration `009` (embedding
+  generations table and write trigger), and the index scripts moved to
+  `app/db/retired/` and `scripts/retired/`. They are not run.
+- `app/db/schema_contract.py` is a read-only validator. It checks the columns
+  and indexes the AI service reads and does not change anything.
 
 ## Identity, embedding and lifecycle
 
@@ -155,9 +155,8 @@ The fake backend persists nothing. Local database tests must use a unique
 fixture `source_table`/`source_row_id` namespace and remove only rows they
 created; there is no authorized blanket cleanup of existing local data.
 
-`scripts/sync_rag_chunks.py` is a manual PostgreSQL-to-PostgreSQL CLI and is
-not an automatic production promotion path. It cannot write Oracle and must
-not be pointed at production in local verification. No automatic
+`scripts/sync_rag_chunks.py` was retired. It was a manual PostgreSQL-to-PostgreSQL
+copy and is not an automatic production promotion path. No automatic
 PostgreSQL-to-Oracle promotion or dual-write path was found.
 
 ## HTTP contract

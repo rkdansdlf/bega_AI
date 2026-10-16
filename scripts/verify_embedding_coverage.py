@@ -25,7 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import get_settings
-from scripts.ingest_from_kbo import (
+from scripts.rag_source_chunks import (
     CANONICAL_SOURCE_ROW_KEYS,
     TABLE_PROFILES,
     build_static_profile_chunk_payloads,
@@ -35,7 +35,7 @@ from scripts.ingest_from_kbo import (
     build_source_row_id,
     resolve_primary_key_columns,
 )
-from scripts.sync_rag_chunks import _load_settings_from_env_file
+from scripts.rag_source_chunks import _load_settings_from_env_file
 
 SEASONAL_TABLES: List[str] = [
     "kbo_seasons",

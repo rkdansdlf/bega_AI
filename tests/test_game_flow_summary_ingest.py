@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts import ingest_from_kbo as ingest_script
+from scripts import rag_source_chunks as ingest_script
 
 
 def test_game_flow_summary_single_chunk_skips_smart_chunks(monkeypatch) -> None:

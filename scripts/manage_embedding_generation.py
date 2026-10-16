@@ -3,26 +3,23 @@
 
     manage_embedding_generation.py list
     manage_embedding_generation.py register g1 --model pplx-embed --dim 1536 --version 2 --mirror-inline
-    manage_embedding_generation.py backfill g1            # copy current inline vectors (no re-embed; safe with live ingest, exit 3 if incomplete)
-    manage_embedding_generation.py build-index g1         # partial HNSW index (CONCURRENTLY)
     manage_embedding_generation.py audit g1
     manage_embedding_generation.py activate g1 [--min-coverage 0.995] [--force]
     manage_embedding_generation.py rollback
-    manage_embedding_generation.py drop g0                # reclaim space of a retired generation
+
+Read-only with respect to vectors: this CLI only manages the generation
+registry and the ACTIVE pointer. Copying, indexing and dropping
+``rag_chunk_embeddings`` rows, and writing ``rag_chunks``, belong to the
+crawler (see docs/rag-storage-profile-contract.md). The backfill, build-index
+and drop subcommands were retired with that ownership change.
 
 Physical store (``--store generations``, the default when RAG_EMBEDDING_STORE is
 ``generations``; migration 009): generations coexist in ``rag_chunk_embeddings``.
-Adopting it, once:
+Rolling to a new model: the crawler writes ``rag_chunk_embeddings`` rows and
+builds the ANN index for the new generation; this CLI then registers it, runs
+``audit``, and ``activate`` flips the ACTIVE pointer. ``rollback`` flips back to
+the previous generation, whose rows were never touched.
 
-    register g1 --mirror-inline  →  backfill g1  →  build-index g1  →  activate g1
-    then set RAG_EMBEDDING_STORE=generations and restart.
-
-Rolling to a new model: ``register g2 --model … --dim …``, have the embedding
-writer call ``embedding_generations.write_embeddings`` (or write
-``rag_chunk_embeddings`` directly), ``build-index g2``, ``audit g2``, ``activate
-g2``. ``rollback`` flips back to g1, whose rows were never touched.
-
-Rows for a *new model* are written by the crawler / a re-embed job, not here.
 ``activate`` refuses until the ANN index exists and coverage passes, then flips
 the ACTIVE pointer in one transaction. Pass ``--db-url`` to target a database
 directly instead of the configured RAG pool.
@@ -128,30 +125,6 @@ async def _run(args: argparse.Namespace) -> int:
                     mirror_inline=args.mirror_inline,
                 )
                 print(f"registered {args.generation_id} (BUILDING)")
-            elif args.cmd == "backfill":
-                out = await eg.backfill_from_inline(
-                    conn,
-                    args.generation_id,
-                    batch_size=args.batch_size,
-                    max_passes=args.max_passes,
-                )
-                print(json.dumps(out, indent=2))
-                if not out["complete"]:
-                    # Rows were locked by in-flight writers on every pass. Not an
-                    # error, but do not proceed to build-index/activate on it.
-                    print(
-                        f"incomplete: {out['remaining']} rows still uncopied "
-                        "(locked by live writers); re-run backfill",
-                        file=sys.stderr,
-                    )
-                    return 3
-            elif args.cmd == "build-index":
-                print(
-                    json.dumps(
-                        await eg.build_generation_index(conn, args.generation_id),
-                        indent=2,
-                    )
-                )
             elif args.cmd == "audit":
                 gen = await eg.get_generation(
                     conn, args.generation_id, extended=extended
@@ -182,19 +155,6 @@ async def _run(args: argparse.Namespace) -> int:
                 )
                 print(json.dumps(out, indent=2, default=str))
                 _note_propagation(out)
-            elif args.cmd == "drop":
-                print(
-                    json.dumps(
-                        await eg.drop_generation_data(
-                            conn,
-                            args.generation_id,
-                            grace_seconds=max(
-                                eg.DEFAULT_DROP_GRACE_S, 3 * _cache_ttl()
-                            ),
-                        ),
-                        indent=2,
-                    )
-                )
     except eg.GenerationError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
@@ -228,18 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="mirror inline rag_chunks.embedding writes with this signature "
         "into the generation (physical store)",
     )
-    bf = sub.add_parser("backfill")
-    bf.add_argument("generation_id")
-    bf.add_argument("--batch-size", type=int, default=5000)
-    bf.add_argument(
-        "--max-passes",
-        type=int,
-        default=3,
-        help="retry passes for rows skipped because a writer held them (exit 3 "
-        "if still incomplete)",
-    )
-    for name in ("build-index", "audit", "drop"):
-        sub.add_parser(name).add_argument("generation_id")
+    sub.add_parser("audit").add_argument("generation_id")
     act = sub.add_parser("activate")
     act.add_argument("generation_id")
     act.add_argument("--min-coverage", type=float, default=eg.DEFAULT_MIN_COVERAGE)

@@ -27,7 +27,6 @@ from .routers import (
     chat_stream,
     feedback,
     search,
-    ingest,
     vision,
     coach,
     coach_auto_brief_ops,
@@ -126,7 +125,6 @@ def create_app() -> FastAPI:
     _include_internal_router(app, chat_stream.router)
     _include_internal_router(app, feedback.router)
     _include_internal_router(app, search.router)
-    _include_internal_router(app, ingest.router)
     _include_internal_router(app, vision.router, deprecated=True)
     _include_internal_router(app, vision.router, prefix="/ai")
     _include_internal_router(app, coach.router, deprecated=True)

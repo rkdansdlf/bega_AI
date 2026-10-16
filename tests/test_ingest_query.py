@@ -18,13 +18,13 @@ except ModuleNotFoundError:
     sql = None
 
 # We can import build_select_query directly from the script
-from scripts.ingest_from_kbo import (
+from scripts.rag_source_chunks import (
     REQUIRED_SOURCE_COLUMNS,
     TABLE_PROFILES,
     build_content,
     build_select_query,
 )
-import scripts.ingest_from_kbo as ingest_script
+import scripts.rag_source_chunks as ingest_script
 
 
 @pytest.fixture
@@ -37,12 +37,6 @@ def sample_cutoff():
     return datetime(2025, 4, 1, 13, 0)
 
 
-def test_ingest_from_kbo_does_not_force_pytest_env_flag() -> None:
-    source = __import__("pathlib").Path("scripts/ingest_from_kbo.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "PYTEST_CURRENT_TEST" not in source
 
 
 def test_build_select_query_with_alias(sample_since):
@@ -638,36 +632,6 @@ def test_custom_checkpoint_query_freezes_update_window_before_resume(
     assert params == (sample_since, sample_cutoff, 41)
 
 
-def test_team_profiles_checkpoint_uses_unique_id_for_same_team_profiles():
-    profile = TABLE_PROFILES["team_profiles"]
-    order = ingest_script.resolve_checkpoint_order(None, "team_profiles", profile)
-    rows = [
-        {"id": 41, "team_id": "TEST_TEAM", "profile": "history"},
-        {"id": 42, "team_id": "TEST_TEAM", "profile": "identity"},
-    ]
-
-    yielded = list(
-        ingest_script.iter_checkpoint_rows(rows, order=order, previous=None)
-    )
-    query, params = build_select_query(
-        table="team_profiles",
-        profile=profile,
-        pk_columns=["id"],
-        limit=None,
-        season_year=None,
-        since=None,
-        checkpoint_order=order,
-        resume_cursor=CheckpointCursor((41,)),
-    )
-
-    assert order.fields == (CheckpointOrderField("id", "integer"),)
-    assert [cursor for _row, cursor in yielded] == [
-        CheckpointCursor((41,)),
-        CheckpointCursor((42,)),
-    ]
-    assert 'ROW("id") > ROW(%s)' in query
-    assert query.rstrip().endswith('ORDER BY "id" ASC')
-    assert params == (41,)
 
 
 def test_datetime_naive_checkpoint_query_rebinds_naive_parameter():

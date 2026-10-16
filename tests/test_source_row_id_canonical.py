@@ -1,4 +1,4 @@
-from scripts.ingest_from_kbo import build_canonical_source_row_id, build_source_row_id
+from scripts.rag_source_chunks import build_canonical_source_row_id, build_source_row_id
 
 
 def test_build_canonical_source_row_id_game() -> None:

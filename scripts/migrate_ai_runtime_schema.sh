@@ -20,10 +20,6 @@ psql --set ON_ERROR_STOP=1 \
   "${DB_URL}"
 
 psql --set ON_ERROR_STOP=1 \
-  --file "${AI_ROOT}/app/db/migrations/005_rag_runtime_compatibility.sql" \
-  "${DB_URL}"
-
-psql --set ON_ERROR_STOP=1 \
   --file "${AI_ROOT}/app/db/migrations/006_chat_cache_provenance.sql" \
   "${DB_URL}"
 
@@ -35,11 +31,9 @@ psql --set ON_ERROR_STOP=1 \
   --file "${AI_ROOT}/app/db/migrations/008_rag_answer_feedback.sql" \
   "${DB_URL}"
 
-# Physical embedding generations. Inert until RAG_EMBEDDING_STORE=generations;
-# requires 005 (rag_chunks columns) and 007 (generation registry).
-psql --set ON_ERROR_STOP=1 \
-  --file "${AI_ROOT}/app/db/migrations/009_rag_chunk_embeddings.sql" \
-  "${DB_URL}"
+# rag_chunks and rag_chunk_embeddings are owned by the crawler (CLAUDE.md data
+# ownership). Migrations 005 and 009 (which alter rag_chunks and install its
+# write trigger) were retired to app/db/retired/migrations and are not run here.
 
 case "${CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED:-false}" in
   1|true|TRUE|yes|YES)

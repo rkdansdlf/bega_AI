@@ -129,9 +129,9 @@ AI/
 │   ├── agents/
 │   │   ├── baseball_agent.py
 │   │   └── tool_caller.py
-│   ├── db/                     # DB 스키마
+│   ├── db/                     # DB 스키마 (rag_chunks는 크롤러 소유)
 │   │   ├── schema.sql
-│   │   └── queries.sql
+│   │   └── retired/            # 실행하지 않는 과거 SQL
 │   └── tools/
 │       ├── database_query.py
 │       ├── game_query.py
@@ -643,30 +643,14 @@ BEGA AI 서비스의 RAG(검색 증강 생성) 파이프라인은 다음 4단계
 
 ## 벡터 스키마 및 데이터 수집
 
-### 스키마 설정
+### 스키마와 데이터 소유
 
-`app/db/schema.sql` 파일을 사용하여 `rag_chunks` 테이블을 생성합니다:
+`rag_chunks`와 임베딩 인덱스는 크롤러([KBO_playwright](https://github.com/rkdansdlf/KBO_playwright))가 생성하고 채웁니다. 이 서비스는 읽기와 검증만 합니다.
 
-```bash
-psql $POSTGRES_DB_URL -f app/db/schema.sql
-```
-
-### 초기 데이터 수집
-
-`scripts/ingest_from_kbo.py` 스크립트는 내부 DB와 정적 문서를 벡터 데이터베이스에 적재합니다:
-
-```bash
-# AI 디렉토리에서 실행
-PYTHONPATH=. .venv/bin/python scripts/ingest_from_kbo.py \
-  --tables player_season_batting player_season_pitching kbo_metrics_explained
-```
-
-**스크립트 기능:**
-
-1.  통계 데이터를 LLM 친화적 텍스트로 변환
-2.  텍스트를 적절한 크기의 청크로 분할
-3.  각 청크의 임베딩 생성
-4.  `rag_chunks` 테이블에 업서트
+- `app/db/schema.sql`은 AI 런타임 전용 테이블만 만듭니다.
+- 기동 시 `app/db/schema_contract.py`가 `rag_chunks`의 필요한 컬럼과 인덱스를 읽기 전용으로 확인합니다.
+- 과거의 수집 스크립트와 `rag_chunks` DDL은 `scripts/retired/`, `app/db/retired/`로 옮겨졌고 실행되지 않습니다.
+- 검증 도구는 `scripts/verify_embedding_coverage.py`, `scripts/run_db_embedding_consistency_audit.py`, `scripts/audit_rag_chunk_source_drift.py`입니다.
 
 ### 오프라인 개발
 

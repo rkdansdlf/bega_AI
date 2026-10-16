@@ -40,7 +40,7 @@ from app.core.rag_storage import (
     resolve_embedding_version,
     scan_sensitive_content,
 )
-from scripts.ingest_from_kbo import (
+from scripts.rag_source_chunks import (
     ChunkPayload,
     TABLE_PROFILES,
     _build_chunk_payload_dicts_for_row,
@@ -48,7 +48,7 @@ from scripts.ingest_from_kbo import (
     build_static_profile_chunk_payloads,
     resolve_primary_key_columns,
 )
-from scripts.sync_rag_chunks import _load_settings_from_env_file
+from scripts.rag_source_chunks import _load_settings_from_env_file
 from scripts.verify_embedding_coverage import (
     CoverageTarget,
     _build_legacy_from_mapping,
@@ -472,7 +472,7 @@ def _actual_rows_query(target: CoverageTarget) -> tuple[str, tuple[Any, ...]]:
     params: List[Any] = [target.source_table]
     profile = TABLE_PROFILES.get(target.table, {})
     if profile.get("source_file"):
-        from scripts.ingest_from_kbo import build_static_source_row_prefix
+        from scripts.rag_source_chunks import build_static_source_row_prefix
 
         prefix = build_static_source_row_prefix(target.table, profile)
         query += " AND (source_row_id = %s OR source_row_id LIKE %s)"

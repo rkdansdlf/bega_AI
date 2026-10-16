@@ -86,22 +86,6 @@ def test_auto_schema_preparation_keeps_compatibility_startup_ddl():
     validate.assert_not_awaited()
 
 
-def test_ingest_run_store_uses_worker_lease_and_recovery_settings():
-    settings = SimpleNamespace(
-        ingest_worker_lease_seconds=240,
-        ingest_worker_max_recovery_attempts=2,
-    )
-    pool = object()
-
-    with (
-        patch.object(deps, "get_settings", return_value=settings),
-        patch.object(deps, "get_ingest_connection_pool", return_value=pool),
-    ):
-        store = deps.get_ingest_run_store()
-
-    assert store.pool is pool
-    assert store.lease_seconds == 240
-    assert store.max_recovery_attempts == 2
 
 
 def _lifespan_settings(*, ingest_worker_enabled: bool) -> SimpleNamespace:
@@ -156,46 +140,6 @@ def _patch_lifespan_resources(
     )
 
 
-def test_lifespan_cleans_post_open_initial_recovery_failure(monkeypatch):
-    class InitialRecoveryError(RuntimeError):
-        pass
-
-    task_refs = []
-
-    async def tracked_loop():
-        task_refs.append(asyncio.current_task())
-        await asyncio.Event().wait()
-
-    resources = _patch_lifespan_resources(
-        monkeypatch,
-        settings=_lifespan_settings(ingest_worker_enabled=True),
-        cleanup_loop=tracked_loop,
-        metrics_loop=tracked_loop,
-    )
-
-    class _FailingWorker:
-        def __init__(self, **kwargs):
-            del kwargs
-
-        async def recover_expired_once(self):
-            await asyncio.sleep(0)
-            raise InitialRecoveryError("initial recovery failed")
-
-    monkeypatch.setattr(deps, "get_ingest_run_store", lambda: object())
-    monkeypatch.setattr(deps, "IngestWorker", _FailingWorker)
-
-    async def scenario():
-        with pytest.raises(InitialRecoveryError, match="initial recovery failed"):
-            async with deps.lifespan(None):
-                raise AssertionError("startup must not reach yield")
-        assert task_refs
-        assert all(task is not None and task.done() for task in task_refs)
-
-    asyncio.run(scenario())
-
-    resources.close_ingest.assert_awaited_once()
-    resources.close_general.assert_awaited_once()
-    resources.backend_get.assert_not_awaited()
 
 
 def test_lifespan_awaits_all_tasks_and_closers_after_task_cleanup_failure(

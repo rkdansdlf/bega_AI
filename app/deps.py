@@ -53,8 +53,6 @@ from .core.chat_semantic_cache import (
     CREATE_VECTOR_INDEX_SQL as CHAT_SEMANTIC_CACHE_VECTOR_INDEX_DDL,
 )
 from .core.chat_semantic_cache import cleanup_expired as _cleanup_expired_semantic_cache
-from .core.ingest_run_store import IngestRunStore
-from .core.ingest_worker import IngestWorker
 from .db.schema_contract import validate_schema_contract
 from .internal_auth import require_ai_internal_token  # noqa: F401  (re-export)
 
@@ -832,23 +830,11 @@ def _required_checks_ready(checks: dict[str, dict[str, Any]]) -> bool:
     )
 
 
-def get_ingest_run_store() -> IngestRunStore:
-    """Build an ingestion store over its dedicated coordination pool."""
-
-    settings = get_settings()
-    return IngestRunStore(
-        get_ingest_connection_pool(),
-        lease_seconds=settings.ingest_worker_lease_seconds,
-        max_recovery_attempts=settings.ingest_worker_max_recovery_attempts,
-    )
-
-
 @asynccontextmanager
 async def lifespan(app):
     """앱 시작/종료 시 실행되는 lifespan 이벤트"""
     del app
     background_tasks: list[asyncio.Task[Any]] = []
-    ingest_worker_stop_event: Optional[asyncio.Event] = None
     embedding_backend: Any = None
     database_resources_started = False
     runtime_initialized = False
@@ -876,25 +862,6 @@ async def lifespan(app):
             background_tasks.append(coach_recovery_task)
             logger.info("[Lifespan] coach FAILED_LOCKED recovery loop started")
 
-        if settings.ingest_worker_enabled:
-            ingest_store = get_ingest_run_store()
-            ingest_worker_stop_event = asyncio.Event()
-            ingest_worker = IngestWorker(store=ingest_store, settings=settings)
-            recovered, failed = await ingest_worker.recover_expired_once()
-            ingest_worker_task = asyncio.create_task(
-                ingest_worker.run_forever(ingest_worker_stop_event)
-            )
-            background_tasks.append(ingest_worker_task)
-            ingest_recovery_task = asyncio.create_task(
-                ingest_worker.run_recovery_forever(ingest_worker_stop_event)
-            )
-            background_tasks.append(ingest_recovery_task)
-            logger.info(
-                "[Lifespan] ingest worker started recovered=%d failed=%d",
-                recovered,
-                failed,
-            )
-
         try:
             from .core.embedding_cache import get_backend as _get_embed_backend
 
@@ -911,8 +878,6 @@ async def lifespan(app):
         raise
     finally:
         cleanup_errors: list[tuple[str, BaseException]] = []
-        if ingest_worker_stop_event is not None:
-            ingest_worker_stop_event.set()
         for task in background_tasks:
             task.cancel()
         for task in background_tasks:

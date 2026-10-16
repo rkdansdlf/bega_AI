@@ -21,7 +21,7 @@
    AI_SCHEMA_DB_URL='postgresql://...' ./scripts/migrate_ai_runtime_schema.sh
    ```
 
-   Managed migration script applies `001_ai_runtime_cache.sql` -> `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql` -> `005_rag_runtime_compatibility.sql`. Compatibility startup applies `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다. 005는 기존 `rag_chunks`에 검색 계약 컬럼과 `rag_retrieval_events`를 additive하게 보강하며, 임베딩을 재생성하거나 `embedding_model` provenance를 추정하지 않습니다. Fresh schema와 이전 004 schema 모두에 `source_updated_before timestamptz` stores the immutable source-clock cutoff; 같은 004가 `ADD COLUMN IF NOT EXISTS`로 기존 테이블을 안전하게 보강합니다.
+   Managed migration script applies `001_ai_runtime_cache.sql` -> `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. Compatibility startup applies `003_ai_ingest_orchestration.sql` -> `004_ai_ingest_checkpoints.sql`. 003은 `ai_ingest_runs`, 활성 요청 유일 인덱스, 범위별 `ai_ingest_watermarks`를 생성하고, 004는 내구성 진행 상태용 `ai_ingest_checkpoints`를 생성합니다. 005(`rag_chunks` 보강)와 009(임베딩 세대 트리거)는 `rag_chunks` 소유권이 크롤러로 넘어가면서 `app/db/retired/`로 이동했고 실행하지 않습니다. Fresh schema와 이전 004 schema 모두에 `source_updated_before timestamptz` stores the immutable source-clock cutoff; 같은 004가 `ADD COLUMN IF NOT EXISTS`로 기존 테이블을 안전하게 보강합니다.
 
 2. AI 서비스를 `AI_DB_SCHEMA_MODE=managed`로 시작합니다. 작업자는 기본 활성화되며 다음 값으로 조정합니다.
 

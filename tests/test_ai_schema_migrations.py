@@ -70,27 +70,6 @@ def test_ingest_checkpoint_migration_defines_durable_progress_table():
     ) in sql
 
 
-def test_rag_runtime_compatibility_migration_is_additive_and_preserves_provenance():
-    sql = (MIGRATION_DIR / "005_rag_runtime_compatibility.sql").read_text(
-        encoding="utf-8"
-    )
-
-    for column in (
-        "content_tsv",
-        "metadata",
-        "source_type",
-        "source_uri",
-        "embedding_model",
-        "embedding_dim",
-        "is_active",
-    ):
-        assert f"ADD COLUMN IF NOT EXISTS {column}" in sql
-    assert "vector_dims(embedding)" in sql
-    assert "source_uri = source_url" in sql
-    assert "does not infer embedding_model" in sql
-    assert "CREATE TABLE IF NOT EXISTS rag_retrieval_events" in sql
-    assert "DROP TABLE" not in sql
-    assert "DELETE FROM" not in sql
 
 
 def test_managed_migration_script_applies_ingest_checkpoint_migration_in_order():
@@ -99,7 +78,6 @@ def test_managed_migration_script_applies_ingest_checkpoint_migration_in_order()
         '"${AI_ROOT}/app/db/migrations/001_ai_runtime_cache.sql"',
         '"${AI_ROOT}/app/db/migrations/003_ai_ingest_orchestration.sql"',
         '"${AI_ROOT}/app/db/migrations/004_ai_ingest_checkpoints.sql"',
-        '"${AI_ROOT}/app/db/migrations/005_rag_runtime_compatibility.sql"',
     )
 
     assert all(path in script for path in migration_paths)
@@ -115,8 +93,7 @@ def test_data_sync_runbook_documents_persistent_checkpoint_operations():
     for statement in (
         "Managed migration script applies `001_ai_runtime_cache.sql` -> "
         "`003_ai_ingest_orchestration.sql` -> "
-        "`004_ai_ingest_checkpoints.sql` -> "
-        "`005_rag_runtime_compatibility.sql`.",
+        "`004_ai_ingest_checkpoints.sql`.",
         "Compatibility startup applies `003_ai_ingest_orchestration.sql` -> "
         "`004_ai_ingest_checkpoints.sql`.",
         "Exactly one `ai_ingest_checkpoints` row per `(run_id, source_table)` "

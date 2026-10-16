@@ -22,7 +22,7 @@ from app.core.ingest_checkpoints import (
     cursor_from_row,
     ensure_cursor_advances,
 )
-import scripts.ingest_from_kbo as ingest_script
+import scripts.rag_source_chunks as ingest_script
 
 
 ORDER = CheckpointOrder(

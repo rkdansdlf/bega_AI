@@ -1,4 +1,4 @@
-from scripts.ingest_from_kbo import TABLE_PROFILES, build_static_source_row_prefix
+from scripts.rag_source_chunks import TABLE_PROFILES, build_static_source_row_prefix
 from scripts.verify_embedding_coverage import normalize_actual_source_row_id
 
 

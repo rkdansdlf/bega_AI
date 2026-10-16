@@ -179,7 +179,6 @@ def test_create_app_registers_every_business_router_with_internal_auth(monkeypat
         main_module.chat_stream.router,
         main_module.feedback.router,
         main_module.search.router,
-        main_module.ingest.router,
         main_module.vision.router,
         main_module.vision.router,
         main_module.coach.router,

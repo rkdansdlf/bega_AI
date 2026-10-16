@@ -13,7 +13,6 @@ from app.core.oracle_rag import (
     oracle_exact_document_search,
     oracle_similarity_search,
     oracle_rag_readiness,
-    upsert_oracle_rag_chunks,
 )
 
 
@@ -213,85 +212,9 @@ async def test_oracle_readiness_uses_native_dimension_function() -> None:
 
 
 @pytest.mark.asyncio
-async def test_oracle_upsert_merges_vectors_and_commits() -> None:
-    cursor = _Cursor([(1,)], [])
-    raw = _Connection(cursor)
-    connection = OracleRagConnection(raw)
-    records = [
-        (
-            1,
-            "p:1",
-            "선수",
-            "검색 가능한 내용",
-            {"content_hash": "hash", "metadata": {"source_type": "profile"}},
-        )
-    ]
-
-    count = await upsert_oracle_rag_chunks(
-        connection,
-        source_table="player_basic",
-        records=records,
-        embeddings=[[0.1, 0.2, 0.3]],
-        season_year=2025,
-        league_type_code="KBO",
-        player_id="1",
-    )
-
-    assert count == 1
-    assert raw.commits == 1
-    assert "MERGE INTO rag_chunks" in cursor.executed[0][0]
-    assert cursor.executed[0][1]["source_table"] == "player_basic"
-    assert cursor.executed[0][1]["league_type_code"] == "KBO"
-    assert "target.league_type_code = :league_type_code" in cursor.executed[0][0]
-    insert_clause = cursor.executed[0][0].split("WHEN NOT MATCHED THEN INSERT", 1)[1]
-    assert "league_type_code" in insert_clause
-    assert ":league_type_code" in insert_clause
-    assert "INSERT INTO rag_chunk_terms" in cursor.executed[-1][0]
 
 
 @pytest.mark.asyncio
-async def test_oracle_upsert_league_code_change_null_and_retry_keep_one_identity() -> (
-    None
-):
-    cursor = _Cursor([(1,)], [])
-    raw = _Connection(cursor)
-    connection = OracleRagConnection(raw)
-    records = [
-        (
-            1,
-            "league:1",
-            "리그 문서",
-            "검색 가능한 리그 문서 내용",
-            {"content_hash": "hash", "metadata": {}},
-        )
-    ]
-
-    for league_type_code in ("KBO", "KBO", "FUTURES", None):
-        count = await upsert_oracle_rag_chunks(
-            connection,
-            source_table="league_document",
-            records=records,
-            embeddings=[[0.1, 0.2, 0.3]],
-            league_type_code=league_type_code,
-        )
-        assert count == 1
-
-    merge_calls = [
-        (sql, params)
-        for sql, params in cursor.executed
-        if "MERGE INTO rag_chunks" in sql
-    ]
-    assert len(merge_calls) == 4
-    assert [params["league_type_code"] for _, params in merge_calls] == [
-        "KBO",
-        "KBO",
-        "FUTURES",
-        None,
-    ]
-    assert all(
-        "target.source_row_id = incoming.source_row_id" in sql for sql, _ in merge_calls
-    )
-    assert raw.commits == 4
 
 
 @pytest.mark.asyncio
