@@ -10,6 +10,16 @@
 -- DEFAULT is a metadata-only change on PostgreSQL 11+ (no table rewrite).
 -- Retrieval detects the column at runtime, so deploying the app before this
 -- migration keeps the previous behaviour (tombstones not filtered).
+--
+-- ADD COLUMN takes an ACCESS EXCLUSIVE lock. While it waits behind a long
+-- transaction, every new SELECT on rag_chunks queues behind it, so the wait is
+-- capped: on timeout psql (ON_ERROR_STOP=1) aborts and the migration is simply
+-- re-run later. The setting is session-local (each file is its own psql run).
+-- See docs/rag-index-status.md for rollout and rollback.
+
+SET lock_timeout = '5s';
 
 ALTER TABLE rag_chunks
     ADD COLUMN IF NOT EXISTS index_status varchar(24) DEFAULT 'ACTIVE';
+
+RESET lock_timeout;

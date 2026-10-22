@@ -202,9 +202,16 @@ def _has_index_status_column(cur: Any) -> bool:
 
 
 def resolve_index_status_sync(
-    *, source_has_column: bool, dest_has_column: bool
+    *,
+    source_has_column: bool,
+    dest_has_column: bool,
+    truncate_dest: bool = False,
 ) -> bool:
-    """Decide whether index_status is copied; refuse to silently drop tombstones."""
+    """Decide whether index_status is copied; refuse to silently drop tombstones.
+
+    Raises before any destination write (the caller checks this before
+    ``--truncate-dest``), dry runs included, so a refused run never touches data.
+    """
     if source_has_column and not dest_has_column:
         raise RuntimeError(
             "Source rag_chunks has index_status but the destination does not; "
@@ -212,10 +219,28 @@ def resolve_index_status_sync(
             "Apply app/db/migrations/010_rag_chunks_index_status.sql to the "
             "destination first."
         )
-    if not source_has_column:
+    if not source_has_column and dest_has_column:
+        if truncate_dest:
+            # Truncating would wipe the destination's tombstones and every re-inserted
+            # row would get the column default (ACTIVE): all DELETED chunks resurrect.
+            raise RuntimeError(
+                "--truncate-dest refused: the destination rag_chunks has index_status "
+                "but the source does not, so truncating would reset every tombstone "
+                "(index_status=DELETED) to ACTIVE. Apply "
+                "app/db/migrations/010_rag_chunks_index_status.sql to the source and "
+                "carry the tombstones there first, or sync without --truncate-dest."
+            )
         print(
-            "source rag_chunks has no index_status column; destination index_status "
-            "is left unchanged",
+            "source rag_chunks has no index_status column: existing destination rows "
+            "keep their index_status (tombstones stay DELETED); rows new to the "
+            "destination get its column default (ACTIVE)",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif not source_has_column:
+        print(
+            "neither source nor destination rag_chunks has index_status; tombstones "
+            "are not synced (apply app/db/migrations/010_rag_chunks_index_status.sql)",
             file=sys.stderr,
             flush=True,
         )
@@ -570,6 +595,7 @@ def sync_rag_chunks(
             include_index_status = resolve_index_status_sync(
                 source_has_column=source_has_index_status,
                 dest_has_column=dest_has_index_status,
+                truncate_dest=truncate_dest,
             )
             if truncate_dest and not dry_run:
                 init_dest_cur.execute("TRUNCATE TABLE rag_chunks")

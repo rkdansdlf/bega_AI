@@ -190,6 +190,9 @@ def test_rag_chunks_index_status_migration_is_additive_and_managed():
 
     assert "ADD COLUMN IF NOT EXISTS index_status varchar(24) DEFAULT 'ACTIVE';" in sql
     assert "UPDATE rag_chunks" not in sql
+    # The ACCESS EXCLUSIVE wait is capped so queued SELECTs are not blocked long.
+    assert sql.index("SET lock_timeout = '5s';") < sql.index("ALTER TABLE rag_chunks")
+    assert "RESET lock_timeout;" in sql
     assert "DROP" not in sql.upper()
     assert "migrations/010_rag_chunks_index_status.sql" in script
     assert script.index("009_rag_chunk_embeddings.sql") < script.index(

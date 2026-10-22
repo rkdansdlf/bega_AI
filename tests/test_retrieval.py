@@ -533,3 +533,120 @@ def test_index_status_visible_predicate_semantics(
         f"SELECT id FROM rag_chunks WHERE {index_status_visible_sql()}"
     ).fetchall()
     assert (rows == [(1,)]) is visible
+
+
+class _UndefinedIndexStatusCursor(_IndexStatusCursor):
+    """Main query fails once as if index_status was dropped after caching."""
+
+    def __init__(self, rows, conn) -> None:  # noqa: ANN001
+        super().__init__(rows)
+        self._conn = conn
+
+    async def execute(self, query, params=None):  # noqa: ANN001
+        await super().execute(query, params)
+        if "index_status" in query and "information_schema" not in query:
+            self._conn.failed_queries += 1
+            from psycopg.errors import UndefinedColumn
+
+            raise UndefinedColumn('column "index_status" does not exist')
+
+
+class _DroppedColumnConnection(_IndexStatusConnection):
+    def __init__(self, rows, transaction_status) -> None:  # noqa: ANN001
+        super().__init__(rows)
+        self.failed_queries = 0
+        self.info = type("_Info", (), {"transaction_status": transaction_status})()
+
+    def cursor(self, row_factory=None):  # noqa: ANN001
+        self.last_cursor = _UndefinedIndexStatusCursor(self.rows, self)
+        return self.last_cursor
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_recovers_when_index_status_column_is_dropped(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import psycopg
+
+    from app.core import retrieval
+
+    # Column was present when cached; then dropped (e.g. rollback of 010).
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_exists", True)
+    conn = _DroppedColumnConnection([], psycopg.pq.TransactionStatus.IDLE)
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3, keyword="오승환")
+
+    assert conn.failed_queries == 1
+    retried_sql, retried_params = conn.last_cursor.executed[-1]
+    failed_sql, failed_params = conn.last_cursor.executed[-2]
+    assert "index_status" in failed_sql
+    assert "index_status" not in retried_sql
+    assert retried_params == failed_params
+    # Cache invalidated: the next search does not add the filter (no failure).
+    assert retrieval._rag_chunks_index_status_exists is False
+    assert await retrieval.rag_chunks_has_index_status(conn) is False
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_does_not_retry_inside_failed_transaction(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import psycopg
+    from psycopg.errors import UndefinedColumn
+
+    from app.core import retrieval
+
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_exists", True)
+    conn = _DroppedColumnConnection([], psycopg.pq.TransactionStatus.INERROR)
+
+    with pytest.raises(UndefinedColumn):
+        await similarity_search(conn, [0.1, 0.2, 0.3], limit=3)
+
+    assert conn.failed_queries == 1
+    # Still invalidated, so the caller's next request succeeds without the filter.
+    assert retrieval._rag_chunks_index_status_exists is False
+
+
+@pytest.mark.asyncio
+async def test_unrelated_undefined_column_is_not_swallowed(
+    reset_index_status_cache: None,
+) -> None:
+    from psycopg.errors import UndefinedColumn
+
+    from app.core import retrieval
+
+    class _Cursor:
+        async def execute(self, query, params=None):  # noqa: ANN001
+            raise UndefinedColumn('column "quality_score" does not exist')
+
+    with pytest.raises(UndefinedColumn):
+        await retrieval.execute_with_index_status_fallback(
+            object(), _Cursor(), "SELECT 1", [], filtered=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_index_status_check_failure_is_cached_for_negative_ttl(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    import logging
+
+    from app.core import retrieval
+
+    calls = {"n": 0}
+
+    class _Broken:
+        def cursor(self, *a, **k):  # noqa: ANN002, ANN003
+            calls["n"] += 1
+            raise RuntimeError("boom")
+
+    caplog.set_level(logging.WARNING, logger=retrieval.logger.name)
+    for _ in range(5):
+        assert await retrieval.rag_chunks_has_index_status(_Broken()) is False
+    assert calls["n"] == 1
+    assert caplog.text.count("index_status column check failed") == 1
+
+    # After the TTL the check runs again.
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_checked_at", -1e9)
+    assert await retrieval.rag_chunks_has_index_status(_Broken()) is False
+    assert calls["n"] == 2

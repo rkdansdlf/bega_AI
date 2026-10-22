@@ -623,3 +623,66 @@ def test_sync_refusal_happens_before_truncating_destination(monkeypatch: Any) ->
         )
 
     assert not any("TRUNCATE" in query for query, _ in dest_init_cur.executed)
+
+
+def test_sync_refuses_truncate_when_only_destination_has_index_status(
+    monkeypatch: Any,
+) -> None:
+    source_count_cur = _FakeCursor(scalar_rows=[(1,)])
+    source_init_cur = _FakeCursor(scalar_rows=[(False,)])
+    dest_init_cur = _FakeCursor(scalar_rows=[(True,)])
+    connections = [
+        _FakeConnection([source_count_cur, source_init_cur]),
+        _FakeConnection([dest_init_cur]),
+    ]
+    monkeypatch.setattr(sync_script, "_require_psycopg", lambda: None)
+    monkeypatch.setattr(
+        sync_script,
+        "psycopg",
+        type(
+            "_FakePsycopg",
+            (),
+            {"connect": staticmethod(lambda *args, **kwargs: connections.pop(0))},
+        )(),
+    )
+
+    with pytest.raises(RuntimeError, match="--truncate-dest refused"):
+        sync_script.sync_rag_chunks(
+            source_db_url="postgresql://source",
+            dest_db_url="postgresql://dest",
+            source_tables=[],
+            season_year=None,
+            batch_size=10,
+            commit_interval=10,
+            limit=None,
+            known_total_rows=None,
+            dry_run=False,
+            truncate_dest=True,
+        )
+
+    assert not any("TRUNCATE" in query for query, _ in dest_init_cur.executed)
+
+
+def test_index_status_messages_match_behaviour(capsys: Any) -> None:
+    assert (
+        sync_script.resolve_index_status_sync(
+            source_has_column=False, dest_has_column=True
+        )
+        is False
+    )
+    err = capsys.readouterr().err
+    assert "existing destination rows keep their index_status" in err
+    assert "left unchanged" not in err
+
+    sync_script.resolve_index_status_sync(
+        source_has_column=False, dest_has_column=False
+    )
+    assert "tombstones are not synced" in capsys.readouterr().err
+
+    assert (
+        sync_script.resolve_index_status_sync(
+            source_has_column=True, dest_has_column=True, truncate_dest=True
+        )
+        is True
+    )
+    assert capsys.readouterr().err == ""

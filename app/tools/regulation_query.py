@@ -11,7 +11,11 @@ from typing import Dict, Any, List
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.errors import UndefinedTable
-from ..core.retrieval import index_status_visible_sql, rag_chunks_has_index_status
+from ..core.retrieval import (
+    execute_with_index_status_fallback,
+    index_status_visible_sql,
+    rag_chunks_has_index_status,
+)
 from ..core.oracle_rag import (
     _parse_meta_async,
     acquire_cursor,
@@ -307,7 +311,8 @@ class RegulationQueryTool:
         # Tombstone(index_status=DELETED 등) 청크 제외. 컬럼이 없는 DB는 기존 동작 유지.
         if not has_index_status:
             return ""
-        return f"\n                AND {index_status_visible_sql()}"
+        # strip_index_status_filter() 가 지울 수 있도록 " AND <술어>" 형태를 유지한다.
+        return f" AND {index_status_visible_sql()}"
 
     async def _search_regulation_once(
         self, conn: psycopg.AsyncConnection, query: str, limit: int
@@ -361,7 +366,9 @@ class RegulationQueryTool:
 
             for search_term in search_terms:
                 search_pattern = f"%{search_term}%"
-                await cursor.execute(
+                await execute_with_index_status_fallback(
+                    conn,
+                    cursor,
                     text_search_query,
                     (
                         search_pattern,
@@ -370,6 +377,7 @@ class RegulationQueryTool:
                         search_pattern,
                         limit,
                     ),
+                    filtered=has_index_status,
                 )
                 rows = await cursor.fetchall()
                 if rows:
@@ -493,7 +501,9 @@ class RegulationQueryTool:
         search_patterns = [f"%{keyword}%" for keyword in keywords] + [limit]
 
         async with conn.cursor(row_factory=dict_row) as cursor:
-            await cursor.execute(query, search_patterns)
+            await execute_with_index_status_fallback(
+                conn, cursor, query, search_patterns, filtered=has_index_status
+            )
             return await cursor.fetchall()
 
     async def get_regulation_by_category(
@@ -661,7 +671,9 @@ class RegulationQueryTool:
                 LIMIT 1;
             """
 
-            await cursor.execute(query, (regulation_code,))
+            await execute_with_index_status_fallback(
+                conn, cursor, query, (regulation_code,), filtered=has_index_status
+            )
             row = await cursor.fetchone()
             return dict(row) if row else None
 

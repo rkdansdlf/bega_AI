@@ -184,3 +184,104 @@ def test_sync_propagates_index_status_and_is_active_false(seeded_source) -> None
         "row-deleted-active-flag": ("DELETED", True),
         "row-deleted": ("DELETED", False),
     }
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_survives_column_drop_after_caching(
+    seeded_source,
+) -> None:
+    async with await psycopg.AsyncConnection.connect(URL, autocommit=True) as conn:
+        first = await retrieval.similarity_search(
+            conn, [1.0] + [0.0] * (DIM - 1), limit=10, settings=_settings()
+        )
+        assert retrieval._rag_chunks_index_status_exists is True
+        assert len(first) == 2
+        try:
+            await conn.execute("ALTER TABLE rag_chunks DROP COLUMN index_status")
+            # Positive cache is stale: the query fails once, is retried without
+            # the filter, and the cache is invalidated (no restart needed).
+            rows = await retrieval.similarity_search(
+                conn, [1.0] + [0.0] * (DIM - 1), limit=10, settings=_settings()
+            )
+            assert len(rows) == 3
+            assert retrieval._rag_chunks_index_status_exists is False
+        finally:
+            await conn.execute(MIGRATION_010)
+
+
+def _drop_source_index_status() -> None:
+    with psycopg.connect(URL, autocommit=True) as conn:
+        conn.execute("ALTER TABLE rag_chunks DROP COLUMN index_status")
+
+
+@pytest.fixture
+def tombstoned_dest_and_legacy_source(seeded_source):
+    """Destination cleaned by KBO_playwright #57; source bega DB without the column."""
+    _prepare(DEST_URL)
+    with psycopg.connect(DEST_URL, autocommit=True) as conn:
+        conn.execute(SEARCH_PATH)
+        _insert(conn, "row-deleted", "DELETED", False)
+        _insert(conn, "row-deleted-active-flag", "DELETED", True)
+        _insert(conn, "row-dest-only", "DELETED", False)
+    _drop_source_index_status()
+    try:
+        yield
+    finally:
+        _prepare(URL)  # re-applies 010 on the source
+
+
+def _dest_statuses() -> dict:
+    with psycopg.connect(DEST_URL) as conn:
+        return dict(
+            (row[0], row[1])
+            for row in conn.execute(
+                "SELECT source_row_id, index_status FROM rag_chunks"
+            ).fetchall()
+        )
+
+
+def _sync(**overrides):
+    kwargs = dict(
+        source_db_url=URL,
+        dest_db_url=DEST_URL,
+        source_tables=[],
+        season_year=None,
+        batch_size=2,
+        commit_interval=2,
+        limit=None,
+        known_total_rows=None,
+        dry_run=False,
+        truncate_dest=False,
+    )
+    kwargs.update(overrides)
+    return sync_script.sync_rag_chunks(**kwargs)
+
+
+@pytest.mark.skipif(not DEST_URL, reason="TEST_PGVECTOR_SYNC_DEST_URL not set")
+def test_sync_from_legacy_source_refuses_truncate(
+    tombstoned_dest_and_legacy_source,
+) -> None:
+    before = _dest_statuses()
+
+    with pytest.raises(RuntimeError, match="--truncate-dest refused"):
+        _sync(truncate_dest=True)
+
+    assert _dest_statuses() == before
+
+
+@pytest.mark.skipif(not DEST_URL, reason="TEST_PGVECTOR_SYNC_DEST_URL not set")
+def test_sync_from_legacy_source_keeps_destination_tombstones(
+    tombstoned_dest_and_legacy_source,
+) -> None:
+    result = _sync()
+
+    assert result["synced_rows"] == len(CHUNKS)
+    assert _dest_statuses() == {
+        # Existing destination rows keep their tombstone ...
+        "row-deleted": "DELETED",
+        "row-deleted-active-flag": "DELETED",
+        "row-dest-only": "DELETED",
+        # ... and rows new to the destination get its default.
+        "row-active": "ACTIVE",
+        "row-null": "ACTIVE",
+    }

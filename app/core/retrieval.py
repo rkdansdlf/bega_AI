@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.errors import QueryCanceled, UndefinedTable
+from psycopg.errors import QueryCanceled, UndefinedColumn, UndefinedTable
 from psycopg import OperationalError as PsycopgOperationalError
 from psycopg import InterfaceError as PsycopgInterfaceError
 from ..config import DEFAULT_EMBED_DIM, Settings, get_settings
@@ -344,9 +344,15 @@ async def rag_chunks_has_index_status(conn: Any) -> bool:
                 """)
             row = await cursor.fetchone()
     except Exception as exc:  # noqa: BLE001 - detection must not break search
+        # 실패도 음성 TTL 동안 캐싱한다(요청마다 경고/재조회 방지).
         logger.warning(
-            "[Search] index_status column check failed: %s", type(exc).__name__
+            "[Search] index_status column check failed: %s; tombstone filter is "
+            "skipped for %ds",
+            type(exc).__name__,
+            int(_INDEX_STATUS_NEGATIVE_RECHECK_S),
         )
+        _rag_chunks_index_status_exists = False
+        _rag_chunks_index_status_checked_at = now
         return False
     result = bool(row[0]) if row else False
     if not result:
@@ -357,6 +363,61 @@ async def rag_chunks_has_index_status(conn: Any) -> bool:
     _rag_chunks_index_status_exists = result
     _rag_chunks_index_status_checked_at = now
     return result
+
+
+def invalidate_index_status_cache() -> None:
+    """컬럼 캐시를 '없음'으로 되돌린다(음성 TTL 이후 재확인).
+
+    롤백 등으로 컬럼이 삭제되면 양성 캐시 때문에 모든 검색이 UndefinedColumn 으로
+    실패하므로, 그 오류를 만난 쪽이 호출한다.
+    """
+    global _rag_chunks_index_status_exists, _rag_chunks_index_status_checked_at
+    _rag_chunks_index_status_exists = False
+    _rag_chunks_index_status_checked_at = time.monotonic()
+
+
+def is_index_status_undefined_error(exc: BaseException) -> bool:
+    """`index_status` 컬럼이 없어 난 UndefinedColumn 인지."""
+    return isinstance(exc, UndefinedColumn) and "index_status" in str(exc)
+
+
+def can_retry_on_connection(conn: Any) -> bool:
+    """실패한 문장 뒤 같은 연결로 재시도해도 안전한지.
+
+    autocommit 풀(기본)은 실패 후 IDLE 이라 재시도할 수 있다. 호출자의 트랜잭션
+    안(INERROR)에서는 재시도하지 않는다(트랜잭션 롤백은 호출자 몫).
+    """
+    info = getattr(conn, "info", None)
+    status = getattr(info, "transaction_status", None)
+    return status == psycopg.pq.TransactionStatus.IDLE
+
+
+def strip_index_status_filter(sql: str) -> str:
+    """`AND <index_status 술어>` 를 SQL 에서 제거한다(술어는 파라미터가 없음)."""
+    return sql.replace(f" AND {index_status_visible_sql()}", "")
+
+
+async def execute_with_index_status_fallback(
+    conn: Any, cursor: Any, sql: str, params: Any, *, filtered: bool
+) -> None:
+    """index_status 필터를 붙인 쿼리를 실행하고, 컬럼이 사라졌으면 복구한다.
+
+    컬럼이 캐시 이후 삭제되면(010 롤백 등) 캐시를 무효화하고, 연결이 안전하면
+    필터 없이 한 번만 재시도한다. 이후 요청은 음성 TTL 동안 필터를 생략하고
+    그 뒤 컬럼을 다시 확인한다.
+    """
+    try:
+        await cursor.execute(sql, params)
+    except UndefinedColumn as exc:
+        if not (filtered and is_index_status_undefined_error(exc)):
+            raise
+        invalidate_index_status_cache()
+        logger.warning(
+            "[Search] rag_chunks.index_status disappeared; cache invalidated"
+        )
+        if not can_retry_on_connection(conn):
+            raise
+        await cursor.execute(strip_index_status_filter(sql), params)
 
 
 @traced("retrieval", "similarity_search")
@@ -459,7 +520,8 @@ async def similarity_search(
     # Tombstone(index_status=DELETED 등)은 lifecycle 토글과 무관하게 항상 제외한다.
     # Oracle 경로도 index_status 술어를 무조건 붙인다. 컬럼은 rag_chunks에만 있어
     # physical store(rag_chunk_embeddings JOIN) 에서도 모호하지 않다.
-    if await rag_chunks_has_index_status(conn):
+    index_status_filtered = await rag_chunks_has_index_status(conn)
+    if index_status_filtered:
         filter_clauses.append(index_status_visible_sql())
     filter_params: List[Any] = []
 
@@ -657,7 +719,9 @@ async def similarity_search(
                 1, int(active_settings.retrieval_statement_timeout_ms)
             )
             await cur.execute(f"SET LOCAL statement_timeout = {statement_timeout_ms};")
-            await cur.execute(sql, final_params)
+            await execute_with_index_status_fallback(
+                conn, cur, sql, final_params, filtered=index_status_filtered
+            )
             rows = await cur.fetchall()
     except UndefinedTable:
         return []
