@@ -40,7 +40,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 
-load_dotenv()
+from app.config import explicit_env_only_enabled
+
+if not explicit_env_only_enabled():
+    load_dotenv()
 
 # --- 레이턴시 목표 (SLA) ---
 LATENCY_TARGETS_MS = {
