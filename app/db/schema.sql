@@ -28,6 +28,7 @@ create table if not exists rag_chunks (
   chunking_version int default 1,
   quality_score numeric default 0.50,
   is_active boolean default true,
+  index_status varchar(24) default 'ACTIVE',
   valid_from timestamptz,
   valid_to timestamptz,
   expires_at timestamptz,
@@ -48,6 +49,7 @@ alter table rag_chunks add column if not exists embedding_version int default 2;
 alter table rag_chunks add column if not exists chunking_version int default 1;
 alter table rag_chunks add column if not exists quality_score numeric default 0.50;
 alter table rag_chunks add column if not exists is_active boolean default true;
+alter table rag_chunks add column if not exists index_status varchar(24) default 'ACTIVE';
 alter table rag_chunks add column if not exists valid_from timestamptz;
 alter table rag_chunks add column if not exists valid_to timestamptz;
 alter table rag_chunks add column if not exists expires_at timestamptz;

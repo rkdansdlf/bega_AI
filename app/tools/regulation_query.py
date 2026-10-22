@@ -11,6 +11,11 @@ from typing import Dict, Any, List
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.errors import UndefinedTable
+from ..core.retrieval import (
+    execute_with_index_status_fallback,
+    index_status_visible_sql,
+    rag_chunks_has_index_status,
+)
 from ..core.oracle_rag import (
     _parse_meta_async,
     acquire_cursor,
@@ -257,6 +262,16 @@ class RegulationQueryTool:
             return bool(row)
 
     async def _rag_chunks_table_available(self, conn: psycopg.AsyncConnection) -> bool:
+        present, _has_index_status = await self._rag_chunks_table_state(conn)
+        return present
+
+    async def _rag_chunks_table_state(
+        self, conn: psycopg.AsyncConnection
+    ) -> tuple[bool, bool]:
+        """(rag_chunks 존재 여부, PG index_status 컬럼 존재 여부).
+
+        Oracle 경로는 자체 index_status 술어를 쓰므로 두 번째 값은 항상 False.
+        """
         if is_oracle_rag_connection(conn):
             cursor = await acquire_cursor(conn)
             try:
@@ -264,7 +279,7 @@ class RegulationQueryTool:
                     "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RAG_CHUNKS'"
                 )
                 row = await cursor.fetchone()
-                return bool(row and row[0])
+                return bool(row and row[0]), False
             finally:
                 close = getattr(cursor, "close", None)
                 if callable(close):
@@ -278,14 +293,32 @@ class RegulationQueryTool:
                     FROM information_schema.tables
                     WHERE table_schema = 'public'
                       AND table_name = 'rag_chunks'
-                ) AS present;
+                ) AS present,
+                EXISTS(
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'rag_chunks'
+                      AND column_name = 'index_status'
+                ) AS has_index_status;
                 """)
-            return self._row_truthy_value(await cursor.fetchone())
+            row = await cursor.fetchone()
+            has_index_status = bool(hasattr(row, "get") and row.get("has_index_status"))
+            return self._row_truthy_value(row), has_index_status
+
+    @staticmethod
+    def _index_status_clause(has_index_status: bool) -> str:
+        # Tombstone(index_status=DELETED 등) 청크 제외. 컬럼이 없는 DB는 기존 동작 유지.
+        if not has_index_status:
+            return ""
+        # strip_index_status_filter() 가 지울 수 있도록 " AND <술어>" 형태를 유지한다.
+        return f" AND {index_status_visible_sql()}"
 
     async def _search_regulation_once(
         self, conn: psycopg.AsyncConnection, query: str, limit: int
     ) -> tuple[list[dict[str, Any]] | None, str | None]:
-        if not await self._rag_chunks_table_available(conn):
+        present, has_index_status = await self._rag_chunks_table_state(conn)
+        if not present:
             return None, None
 
         if is_oracle_rag_connection(conn):
@@ -304,7 +337,7 @@ class RegulationQueryTool:
             return rows, search_terms[0] if rows and search_terms else None
 
         async with conn.cursor(row_factory=dict_row) as cursor:
-            text_search_query = """
+            text_search_query = f"""
                 SELECT 
                     id,
                     title,
@@ -323,7 +356,7 @@ class RegulationQueryTool:
                 AND (
                     content ILIKE %s 
                     OR title ILIKE %s
-                )
+                ){self._index_status_clause(has_index_status)}
                 ORDER BY similarity_score DESC, title
                 LIMIT %s;
             """
@@ -333,7 +366,9 @@ class RegulationQueryTool:
 
             for search_term in search_terms:
                 search_pattern = f"%{search_term}%"
-                await cursor.execute(
+                await execute_with_index_status_fallback(
+                    conn,
+                    cursor,
                     text_search_query,
                     (
                         search_pattern,
@@ -342,6 +377,7 @@ class RegulationQueryTool:
                         search_pattern,
                         limit,
                     ),
+                    filtered=has_index_status,
                 )
                 rows = await cursor.fetchall()
                 if rows:
@@ -423,7 +459,8 @@ class RegulationQueryTool:
     async def _get_regulation_by_category_once(
         self, conn: psycopg.AsyncConnection, category: str, limit: int
     ) -> list[dict[str, Any]] | None:
-        if not await self._rag_chunks_table_available(conn):
+        present, has_index_status = await self._rag_chunks_table_state(conn)
+        if not present:
             return None
 
         keywords = self.regulation_categories.get(category, [])
@@ -456,7 +493,7 @@ class RegulationQueryTool:
                 meta->>'regulation_code' as regulation_code
             FROM rag_chunks 
             WHERE source_table = 'kbo_regulations'
-            AND ({keyword_conditions})
+            AND ({keyword_conditions}){self._index_status_clause(has_index_status)}
             ORDER BY title
             LIMIT %s;
         """
@@ -464,7 +501,9 @@ class RegulationQueryTool:
         search_patterns = [f"%{keyword}%" for keyword in keywords] + [limit]
 
         async with conn.cursor(row_factory=dict_row) as cursor:
-            await cursor.execute(query, search_patterns)
+            await execute_with_index_status_fallback(
+                conn, cursor, query, search_patterns, filtered=has_index_status
+            )
             return await cursor.fetchall()
 
     async def get_regulation_by_category(
@@ -617,8 +656,9 @@ class RegulationQueryTool:
                     result = close()
                     if hasattr(result, "__await__"):
                         await result
+        has_index_status = await rag_chunks_has_index_status(conn)
         async with conn.cursor(row_factory=dict_row) as cursor:
-            query = """
+            query = f"""
                 SELECT 
                     id,
                     title,
@@ -627,11 +667,13 @@ class RegulationQueryTool:
                     meta->>'category' as category
                 FROM rag_chunks 
                 WHERE source_table = 'kbo_regulations'
-                AND meta->>'regulation_code' = %s
+                AND meta->>'regulation_code' = %s{self._index_status_clause(has_index_status)}
                 LIMIT 1;
             """
 
-            await cursor.execute(query, (regulation_code,))
+            await execute_with_index_status_fallback(
+                conn, cursor, query, (regulation_code,), filtered=has_index_status
+            )
             row = await cursor.fetchone()
             return dict(row) if row else None
 

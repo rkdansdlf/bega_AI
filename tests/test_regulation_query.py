@@ -222,3 +222,33 @@ def test_validate_regulation_reference_retries_with_fresh_connection(
     assert result["error"] is None
     assert result["exists"] is True
     assert result["regulation"]["regulation_code"] == "01-1"
+
+
+def test_regulation_search_excludes_tombstoned_chunks_when_column_exists() -> None:
+    exists_cursor = _FakeCursor(
+        fetchone_results=[{"present": True, "has_index_status": True}]
+    )
+    search_cursor = _FakeCursor(fetchall_results=[[]])
+    tool = RegulationQueryTool(_FakeConnection([exists_cursor, search_cursor]))
+
+    asyncio.run(tool.get_regulation_by_category("player", limit=3))
+
+    assert "information_schema.columns" in exists_cursor.executed[0][0]
+    sql = search_cursor.executed[0][0]
+    assert (
+        "COALESCE(index_status, 'ACTIVE') NOT IN ('DELETED', 'TOMBSTONED', 'PURGED')"
+        in sql
+    )
+
+
+def test_regulation_search_without_index_status_column_keeps_query() -> None:
+    exists_cursor = _FakeCursor(
+        fetchone_results=[{"present": True, "has_index_status": False}]
+    )
+    search_cursor = _FakeCursor(fetchall_results=[[]])
+    tool = RegulationQueryTool(_FakeConnection([exists_cursor, search_cursor]))
+
+    asyncio.run(tool.search_regulation("FA 보상선수", limit=3))
+
+    assert search_cursor.executed
+    assert all("index_status" not in sql for sql, _ in search_cursor.executed)

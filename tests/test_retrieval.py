@@ -389,3 +389,321 @@ def test_rrf_k_by_intent_dict_covers_expected_intents() -> None:
         "stats_lookup",
         "comparison",
     }
+
+
+# ---------------------------------------------------------------------------
+# index_status tombstone filter (KBO_playwright tombstones: index_status=DELETED)
+# ---------------------------------------------------------------------------
+
+
+class _IndexStatusCursor(_DummyCursor):
+    """Reports rag_chunks and rag_chunks.index_status as present."""
+
+    async def fetchone(self):
+        if self.executed:
+            query, _ = self.executed[-1]
+            if "information_schema.columns" in query and "index_status" in query:
+                return (True,)
+        return await super().fetchone()
+
+
+class _IndexStatusConnection(_DummyConnection):
+    def cursor(self, row_factory=None):  # noqa: ANN001
+        self.last_cursor = _IndexStatusCursor(self.rows)
+        return self.last_cursor
+
+
+@pytest.fixture
+def reset_index_status_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core import retrieval
+
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_exists", None)
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_checked_at", 0.0)
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_check_failed_until", 0.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keyword", [None, "오승환 300세이브"])
+async def test_similarity_search_excludes_tombstoned_chunks_when_column_exists(
+    reset_index_status_cache: None, keyword: str | None
+) -> None:
+    conn = _IndexStatusConnection([])
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3, keyword=keyword)
+
+    sql, _ = conn.last_cursor.executed[1]
+    predicate = (
+        "COALESCE(index_status, 'ACTIVE') NOT IN ('DELETED', 'TOMBSTONED', 'PURGED')"
+    )
+    # Hybrid search applies the WHERE clause to both the vector and keyword CTEs.
+    assert sql.count(predicate) == (2 if keyword else 1)
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_excludes_tombstones_even_without_lifecycle_filter(
+    reset_index_status_cache: None,
+) -> None:
+    from app.config import get_settings
+
+    conn = _IndexStatusConnection([])
+    settings = get_settings().model_copy(
+        update={"rag_retrieval_active_filter_enabled": False}
+    )
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3, settings=settings)
+
+    sql, _ = conn.last_cursor.executed[1]
+    assert "COALESCE(is_active, true) = true" not in sql
+    assert "COALESCE(index_status, 'ACTIVE') NOT IN" in sql
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_skips_index_status_filter_when_column_missing(
+    reset_index_status_cache: None,
+) -> None:
+    # _DummyCursor answers the information_schema.columns probe with no row,
+    # i.e. a database where migration 010 has not been applied yet.
+    conn = _DummyConnection([])
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3)
+
+    sql, _ = conn.last_cursor.executed[1]
+    assert "index_status" not in sql
+    assert "COALESCE(is_active, true) = true" in sql
+
+
+@pytest.mark.asyncio
+async def test_index_status_column_detection_caches_positive_and_rechecks_negative(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core import retrieval
+
+    missing = _DummyConnection([])
+    assert await retrieval.rag_chunks_has_index_status(missing) is False
+    # Negative result is cached for a while (no probe on every search) ...
+    probes_before = missing.last_cursor
+    assert await retrieval.rag_chunks_has_index_status(missing) is False
+    assert missing.last_cursor is probes_before
+    # ... and re-checked after the window, so migration 010 needs no restart.
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_checked_at", -1e9)
+    present = _IndexStatusConnection([])
+    assert await retrieval.rag_chunks_has_index_status(present) is True
+    assert await retrieval.rag_chunks_has_index_status(_DummyConnection([])) is True
+
+
+@pytest.mark.asyncio
+async def test_index_status_column_detection_failure_fails_closed(
+    reset_index_status_cache: None,
+) -> None:
+    from app.core import retrieval
+
+    class _Broken:
+        def cursor(self, *a, **k):  # noqa: ANN002, ANN003
+            raise RuntimeError("boom")
+
+    # Assume the column exists (keep the tombstone filter); nothing is cached.
+    assert await retrieval.rag_chunks_has_index_status(_Broken()) is True
+    assert retrieval._rag_chunks_index_status_exists is None
+
+
+@pytest.mark.parametrize(
+    ("status", "visible"),
+    [
+        ("DELETED", False),
+        ("TOMBSTONED", False),
+        ("PURGED", False),
+        ("ACTIVE", True),
+        ("INDEXED", True),
+        (None, True),
+    ],
+)
+def test_index_status_visible_predicate_semantics(
+    status: str | None, visible: bool
+) -> None:
+    """Evaluate the generated predicate against a real SQL engine.
+
+    COALESCE / NOT IN are standard SQL, so SQLite gives the same NULL handling
+    as PostgreSQL: NULL is treated as ACTIVE, retired states are filtered.
+    """
+    import sqlite3
+
+    from app.core.retrieval import index_status_visible_sql
+
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE rag_chunks (id integer, index_status text)")
+    db.execute("INSERT INTO rag_chunks VALUES (1, ?)", (status,))
+    rows = db.execute(
+        f"SELECT id FROM rag_chunks WHERE {index_status_visible_sql()}"
+    ).fetchall()
+    assert (rows == [(1,)]) is visible
+
+
+class _UndefinedIndexStatusCursor(_IndexStatusCursor):
+    """Main query fails once as if index_status was dropped after caching."""
+
+    def __init__(self, rows, conn) -> None:  # noqa: ANN001
+        super().__init__(rows)
+        self._conn = conn
+
+    async def execute(self, query, params=None):  # noqa: ANN001
+        await super().execute(query, params)
+        if "index_status" in query and "information_schema" not in query:
+            self._conn.failed_queries += 1
+            from psycopg.errors import UndefinedColumn
+
+            raise UndefinedColumn('column "index_status" does not exist')
+
+
+class _DroppedColumnConnection(_IndexStatusConnection):
+    def __init__(self, rows, transaction_status) -> None:  # noqa: ANN001
+        super().__init__(rows)
+        self.failed_queries = 0
+        self.info = type("_Info", (), {"transaction_status": transaction_status})()
+
+    def cursor(self, row_factory=None):  # noqa: ANN001
+        self.last_cursor = _UndefinedIndexStatusCursor(self.rows, self)
+        return self.last_cursor
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_recovers_when_index_status_column_is_dropped(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import psycopg
+
+    from app.core import retrieval
+
+    # Column was present when cached; then dropped (e.g. rollback of 010).
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_exists", True)
+    conn = _DroppedColumnConnection([], psycopg.pq.TransactionStatus.IDLE)
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3, keyword="오승환")
+
+    assert conn.failed_queries == 1
+    retried_sql, retried_params = conn.last_cursor.executed[-1]
+    failed_sql, failed_params = conn.last_cursor.executed[-2]
+    assert "index_status" in failed_sql
+    assert "index_status" not in retried_sql
+    assert retried_params == failed_params
+    # Cache invalidated: the next search does not add the filter (no failure).
+    assert retrieval._rag_chunks_index_status_exists is False
+    assert await retrieval.rag_chunks_has_index_status(conn) is False
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_does_not_retry_inside_failed_transaction(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import psycopg
+    from psycopg.errors import UndefinedColumn
+
+    from app.core import retrieval
+
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_exists", True)
+    conn = _DroppedColumnConnection([], psycopg.pq.TransactionStatus.INERROR)
+
+    with pytest.raises(UndefinedColumn):
+        await similarity_search(conn, [0.1, 0.2, 0.3], limit=3)
+
+    assert conn.failed_queries == 1
+    # Still invalidated, so the caller's next request succeeds without the filter.
+    assert retrieval._rag_chunks_index_status_exists is False
+
+
+@pytest.mark.asyncio
+async def test_unrelated_undefined_column_is_not_swallowed(
+    reset_index_status_cache: None,
+) -> None:
+    from psycopg.errors import UndefinedColumn
+
+    from app.core import retrieval
+
+    class _Cursor:
+        async def execute(self, query, params=None):  # noqa: ANN001
+            raise UndefinedColumn('column "quality_score" does not exist')
+
+    with pytest.raises(UndefinedColumn):
+        await retrieval.execute_with_index_status_fallback(
+            object(), _Cursor(), "SELECT 1", [], filtered=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_index_status_check_failure_is_not_cached_and_warning_is_rate_limited(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    import logging
+
+    from app.core import retrieval
+
+    calls = {"n": 0}
+
+    class _Broken:
+        def cursor(self, *a, **k):  # noqa: ANN002, ANN003
+            calls["n"] += 1
+            raise RuntimeError("boom")
+
+    caplog.set_level(logging.WARNING, logger=retrieval.logger.name)
+    for _ in range(5):
+        assert await retrieval.rag_chunks_has_index_status(_Broken()) is True
+    # One probe and one warning per short backoff window, no cached answer.
+    assert calls["n"] == 1
+    assert caplog.text.count("index_status column check failed") == 1
+    assert retrieval._rag_chunks_index_status_exists is None
+
+    # After the backoff the check runs again; a successful check is cached.
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_check_failed_until", 0.0)
+    assert await retrieval.rag_chunks_has_index_status(_DummyConnection([])) is False
+    assert retrieval._rag_chunks_index_status_exists is False
+
+
+@pytest.mark.asyncio
+async def test_failed_check_on_aborted_connection_keeps_tombstones_hidden(
+    reset_index_status_cache: None,
+) -> None:
+    """QA repro: a check on an aborted-transaction connection must not disable the
+    filter for the next (healthy) search."""
+    from psycopg.errors import InFailedSqlTransaction
+
+    from app.core import retrieval
+
+    class _AbortedCursor(_DummyCursor):
+        async def execute(self, query, params=None):  # noqa: ANN001
+            raise InFailedSqlTransaction("current transaction is aborted")
+
+    class _AbortedConnection(_DummyConnection):
+        def cursor(self, row_factory=None):  # noqa: ANN001
+            return _AbortedCursor([])
+
+    assert await retrieval.rag_chunks_has_index_status(_AbortedConnection([])) is True
+
+    healthy = _IndexStatusConnection([])
+    await similarity_search(healthy, [0.1, 0.2, 0.3], limit=3)
+    sql, _ = healthy.last_cursor.executed[1]
+    assert (
+        "COALESCE(index_status, 'ACTIVE') NOT IN ('DELETED', 'TOMBSTONED', 'PURGED')"
+        in sql
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_check_with_missing_column_falls_back_without_filter(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Assuming True is safe: if the column really is missing, the query's
+    UndefinedColumn resets the cache and the search is retried unfiltered."""
+    import psycopg
+
+    from app.core import retrieval
+
+    monkeypatch.setattr(
+        retrieval, "_rag_chunks_index_status_check_failed_until", float("inf")
+    )
+    conn = _DroppedColumnConnection([], psycopg.pq.TransactionStatus.IDLE)
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3)
+
+    assert conn.failed_queries == 1
+    assert "index_status" not in conn.last_cursor.executed[-1][0]
+    assert retrieval._rag_chunks_index_status_exists is False
+    assert retrieval._rag_chunks_index_status_check_failed_until == 0.0

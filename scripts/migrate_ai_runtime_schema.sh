@@ -41,6 +41,11 @@ psql --set ON_ERROR_STOP=1 \
   --file "${AI_ROOT}/app/db/migrations/009_rag_chunk_embeddings.sql" \
   "${DB_URL}"
 
+# rag_chunks.index_status (tombstone lifecycle). Additive; requires rag_chunks.
+psql --set ON_ERROR_STOP=1 \
+  --file "${AI_ROOT}/app/db/migrations/010_rag_chunks_index_status.sql" \
+  "${DB_URL}"
+
 case "${CHAT_SEMANTIC_CACHE_VECTOR_INDEX_ENABLED:-false}" in
   1|true|TRUE|yes|YES)
     psql --set ON_ERROR_STOP=1 \
