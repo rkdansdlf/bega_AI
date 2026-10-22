@@ -49,6 +49,17 @@ _PGVECTOR_SEARCH_PATH = "public, extensions, security"
 # 테이블은 배포 후 변경되지 않으므로 프로세스 재시작 시 자동 무효화됨
 _rag_chunks_table_exists: Optional[bool] = None
 
+# rag_chunks.index_status 컬럼 존재 여부 캐시.
+# True는 프로세스 수명 동안 캐싱한다(컬럼은 추가만 되고 삭제되지 않음).
+# False는 마이그레이션 010 적용 후 재시작 없이 필터가 켜지도록 일정 시간 후 재확인한다.
+_rag_chunks_index_status_exists: Optional[bool] = None
+_rag_chunks_index_status_checked_at: float = 0.0
+_INDEX_STATUS_NEGATIVE_RECHECK_S = 300.0
+
+# 검색에서 제외할 lifecycle 상태 (KBO_playwright rag_index_lifecycle의 제거 계열 상태).
+# NULL과 ACTIVE/INDEXED/PENDING/STALE 등 나머지 값은 기존처럼 검색 대상이다.
+RETIRED_INDEX_STATUSES: tuple[str, ...] = ("DELETED", "TOMBSTONED", "PURGED")
+
 # 감지된 벡터 인덱스 타입 캐시 (프로세스 수명 동안 유효, "hnsw" 또는 "ivfflat")
 # AI_VECTOR_INDEX=auto 모드에서 최초 쿼리 시 pg_indexes를 조회한 후 캐싱한다.
 # 인덱스 변경 시 서비스 재시작 필요.
@@ -294,6 +305,60 @@ async def _rag_chunks_exists(
         return False
 
 
+def index_status_visible_sql(column: str = "index_status") -> str:
+    """tombstone 된 청크를 제외하는 NULL-safe 술어를 반환합니다.
+
+    NULL은 ACTIVE로 취급한다(컬럼 추가 전 적재된 행, 상태를 쓰지 않는 writer).
+    ``column``은 호출부 상수만 받는다(사용자 입력 아님).
+    """
+    retired = ", ".join(f"'{status}'" for status in RETIRED_INDEX_STATUSES)
+    return f"COALESCE({column}, 'ACTIVE') NOT IN ({retired})"
+
+
+async def rag_chunks_has_index_status(conn: Any) -> bool:
+    """`rag_chunks.index_status` 컬럼이 존재하는지 확인합니다.
+
+    마이그레이션 010 이전 DB에서는 컬럼이 없으므로 필터를 붙이면 쿼리가
+    UndefinedColumn 으로 실패한다. 컬럼이 있을 때만 tombstone 필터를 붙인다.
+    조회 실패 시에는 False(필터 생략)로 기존 동작을 유지한다.
+    """
+    global _rag_chunks_index_status_exists, _rag_chunks_index_status_checked_at
+    if _rag_chunks_index_status_exists is True:
+        return True
+    now = time.monotonic()
+    if (
+        _rag_chunks_index_status_exists is False
+        and now - _rag_chunks_index_status_checked_at < _INDEX_STATUS_NEGATIVE_RECHECK_S
+    ):
+        return False
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("""
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'rag_chunks'
+                      AND column_name = 'index_status'
+                );
+                """)
+            row = await cursor.fetchone()
+    except Exception as exc:  # noqa: BLE001 - detection must not break search
+        logger.warning(
+            "[Search] index_status column check failed: %s", type(exc).__name__
+        )
+        return False
+    result = bool(row[0]) if row else False
+    if not result:
+        logger.warning(
+            "[Search] rag_chunks.index_status is missing; tombstoned chunks are not "
+            "filtered. Apply app/db/migrations/010_rag_chunks_index_status.sql."
+        )
+    _rag_chunks_index_status_exists = result
+    _rag_chunks_index_status_checked_at = now
+    return result
+
+
 @traced("retrieval", "similarity_search")
 async def similarity_search(
     conn: psycopg.AsyncConnection,
@@ -391,6 +456,11 @@ async def similarity_search(
                 "(valid_to IS NULL OR valid_to > now())",
             ]
         )
+    # Tombstone(index_status=DELETED 등)은 lifecycle 토글과 무관하게 항상 제외한다.
+    # Oracle 경로도 index_status 술어를 무조건 붙인다. 컬럼은 rag_chunks에만 있어
+    # physical store(rag_chunk_embeddings JOIN) 에서도 모호하지 않다.
+    if await rag_chunks_has_index_status(conn):
+        filter_clauses.append(index_status_visible_sql())
     filter_params: List[Any] = []
 
     suppressed_tables: List[str] = []

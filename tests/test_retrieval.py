@@ -389,3 +389,147 @@ def test_rrf_k_by_intent_dict_covers_expected_intents() -> None:
         "stats_lookup",
         "comparison",
     }
+
+
+# ---------------------------------------------------------------------------
+# index_status tombstone filter (KBO_playwright tombstones: index_status=DELETED)
+# ---------------------------------------------------------------------------
+
+
+class _IndexStatusCursor(_DummyCursor):
+    """Reports rag_chunks and rag_chunks.index_status as present."""
+
+    async def fetchone(self):
+        if self.executed:
+            query, _ = self.executed[-1]
+            if "information_schema.columns" in query and "index_status" in query:
+                return (True,)
+        return await super().fetchone()
+
+
+class _IndexStatusConnection(_DummyConnection):
+    def cursor(self, row_factory=None):  # noqa: ANN001
+        self.last_cursor = _IndexStatusCursor(self.rows)
+        return self.last_cursor
+
+
+@pytest.fixture
+def reset_index_status_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core import retrieval
+
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_exists", None)
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_checked_at", 0.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keyword", [None, "오승환 300세이브"])
+async def test_similarity_search_excludes_tombstoned_chunks_when_column_exists(
+    reset_index_status_cache: None, keyword: str | None
+) -> None:
+    conn = _IndexStatusConnection([])
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3, keyword=keyword)
+
+    sql, _ = conn.last_cursor.executed[1]
+    predicate = (
+        "COALESCE(index_status, 'ACTIVE') NOT IN ('DELETED', 'TOMBSTONED', 'PURGED')"
+    )
+    # Hybrid search applies the WHERE clause to both the vector and keyword CTEs.
+    assert sql.count(predicate) == (2 if keyword else 1)
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_excludes_tombstones_even_without_lifecycle_filter(
+    reset_index_status_cache: None,
+) -> None:
+    from app.config import get_settings
+
+    conn = _IndexStatusConnection([])
+    settings = get_settings().model_copy(
+        update={"rag_retrieval_active_filter_enabled": False}
+    )
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3, settings=settings)
+
+    sql, _ = conn.last_cursor.executed[1]
+    assert "COALESCE(is_active, true) = true" not in sql
+    assert "COALESCE(index_status, 'ACTIVE') NOT IN" in sql
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_skips_index_status_filter_when_column_missing(
+    reset_index_status_cache: None,
+) -> None:
+    # _DummyCursor answers the information_schema.columns probe with no row,
+    # i.e. a database where migration 010 has not been applied yet.
+    conn = _DummyConnection([])
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3)
+
+    sql, _ = conn.last_cursor.executed[1]
+    assert "index_status" not in sql
+    assert "COALESCE(is_active, true) = true" in sql
+
+
+@pytest.mark.asyncio
+async def test_index_status_column_detection_caches_positive_and_rechecks_negative(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core import retrieval
+
+    missing = _DummyConnection([])
+    assert await retrieval.rag_chunks_has_index_status(missing) is False
+    # Negative result is cached for a while (no probe on every search) ...
+    probes_before = missing.last_cursor
+    assert await retrieval.rag_chunks_has_index_status(missing) is False
+    assert missing.last_cursor is probes_before
+    # ... and re-checked after the window, so migration 010 needs no restart.
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_checked_at", -1e9)
+    present = _IndexStatusConnection([])
+    assert await retrieval.rag_chunks_has_index_status(present) is True
+    assert await retrieval.rag_chunks_has_index_status(_DummyConnection([])) is True
+
+
+@pytest.mark.asyncio
+async def test_index_status_column_detection_failure_keeps_previous_behaviour(
+    reset_index_status_cache: None,
+) -> None:
+    from app.core import retrieval
+
+    class _Broken:
+        def cursor(self, *a, **k):  # noqa: ANN002, ANN003
+            raise RuntimeError("boom")
+
+    assert await retrieval.rag_chunks_has_index_status(_Broken()) is False
+
+
+@pytest.mark.parametrize(
+    ("status", "visible"),
+    [
+        ("DELETED", False),
+        ("TOMBSTONED", False),
+        ("PURGED", False),
+        ("ACTIVE", True),
+        ("INDEXED", True),
+        (None, True),
+    ],
+)
+def test_index_status_visible_predicate_semantics(
+    status: str | None, visible: bool
+) -> None:
+    """Evaluate the generated predicate against a real SQL engine.
+
+    COALESCE / NOT IN are standard SQL, so SQLite gives the same NULL handling
+    as PostgreSQL: NULL is treated as ACTIVE, retired states are filtered.
+    """
+    import sqlite3
+
+    from app.core.retrieval import index_status_visible_sql
+
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE rag_chunks (id integer, index_status text)")
+    db.execute("INSERT INTO rag_chunks VALUES (1, ?)", (status,))
+    rows = db.execute(
+        f"SELECT id FROM rag_chunks WHERE {index_status_visible_sql()}"
+    ).fetchall()
+    assert (rows == [(1,)]) is visible

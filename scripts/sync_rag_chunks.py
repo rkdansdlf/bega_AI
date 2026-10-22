@@ -23,41 +23,9 @@ except ModuleNotFoundError as exc:
 
 from app.config import Settings
 
-SELECT_COLUMNS = """
-SELECT
-    meta,
-    metadata,
-    source_type,
-    source_uri,
-    topic_key,
-    content_hash,
-    chunk_hash,
-    embedding_model,
-    embedding_dim,
-    embedding_version,
-    chunking_version,
-    quality_score,
-    is_active,
-    valid_from,
-    valid_to,
-    expires_at,
-    season_year,
-    season_id,
-    league_type_code,
-    team_id,
-    player_id,
-    source_table,
-    source_row_id,
-    title,
-    content,
-    embedding::text AS embedding_text
-FROM rag_chunks
-"""
-PGVECTOR_SEARCH_PATH = "public, extensions, security"
-STAGE_TABLE_NAME = "rag_chunk_sync_stage"
-STAGE_COLUMNS = (
-    "meta_json",
-    "metadata_json",
+_BASE_COLUMNS = (
+    "meta",
+    "metadata",
     "source_type",
     "source_uri",
     "topic_key",
@@ -81,36 +49,97 @@ STAGE_COLUMNS = (
     "source_row_id",
     "title",
     "content",
-    "embedding_text",
 )
-MERGE_STAGE_SQL = f"""
+# Lifecycle column written by KBO_playwright tombstone tools (DELETED etc.).
+# Appended last so the positional payload of the base columns is unchanged.
+INDEX_STATUS_COLUMN = "index_status"
+INDEX_STATUS_COLUMN_EXISTS_SQL = """
+SELECT EXISTS(
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = ANY(current_schemas(false))
+      AND table_name = 'rag_chunks'
+      AND column_name = 'index_status'
+)
+"""
+PGVECTOR_SEARCH_PATH = "public, extensions, security"
+STAGE_TABLE_NAME = "rag_chunk_sync_stage"
+
+
+def build_select_columns(*, include_index_status: bool = False) -> str:
+    columns = list(_BASE_COLUMNS)
+    columns.append("embedding::text AS embedding_text")
+    if include_index_status:
+        columns.append(INDEX_STATUS_COLUMN)
+    body = ",\n".join(f"    {column}" for column in columns)
+    return f"\nSELECT\n{body}\nFROM rag_chunks\n"
+
+
+def stage_columns(*, include_index_status: bool = False) -> Tuple[str, ...]:
+    columns = (
+        "meta_json",
+        "metadata_json",
+        *_BASE_COLUMNS[2:],
+        "embedding_text",
+    )
+    if include_index_status:
+        columns += (INDEX_STATUS_COLUMN,)
+    return columns
+
+
+def _insert_column_list(include_index_status: bool) -> str:
+    columns = [*_BASE_COLUMNS, "embedding"]
+    if include_index_status:
+        columns.append(INDEX_STATUS_COLUMN)
+    return ",\n".join(f"    {column}" for column in columns)
+
+
+def _conflict_update_sql(include_index_status: bool) -> str:
+    # is_active is copied as-is (an explicit false stays false; only NULL
+    # becomes true). index_status is copied verbatim so a source tombstone
+    # (DELETED) is never reset to ACTIVE in the destination.
+    index_status_update = (
+        "\n    index_status = EXCLUDED.index_status," if include_index_status else ""
+    )
+    return f"""ON CONFLICT (source_table, source_row_id)
+DO UPDATE SET
+    meta = EXCLUDED.meta,
+    metadata = EXCLUDED.metadata,
+    source_type = EXCLUDED.source_type,
+    source_uri = EXCLUDED.source_uri,
+    topic_key = EXCLUDED.topic_key,
+    content_hash = EXCLUDED.content_hash,
+    chunk_hash = EXCLUDED.chunk_hash,
+    embedding_model = EXCLUDED.embedding_model,
+    embedding_dim = EXCLUDED.embedding_dim,
+    embedding_version = EXCLUDED.embedding_version,
+    chunking_version = EXCLUDED.chunking_version,
+    quality_score = EXCLUDED.quality_score,
+    is_active = EXCLUDED.is_active,{index_status_update}
+    valid_from = EXCLUDED.valid_from,
+    valid_to = EXCLUDED.valid_to,
+    expires_at = EXCLUDED.expires_at,
+    content = EXCLUDED.content,
+    embedding = COALESCE(EXCLUDED.embedding, rag_chunks.embedding),
+    season_year = COALESCE(EXCLUDED.season_year, rag_chunks.season_year),
+    season_id = COALESCE(EXCLUDED.season_id, rag_chunks.season_id),
+    league_type_code = COALESCE(EXCLUDED.league_type_code, rag_chunks.league_type_code),
+    team_id = COALESCE(EXCLUDED.team_id, rag_chunks.team_id),
+    player_id = COALESCE(EXCLUDED.player_id, rag_chunks.player_id),
+    title = EXCLUDED.title,
+    updated_at = now()
+"""
+
+
+def build_merge_stage_sql(*, include_index_status: bool = False) -> str:
+    # NULL index_status means ACTIVE (same rule as retrieval); writing the
+    # literal keeps NOT NULL destination columns (KBO_playwright schema) happy.
+    index_status_select = (
+        ",\n    COALESCE(index_status, 'ACTIVE')" if include_index_status else ""
+    )
+    return f"""
 INSERT INTO rag_chunks (
-    meta,
-    metadata,
-    source_type,
-    source_uri,
-    topic_key,
-    content_hash,
-    chunk_hash,
-    embedding_model,
-    embedding_dim,
-    embedding_version,
-    chunking_version,
-    quality_score,
-    is_active,
-    valid_from,
-    valid_to,
-    expires_at,
-    season_year,
-    season_id,
-    league_type_code,
-    team_id,
-    player_id,
-    source_table,
-    source_row_id,
-    title,
-    content,
-    embedding
+{_insert_column_list(include_index_status)}
 )
 SELECT
     CASE WHEN meta_json IS NULL THEN NULL ELSE meta_json::jsonb END,
@@ -138,98 +167,59 @@ SELECT
     source_row_id,
     title,
     content,
-    embedding_text::vector
+    embedding_text::vector{index_status_select}
 FROM {STAGE_TABLE_NAME}
-ON CONFLICT (source_table, source_row_id)
-DO UPDATE SET
-    meta = EXCLUDED.meta,
-    metadata = EXCLUDED.metadata,
-    source_type = EXCLUDED.source_type,
-    source_uri = EXCLUDED.source_uri,
-    topic_key = EXCLUDED.topic_key,
-    content_hash = EXCLUDED.content_hash,
-    chunk_hash = EXCLUDED.chunk_hash,
-    embedding_model = EXCLUDED.embedding_model,
-    embedding_dim = EXCLUDED.embedding_dim,
-    embedding_version = EXCLUDED.embedding_version,
-    chunking_version = EXCLUDED.chunking_version,
-    quality_score = EXCLUDED.quality_score,
-    is_active = EXCLUDED.is_active,
-    valid_from = EXCLUDED.valid_from,
-    valid_to = EXCLUDED.valid_to,
-    expires_at = EXCLUDED.expires_at,
-    content = EXCLUDED.content,
-    embedding = COALESCE(EXCLUDED.embedding, rag_chunks.embedding),
-    season_year = COALESCE(EXCLUDED.season_year, rag_chunks.season_year),
-    season_id = COALESCE(EXCLUDED.season_id, rag_chunks.season_id),
-    league_type_code = COALESCE(EXCLUDED.league_type_code, rag_chunks.league_type_code),
-    team_id = COALESCE(EXCLUDED.team_id, rag_chunks.team_id),
-    player_id = COALESCE(EXCLUDED.player_id, rag_chunks.player_id),
-    title = EXCLUDED.title,
-    updated_at = now()
-"""
+{_conflict_update_sql(include_index_status)}"""
 
-UPSERT_SQL = """
+
+def build_upsert_sql(*, include_index_status: bool = False) -> str:
+    index_status_value = ", COALESCE(%s, 'ACTIVE')" if include_index_status else ""
+    return f"""
 INSERT INTO rag_chunks (
-    meta,
-    metadata,
-    source_type,
-    source_uri,
-    topic_key,
-    content_hash,
-    chunk_hash,
-    embedding_model,
-    embedding_dim,
-    embedding_version,
-    chunking_version,
-    quality_score,
-    is_active,
-    valid_from,
-    valid_to,
-    expires_at,
-    season_year,
-    season_id,
-    league_type_code,
-    team_id,
-    player_id,
-    source_table,
-    source_row_id,
-    title,
-    content,
-    embedding
+{_insert_column_list(include_index_status)}
 ) VALUES (
-    %s::jsonb, COALESCE(%s::jsonb, '{}'::jsonb), %s, %s, %s, %s, %s,
+    %s::jsonb, COALESCE(%s::jsonb, '{{}}'::jsonb), %s, %s, %s, %s, %s,
     %s, %s, %s, %s, %s, COALESCE(%s, true), %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s, %s, %s, %s::vector
+    %s, %s, %s, %s, %s, %s::vector{index_status_value}
 )
-ON CONFLICT (source_table, source_row_id)
-DO UPDATE SET
-    meta = EXCLUDED.meta,
-    metadata = EXCLUDED.metadata,
-    source_type = EXCLUDED.source_type,
-    source_uri = EXCLUDED.source_uri,
-    topic_key = EXCLUDED.topic_key,
-    content_hash = EXCLUDED.content_hash,
-    chunk_hash = EXCLUDED.chunk_hash,
-    embedding_model = EXCLUDED.embedding_model,
-    embedding_dim = EXCLUDED.embedding_dim,
-    embedding_version = EXCLUDED.embedding_version,
-    chunking_version = EXCLUDED.chunking_version,
-    quality_score = EXCLUDED.quality_score,
-    is_active = EXCLUDED.is_active,
-    valid_from = EXCLUDED.valid_from,
-    valid_to = EXCLUDED.valid_to,
-    expires_at = EXCLUDED.expires_at,
-    content = EXCLUDED.content,
-    embedding = COALESCE(EXCLUDED.embedding, rag_chunks.embedding),
-    season_year = COALESCE(EXCLUDED.season_year, rag_chunks.season_year),
-    season_id = COALESCE(EXCLUDED.season_id, rag_chunks.season_id),
-    league_type_code = COALESCE(EXCLUDED.league_type_code, rag_chunks.league_type_code),
-    team_id = COALESCE(EXCLUDED.team_id, rag_chunks.team_id),
-    player_id = COALESCE(EXCLUDED.player_id, rag_chunks.player_id),
-    title = EXCLUDED.title,
-    updated_at = now()
-"""
+{_conflict_update_sql(include_index_status)}"""
+
+
+SELECT_COLUMNS = build_select_columns()
+STAGE_COLUMNS = stage_columns()
+MERGE_STAGE_SQL = build_merge_stage_sql()
+UPSERT_SQL = build_upsert_sql()
+
+
+def _has_index_status_column(cur: Any) -> bool:
+    cur.execute(INDEX_STATUS_COLUMN_EXISTS_SQL, ())
+    row = cur.fetchone()
+    if row is None:
+        return False
+    if isinstance(row, dict):
+        return bool(next(iter(row.values()), False))
+    return bool(row[0])
+
+
+def resolve_index_status_sync(
+    *, source_has_column: bool, dest_has_column: bool
+) -> bool:
+    """Decide whether index_status is copied; refuse to silently drop tombstones."""
+    if source_has_column and not dest_has_column:
+        raise RuntimeError(
+            "Source rag_chunks has index_status but the destination does not; "
+            "syncing would drop tombstones (DELETED chunks would become searchable). "
+            "Apply app/db/migrations/010_rag_chunks_index_status.sql to the "
+            "destination first."
+        )
+    if not source_has_column:
+        print(
+            "source rag_chunks has no index_status column; destination index_status "
+            "is left unchanged",
+            file=sys.stderr,
+            flush=True,
+        )
+    return source_has_column
 
 
 def _require_psycopg() -> None:
@@ -374,8 +364,9 @@ def build_select_query(
     source_tables: Sequence[str],
     season_year: Optional[int],
     limit: Optional[int],
+    include_index_status: bool = False,
 ) -> tuple[str, tuple[Any, ...]]:
-    query = SELECT_COLUMNS.strip()
+    query = build_select_columns(include_index_status=include_index_status).strip()
     params: List[Any] = []
 
     if source_tables:
@@ -424,49 +415,52 @@ def _execute_scalar(cur: Any, query: str, params: tuple[Any, ...]) -> int:
     return int(row[0])
 
 
-def _build_upsert_rows(rows: Sequence[Dict[str, Any]]) -> List[tuple[Any, ...]]:
+def _build_upsert_rows(
+    rows: Sequence[Dict[str, Any]], *, include_index_status: bool = False
+) -> List[tuple[Any, ...]]:
     payload: List[tuple[Any, ...]] = []
     for row in rows:
         meta = row.get("meta")
         metadata = row.get("metadata")
-        payload.append(
+        values: tuple[Any, ...] = (
             (
-                (
-                    json.dumps(meta, ensure_ascii=False, default=str)
-                    if meta is not None
-                    else None
-                ),
-                (
-                    json.dumps(metadata, ensure_ascii=False, default=str)
-                    if metadata is not None
-                    else None
-                ),
-                row.get("source_type"),
-                row.get("source_uri"),
-                row.get("topic_key"),
-                row.get("content_hash"),
-                row.get("chunk_hash"),
-                row.get("embedding_model"),
-                row.get("embedding_dim"),
-                row.get("embedding_version"),
-                row.get("chunking_version"),
-                row.get("quality_score"),
-                row.get("is_active"),
-                row.get("valid_from"),
-                row.get("valid_to"),
-                row.get("expires_at"),
-                row.get("season_year"),
-                row.get("season_id"),
-                row.get("league_type_code"),
-                row.get("team_id"),
-                row.get("player_id"),
-                row.get("source_table"),
-                row.get("source_row_id"),
-                row.get("title"),
-                row.get("content"),
-                row.get("embedding_text"),
-            )
+                json.dumps(meta, ensure_ascii=False, default=str)
+                if meta is not None
+                else None
+            ),
+            (
+                json.dumps(metadata, ensure_ascii=False, default=str)
+                if metadata is not None
+                else None
+            ),
+            row.get("source_type"),
+            row.get("source_uri"),
+            row.get("topic_key"),
+            row.get("content_hash"),
+            row.get("chunk_hash"),
+            row.get("embedding_model"),
+            row.get("embedding_dim"),
+            row.get("embedding_version"),
+            row.get("chunking_version"),
+            row.get("quality_score"),
+            row.get("is_active"),
+            row.get("valid_from"),
+            row.get("valid_to"),
+            row.get("expires_at"),
+            row.get("season_year"),
+            row.get("season_id"),
+            row.get("league_type_code"),
+            row.get("team_id"),
+            row.get("player_id"),
+            row.get("source_table"),
+            row.get("source_row_id"),
+            row.get("title"),
+            row.get("content"),
+            row.get("embedding_text"),
         )
+        if include_index_status:
+            values += (row.get(INDEX_STATUS_COLUMN),)
+        payload.append(values)
     return payload
 
 
@@ -510,20 +504,26 @@ def _prepare_stage_table(dest_cur: Any) -> None:
             source_row_id text NOT NULL,
             title text,
             content text,
-            embedding_text text
+            embedding_text text,
+            index_status text
         ) ON COMMIT PRESERVE ROWS
         """)
     dest_cur.execute(f"TRUNCATE TABLE {STAGE_TABLE_NAME}")
 
 
-def _stage_batch_with_copy(dest_cur: Any, payload: Sequence[tuple[Any, ...]]) -> None:
-    column_list = ", ".join(STAGE_COLUMNS)
+def _stage_batch_with_copy(
+    dest_cur: Any,
+    payload: Sequence[tuple[Any, ...]],
+    *,
+    include_index_status: bool = False,
+) -> None:
+    column_list = ", ".join(stage_columns(include_index_status=include_index_status))
     with dest_cur.copy(f"COPY {STAGE_TABLE_NAME} ({column_list}) FROM STDIN") as copy:
         for row in payload:
             copy.write_row(row)
 
 
-def _merge_staged_rows(dest_cur: Any) -> int:
+def _merge_staged_rows(dest_cur: Any, *, include_index_status: bool = False) -> int:
     staged_count = _execute_scalar(
         dest_cur,
         f"SELECT count(*) FROM {STAGE_TABLE_NAME}",
@@ -531,7 +531,7 @@ def _merge_staged_rows(dest_cur: Any) -> int:
     )
     if staged_count <= 0:
         return 0
-    dest_cur.execute(MERGE_STAGE_SQL)
+    dest_cur.execute(build_merge_stage_sql(include_index_status=include_index_status))
     dest_cur.execute(f"TRUNCATE TABLE {STAGE_TABLE_NAME}")
     return staged_count
 
@@ -562,11 +562,18 @@ def sync_rag_chunks(
         with dest_conn.cursor() as init_dest_cur:
             init_dest_cur.execute(f"SET search_path TO {PGVECTOR_SEARCH_PATH}")
             init_dest_cur.execute("SET statement_timeout TO 0;")
+            dest_has_index_status = _has_index_status_column(init_dest_cur)
+            with source_conn.cursor() as init_source_cur:
+                init_source_cur.execute("SET statement_timeout TO 0;")
+                source_has_index_status = _has_index_status_column(init_source_cur)
+            # Checked before any destination write (including --truncate-dest).
+            include_index_status = resolve_index_status_sync(
+                source_has_column=source_has_index_status,
+                dest_has_column=dest_has_index_status,
+            )
             if truncate_dest and not dry_run:
                 init_dest_cur.execute("TRUNCATE TABLE rag_chunks")
                 dest_conn.commit()
-        with source_conn.cursor() as init_source_cur:
-            init_source_cur.execute("SET statement_timeout TO 0;")
 
         try:
             total_rows = _count_source_rows(
@@ -598,7 +605,9 @@ def sync_rag_chunks(
             source_tables=source_tables,
             season_year=season_year,
             limit=limit,
+            include_index_status=include_index_status,
         )
+        upsert_sql = build_upsert_sql(include_index_status=include_index_status)
 
         with (
             source_conn.cursor(
@@ -615,12 +624,16 @@ def sync_rag_chunks(
                 _batched_fetch(source_cur, batch_size=max(1, batch_size)),
                 start=1,
             ):
-                payload = _build_upsert_rows(rows)
+                payload = _build_upsert_rows(
+                    rows, include_index_status=include_index_status
+                )
                 if payload and use_copy_pipeline:
-                    _stage_batch_with_copy(dest_cur, payload)
+                    _stage_batch_with_copy(
+                        dest_cur, payload, include_index_status=include_index_status
+                    )
                     pending_stage_rows += len(payload)
                 elif payload:
-                    dest_cur.executemany(UPSERT_SQL, payload)
+                    dest_cur.executemany(upsert_sql, payload)
                     synced_rows += len(payload)
 
                 print(
@@ -634,7 +647,9 @@ def sync_rag_chunks(
                     and commit_interval > 0
                     and pending_stage_rows >= commit_interval
                 ):
-                    synced_rows += _merge_staged_rows(dest_cur)
+                    synced_rows += _merge_staged_rows(
+                        dest_cur, include_index_status=include_index_status
+                    )
                     pending_stage_rows = 0
                     dest_conn.commit()
                     committed_rows = synced_rows
@@ -647,7 +662,9 @@ def sync_rag_chunks(
                     committed_rows = synced_rows
 
             if use_copy_pipeline and pending_stage_rows > 0:
-                synced_rows += _merge_staged_rows(dest_cur)
+                synced_rows += _merge_staged_rows(
+                    dest_cur, include_index_status=include_index_status
+                )
                 pending_stage_rows = 0
             dest_conn.commit()
             committed_rows = synced_rows

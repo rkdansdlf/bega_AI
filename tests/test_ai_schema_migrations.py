@@ -180,3 +180,18 @@ def test_checkpoint_design_documents_timestamp_subtypes_and_frozen_source_window
         "success watermark remains the maximum committed non-NULL update timestamp",
     ):
         assert statement in text
+
+
+def test_rag_chunks_index_status_migration_is_additive_and_managed():
+    sql = (MIGRATION_DIR / "010_rag_chunks_index_status.sql").read_text(
+        encoding="utf-8"
+    )
+    script = MANAGED_MIGRATION_SCRIPT.read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS index_status varchar(24) DEFAULT 'ACTIVE';" in sql
+    assert "UPDATE rag_chunks" not in sql
+    assert "DROP" not in sql.upper()
+    assert "migrations/010_rag_chunks_index_status.sql" in script
+    assert script.index("009_rag_chunk_embeddings.sql") < script.index(
+        "010_rag_chunks_index_status.sql"
+    )

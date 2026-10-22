@@ -16,7 +16,11 @@ from ..config import Settings
 from ..core.embeddings import async_embed_query
 from ..core.exceptions import DBRetrievalError
 from ..core.oracle_rag import is_oracle_rag_connection, oracle_exact_document_search
-from ..core.retrieval import similarity_search_with_fallback
+from ..core.retrieval import (
+    index_status_visible_sql,
+    rag_chunks_has_index_status,
+    similarity_search_with_fallback,
+)
 from .query_logging import (
     ACTION_SEARCH_DOCUMENTS,
     DOCUMENT_QUERY_COMPONENT,
@@ -256,6 +260,12 @@ class DocumentQueryTool:
             params.extend([like_value, like_value, like_value])
         params.append(limit)
 
+        # Tombstone(index_status=DELETED 등) 청크 제외. 컬럼이 없는 DB는 기존 동작 유지.
+        index_status_clause = (
+            f"\n          AND {index_status_visible_sql()}"
+            if await rag_chunks_has_index_status(conn)
+            else ""
+        )
         sql = f"""
         SELECT
             id,
@@ -268,7 +278,7 @@ class DocumentQueryTool:
             1.0 AS combined_score
         FROM rag_chunks
         WHERE source_table = ANY(%s)
-          AND ({' OR '.join(clauses)})
+          AND ({' OR '.join(clauses)}){index_status_clause}
         LIMIT %s
         """
 
