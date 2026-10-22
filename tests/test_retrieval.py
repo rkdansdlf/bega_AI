@@ -419,6 +419,7 @@ def reset_index_status_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(retrieval, "_rag_chunks_index_status_exists", None)
     monkeypatch.setattr(retrieval, "_rag_chunks_index_status_checked_at", 0.0)
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_check_failed_until", 0.0)
 
 
 @pytest.mark.asyncio
@@ -491,7 +492,7 @@ async def test_index_status_column_detection_caches_positive_and_rechecks_negati
 
 
 @pytest.mark.asyncio
-async def test_index_status_column_detection_failure_keeps_previous_behaviour(
+async def test_index_status_column_detection_failure_fails_closed(
     reset_index_status_cache: None,
 ) -> None:
     from app.core import retrieval
@@ -500,7 +501,9 @@ async def test_index_status_column_detection_failure_keeps_previous_behaviour(
         def cursor(self, *a, **k):  # noqa: ANN002, ANN003
             raise RuntimeError("boom")
 
-    assert await retrieval.rag_chunks_has_index_status(_Broken()) is False
+    # Assume the column exists (keep the tombstone filter); nothing is cached.
+    assert await retrieval.rag_chunks_has_index_status(_Broken()) is True
+    assert retrieval._rag_chunks_index_status_exists is None
 
 
 @pytest.mark.parametrize(
@@ -626,7 +629,7 @@ async def test_unrelated_undefined_column_is_not_swallowed(
 
 
 @pytest.mark.asyncio
-async def test_index_status_check_failure_is_cached_for_negative_ttl(
+async def test_index_status_check_failure_is_not_cached_and_warning_is_rate_limited(
     reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
     import logging
@@ -642,11 +645,65 @@ async def test_index_status_check_failure_is_cached_for_negative_ttl(
 
     caplog.set_level(logging.WARNING, logger=retrieval.logger.name)
     for _ in range(5):
-        assert await retrieval.rag_chunks_has_index_status(_Broken()) is False
+        assert await retrieval.rag_chunks_has_index_status(_Broken()) is True
+    # One probe and one warning per short backoff window, no cached answer.
     assert calls["n"] == 1
     assert caplog.text.count("index_status column check failed") == 1
+    assert retrieval._rag_chunks_index_status_exists is None
 
-    # After the TTL the check runs again.
-    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_checked_at", -1e9)
-    assert await retrieval.rag_chunks_has_index_status(_Broken()) is False
-    assert calls["n"] == 2
+    # After the backoff the check runs again; a successful check is cached.
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_check_failed_until", 0.0)
+    assert await retrieval.rag_chunks_has_index_status(_DummyConnection([])) is False
+    assert retrieval._rag_chunks_index_status_exists is False
+
+
+@pytest.mark.asyncio
+async def test_failed_check_on_aborted_connection_keeps_tombstones_hidden(
+    reset_index_status_cache: None,
+) -> None:
+    """QA repro: a check on an aborted-transaction connection must not disable the
+    filter for the next (healthy) search."""
+    from psycopg.errors import InFailedSqlTransaction
+
+    from app.core import retrieval
+
+    class _AbortedCursor(_DummyCursor):
+        async def execute(self, query, params=None):  # noqa: ANN001
+            raise InFailedSqlTransaction("current transaction is aborted")
+
+    class _AbortedConnection(_DummyConnection):
+        def cursor(self, row_factory=None):  # noqa: ANN001
+            return _AbortedCursor([])
+
+    assert await retrieval.rag_chunks_has_index_status(_AbortedConnection([])) is True
+
+    healthy = _IndexStatusConnection([])
+    await similarity_search(healthy, [0.1, 0.2, 0.3], limit=3)
+    sql, _ = healthy.last_cursor.executed[1]
+    assert (
+        "COALESCE(index_status, 'ACTIVE') NOT IN ('DELETED', 'TOMBSTONED', 'PURGED')"
+        in sql
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_check_with_missing_column_falls_back_without_filter(
+    reset_index_status_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Assuming True is safe: if the column really is missing, the query's
+    UndefinedColumn resets the cache and the search is retried unfiltered."""
+    import psycopg
+
+    from app.core import retrieval
+
+    monkeypatch.setattr(
+        retrieval, "_rag_chunks_index_status_check_failed_until", float("inf")
+    )
+    conn = _DroppedColumnConnection([], psycopg.pq.TransactionStatus.IDLE)
+
+    await similarity_search(conn, [0.1, 0.2, 0.3], limit=3)
+
+    assert conn.failed_queries == 1
+    assert "index_status" not in conn.last_cursor.executed[-1][0]
+    assert retrieval._rag_chunks_index_status_exists is False
+    assert retrieval._rag_chunks_index_status_check_failed_until == 0.0

@@ -55,6 +55,12 @@ _rag_chunks_table_exists: Optional[bool] = None
 _rag_chunks_index_status_exists: Optional[bool] = None
 _rag_chunks_index_status_checked_at: float = 0.0
 _INDEX_STATUS_NEGATIVE_RECHECK_S = 300.0
+# 확인 쿼리 자체가 실패하면(중단된 트랜잭션, 일시 장애) 컬럼이 있다고 가정한다(fail-closed:
+# tombstone 노출 방지). 실제로 없으면 execute_with_index_status_fallback 이 UndefinedColumn
+# 을 받아 캐시를 무효화하고 필터 없이 재시도한다. 실패 결과는 캐시하지 않고, 경고 폭주만
+# 막기 위해 짧은 시간 동안 재조회/경고를 생략한다.
+_rag_chunks_index_status_check_failed_until: float = 0.0
+_INDEX_STATUS_CHECK_FAILURE_BACKOFF_S = 10.0
 
 # 검색에서 제외할 lifecycle 상태 (KBO_playwright rag_index_lifecycle의 제거 계열 상태).
 # NULL과 ACTIVE/INDEXED/PENDING/STALE 등 나머지 값은 기존처럼 검색 대상이다.
@@ -320,9 +326,12 @@ async def rag_chunks_has_index_status(conn: Any) -> bool:
 
     마이그레이션 010 이전 DB에서는 컬럼이 없으므로 필터를 붙이면 쿼리가
     UndefinedColumn 으로 실패한다. 컬럼이 있을 때만 tombstone 필터를 붙인다.
-    조회 실패 시에는 False(필터 생략)로 기존 동작을 유지한다.
+    조회 자체가 실패하면 True(필터 적용)를 반환하고 결과를 캐시하지 않는다.
+    필터를 붙인 모든 쿼리는 execute_with_index_status_fallback 으로 실행되므로,
+    컬럼이 실제로 없으면 UndefinedColumn 을 받아 필터 없이 복구된다.
     """
     global _rag_chunks_index_status_exists, _rag_chunks_index_status_checked_at
+    global _rag_chunks_index_status_check_failed_until
     if _rag_chunks_index_status_exists is True:
         return True
     now = time.monotonic()
@@ -331,6 +340,8 @@ async def rag_chunks_has_index_status(conn: Any) -> bool:
         and now - _rag_chunks_index_status_checked_at < _INDEX_STATUS_NEGATIVE_RECHECK_S
     ):
         return False
+    if now < _rag_chunks_index_status_check_failed_until:
+        return True
     try:
         async with conn.cursor() as cursor:
             await cursor.execute("""
@@ -344,16 +355,18 @@ async def rag_chunks_has_index_status(conn: Any) -> bool:
                 """)
             row = await cursor.fetchone()
     except Exception as exc:  # noqa: BLE001 - detection must not break search
-        # 실패도 음성 TTL 동안 캐싱한다(요청마다 경고/재조회 방지).
+        # 실패는 캐시하지 않는다. 필터를 유지(True)하고 짧게만 재조회/경고를 생략한다.
         logger.warning(
-            "[Search] index_status column check failed: %s; tombstone filter is "
-            "skipped for %ds",
+            "[Search] index_status column check failed: %s; assuming the column "
+            "exists (tombstone filter kept, UndefinedColumn falls back); next check "
+            "in %ds",
             type(exc).__name__,
-            int(_INDEX_STATUS_NEGATIVE_RECHECK_S),
+            int(_INDEX_STATUS_CHECK_FAILURE_BACKOFF_S),
         )
-        _rag_chunks_index_status_exists = False
-        _rag_chunks_index_status_checked_at = now
-        return False
+        _rag_chunks_index_status_check_failed_until = (
+            now + _INDEX_STATUS_CHECK_FAILURE_BACKOFF_S
+        )
+        return True
     result = bool(row[0]) if row else False
     if not result:
         logger.warning(
@@ -372,8 +385,10 @@ def invalidate_index_status_cache() -> None:
     실패하므로, 그 오류를 만난 쪽이 호출한다.
     """
     global _rag_chunks_index_status_exists, _rag_chunks_index_status_checked_at
+    global _rag_chunks_index_status_check_failed_until
     _rag_chunks_index_status_exists = False
     _rag_chunks_index_status_checked_at = time.monotonic()
+    _rag_chunks_index_status_check_failed_until = 0.0
 
 
 def is_index_status_undefined_error(exc: BaseException) -> bool:

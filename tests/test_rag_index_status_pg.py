@@ -93,6 +93,7 @@ def _insert(conn, row_id: str, status, is_active, *, table: str = "milestone"):
 def _reset_index_status_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(retrieval, "_rag_chunks_index_status_exists", None)
     monkeypatch.setattr(retrieval, "_rag_chunks_index_status_checked_at", 0.0)
+    monkeypatch.setattr(retrieval, "_rag_chunks_index_status_check_failed_until", 0.0)
 
 
 @pytest.fixture
@@ -285,3 +286,58 @@ def test_sync_from_legacy_source_keeps_destination_tombstones(
         "row-active": "ACTIVE",
         "row-null": "ACTIVE",
     }
+
+
+@pytest.mark.asyncio
+async def test_check_on_aborted_transaction_does_not_expose_tombstones(
+    seeded_source,
+) -> None:
+    """QA repro: column check on an aborted transaction, then a normal search."""
+    async with await psycopg.AsyncConnection.connect(URL) as aborted:
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            await aborted.execute("SELECT 1/0")
+        assert await retrieval.rag_chunks_has_index_status(aborted) is True
+        await aborted.rollback()
+
+    async with await psycopg.AsyncConnection.connect(URL, autocommit=True) as conn:
+        rows = await retrieval.similarity_search(
+            conn, [1.0] + [0.0] * (DIM - 1), limit=10, settings=_settings()
+        )
+    assert sorted(row["source_row_id"] for row in rows) == ["row-active", "row-null"]
+
+
+@pytest.mark.asyncio
+async def test_failed_check_on_db_without_column_still_searches(seeded_source) -> None:
+    async with await psycopg.AsyncConnection.connect(URL, autocommit=True) as conn:
+        try:
+            await conn.execute("ALTER TABLE rag_chunks DROP COLUMN index_status")
+            async with await psycopg.AsyncConnection.connect(URL) as aborted:
+                with pytest.raises(psycopg.errors.DivisionByZero):
+                    await aborted.execute("SELECT 1/0")
+                assert await retrieval.rag_chunks_has_index_status(aborted) is True
+            rows = await retrieval.similarity_search(
+                conn, [1.0] + [0.0] * (DIM - 1), limit=10, settings=_settings()
+            )
+            assert len(rows) == 3
+            assert retrieval._rag_chunks_index_status_exists is False
+        finally:
+            await conn.execute(MIGRATION_010)
+
+
+def test_migration_010_rerun_takes_no_lock_on_rag_chunks(seeded_source) -> None:
+    """Re-running 010 (every deploy) must not queue behind/ahead of readers."""
+    with (
+        psycopg.connect(URL) as reader,
+        psycopg.connect(URL, autocommit=True) as migrator,
+    ):
+        # Long reader transaction holding ACCESS SHARE on rag_chunks.
+        reader.execute("SELECT count(*) FROM rag_chunks").fetchone()
+        # Would wait (and fail with LockNotAvailable) if it needed ACCESS EXCLUSIVE.
+        migrator.execute("SET lock_timeout = '200ms'")
+        migrator.execute(MIGRATION_010)
+        held = migrator.execute("""
+            SELECT count(*) FROM pg_locks
+            WHERE relation = 'rag_chunks'::regclass AND mode = 'AccessExclusiveLock'
+            """).fetchone()[0]
+        assert held == 0
+        reader.rollback()

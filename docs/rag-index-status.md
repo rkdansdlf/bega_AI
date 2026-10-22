@@ -19,6 +19,11 @@ psql --set ON_ERROR_STOP=1 -f app/db/migrations/010_rag_chunks_index_status.sql 
   `SET lock_timeout = '5s'` 로 대기를 제한합니다. 시간 초과 시 psql 이 실패하므로
   `pg_stat_activity` 에서 긴 트랜잭션을 확인한 뒤 다시 실행하면 됩니다. 수동으로 ALTER 를
   실행할 때도 반드시 `SET lock_timeout = '5s';` 를 먼저 실행하세요.
+- 재실행(배포마다)은 카탈로그만 확인하고 컬럼이 없을 때만 `ALTER` 를 실행하므로
+  `rag_chunks` 에 락을 잡지 않습니다(읽기 차단·lock timeout 으로 이후 migration 중단 없음).
+- 컬럼 확인 쿼리 자체가 실패하면(중단된 트랜잭션 등) 앱은 컬럼이 있다고 가정해 필터를
+  유지하고(결과는 캐시하지 않음, 경고는 10초에 1회), 실제로 없으면 `UndefinedColumn` 복구
+  경로가 필터 없이 재시도합니다.
 - 앱은 컬럼을 런타임에 감지합니다. migration 전에 배포해도 검색은 실패하지 않고
   (필터 생략 + 경고 로그), 적용 후 최대 5분(음성 캐시 TTL) 안에 재시작 없이 필터가 켜집니다.
 
@@ -44,5 +49,9 @@ psql --set ON_ERROR_STOP=1 -f app/db/migrations/010_rag_chunks_index_status.sql 
   - 앱은 컬럼 존재를 프로세스 수명 동안 캐시합니다. 삭제 후 첫 검색이 `UndefinedColumn`
     을 만나면 캐시를 무효화하고 필터 없이 한 번 재시도합니다(autocommit 연결 — 기본 풀).
     호출자 트랜잭션 안의 연결이면 그 요청은 실패하고 다음 요청부터 필터 없이 동작합니다.
+  - 단, PostgreSQL 은 오류가 난 트랜잭션을 abort 상태로 두므로 **그 호출자 트랜잭션은
+    롤백될 때까지 이후 모든 문장이 계속 실패합니다**(`InFailedSqlTransaction`). 호출자가
+    트랜잭션을 롤백한 뒤(또는 새 연결/트랜잭션에서) 요청해야 정상 동작합니다. 기본 RAG 풀은
+    autocommit 이라 해당되지 않습니다.
   - 가장 확실한 방법은 **컬럼 삭제 후 AI 서비스를 재시작**하는 것입니다(롤백 절차에 포함).
   - 삭제에도 `SET lock_timeout = '5s';` 를 먼저 실행하세요.
