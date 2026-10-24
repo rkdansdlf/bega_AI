@@ -12,6 +12,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.errors import UndefinedTable
 from ..core.retrieval import (
+    INDEX_STATUS_COLUMN_EXISTS_SQL,
     execute_with_index_status_fallback,
     index_status_visible_sql,
     rag_chunks_has_index_status,
@@ -287,20 +288,14 @@ class RegulationQueryTool:
                     if hasattr(result, "__await__"):
                         await result
         async with conn.cursor(row_factory=dict_row) as cursor:
-            await cursor.execute("""
+            await cursor.execute(f"""
                 SELECT EXISTS(
                     SELECT 1
                     FROM information_schema.tables
                     WHERE table_schema = 'public'
                       AND table_name = 'rag_chunks'
                 ) AS present,
-                EXISTS(
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = 'public'
-                      AND table_name = 'rag_chunks'
-                      AND column_name = 'index_status'
-                ) AS has_index_status;
+                {INDEX_STATUS_COLUMN_EXISTS_SQL} AS has_index_status;
                 """)
             row = await cursor.fetchone()
             has_index_status = bool(hasattr(row, "get") and row.get("has_index_status"))

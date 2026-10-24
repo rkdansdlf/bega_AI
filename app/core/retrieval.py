@@ -311,6 +311,22 @@ async def _rag_chunks_exists(
         return False
 
 
+# `rag_chunks.index_status` 존재 여부 술어(EXISTS 식). 마이그레이션 010 과 같은 방식으로
+# 테이블을 찾는다: 비한정 `rag_chunks` 를 세션 search_path 로 해석(to_regclass)하고
+# pg_attribute 를 읽는다. information_schema 에 table_schema='public' 을 고정하면
+# search_path 가 다른 배포에서 010/실제 쿼리(비한정 rag_chunks)와 판단이 어긋나고,
+# information_schema.columns 는 권한 없는 컬럼을 숨긴다. 테이블이 없으면
+# to_regclass 가 NULL 이라 false 가 된다.
+INDEX_STATUS_COLUMN_EXISTS_SQL = """EXISTS(
+                    SELECT 1
+                    FROM pg_catalog.pg_attribute
+                    WHERE attrelid = to_regclass('rag_chunks')
+                      AND attname = 'index_status'
+                      AND attnum > 0
+                      AND NOT attisdropped
+                )"""
+
+
 def index_status_visible_sql(column: str = "index_status") -> str:
     """tombstone 된 청크를 제외하는 NULL-safe 술어를 반환합니다.
 
@@ -321,8 +337,14 @@ def index_status_visible_sql(column: str = "index_status") -> str:
     return f"COALESCE({column}, 'ACTIVE') NOT IN ({retired})"
 
 
-async def rag_chunks_has_index_status(conn: Any) -> bool:
+async def rag_chunks_has_index_status(
+    conn: Any, *, search_path: Optional[str] = None
+) -> bool:
     """`rag_chunks.index_status` 컬럼이 존재하는지 확인합니다.
+
+    테이블은 비한정 `rag_chunks` 를 세션 search_path 로 해석한다(to_regclass).
+    호출자가 본 쿼리 전에 search_path 를 고정한다면 같은 값을 ``search_path`` 로
+    넘겨, 확인과 본 쿼리가 같은 테이블을 보게 한다(SET 실패도 조회 실패로 취급).
 
     마이그레이션 010 이전 DB에서는 컬럼이 없으므로 필터를 붙이면 쿼리가
     UndefinedColumn 으로 실패한다. 컬럼이 있을 때만 tombstone 필터를 붙인다.
@@ -344,15 +366,9 @@ async def rag_chunks_has_index_status(conn: Any) -> bool:
         return True
     try:
         async with conn.cursor() as cursor:
-            await cursor.execute("""
-                SELECT EXISTS(
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = 'public'
-                      AND table_name = 'rag_chunks'
-                      AND column_name = 'index_status'
-                );
-                """)
+            if search_path is not None:
+                await cursor.execute(f"SET search_path TO {search_path}")
+            await cursor.execute(f"SELECT {INDEX_STATUS_COLUMN_EXISTS_SQL};")
             row = await cursor.fetchone()
     except Exception as exc:  # noqa: BLE001 - detection must not break search
         # 실패는 캐시하지 않는다. 필터를 유지(True)하고 짧게만 재조회/경고를 생략한다.
@@ -535,7 +551,11 @@ async def similarity_search(
     # Tombstone(index_status=DELETED 등)은 lifecycle 토글과 무관하게 항상 제외한다.
     # Oracle 경로도 index_status 술어를 무조건 붙인다. 컬럼은 rag_chunks에만 있어
     # physical store(rag_chunk_embeddings JOIN) 에서도 모호하지 않다.
-    index_status_filtered = await rag_chunks_has_index_status(conn)
+    # 컬럼 확인은 비한정 rag_chunks 를 search_path 로 해석하므로, 본 쿼리가 쓰는
+    # search_path(_ensure_pgvector_session 과 동일)로 맞춘 뒤 확인한다.
+    index_status_filtered = await rag_chunks_has_index_status(
+        conn, search_path=_PGVECTOR_SEARCH_PATH
+    )
     if index_status_filtered:
         filter_clauses.append(index_status_visible_sql())
     filter_params: List[Any] = []
