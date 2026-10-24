@@ -402,7 +402,7 @@ class _IndexStatusCursor(_DummyCursor):
     async def fetchone(self):
         if self.executed:
             query, _ = self.executed[-1]
-            if "information_schema.columns" in query and "index_status" in query:
+            if "pg_attribute" in query and "index_status" in query:
                 return (True,)
         return await super().fetchone()
 
@@ -458,10 +458,55 @@ async def test_similarity_search_excludes_tombstones_even_without_lifecycle_filt
 
 
 @pytest.mark.asyncio
+async def test_index_status_probe_resolves_table_via_search_path(
+    reset_index_status_cache: None,
+) -> None:
+    """QA #31 item 5: probe must not pin table_schema = 'public'."""
+    from app.core.retrieval import rag_chunks_has_index_status
+
+    conn = _IndexStatusConnection([])
+
+    assert await rag_chunks_has_index_status(conn) is True
+
+    probe, _ = conn.last_cursor.executed[0]
+    assert "to_regclass('rag_chunks')" in probe
+    assert "pg_catalog.pg_attribute" in probe
+    assert "attname = 'index_status'" in probe
+    assert "NOT attisdropped" in probe
+    assert "information_schema" not in probe
+    assert "public" not in probe
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_probes_index_status_under_its_search_path(
+    reset_index_status_cache: None,
+) -> None:
+    """The probe and the main query must resolve the same rag_chunks table."""
+    from app.core import retrieval
+
+    cursors: list[_IndexStatusCursor] = []
+
+    class _RecordingConnection(_IndexStatusConnection):
+        def cursor(self, row_factory=None):  # noqa: ANN001
+            cur = super().cursor(row_factory)
+            cursors.append(cur)
+            return cur
+
+    await similarity_search(_RecordingConnection([]), [0.1, 0.2, 0.3], limit=3)
+
+    probe_cursor = next(
+        c for c in cursors if any("pg_attribute" in q for q, _ in c.executed)
+    )
+    queries = [q for q, _ in probe_cursor.executed]
+    assert queries[0] == f"SET search_path TO {retrieval._PGVECTOR_SEARCH_PATH}"
+    assert "pg_attribute" in queries[1]
+
+
+@pytest.mark.asyncio
 async def test_similarity_search_skips_index_status_filter_when_column_missing(
     reset_index_status_cache: None,
 ) -> None:
-    # _DummyCursor answers the information_schema.columns probe with no row,
+    # _DummyCursor answers the pg_attribute index_status probe with no row,
     # i.e. a database where migration 010 has not been applied yet.
     conn = _DummyConnection([])
 
@@ -547,7 +592,7 @@ class _UndefinedIndexStatusCursor(_IndexStatusCursor):
 
     async def execute(self, query, params=None):  # noqa: ANN001
         await super().execute(query, params)
-        if "index_status" in query and "information_schema" not in query:
+        if "index_status" in query and "pg_attribute" not in query:
             self._conn.failed_queries += 1
             from psycopg.errors import UndefinedColumn
 

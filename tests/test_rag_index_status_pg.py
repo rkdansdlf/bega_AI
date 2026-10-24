@@ -341,3 +341,76 @@ def test_migration_010_rerun_takes_no_lock_on_rag_chunks(seeded_source) -> None:
             """).fetchone()[0]
         assert held == 0
         reader.rollback()
+
+
+@pytest_asyncio.fixture
+async def alt_schema_conn(seeded_source):
+    """Non-autocommit connection whose search_path resolves rag_chunks to kbo_alt.
+
+    Everything (schema, table, search_path) lives in one transaction that is
+    rolled back, so public.rag_chunks is left untouched.
+    """
+    async with await psycopg.AsyncConnection.connect(URL) as conn:
+        await conn.execute("CREATE SCHEMA kbo_alt")
+        await conn.execute(
+            "CREATE TABLE kbo_alt.rag_chunks (LIKE public.rag_chunks INCLUDING DEFAULTS)"
+        )
+        await conn.execute("SET LOCAL search_path TO kbo_alt, public, extensions")
+        try:
+            yield conn
+        finally:
+            await conn.rollback()
+
+
+@pytest.mark.asyncio
+async def test_column_check_follows_search_path_when_only_public_lacks_column(
+    alt_schema_conn,
+) -> None:
+    """QA #31 item 5: the probe resolves rag_chunks via search_path, not 'public'."""
+    conn = alt_schema_conn
+    await conn.execute("ALTER TABLE public.rag_chunks DROP COLUMN index_status")
+
+    assert await retrieval.rag_chunks_has_index_status(conn) is True
+
+
+@pytest.mark.asyncio
+async def test_similarity_search_probes_under_its_own_search_path(
+    alt_schema_conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session search_path resolves a column-less kbo_alt.rag_chunks, but
+    similarity_search pins its own search_path (public first) before probing, so
+    the filter still applies to the public table it actually queries."""
+    conn = alt_schema_conn
+    await conn.execute("ALTER TABLE kbo_alt.rag_chunks DROP COLUMN index_status")
+    # Warm table-exists cache: _rag_chunks_exists then skips its own SET search_path.
+    monkeypatch.setattr(retrieval, "_rag_chunks_table_exists", True)
+
+    rows = await retrieval.similarity_search(
+        conn, [1.0] + [0.0] * (DIM - 1), limit=10, settings=_settings()
+    )
+
+    assert retrieval._rag_chunks_index_status_exists is True
+    assert sorted(row["source_row_id"] for row in rows) == ["row-active", "row-null"]
+
+
+@pytest.mark.asyncio
+async def test_column_check_follows_search_path_when_resolved_table_lacks_column(
+    alt_schema_conn,
+) -> None:
+    """public.rag_chunks has index_status, but the resolved kbo_alt table does not."""
+    conn = alt_schema_conn
+    await conn.execute("ALTER TABLE kbo_alt.rag_chunks DROP COLUMN index_status")
+
+    assert await retrieval.rag_chunks_has_index_status(conn) is False
+
+
+@pytest.mark.asyncio
+async def test_column_check_is_false_when_rag_chunks_is_not_on_search_path(
+    seeded_source,
+) -> None:
+    async with await psycopg.AsyncConnection.connect(URL) as conn:
+        try:
+            await conn.execute("SET LOCAL search_path TO pg_catalog")
+            assert await retrieval.rag_chunks_has_index_status(conn) is False
+        finally:
+            await conn.rollback()

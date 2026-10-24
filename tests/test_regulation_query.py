@@ -233,7 +233,10 @@ def test_regulation_search_excludes_tombstoned_chunks_when_column_exists() -> No
 
     asyncio.run(tool.get_regulation_by_category("player", limit=3))
 
-    assert "information_schema.columns" in exists_cursor.executed[0][0]
+    probe = exists_cursor.executed[0][0]
+    assert "to_regclass('rag_chunks')" in probe
+    assert "pg_catalog.pg_attribute" in probe
+    assert "information_schema.columns" not in probe
     sql = search_cursor.executed[0][0]
     assert (
         "COALESCE(index_status, 'ACTIVE') NOT IN ('DELETED', 'TOMBSTONED', 'PURGED')"
