@@ -5,11 +5,19 @@
 기본 정책:
 - 7일 이상 지난 캐시를 정리
 - 기본 안전모드로 전역 삭제를 차단
+- 배치 소유 prompt_version(COACH_BATCH_OWNED_PROMPT_VERSIONS)은 기본 제외.
+  배치 행은 batch_coach_cache.py가 verify-then-replace/--cleanup-legacy로
+  직접 관리하므로, TTL이 rebuild 직전에 지우면 previous_kept 보호가 무력화된다.
+- live 계약 버전(COACH_CACHE_PROMPT_VERSION) 행은 의도적으로 TTL 대상이다.
+  live API의 COMPLETED 캐시 TTL이 24h(app/routers/coach.py
+  COMPLETED_CACHE_TTL_SECONDS)이므로 7일 이상 지난 live 행은 어차피 재사용되지
+  않는 만료 행이다.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -21,7 +29,8 @@ from typing import Any, Dict, List, Optional
 os.environ.setdefault("BEGA_SKIP_APP_INIT", "1")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.deps import get_connection_pool
+from app.core.coach_cache_contract import COACH_BATCH_OWNED_PROMPT_VERSIONS
+from app.deps import close_connection_pool, get_connection_pool
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
 
 logging.basicConfig(
@@ -30,6 +39,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETENTION_DAYS = 7
+DEFAULT_EXCLUDED_PROMPT_VERSIONS: tuple[str, ...] = tuple(
+    COACH_BATCH_OWNED_PROMPT_VERSIONS
+)
+
+
+def parse_prompt_versions_csv(raw: Optional[str]) -> Optional[List[str]]:
+    """None -> use defaults; "" -> exclude nothing; CSV -> explicit list."""
+    if raw is None:
+        return None
+    return sorted({token.strip() for token in str(raw).split(",") if token.strip()})
 
 
 def parse_years_csv(raw_years: Optional[str]) -> Optional[List[int]]:
@@ -75,9 +94,14 @@ def build_where_clause(
     retention_days: int,
     years: Optional[List[int]],
     teams: Optional[List[str]],
+    exclude_prompt_versions: Optional[List[str]] = None,
 ) -> tuple[str, List[Any]]:
     clauses = ["updated_at < now() - make_interval(days => %s)"]
     params: List[Any] = [retention_days]
+
+    if exclude_prompt_versions:
+        clauses.append("prompt_version <> ALL(%s)")
+        params.append(list(exclude_prompt_versions))
 
     if years:
         clauses.append("year = ANY(%s)")
@@ -91,12 +115,13 @@ def build_where_clause(
     return where_clause, params
 
 
-def cleanup_expired_cache(
+async def cleanup_expired_cache(
     retention_days: int,
     dry_run: bool = False,
     years: Optional[List[int]] = None,
     teams: Optional[List[str]] = None,
     allow_global: bool = False,
+    exclude_prompt_versions: Optional[List[str]] = None,
 ) -> dict:
     """
     만료된 캐시 항목을 정리합니다.
@@ -107,6 +132,8 @@ def cleanup_expired_cache(
         years: 정리 대상 연도 필터
         teams: 정리 대상 팀 코드 필터(캐노니컬)
         allow_global: True면 전역 정리 허용
+        exclude_prompt_versions: 제외할 prompt_version 목록.
+            None이면 배치 소유 버전(DEFAULT_EXCLUDED_PROMPT_VERSIONS), []이면 제외 없음.
 
     Returns:
         정리 결과 요약
@@ -116,71 +143,121 @@ def cleanup_expired_cache(
             "global cleanup is blocked by default; provide --years/--teams or pass --allow-global"
         )
 
+    if exclude_prompt_versions is None:
+        exclude_prompt_versions = list(DEFAULT_EXCLUDED_PROMPT_VERSIONS)
     pool = get_connection_pool()
-    where_clause, where_params = build_where_clause(retention_days, years, teams)
+    where_clause, where_params = build_where_clause(
+        retention_days, years, teams, exclude_prompt_versions
+    )
     scope = {
         "retention_days": retention_days,
         "years": years or [],
         "teams": teams or [],
         "allow_global": allow_global,
+        "excluded_prompt_versions": list(exclude_prompt_versions),
     }
 
-    with pool.connection() as conn:
-        select_sql = f"""
-            SELECT cache_key, team_id, year, status, updated_at
-            FROM coach_analysis_cache
-            WHERE {where_clause}
-            ORDER BY updated_at
-        """
-        expired_rows = conn.execute(select_sql, tuple(where_params)).fetchall()
-        expired_count = len(expired_rows)
+    try:
+        await pool.open(wait=True, timeout=10.0)
+        async with pool.connection() as conn:
+            if dry_run:
+                select_sql = f"""
+                    SELECT cache_key, team_id, year, status, updated_at
+                    FROM coach_analysis_cache
+                    WHERE {where_clause}
+                    ORDER BY updated_at
+                """
+                cur = await conn.execute(select_sql, tuple(where_params))
+                expired_rows = await cur.fetchall()
+                expired_count = len(expired_rows)
 
-        if expired_count == 0:
-            logger.info("삭제할 만료 캐시 없음")
-            return {"deleted": 0, "would_delete": 0, "dry_run": dry_run, "scope": scope}
+                if expired_count == 0:
+                    logger.info("삭제할 만료 캐시 없음")
+                    return {
+                        "deleted": 0,
+                        "would_delete": 0,
+                        "would_delete_keys": [],
+                        "dry_run": True,
+                        "scope": scope,
+                    }
 
-        logger.info(
-            "만료 캐시 %d개 발견 (>%d일, years=%s, teams=%s)",
-            expired_count,
-            retention_days,
-            years or "ALL",
-            teams or "ALL",
-        )
+                logger.info(
+                    "만료 캐시 %d개 발견 (>%d일, years=%s, teams=%s)",
+                    expired_count,
+                    retention_days,
+                    years or "ALL",
+                    teams or "ALL",
+                )
+                for row in expired_rows[:10]:
+                    cache_key, team_id, year, status, updated_at = row
+                    logger.info(
+                        "  - %s (%s) | %s | 마지막 업데이트: %s",
+                        team_id,
+                        year,
+                        status,
+                        updated_at,
+                    )
+                if expired_count > 10:
+                    logger.info("  ... 외 %d개", expired_count - 10)
 
-        for row in expired_rows[:10]:
-            cache_key, team_id, year, status, updated_at = row
+                logger.info("[DRY-RUN] 실제 삭제 없이 종료")
+                return {
+                    "deleted": 0,
+                    "would_delete": expired_count,
+                    "would_delete_keys": [r[0] for r in expired_rows],
+                    "dry_run": True,
+                    "scope": scope,
+                }
+
+            delete_sql = f"""
+                DELETE FROM coach_analysis_cache
+                WHERE {where_clause}
+                RETURNING cache_key, team_id, year, status, updated_at
+            """
+            cur = await conn.execute(delete_sql, tuple(where_params))
+            deleted_rows = await cur.fetchall()
+            await conn.commit()
+            deleted_count = len(deleted_rows)
+
+            if deleted_count == 0:
+                logger.info("삭제할 만료 캐시 없음")
+                return {
+                    "deleted": 0,
+                    "would_delete": 0,
+                    "deleted_keys": [],
+                    "dry_run": False,
+                    "scope": scope,
+                }
+
             logger.info(
-                "  - %s (%s) | %s | 마지막 업데이트: %s",
-                team_id,
-                year,
-                status,
-                updated_at,
+                "만료 캐시 %d개 삭제 (>%d일, years=%s, teams=%s)",
+                deleted_count,
+                retention_days,
+                years or "ALL",
+                teams or "ALL",
             )
-        if expired_count > 10:
-            logger.info("  ... 외 %d개", expired_count - 10)
+            for row in deleted_rows[:10]:
+                cache_key, team_id, year, status, updated_at = row
+                logger.info(
+                    "  - %s (%s) | %s | 마지막 업데이트: %s",
+                    team_id,
+                    year,
+                    status,
+                    updated_at,
+                )
+            if deleted_count > 10:
+                logger.info("  ... 외 %d개", deleted_count - 10)
 
-        if dry_run:
-            logger.info("[DRY-RUN] 실제 삭제 없이 종료")
+            logger.info("삭제 완료: %d개 항목", deleted_count)
             return {
-                "deleted": 0,
-                "would_delete": expired_count,
-                "dry_run": True,
+                "deleted": deleted_count,
+                "would_delete": deleted_count,
+                "deleted_keys": [r[0] for r in deleted_rows],
+                "dry_run": False,
                 "scope": scope,
             }
-
-        delete_sql = f"""
-            DELETE FROM coach_analysis_cache
-            WHERE {where_clause}
-        """
-        deleted = conn.execute(delete_sql, tuple(where_params)).rowcount
-        conn.commit()
-        logger.info("삭제 완료: %d개 항목", deleted)
-        return {
-            "deleted": deleted,
-            "would_delete": expired_count,
-            "dry_run": False,
-            "scope": scope,
-        }
+    finally:
+        await close_connection_pool()
 
 
 def write_output(path: str, payload: Dict[str, Any]) -> None:
@@ -220,6 +297,15 @@ def main() -> int:
         help="years/teams 없이 전역 정리를 허용합니다.",
     )
     parser.add_argument(
+        "--exclude-prompt-versions",
+        default=None,
+        help=(
+            "TTL에서 제외할 prompt_version CSV. 기본값: 배치 소유 버전 "
+            f"({','.join(DEFAULT_EXCLUDED_PROMPT_VERSIONS)}). "
+            '빈 문자열("")이면 버전 무관 정리(이전 동작).'
+        ),
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="결과 JSON 저장 경로",
@@ -229,6 +315,9 @@ def main() -> int:
     resolver = TeamCodeResolver()
     years = parse_years_csv(args.years)
     teams = parse_teams_csv(args.teams, resolver)
+    exclude_prompt_versions = parse_prompt_versions_csv(args.exclude_prompt_versions)
+    if exclude_prompt_versions is None:
+        exclude_prompt_versions = list(DEFAULT_EXCLUDED_PROMPT_VERSIONS)
 
     print("=" * 50)
     print("Coach 캐시 정리")
@@ -237,17 +326,21 @@ def main() -> int:
     print(f"연도 필터: {years if years else 'ALL'}")
     print(f"팀 필터: {teams if teams else 'ALL'}")
     print(f"전역 허용: {args.allow_global}")
+    print(f"제외 prompt_version: {exclude_prompt_versions or 'NONE'}")
     print(f"모드: {'DRY-RUN (확인만)' if args.dry_run else '실제 삭제'}")
     print("=" * 50)
 
     start = datetime.now()
     try:
-        result = cleanup_expired_cache(
-            retention_days=args.days,
-            dry_run=args.dry_run,
-            years=years,
-            teams=teams,
-            allow_global=args.allow_global,
+        result = asyncio.run(
+            cleanup_expired_cache(
+                retention_days=args.days,
+                dry_run=args.dry_run,
+                years=years,
+                teams=teams,
+                allow_global=args.allow_global,
+                exclude_prompt_versions=exclude_prompt_versions,
+            )
         )
         status = "PASS"
         fatal_error = None
@@ -267,6 +360,7 @@ def main() -> int:
         "years": years or [],
         "teams": teams or [],
         "allow_global": args.allow_global,
+        "excluded_prompt_versions": exclude_prompt_versions,
         "dry_run": args.dry_run,
         "result": result,
         "runtime_seconds": round(elapsed, 3),

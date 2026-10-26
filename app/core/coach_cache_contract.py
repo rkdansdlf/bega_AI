@@ -13,6 +13,24 @@ from .coach_cache_key import (
 COACH_CACHE_SCHEMA_VERSION = "coach_analysis_v2"
 COACH_CACHE_PROMPT_VERSION = "v90_scheduled_llm"  # 예측(SCHEDULED manual)도 LLM 호출 + risk 백필 → stale 캐시 무효화
 
+# Prompt versions written by scripts/batch_coach_cache.py (team season batch).
+# Batch-owned rows are cleaned up only by the batch itself (--cleanup-legacy,
+# verify-then-replace); TTL cleanup (scripts/cleanup_expired_cache.py) excludes
+# them by default. When bumping COACH_BATCH_PROMPT_VERSION, move the previous
+# value into COACH_BATCH_LEGACY_PROMPT_VERSIONS.
+COACH_BATCH_PROMPT_VERSION = "v5_focus"
+COACH_BATCH_LEGACY_PROMPT_VERSIONS: tuple[str, ...] = ("v3_prompt", "v4_dual")
+COACH_BATCH_OWNED_PROMPT_VERSIONS: tuple[str, ...] = (
+    COACH_BATCH_LEGACY_PROMPT_VERSIONS + (COACH_BATCH_PROMPT_VERSION,)
+)
+
+if COACH_CACHE_PROMPT_VERSION in COACH_BATCH_OWNED_PROMPT_VERSIONS:
+    raise RuntimeError(
+        f"COACH_CACHE_PROMPT_VERSION {COACH_CACHE_PROMPT_VERSION!r} must not be "
+        f"in COACH_BATCH_OWNED_PROMPT_VERSIONS {COACH_BATCH_OWNED_PROMPT_VERSIONS!r}; "
+        "batch must never own the live contract version"
+    )
+
 
 def _normalize_optional_signature(value: Optional[str]) -> Optional[str]:
     normalized = " ".join(str(value or "").split()).strip()

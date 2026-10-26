@@ -1,26 +1,57 @@
 name: Coach Cache Warmup
 
 on:
-  workflow_dispatch:       # 수동 실행 가능
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type WARMUP-STAGING to run against STAGING"
+        required: true
+        default: ""
+        type: string
+
+concurrency:
+  group: coach-cache-operations
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   warmup:
-    name: Pre-warm Coach Analysis Cache
+    name: Pre-warm Coach Analysis Cache (Staging)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      POSTGRES_DB_URL: ${{ secrets.COACH_QUALITY_DB_URL_STAGING_RW }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY_STAGING }}
+      LLM_PROVIDER: openrouter
+      COACH_LLM_PROVIDER: openrouter
+      WARMUP_CONFIRM: ${{ inputs.confirm }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate warmup confirmation and secrets
+        run: |
+          if [ "$WARMUP_CONFIRM" != "WARMUP-STAGING" ]; then
+            echo "::error::Confirmation input must be 'WARMUP-STAGING', got: '$WARMUP_CONFIRM'"
+            exit 1
+          fi
+          if [ -z "$POSTGRES_DB_URL" ]; then
+            echo "::error::POSTGRES_DB_URL (COACH_QUALITY_DB_URL_STAGING_RW) is not set"
+            exit 1
+          fi
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::OPENROUTER_API_KEY (OPENROUTER_API_KEY_STAGING) is not set"
+            exit 1
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
           cache-dependency-path: requirements.txt
 
       - name: Install dependencies
@@ -28,14 +59,55 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Warmup plan dry-run
+        run: |
+          python scripts/batch_coach_cache.py \
+            --only-missing \
+            --dry-run \
+            --quality-report /tmp/coach_warmup_plan.json
+
       - name: Run Coach Cache Warmup
-        env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          LLM_PROVIDER: openrouter
-        run: python scripts/batch_coach_cache.py
+        id: warmup
+        run: |
+          python scripts/batch_coach_cache.py \
+            --only-missing \
+            --quality-report /tmp/coach_warmup_report.json
 
       - name: Warmup Summary
+        if: always()
+        env:
+          WARMUP_OUTCOME: ${{ steps.warmup.outcome }}
         run: |
-          echo "### Coach Cache Warmup" >> "${GITHUB_STEP_SUMMARY}"
-          echo "Pre-warming completed for all 10 KBO teams." >> "${GITHUB_STEP_SUMMARY}"
+          python - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json
+          import os
+          from pathlib import Path
+
+          print("### Coach Cache Warmup (Staging)")
+          print(f"Warmup step outcome: `{os.environ.get('WARMUP_OUTCOME') or 'unknown'}`")
+          path = Path("/tmp/coach_warmup_report.json")
+          if not path.exists():
+              print("No warmup report was produced (/tmp/coach_warmup_report.json missing).")
+          else:
+              summary = json.loads(path.read_text(encoding="utf-8")).get("summary", {})
+              print("| total | success | skipped | failed |")
+              print("|---|---|---|---|")
+              print(
+                  f"| {summary.get('cases', '?')} | {summary.get('success', '?')}"
+                  f" | {summary.get('skipped', '?')} | {summary.get('failed', '?')} |"
+              )
+              failures = summary.get("failure_category_counts") or {}
+              if failures:
+                  print("")
+                  print("Failure categories: " + ", ".join(f"{k}={v}" for k, v in failures.items()))
+          PY
+
+      - name: Upload warmup artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coach-warmup-results
+          path: |
+            /tmp/coach_warmup_plan.json
+            /tmp/coach_warmup_report.json
+          retention-days: 7

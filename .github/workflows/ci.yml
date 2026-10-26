@@ -87,6 +87,24 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     timeout-minutes: 30
+    # Scratch Postgres for the coach-cache DB tests
+    # (tests/test_batch_coach_cache_cleanup_db.py and friends). Mapped to host
+    # port 55432 on purpose so POSTGRES_DB_URL (localhost:5432) stays
+    # unreachable and other tests keep their current behaviour.
+    services:
+      coach-cache-test-db:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: coach_cache_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d coach_cache_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     
     steps:
       - name: Checkout code
@@ -110,6 +128,7 @@ jobs:
         run: pytest tests --cov=./ --cov-report=xml --cov-report=html
         env:
           POSTGRES_DB_URL: "postgresql://localhost:5432/postgres"
+          COACH_CACHE_TEST_DB_URL: "postgresql://postgres:postgres@localhost:55432/coach_cache_test"
       
       - name: Upload test results
         if: always()

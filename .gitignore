@@ -88,4 +88,8 @@ test_rag_search.py
 !/tests/test_ingest_run_store.py
 !/tests/test_ingest_results.py
 !/tests/test_ingest_worker.py
+!/tests/test_cleanup_expired_cache_script.py
+!/tests/test_batch_coach_cache_async_pool.py
+!/tests/test_batch_coach_cache_safety.py
+!/tests/test_batch_coach_cache_cleanup_db.py
 /.worktrees

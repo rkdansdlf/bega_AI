@@ -53,6 +53,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # TTL cleanup excludes batch-owned prompt versions by default
+      # (COACH_BATCH_OWNED_PROMPT_VERSIONS), so it can never delete the rows the
+      # rebuild below keeps as previous_kept, and the batch plan's
+      # force_rebuild_replace_keys stay valid after the TTL execute step.
+      # Live-contract rows older than 7d are deleted on purpose: the live API's
+      # COMPLETED TTL is 24h, so they are already expired for readers.
       - name: Cleanup cache dry-run (7d, year=2025)
         run: |
           python scripts/cleanup_expired_cache.py \
@@ -61,6 +67,17 @@ jobs:
             --dry-run \
             --output /tmp/coach_cleanup_2025_dryrun.json
 
+      - name: Batch cleanup/rebuild plan dry-run (year=2025)
+        run: |
+          python scripts/batch_coach_cache.py \
+            --years 2025 \
+            --force-rebuild \
+            --purge-invalid-years \
+            --cleanup-legacy \
+            --game-type REGULAR \
+            --dry-run \
+            --quality-report /tmp/coach_batch_plan_2025_dryrun.json
+
       - name: Cleanup cache execute (7d, year=2025)
         run: |
           python scripts/cleanup_expired_cache.py \
@@ -68,15 +85,28 @@ jobs:
             --years 2025 \
             --output /tmp/coach_cleanup_2025_execute.json
 
+      # --force-rebuild is now verify-then-replace: it deletes nothing up front
+      # and replaces existing COMPLETED rows only after the new result validates.
+      # The quality gate requires 10 freshly generated successes.
+      # --purge-invalid-years only removes batch-owned prompt versions
+      # (never the live API contract), keeping cache_integrity at 0.
+      # --cleanup-legacy is the only switch that lets the batch DELETE its own
+      # legacy/mismatch/stale-PENDING rows; warmup and ad-hoc runs never pass it.
       - name: Rebuild coach cache for 2025 regular season
+        id: rebuild
         run: |
           python scripts/batch_coach_cache.py \
             --years 2025 \
             --force-rebuild \
+            --purge-invalid-years \
+            --cleanup-legacy \
             --game-type REGULAR \
             --quality-report /tmp/coach_quality_2025_weekly.json
 
+      # Run the gate even when the rebuild exits non-zero (partial failures),
+      # so the gate report states the failure codes explicitly.
       - name: Evaluate coach quality gate
+        if: ${{ !cancelled() && steps.rebuild.outcome != 'skipped' }}
         run: |
           python scripts/evaluate_coach_quality.py \
             /tmp/coach_quality_2025_weekly.json \
@@ -92,6 +122,7 @@ jobs:
           name: coach-quality-2025-weekly
           path: |
             /tmp/coach_cleanup_2025_dryrun.json
+            /tmp/coach_batch_plan_2025_dryrun.json
             /tmp/coach_cleanup_2025_execute.json
             /tmp/coach_quality_2025_weekly.json
             /tmp/coach_quality_gate_2025_weekly.json
