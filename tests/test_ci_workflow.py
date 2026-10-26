@@ -18,7 +18,7 @@ FORMAT_STEP = LINT_JOB[
 
 
 def test_ci_uses_pinned_black_and_full_comparison_history() -> None:
-    assert "black==26.5.1" in DEV_REQUIREMENTS
+    assert "black==26.10.1" in DEV_REQUIREMENTS
     assert "fetch-depth: 0" in LINT_JOB
     assert "pip install -r requirements-dev" in LINT_JOB
     assert "pip install flake8 black" not in LINT_JOB
