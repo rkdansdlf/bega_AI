@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,3 +181,28 @@ def test_checkpoint_design_documents_timestamp_subtypes_and_frozen_source_window
         "success watermark remains the maximum committed non-NULL update timestamp",
     ):
         assert statement in text
+
+
+def test_rag_chunks_index_status_migration_is_additive_and_managed():
+    sql = (MIGRATION_DIR / "010_rag_chunks_index_status.sql").read_text(
+        encoding="utf-8"
+    )
+    script = MANAGED_MIGRATION_SCRIPT.read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS index_status varchar(24) DEFAULT 'ACTIVE';" in sql
+    assert "UPDATE rag_chunks" not in sql
+    # The ACCESS EXCLUSIVE wait is capped so queued SELECTs are not blocked long.
+    assert sql.index("SET lock_timeout = '5s';") < sql.index("ALTER TABLE rag_chunks")
+    assert "RESET lock_timeout;" in sql
+    # Re-runs (every deploy) must not take ACCESS EXCLUSIVE: the ALTER only runs
+    # inside the catalog guard, resolved through search_path like the ALTER.
+    guard = sql.index("IF NOT EXISTS (")
+    assert "to_regclass('rag_chunks')" in sql[guard:]
+    assert guard < sql.index("ALTER TABLE rag_chunks") < sql.index("END IF;")
+    assert sql.count("ALTER TABLE rag_chunks") == 1
+    # No destructive statement (pg_attribute.attisdropped is only a catalog flag).
+    assert not re.search(r"\bDROP\b", sql, flags=re.IGNORECASE)
+    assert "migrations/010_rag_chunks_index_status.sql" in script
+    assert script.index("009_rag_chunk_embeddings.sql") < script.index(
+        "010_rag_chunks_index_status.sql"
+    )

@@ -703,6 +703,8 @@ export AI_DB_SCHEMA_MODE=managed
 [`docs/data-sync-orchestration-runbook.md`](docs/data-sync-orchestration-runbook.md)를 따릅니다.
 
 `vector` extension은 DB/DBA 사전 조건이며 위 migration이 설치하지 않습니다.
+RAG tombstone(`rag_chunks.index_status`, migration 010)의 적용·sync·롤백(재시작 필요 조건 포함)은
+[`docs/rag-index-status.md`](docs/rag-index-status.md)를 따릅니다.
 운영 스키마 계약 검증은 `scripts/validate_ai_runtime_schema.py`를 사용합니다.
 
 기존 아래 AWS EC2/Nginx 절차는 과거 수동 설치 참고자료이며 현재 OCI
