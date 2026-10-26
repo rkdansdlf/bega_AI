@@ -29,8 +29,29 @@ def test_quality_workflow_validates_secrets_before_running_cache_operations() ->
     assert "group: coach-cache-operations" in workflow
     assert "COACH_QUALITY_DB_URL_STAGING_RW" in workflow
     assert "OPENROUTER_API_KEY_STAGING" in workflow
-    assert workflow.index("Validate required secrets") < workflow.index(
-        "Set up Python"
-    )
+    assert workflow.index("Validate required secrets") < workflow.index("Set up Python")
     assert "--years 2025" in workflow
     assert "--days 7" in workflow
+
+
+def test_quality_workflow_has_batch_plan_dryrun_before_execute() -> None:
+    workflow = _workflow_path("coach-quality-2025-weekly.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Batch cleanup/rebuild plan dry-run" in workflow
+    assert "--dry-run" in workflow
+    assert workflow.index("Batch cleanup/rebuild plan dry-run") < workflow.index(
+        "Cleanup cache execute"
+    )
+
+
+def test_warmup_workflow_uses_staging_only() -> None:
+    workflow = _workflow_path("coach-warmup.yml").read_text(encoding="utf-8")
+
+    assert "SUPABASE_DB_URL" not in workflow
+    assert "COACH_QUALITY_DB_URL_STAGING_RW" in workflow
+    assert "WARMUP-STAGING" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "\n  schedule:" not in workflow
+    assert "--only-missing" in workflow

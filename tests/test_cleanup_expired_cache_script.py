@@ -37,7 +37,7 @@ class FakeConnection:
     def __init__(
         self,
         select_rows: list[tuple] | None = None,
-        delete_rowcount: int = 0,
+        delete_returning_rows: list[tuple] | None = None,
     ) -> None:
         self.select_rows = (
             select_rows
@@ -47,7 +47,7 @@ class FakeConnection:
                 ("key2", "SSG", 2025, "COMPLETED", "2025-01-02T00:00:00"),
             ]
         )
-        self.delete_rowcount = delete_rowcount
+        self.delete_returning_rows = delete_returning_rows
         self.executed_queries: list[tuple[str, tuple]] = []
         self.committed = False
 
@@ -57,7 +57,12 @@ class FakeConnection:
         if clean_sql.startswith("SELECT"):
             return FakeCursor(rows=self.select_rows, rowcount=len(self.select_rows))
         if clean_sql.startswith("DELETE"):
-            return FakeCursor(rows=[], rowcount=self.delete_rowcount)
+            rows = (
+                self.delete_returning_rows
+                if self.delete_returning_rows is not None
+                else []
+            )
+            return FakeCursor(rows=rows, rowcount=len(rows))
         return FakeCursor()
 
     async def commit(self) -> None:
@@ -103,10 +108,10 @@ async def test_cleanup_expired_cache_dry_run_issues_no_delete(
     assert result["would_delete"] == 2
     assert result["deleted"] == 0
     assert result["dry_run"] is True
+    assert result["would_delete_keys"] == ["key1", "key2"]
     fake_pool.open.assert_awaited_once_with(wait=True, timeout=10.0)
     fake_pool.close.assert_awaited_once()
 
-    # Ensure SELECT was run, but DELETE was NOT issued
     queries = [q[0].strip().upper() for q in fake_conn.executed_queries]
     assert len(queries) == 1
     assert queries[0].startswith("SELECT")
@@ -115,15 +120,15 @@ async def test_cleanup_expired_cache_dry_run_issues_no_delete(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_expired_cache_non_dry_run_issues_delete_with_same_params(
+async def test_cleanup_expired_cache_non_dry_run_issues_delete_returning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    sample_rows = [
+    delete_rows = [
         ("key1", "LG", 2025, "COMPLETED", "2025-01-01T00:00:00"),
         ("key2", "LG", 2025, "COMPLETED", "2025-01-02T00:00:00"),
         ("key3", "LG", 2025, "COMPLETED", "2025-01-03T00:00:00"),
     ]
-    fake_conn = FakeConnection(select_rows=sample_rows, delete_rowcount=3)
+    fake_conn = FakeConnection(delete_returning_rows=delete_rows)
     fake_pool = AsyncOnlyFakePool(fake_conn)
     monkeypatch.setattr(cleanup_script, "get_connection_pool", lambda: fake_pool)
 
@@ -137,18 +142,16 @@ async def test_cleanup_expired_cache_non_dry_run_issues_delete_with_same_params(
     assert result["would_delete"] == 3
     assert result["deleted"] == 3
     assert result["dry_run"] is False
+    assert result["deleted_keys"] == ["key1", "key2", "key3"]
     fake_pool.open.assert_awaited_once_with(wait=True, timeout=10.0)
     fake_pool.close.assert_awaited_once()
     assert fake_conn.committed is True
 
-    assert len(fake_conn.executed_queries) == 2
-    select_sql, select_params = fake_conn.executed_queries[0]
-    delete_sql, delete_params = fake_conn.executed_queries[1]
-
-    assert select_sql.strip().upper().startswith("SELECT")
+    assert len(fake_conn.executed_queries) == 1
+    delete_sql, delete_params = fake_conn.executed_queries[0]
     assert delete_sql.strip().upper().startswith("DELETE")
-    assert select_params == delete_params
-    assert select_params == (14, [2025], ["LG"])
+    assert "RETURNING" in delete_sql.upper()
+    assert delete_params == (14, [2025], ["LG"])
 
 
 @pytest.mark.asyncio
@@ -207,7 +210,7 @@ def test_cleanup_expired_cache_main_dry_run(
 async def test_cleanup_expired_cache_no_rows_closes_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_conn = FakeConnection(select_rows=[])
+    fake_conn = FakeConnection(delete_returning_rows=[])
     fake_pool = AsyncOnlyFakePool(fake_conn)
     monkeypatch.setattr(cleanup_script, "get_connection_pool", lambda: fake_pool)
 

@@ -31,8 +31,18 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, delete_rowcount: int = 5) -> None:
-        self.delete_rowcount = delete_rowcount
+    def __init__(
+        self,
+        *,
+        select_key_batches: list[list[str]] | None = None,
+        count_results: list[int] | None = None,
+        delete_returning_keys: list[str] | None = None,
+    ) -> None:
+        self._key_batches = list(select_key_batches or [])
+        self._counts = list(count_results or [])
+        self._delete_returning_keys = delete_returning_keys or []
+        self._key_idx = 0
+        self._count_idx = 0
         self.executed_queries: list[tuple[str, tuple]] = []
         self.committed = False
 
@@ -40,19 +50,37 @@ class FakeConnection:
         self.executed_queries.append((sql, params))
         clean_sql = " ".join(sql.strip().split()).upper()
         if clean_sql.startswith("SELECT COUNT(*)"):
-            if "PROMPT_VERSION <>" in clean_sql:
-                return FakeCursor(rows=[(1,)], rowcount=1)
-            if "OR YEAR >" in clean_sql:
-                return FakeCursor(rows=[(2,)], rowcount=1)
-            if "UPPER(TEAM_ID) = ANY" in clean_sql:
-                return FakeCursor(rows=[(3,)], rowcount=1)
-            return FakeCursor(rows=[(0,)], rowcount=1)
+            count = (
+                self._counts[self._count_idx]
+                if self._count_idx < len(self._counts)
+                else 0
+            )
+            self._count_idx += 1
+            if clean_sql.startswith("SELECT COUNT(*) FILTER"):
+                # (batch-owned count, all-versions count)
+                return FakeCursor(rows=[(count, count)])
+            return FakeCursor(rows=[(count,)])
+        if clean_sql.startswith("SELECT CACHE_KEY"):
+            keys = (
+                self._key_batches[self._key_idx]
+                if self._key_idx < len(self._key_batches)
+                else []
+            )
+            self._key_idx += 1
+            return FakeCursor(rows=[(k,) for k in keys])
         if clean_sql.startswith("DELETE"):
-            return FakeCursor(rows=[], rowcount=self.delete_rowcount)
+            return FakeCursor(
+                rows=[(k,) for k in self._delete_returning_keys],
+                rowcount=len(self._delete_returning_keys),
+            )
         return FakeCursor()
 
     async def commit(self) -> None:
         self.committed = True
+
+    @contextlib.asynccontextmanager
+    async def transaction(self):
+        yield
 
 
 class AsyncOnlyFakePool:
@@ -75,7 +103,14 @@ def test_async_only_pool_fails_sync_with() -> None:
 
 @pytest.mark.asyncio
 async def test_cleanup_cache_rows_with_async_pool() -> None:
-    fake_conn = FakeConnection(delete_rowcount=6)
+    fake_conn = FakeConnection(
+        select_key_batches=[
+            ["k_mismatch_1"],
+            ["k_legacy_1", "k_legacy_2"],
+        ],
+        count_results=[5],
+        delete_returning_keys=["k_legacy_1", "k_legacy_2", "k_mismatch_1"],
+    )
     pool = AsyncOnlyFakePool(fake_conn)
     resolver = batch_script.TeamCodeResolver()
 
@@ -94,11 +129,20 @@ async def test_cleanup_cache_rows_with_async_pool() -> None:
     result = await batch_script.cleanup_cache_rows(pool, options, resolver)
 
     assert result["prompt_mismatch_rows"] == 1
-    assert result["invalid_year_rows"] == 2
-    assert result["legacy_team_rows"] == 3
+    assert result["legacy_team_rows"] == 2
+    assert result["invalid_year_rows"] == 0
+    assert result["invalid_year_purge_enabled"] is False
+    assert result["invalid_year_rows_total"] == 5
     assert result["force_rebuild_rows"] == 0
-    assert result["deleted_total"] == 6
-    assert fake_conn.committed is True
+    assert result["force_rebuild_deletes"] == 0
+    assert result["deleted_total"] == 3
+    assert sorted(result["deleted_keys"]) == [
+        "k_legacy_1",
+        "k_legacy_2",
+        "k_mismatch_1",
+    ]
+    assert result["would_delete_total"] == 3
+    assert result["protected_prompt_version"] == batch_script.COACH_CACHE_PROMPT_VERSION
 
     delete_queries = [
         q
@@ -110,7 +154,15 @@ async def test_cleanup_cache_rows_with_async_pool() -> None:
 
 @pytest.mark.asyncio
 async def test_cleanup_cache_rows_force_rebuild_with_async_pool() -> None:
-    fake_conn = FakeConnection(delete_rowcount=10)
+    fake_conn = FakeConnection(
+        select_key_batches=[
+            ["k_mismatch_1"],
+            ["k_legacy_1"],
+            ["k_target_completed"],
+        ],
+        count_results=[2],
+        delete_returning_keys=["k_legacy_1", "k_mismatch_1"],
+    )
     pool = AsyncOnlyFakePool(fake_conn)
     resolver = batch_script.TeamCodeResolver()
 
@@ -128,14 +180,16 @@ async def test_cleanup_cache_rows_force_rebuild_with_async_pool() -> None:
 
     result = await batch_script.cleanup_cache_rows(pool, options, resolver)
 
-    assert result["force_rebuild_rows"] == 3
-    assert result["deleted_total"] == 10
-    assert fake_conn.committed is True
+    assert result["force_rebuild_rows"] == 1
+    assert result["force_rebuild_replace_keys"] == ["k_target_completed"]
+    assert result["force_rebuild_deletes"] == 0
+    assert result["deleted_total"] == 2
+    assert result["invalid_year_rows_total"] == 2
 
 
 @pytest.mark.asyncio
 async def test_summarize_results_with_async_pool() -> None:
-    fake_conn = FakeConnection()
+    fake_conn = FakeConnection(count_results=[0, 0])
     pool = AsyncOnlyFakePool(fake_conn)
     resolver = batch_script.TeamCodeResolver()
 
@@ -179,7 +233,10 @@ async def test_summarize_results_with_async_pool() -> None:
 async def test_async_main_opens_and_closes_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_conn = FakeConnection()
+    fake_conn = FakeConnection(
+        select_key_batches=[[], []],
+        count_results=[0],
+    )
     pool = AsyncOnlyFakePool(fake_conn)
 
     async def _fake_generate(**kwargs):  # noqa: ANN003
@@ -205,46 +262,6 @@ async def test_async_main_opens_and_closes_pool(
     assert exit_code == 0
     pool.open.assert_awaited_once_with(wait=True, timeout=10.0)
     pool.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_cleanup_cache_rows_delete_params_unchanged() -> None:
-    """DELETE 조건/파라미터가 동기 구현과 동일한지(삭제 대상 불변) 확인."""
-    fake_conn = FakeConnection(delete_rowcount=4)
-    pool = AsyncOnlyFakePool(fake_conn)
-    resolver = batch_script.TeamCodeResolver()
-    options = batch_script.RunOptions(
-        years=[2025],
-        teams=["LG"],
-        focus=[],
-        only_missing=False,
-        force_rebuild=True,
-        quality_report=None,
-        baseline=False,
-        game_type="REGULAR",
-        delay_seconds=0.0,
-    )
-
-    await batch_script.cleanup_cache_rows(pool, options, resolver)
-
-    delete_calls = [
-        (sql, params)
-        for sql, params in fake_conn.executed_queries
-        if sql.strip().upper().startswith("DELETE")
-    ]
-    assert len(delete_calls) == 1
-    _, params = delete_calls[0]
-    legacy_aliases = batch_script.collect_regular_aliases(resolver)
-    assert params == (
-        [2025],
-        batch_script.PROMPT_VERSION,
-        batch_script.COACH_YEAR_MIN,
-        batch_script.datetime.now().year + 1,
-        [2025],
-        legacy_aliases,
-        [2025],
-        ["LG"],
-    )
 
 
 class _NotFoundQueryTool:
