@@ -161,7 +161,7 @@ def collect_regular_aliases(resolver: TeamCodeResolver) -> List[str]:
     return sorted(aliases)
 
 
-def cleanup_cache_rows(
+async def cleanup_cache_rows(
     pool, options: RunOptions, resolver: TeamCodeResolver
 ) -> Dict[str, Any]:
     max_year = datetime.now().year + 1
@@ -175,8 +175,8 @@ def cleanup_cache_rows(
         "deleted_total": 0,
     }
 
-    with pool.connection() as conn:
-        result["prompt_mismatch_rows"] = conn.execute(
+    async with pool.connection() as conn:
+        cur = await conn.execute(
             """
             SELECT COUNT(*)
             FROM coach_analysis_cache
@@ -184,18 +184,22 @@ def cleanup_cache_rows(
               AND prompt_version <> %s
             """,
             (options.years, PROMPT_VERSION),
-        ).fetchone()[0]
+        )
+        row = await cur.fetchone()
+        result["prompt_mismatch_rows"] = row[0]
 
-        result["invalid_year_rows"] = conn.execute(
+        cur = await conn.execute(
             """
             SELECT COUNT(*)
             FROM coach_analysis_cache
             WHERE year < %s OR year > %s
             """,
             (COACH_YEAR_MIN, max_year),
-        ).fetchone()[0]
+        )
+        row = await cur.fetchone()
+        result["invalid_year_rows"] = row[0]
 
-        result["legacy_team_rows"] = conn.execute(
+        cur = await conn.execute(
             """
             SELECT COUNT(*)
             FROM coach_analysis_cache
@@ -203,10 +207,12 @@ def cleanup_cache_rows(
               AND UPPER(team_id) = ANY(%s)
             """,
             (options.years, legacy_aliases),
-        ).fetchone()[0]
+        )
+        row = await cur.fetchone()
+        result["legacy_team_rows"] = row[0]
 
         if options.force_rebuild:
-            result["force_rebuild_rows"] = conn.execute(
+            cur = await conn.execute(
                 """
                 SELECT COUNT(*)
                 FROM coach_analysis_cache
@@ -214,7 +220,9 @@ def cleanup_cache_rows(
                   AND UPPER(team_id) = ANY(%s)
                 """,
                 (options.years, options.teams),
-            ).fetchone()[0]
+            )
+            row = await cur.fetchone()
+            result["force_rebuild_rows"] = row[0]
 
         delete_query = """
             DELETE FROM coach_analysis_cache
@@ -246,9 +254,9 @@ def cleanup_cache_rows(
             """
             delete_params.extend([options.years, options.teams])
 
-        deleted = conn.execute(delete_query, tuple(delete_params))
+        deleted = await conn.execute(delete_query, tuple(delete_params))
         result["deleted_total"] = deleted.rowcount or 0
-        conn.commit()
+        await conn.commit()
 
     return result
 
@@ -387,11 +395,12 @@ async def generate_and_cache_team(
         "normalization_reasons": [],
     }
 
-    with pool.connection() as conn:
-        row = conn.execute(
+    async with pool.connection() as conn:
+        cur = await conn.execute(
             "SELECT status, response_json FROM coach_analysis_cache WHERE cache_key = %s",
             (cache_key,),
-        ).fetchone()
+        )
+        row = await cur.fetchone()
 
         if row:
             status = row[0]
@@ -412,7 +421,7 @@ async def generate_and_cache_team(
                 result["elapsed_seconds"] = (datetime.now() - start).total_seconds()
                 return result
 
-        conn.execute(
+        await conn.execute(
             """
             INSERT INTO coach_analysis_cache (cache_key, team_id, year, prompt_version, model_name, status)
             VALUES (%s, %s, %s, %s, %s, 'PENDING')
@@ -426,19 +435,19 @@ async def generate_and_cache_team(
             """,
             (cache_key, team_id, year, PROMPT_VERSION, MODEL_NAME),
         )
-        conn.commit()
+        await conn.commit()
 
-    with pool.connection() as conn:
+    async with pool.connection() as conn:
         db_query = DatabaseQueryTool(conn)
         tool_results = {
-            "team_summary": db_query.get_team_summary(team_id, year),
-            "advanced_metrics": db_query.get_team_advanced_metrics(team_id, year),
-            "recent_form": db_query.get_team_recent_form(team_id, year),
+            "team_summary": await db_query.get_team_summary(team_id, year),
+            "advanced_metrics": await db_query.get_team_advanced_metrics(team_id, year),
+            "recent_form": await db_query.get_team_recent_form(team_id, year),
         }
 
     if not tool_results["team_summary"].get("found"):
-        with pool.connection() as conn:
-            conn.execute(
+        async with pool.connection() as conn:
+            await conn.execute(
                 """
                 UPDATE coach_analysis_cache
                 SET status = 'FAILED', error_message = %s, updated_at = now()
@@ -446,7 +455,7 @@ async def generate_and_cache_team(
                 """,
                 (f"No team summary for {team_id} {year}", cache_key),
             )
-            conn.commit()
+            await conn.commit()
         result["reason"] = "no_team_summary"
         result["failure_category"] = "no_team_summary"
         result["validator_hard_fail"] = True
@@ -476,8 +485,8 @@ async def generate_and_cache_team(
             chunks.append(chunk)
         full_response = "".join(chunks)
     except Exception as exc:
-        with pool.connection() as conn:
-            conn.execute(
+        async with pool.connection() as conn:
+            await conn.execute(
                 """
                 UPDATE coach_analysis_cache
                 SET status = 'FAILED', error_message = %s, updated_at = now()
@@ -485,7 +494,7 @@ async def generate_and_cache_team(
                 """,
                 (str(exc), cache_key),
             )
-            conn.commit()
+            await conn.commit()
         result["reason"] = f"llm_error:{exc}"
         result["failure_category"] = "llm_error"
         result["validator_hard_fail"] = True
@@ -499,7 +508,7 @@ async def generate_and_cache_team(
     result["normalization_applied"] = bool(parse_meta.get("normalization_applied"))
     result["normalization_reasons"] = list(parse_meta.get("normalization_reasons", []))
 
-    with pool.connection() as conn:
+    async with pool.connection() as conn:
         if parsed_response:
             parsed_payload = parsed_response.model_dump()
             grounding_validation = validate_response_against_fact_sheet(
@@ -508,7 +517,7 @@ async def generate_and_cache_team(
             )
             if grounding_validation.reasons:
                 error_msg = ",".join(grounding_validation.reasons)
-                conn.execute(
+                await conn.execute(
                     """
                     UPDATE coach_analysis_cache
                     SET status = 'FAILED', error_message = %s, updated_at = now()
@@ -516,13 +525,13 @@ async def generate_and_cache_team(
                     """,
                     (error_msg, cache_key),
                 )
-                conn.commit()
+                await conn.commit()
                 result["reason"] = error_msg
                 result["failure_category"] = "grounding_validation_fail"
                 result["validator_hard_fail"] = True
             else:
                 payload_json = json.dumps(parsed_payload, ensure_ascii=False)
-                conn.execute(
+                await conn.execute(
                     """
                     UPDATE coach_analysis_cache
                     SET status = 'COMPLETED', response_json = %s, error_message = NULL, updated_at = now()
@@ -530,7 +539,7 @@ async def generate_and_cache_team(
                     """,
                     (payload_json, cache_key),
                 )
-                conn.commit()
+                await conn.commit()
 
                 warnings = validate_coach_response(parsed_response)
                 warnings.extend(grounding_validation.warnings)
@@ -546,7 +555,7 @@ async def generate_and_cache_team(
                 result["critical_over_limit"] = critical_count > 2
         else:
             error_msg = parse_error or "JSON parsing failed"
-            conn.execute(
+            await conn.execute(
                 """
                 UPDATE coach_analysis_cache
                 SET status = 'FAILED', error_message = %s, updated_at = now()
@@ -554,7 +563,7 @@ async def generate_and_cache_team(
                 """,
                 (error_msg, cache_key),
             )
-            conn.commit()
+            await conn.commit()
             result["reason"] = error_msg
             result["failure_category"] = parse_meta.get(
                 "error_code"
@@ -565,7 +574,7 @@ async def generate_and_cache_team(
     return result
 
 
-def summarize_results(
+async def summarize_results(
     results: Iterable[Dict[str, Any]],
     options: RunOptions,
     cleanup_result: Dict[str, Any],
@@ -596,17 +605,19 @@ def summarize_results(
         failure_category_counts[category] = failure_category_counts.get(category, 0) + 1
 
     legacy_aliases = collect_regular_aliases(resolver)
-    with pool.connection() as conn:
-        invalid_year_rows = conn.execute(
+    async with pool.connection() as conn:
+        cur = await conn.execute(
             """
             SELECT COUNT(*)
             FROM coach_analysis_cache
             WHERE year < %s OR year > %s
             """,
             (COACH_YEAR_MIN, datetime.now().year + 1),
-        ).fetchone()[0]
+        )
+        row = await cur.fetchone()
+        invalid_year_rows = row[0]
 
-        legacy_team_rows = conn.execute(
+        cur = await conn.execute(
             """
             SELECT COUNT(*)
             FROM coach_analysis_cache
@@ -614,7 +625,9 @@ def summarize_results(
               AND UPPER(team_id) = ANY(%s)
             """,
             (options.years, legacy_aliases),
-        ).fetchone()[0]
+        )
+        row = await cur.fetchone()
+        legacy_team_rows = row[0]
 
     cases_ok = success + skipped
     summary = {
@@ -752,12 +765,11 @@ def run_baseline_evaluation(report_path: Path, years: List[int], game_type: str)
     return proc.returncode
 
 
-async def async_main(options: RunOptions) -> int:
+async def _run_batch(options: RunOptions, pool) -> int:
     if options.baseline and not options.quality_report:
         raise ValueError("--baseline requires --quality-report")
 
     run_start = datetime.now()
-    pool = get_connection_pool()
     resolver = TeamCodeResolver()
 
     print("=" * 72)
@@ -773,7 +785,7 @@ async def async_main(options: RunOptions) -> int:
     )
     print("=" * 72)
 
-    cleanup_result = cleanup_cache_rows(pool, options, resolver)
+    cleanup_result = await cleanup_cache_rows(pool, options, resolver)
     logger.info("Cleanup result: %s", cleanup_result)
 
     results: List[Dict[str, Any]] = []
@@ -806,7 +818,7 @@ async def async_main(options: RunOptions) -> int:
             if case_index < total_cases:
                 await asyncio.sleep(max(options.delay_seconds, 0.0))
 
-    report = summarize_results(results, options, cleanup_result, pool, resolver)
+    report = await summarize_results(results, options, cleanup_result, pool, resolver)
     report["run_started_at"] = run_start.isoformat()
     report["run_finished_at"] = datetime.now().isoformat()
 
@@ -836,6 +848,17 @@ async def async_main(options: RunOptions) -> int:
                 print(f"Baseline evaluation failed (exit code={baseline_rc})")
 
     return 0 if report["summary"]["failed"] == 0 and not baseline_failed else 1
+
+
+async def async_main(options: RunOptions) -> int:
+    # get_connection_pool()은 open=False로 생성된 AsyncConnectionPool이므로
+    # 이벤트 루프 안에서 명시적으로 열고, 종료 시 닫는다.
+    pool = get_connection_pool()
+    try:
+        await pool.open(wait=True, timeout=10.0)
+        return await _run_batch(options, pool)
+    finally:
+        await pool.close()
 
 
 def main() -> int:

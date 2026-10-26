@@ -27,9 +27,10 @@ def test_build_where_clause_includes_filters():
     assert params == [7, [2025], ["SSG", "DB"]]
 
 
-def test_cleanup_expired_cache_blocks_global_without_allow():
+@pytest.mark.asyncio
+async def test_cleanup_expired_cache_blocks_global_without_allow():
     with pytest.raises(ValueError):
-        cleanup_expired_cache(
+        await cleanup_expired_cache(
             retention_days=7,
             dry_run=True,
             years=None,

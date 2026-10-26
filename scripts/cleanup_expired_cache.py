@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -91,7 +92,7 @@ def build_where_clause(
     return where_clause, params
 
 
-def cleanup_expired_cache(
+async def cleanup_expired_cache(
     retention_days: int,
     dry_run: bool = False,
     years: Optional[List[int]] = None,
@@ -125,62 +126,73 @@ def cleanup_expired_cache(
         "allow_global": allow_global,
     }
 
-    with pool.connection() as conn:
-        select_sql = f"""
-            SELECT cache_key, team_id, year, status, updated_at
-            FROM coach_analysis_cache
-            WHERE {where_clause}
-            ORDER BY updated_at
-        """
-        expired_rows = conn.execute(select_sql, tuple(where_params)).fetchall()
-        expired_count = len(expired_rows)
+    try:
+        await pool.open(wait=True, timeout=10.0)
+        async with pool.connection() as conn:
+            select_sql = f"""
+                SELECT cache_key, team_id, year, status, updated_at
+                FROM coach_analysis_cache
+                WHERE {where_clause}
+                ORDER BY updated_at
+            """
+            cur = await conn.execute(select_sql, tuple(where_params))
+            expired_rows = await cur.fetchall()
+            expired_count = len(expired_rows)
 
-        if expired_count == 0:
-            logger.info("삭제할 만료 캐시 없음")
-            return {"deleted": 0, "would_delete": 0, "dry_run": dry_run, "scope": scope}
+            if expired_count == 0:
+                logger.info("삭제할 만료 캐시 없음")
+                return {
+                    "deleted": 0,
+                    "would_delete": 0,
+                    "dry_run": dry_run,
+                    "scope": scope,
+                }
 
-        logger.info(
-            "만료 캐시 %d개 발견 (>%d일, years=%s, teams=%s)",
-            expired_count,
-            retention_days,
-            years or "ALL",
-            teams or "ALL",
-        )
-
-        for row in expired_rows[:10]:
-            cache_key, team_id, year, status, updated_at = row
             logger.info(
-                "  - %s (%s) | %s | 마지막 업데이트: %s",
-                team_id,
-                year,
-                status,
-                updated_at,
+                "만료 캐시 %d개 발견 (>%d일, years=%s, teams=%s)",
+                expired_count,
+                retention_days,
+                years or "ALL",
+                teams or "ALL",
             )
-        if expired_count > 10:
-            logger.info("  ... 외 %d개", expired_count - 10)
 
-        if dry_run:
-            logger.info("[DRY-RUN] 실제 삭제 없이 종료")
+            for row in expired_rows[:10]:
+                cache_key, team_id, year, status, updated_at = row
+                logger.info(
+                    "  - %s (%s) | %s | 마지막 업데이트: %s",
+                    team_id,
+                    year,
+                    status,
+                    updated_at,
+                )
+            if expired_count > 10:
+                logger.info("  ... 외 %d개", expired_count - 10)
+
+            if dry_run:
+                logger.info("[DRY-RUN] 실제 삭제 없이 종료")
+                return {
+                    "deleted": 0,
+                    "would_delete": expired_count,
+                    "dry_run": True,
+                    "scope": scope,
+                }
+
+            delete_sql = f"""
+                DELETE FROM coach_analysis_cache
+                WHERE {where_clause}
+            """
+            del_cur = await conn.execute(delete_sql, tuple(where_params))
+            deleted = del_cur.rowcount
+            await conn.commit()
+            logger.info("삭제 완료: %d개 항목", deleted)
             return {
-                "deleted": 0,
+                "deleted": deleted,
                 "would_delete": expired_count,
-                "dry_run": True,
+                "dry_run": False,
                 "scope": scope,
             }
-
-        delete_sql = f"""
-            DELETE FROM coach_analysis_cache
-            WHERE {where_clause}
-        """
-        deleted = conn.execute(delete_sql, tuple(where_params)).rowcount
-        conn.commit()
-        logger.info("삭제 완료: %d개 항목", deleted)
-        return {
-            "deleted": deleted,
-            "would_delete": expired_count,
-            "dry_run": False,
-            "scope": scope,
-        }
+    finally:
+        await pool.close()
 
 
 def write_output(path: str, payload: Dict[str, Any]) -> None:
@@ -242,12 +254,14 @@ def main() -> int:
 
     start = datetime.now()
     try:
-        result = cleanup_expired_cache(
-            retention_days=args.days,
-            dry_run=args.dry_run,
-            years=years,
-            teams=teams,
-            allow_global=args.allow_global,
+        result = asyncio.run(
+            cleanup_expired_cache(
+                retention_days=args.days,
+                dry_run=args.dry_run,
+                years=years,
+                teams=teams,
+                allow_global=args.allow_global,
+            )
         )
         status = "PASS"
         fatal_error = None

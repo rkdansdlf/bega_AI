@@ -83,8 +83,24 @@ def test_async_main_returns_failure_when_baseline_gate_fails(
     async def _fake_generate_and_cache_team(**kwargs):  # noqa: ANN003
         return {"status": "success", "headline": "ok"}
 
-    def _fake_summarize_results(*args, **kwargs):  # noqa: ANN002, ANN003
+    async def _fake_summarize_results(*args, **kwargs):  # noqa: ANN002, ANN003
         return {"summary": {"failed": 0}, "details": []}
+
+    async def _fake_cleanup_cache_rows(*args, **kwargs):  # noqa: ANN002, ANN003
+        return {}
+
+    class _FakeAsyncPool:
+        def __init__(self) -> None:
+            self.opened = False
+            self.closed = False
+
+        async def open(self, **kwargs) -> None:  # noqa: ANN003
+            self.opened = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+    fake_pool = _FakeAsyncPool()
 
     def _fake_run_baseline(report: Path, years, game_type: str):  # noqa: ANN001
         calls["baseline"] += 1
@@ -93,10 +109,10 @@ def test_async_main_returns_failure_when_baseline_gate_fails(
         assert game_type == "REGULAR"
         return 1
 
-    monkeypatch.setattr(batch_coach_cache, "get_connection_pool", lambda: object())
+    monkeypatch.setattr(batch_coach_cache, "get_connection_pool", lambda: fake_pool)
     monkeypatch.setattr(batch_coach_cache, "TeamCodeResolver", lambda: object())
     monkeypatch.setattr(
-        batch_coach_cache, "cleanup_cache_rows", lambda *args, **kwargs: {}
+        batch_coach_cache, "cleanup_cache_rows", _fake_cleanup_cache_rows
     )
     monkeypatch.setattr(
         batch_coach_cache,
@@ -127,3 +143,5 @@ def test_async_main_returns_failure_when_baseline_gate_fails(
     assert rc == 1
     assert report_path.exists()
     assert calls["baseline"] == 1
+    assert fake_pool.opened is True
+    assert fake_pool.closed is True
