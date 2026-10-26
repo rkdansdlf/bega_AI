@@ -109,7 +109,13 @@ def test_async_main_returns_failure_when_baseline_gate_fails(
         assert game_type == "REGULAR"
         return 1
 
+    async def _fake_close_connection_pool() -> None:
+        await fake_pool.close()
+
     monkeypatch.setattr(batch_coach_cache, "get_connection_pool", lambda: fake_pool)
+    monkeypatch.setattr(
+        batch_coach_cache, "close_connection_pool", _fake_close_connection_pool
+    )
     monkeypatch.setattr(batch_coach_cache, "TeamCodeResolver", lambda: object())
     monkeypatch.setattr(
         batch_coach_cache, "cleanup_cache_rows", _fake_cleanup_cache_rows

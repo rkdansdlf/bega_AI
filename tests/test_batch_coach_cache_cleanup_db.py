@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import psycopg
@@ -29,6 +30,17 @@ assert SPEC is not None and SPEC.loader is not None
 batch_script = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = batch_script
 SPEC.loader.exec_module(batch_script)
+
+CLEANUP_SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "cleanup_expired_cache.py"
+)
+CLEANUP_SPEC = importlib.util.spec_from_file_location(
+    "cleanup_expired_cache_db_under_test", CLEANUP_SCRIPT_PATH
+)
+assert CLEANUP_SPEC is not None and CLEANUP_SPEC.loader is not None
+cleanup_script = importlib.util.module_from_spec(CLEANUP_SPEC)
+sys.modules[CLEANUP_SPEC.name] = cleanup_script
+CLEANUP_SPEC.loader.exec_module(cleanup_script)
 
 CREATE_TABLE_SQL = """
 CREATE TABLE coach_analysis_cache (
@@ -193,6 +205,7 @@ async def test_h2_cleanup_preserves_live_and_deletes_legacy(
         baseline=False,
         game_type="REGULAR",
         delay_seconds=0.0,
+        cleanup_legacy=True,
     )
     resolver = batch_script.TeamCodeResolver()
 
@@ -417,6 +430,7 @@ async def test_dry_run_parity(
         baseline=False,
         game_type="REGULAR",
         delay_seconds=0.0,
+        cleanup_legacy=True,
     )
     resolver = batch_script.TeamCodeResolver()
 
@@ -458,6 +472,7 @@ async def test_gate_metrics_ignore_live_contract_rows_after_purge(
         game_type="REGULAR",
         delay_seconds=0.0,
         purge_invalid_years=True,
+        cleanup_legacy=True,
     )
     resolver = batch_script.TeamCodeResolver()
     cleanup = await batch_script.cleanup_cache_rows(
@@ -473,3 +488,351 @@ async def test_gate_metrics_ignore_live_contract_rows_after_purge(
     assert summary["legacy_residual_total_all_versions"] == 1
     rows = await fetch_cache_rows(pool)
     assert set(rows) == {"live_inv_2030", "live_alias_ob"}
+
+
+@pytest.mark.asyncio
+async def test_ttl_then_rebuild_keeps_previous(
+    pool: psycopg_pool.AsyncConnectionPool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    aged_140d = now - timedelta(days=140)
+
+    options = batch_script.RunOptions(
+        years=[2025],
+        teams=batch_script.CANONICAL_TEAMS.copy(),
+        focus=[],
+        only_missing=False,
+        force_rebuild=False,
+        quality_report=None,
+        baseline=False,
+        game_type="REGULAR",
+        delay_seconds=0.0,
+    )
+    target_keys = batch_script.build_target_batch_keys(options)
+    assert len(target_keys) == 10
+
+    # Seed 10 batch v5_focus COMPLETED rows for 2025 canonical teams aged 140 days
+    for team, key in zip(batch_script.CANONICAL_TEAMS, target_keys):
+        await insert_row(
+            pool,
+            cache_key=key,
+            team_id=team,
+            year=2025,
+            prompt_version="v5_focus",
+            status="COMPLETED",
+            response_json={"headline": f"{team} aged 140d"},
+            updated_at=aged_140d,
+        )
+
+    # Plus one live v90_scheduled_llm row aged 140 days and one fresh one
+    live_pv = COACH_CACHE_PROMPT_VERSION
+    await insert_row(
+        pool,
+        cache_key="live_2025_aged_140d",
+        team_id="LG",
+        year=2025,
+        prompt_version=live_pv,
+        status="COMPLETED",
+        response_json={"headline": "live old"},
+        updated_at=aged_140d,
+    )
+    await insert_row(
+        pool,
+        cache_key="live_2025_fresh",
+        team_id="LG",
+        year=2025,
+        prompt_version=live_pv,
+        status="COMPLETED",
+        response_json={"headline": "live fresh"},
+        updated_at=now,
+    )
+
+    # Run cleanup_expired_cache (retention_days=7, years=[2025], non-dry-run)
+    monkeypatch.setattr(cleanup_script, "get_connection_pool", lambda: pool)
+    monkeypatch.setattr(cleanup_script, "close_connection_pool", AsyncMock())
+
+    ttl_res = await cleanup_script.cleanup_expired_cache(
+        retention_days=7,
+        years=[2025],
+        dry_run=False,
+    )
+
+    # Assert: 10 batch rows survive, old live row is deleted, fresh live survives
+    rows_after_ttl = await fetch_cache_rows(pool)
+    for key in target_keys:
+        assert key in rows_after_ttl
+    assert "live_2025_aged_140d" not in rows_after_ttl
+    assert "live_2025_fresh" in rows_after_ttl
+    assert ttl_res["deleted"] == 1
+    assert ttl_res["deleted_keys"] == ["live_2025_aged_140d"]
+
+    # Stub LLM / DB tools to fail
+    class FakeDatabaseQueryTool:
+        def __init__(self, conn=None) -> None:
+            pass
+
+        async def get_team_summary(self, team_id: str, year: int) -> dict[str, Any]:
+            return {"found": True, "team_name": team_id}
+
+        async def get_team_advanced_metrics(
+            self, team_id: str, year: int
+        ) -> dict[str, Any]:
+            return {}
+
+        async def get_team_recent_form(self, team_id: str, year: int) -> dict[str, Any]:
+            return {}
+
+    async def _failing_llm(messages):
+        if False:
+            yield ""
+        raise RuntimeError("llm rebuild failure")
+
+    monkeypatch.setattr(batch_script, "DatabaseQueryTool", FakeDatabaseQueryTool)
+    monkeypatch.setattr(batch_script, "get_coach_llm_generator", lambda: _failing_llm)
+
+    # Run generate_and_cache_team(force_rebuild=True, skip_completed=False) for 3 teams
+    test_teams = ["LG", "SSG", "KIA"]
+    for team in test_teams:
+        res = await batch_script.generate_and_cache_team(
+            pool=pool,
+            team_id=team,
+            year=2025,
+            game_type="REGULAR",
+            focus=[],
+            skip_completed=False,
+            only_missing=False,
+            force_rebuild=True,
+        )
+        assert res["status"] == "failed"
+        assert res["previous_kept"] is True
+
+    # Assert old response_json is unchanged
+    rows_after_rebuild = await fetch_cache_rows(pool)
+    for team in test_teams:
+        team_key = batch_script.build_target_batch_keys(
+            batch_script.RunOptions(
+                years=[2025],
+                teams=[team],
+                focus=[],
+                only_missing=False,
+                force_rebuild=True,
+                quality_report=None,
+                baseline=False,
+                game_type="REGULAR",
+                delay_seconds=0.0,
+            )
+        )[0]
+        status, resp_json = rows_after_rebuild[team_key]
+        assert status == "COMPLETED"
+        assert resp_json == {"headline": f"{team} aged 140d"}
+
+    # Assert that with exclude_prompt_versions=[] the same TTL call deletes them
+    ttl_unexcluded = await cleanup_script.cleanup_expired_cache(
+        retention_days=7,
+        years=[2025],
+        dry_run=False,
+        exclude_prompt_versions=[],
+    )
+    rows_final = await fetch_cache_rows(pool)
+    for key in target_keys:
+        assert key not in rows_final
+    assert "live_2025_fresh" in rows_final
+    assert ttl_unexcluded["deleted"] == 10
+
+
+@pytest.mark.asyncio
+async def test_cleanup_without_flag_deletes_nothing(
+    pool: psycopg_pool.AsyncConnectionPool,
+) -> None:
+    now = datetime.now(timezone.utc)
+    await insert_row(
+        pool,
+        cache_key="legacy_v3_flag_test",
+        team_id="LG",
+        year=2025,
+        prompt_version="v3_prompt",
+        status="COMPLETED",
+        updated_at=now,
+    )
+    await insert_row(
+        pool,
+        cache_key="legacy_v4_flag_test",
+        team_id="KIA",
+        year=2025,
+        prompt_version="v4_dual",
+        status="COMPLETED",
+        updated_at=now,
+    )
+
+    resolver = batch_script.TeamCodeResolver()
+
+    # cleanup_legacy=False non-dry-run deletes nothing
+    options_no_legacy = batch_script.RunOptions(
+        years=[2025],
+        teams=batch_script.CANONICAL_TEAMS.copy(),
+        focus=[],
+        only_missing=False,
+        force_rebuild=False,
+        quality_report=None,
+        baseline=False,
+        game_type="REGULAR",
+        delay_seconds=0.0,
+        dry_run=False,
+        cleanup_legacy=False,
+    )
+    res_no_legacy = await batch_script.cleanup_cache_rows(
+        pool, options_no_legacy, resolver, dry_run=False
+    )
+    assert res_no_legacy["deleted_total"] == 0
+    assert res_no_legacy["would_delete_keys"] == []
+    assert sorted(res_no_legacy["cleanup_candidate_keys"]) == [
+        "legacy_v3_flag_test",
+        "legacy_v4_flag_test",
+    ]
+
+    rows = await fetch_cache_rows(pool)
+    assert "legacy_v3_flag_test" in rows
+    assert "legacy_v4_flag_test" in rows
+
+    # cleanup_legacy=True deletes them
+    options_legacy = batch_script.RunOptions(
+        years=[2025],
+        teams=batch_script.CANONICAL_TEAMS.copy(),
+        focus=[],
+        only_missing=False,
+        force_rebuild=False,
+        quality_report=None,
+        baseline=False,
+        game_type="REGULAR",
+        delay_seconds=0.0,
+        dry_run=False,
+        cleanup_legacy=True,
+    )
+    res_legacy = await batch_script.cleanup_cache_rows(
+        pool, options_legacy, resolver, dry_run=False
+    )
+    assert res_legacy["deleted_total"] == 2
+    assert sorted(res_legacy["deleted_keys"]) == [
+        "legacy_v3_flag_test",
+        "legacy_v4_flag_test",
+    ]
+
+    rows_after = await fetch_cache_rows(pool)
+    assert "legacy_v3_flag_test" not in rows_after
+    assert "legacy_v4_flag_test" not in rows_after
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_cleanup(
+    pool: psycopg_pool.AsyncConnectionPool,
+) -> None:
+    now = datetime.now(timezone.utc)
+    live_pv = COACH_CACHE_PROMPT_VERSION
+
+    # Batch-owned PENDING row aged 5h (deleted with cleanup_legacy)
+    await insert_row(
+        pool,
+        cache_key="stale_batch_pending_5h",
+        team_id="LG",
+        year=2025,
+        prompt_version="v5_focus",
+        status="PENDING",
+        response_json=None,
+        updated_at=now - timedelta(hours=5),
+    )
+    # PENDING row aged 10 minutes (kept)
+    await insert_row(
+        pool,
+        cache_key="fresh_batch_pending_10m",
+        team_id="SSG",
+        year=2025,
+        prompt_version="v5_focus",
+        status="PENDING",
+        response_json=None,
+        updated_at=now - timedelta(minutes=10),
+    )
+    # Live-version PENDING aged 5h (kept)
+    await insert_row(
+        pool,
+        cache_key="stale_live_pending_5h",
+        team_id="LG",
+        year=2025,
+        prompt_version=live_pv,
+        status="PENDING",
+        response_json=None,
+        updated_at=now - timedelta(hours=5),
+    )
+
+    options = batch_script.RunOptions(
+        years=[2025],
+        teams=batch_script.CANONICAL_TEAMS.copy(),
+        focus=[],
+        only_missing=False,
+        force_rebuild=False,
+        quality_report=None,
+        baseline=False,
+        game_type="REGULAR",
+        delay_seconds=0.0,
+        dry_run=False,
+        cleanup_legacy=True,
+    )
+    resolver = batch_script.TeamCodeResolver()
+
+    result = await batch_script.cleanup_cache_rows(
+        pool, options, resolver, dry_run=False
+    )
+
+    assert result["stale_pending_rows"] == 1
+    assert result["deleted_keys"] == ["stale_batch_pending_5h"]
+
+    rows = await fetch_cache_rows(pool)
+    assert "stale_batch_pending_5h" not in rows
+    assert "fresh_batch_pending_10m" in rows
+    assert "stale_live_pending_5h" in rows
+
+
+@pytest.mark.asyncio
+async def test_plan_lists_new_generation_keys(
+    pool: psycopg_pool.AsyncConnectionPool,
+) -> None:
+    options = batch_script.RunOptions(
+        years=[2025],
+        teams=batch_script.CANONICAL_TEAMS.copy(),
+        focus=[],
+        only_missing=False,
+        force_rebuild=True,
+        quality_report=None,
+        baseline=False,
+        game_type="REGULAR",
+        delay_seconds=0.0,
+        dry_run=True,
+    )
+    target_keys = batch_script.build_target_batch_keys(options)
+    assert len(target_keys) == 10
+
+    # Seed 7 of 10 target rows as COMPLETED
+    completed_teams = batch_script.CANONICAL_TEAMS[:7]
+    completed_keys = target_keys[:7]
+    missing_keys = target_keys[7:]
+
+    for team, key in zip(completed_teams, completed_keys):
+        await insert_row(
+            pool,
+            cache_key=key,
+            team_id=team,
+            year=2025,
+            prompt_version="v5_focus",
+            status="COMPLETED",
+            response_json={"headline": f"{team} ready"},
+        )
+
+    resolver = batch_script.TeamCodeResolver()
+    result = await batch_script.cleanup_cache_rows(
+        pool, options, resolver, dry_run=True
+    )
+
+    assert result["force_rebuild_rows"] == 7
+    assert sorted(result["force_rebuild_replace_keys"]) == sorted(completed_keys)
+    assert sorted(result["new_generation_keys"]) == sorted(missing_keys)
+    assert len(result["new_generation_keys"]) == 3

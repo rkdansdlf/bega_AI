@@ -55,3 +55,46 @@ def test_warmup_workflow_uses_staging_only() -> None:
     assert "workflow_dispatch:" in workflow
     assert "\n  schedule:" not in workflow
     assert "--only-missing" in workflow
+
+
+def test_weekly_workflow_cleanup_legacy_and_gate_condition() -> None:
+    workflow = _workflow_path("coach-quality-2025-weekly.yml").read_text(
+        encoding="utf-8"
+    )
+
+    # --cleanup-legacy passed in both plan dry-run and rebuild steps
+    assert "Batch cleanup/rebuild plan dry-run" in workflow
+    assert "Rebuild coach cache for 2025 regular season" in workflow
+    assert "id: rebuild" in workflow
+    assert workflow.count("--cleanup-legacy") >= 2
+
+    dryrun_idx = workflow.index("Batch cleanup/rebuild plan dry-run")
+    rebuild_idx = workflow.index("Rebuild coach cache for 2025 regular season")
+    gate_idx = workflow.index("Evaluate coach quality gate")
+
+    dryrun_block = workflow[dryrun_idx:rebuild_idx]
+    rebuild_block = workflow[rebuild_idx:gate_idx]
+    assert "--cleanup-legacy" in dryrun_block
+    assert "--cleanup-legacy" in rebuild_block
+
+    # Gate step condition
+    assert "if: ${{ !cancelled() && steps.rebuild.outcome != 'skipped' }}" in workflow
+
+
+def test_warmup_workflow_no_cleanup_legacy_and_dynamic_summary() -> None:
+    workflow = _workflow_path("coach-warmup.yml").read_text(encoding="utf-8")
+
+    assert "--cleanup-legacy" not in workflow
+    assert "completed for all 10" not in workflow
+    assert "Pre-warming completed for all 10 KBO teams." not in workflow
+    assert "if: always()" in workflow
+    assert "/tmp/coach_warmup_report.json" in workflow
+
+
+def test_ci_workflow_has_postgres_service_and_test_db_url() -> None:
+    workflow = _workflow_path("ci.yml").read_text(encoding="utf-8")
+
+    assert "image: postgres:17" in workflow
+    assert "55432:5432" in workflow
+    assert "COACH_CACHE_TEST_DB_URL:" in workflow
+    assert "coach_cache_test" in workflow

@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+import psycopg
+
 # 프로젝트 루트를 Python path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -35,13 +37,22 @@ from app.core.coach_grounding import (
     validate_response_against_fact_sheet,
 )
 from app.core.prompts import COACH_PROMPT_V2
-from app.core.coach_cache_contract import COACH_CACHE_PROMPT_VERSION
+from app.core.coach_cache_contract import (
+    COACH_BATCH_LEGACY_PROMPT_VERSIONS,
+    COACH_BATCH_OWNED_PROMPT_VERSIONS,
+    COACH_BATCH_PROMPT_VERSION,
+    COACH_CACHE_PROMPT_VERSION,
+)
 from app.core.coach_cache_key import (
     build_coach_cache_key,
     build_focus_signature,
     normalize_focus,
 )
-from app.deps import get_coach_llm_generator, get_connection_pool
+from app.deps import (
+    close_connection_pool,
+    get_coach_llm_generator,
+    get_connection_pool,
+)
 from app.routers.coach import _remove_duplicate_json_start
 from app.tools.database_query import DatabaseQueryTool
 from app.tools.team_code_resolver import CANONICAL_CODES, TeamCodeResolver
@@ -53,10 +64,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CANONICAL_TEAMS = ["SS", "LT", "LG", "DB", "KIA", "KH", "HH", "SSG", "NC", "KT"]
-PROMPT_VERSION = "v5_focus"
+PROMPT_VERSION = COACH_BATCH_PROMPT_VERSION
 MODEL_NAME = "openrouter/free"
 CACHE_SCHEMA_VERSION = "v3"
 COACH_YEAR_MIN = 1982
+STALE_PENDING_HOURS = 3
 FOCUS_SECTION_HEADERS: Dict[str, str] = {
     "recent_form": "## 최근 전력",
     "bullpen": "## 불펜 상태",
@@ -65,8 +77,8 @@ FOCUS_SECTION_HEADERS: Dict[str, str] = {
     "batting": "## 타격 생산성",
 }
 
-BATCH_LEGACY_PROMPT_VERSIONS: tuple = ("v3_prompt", "v4_dual")
-BATCH_OWNED_PROMPT_VERSIONS = BATCH_LEGACY_PROMPT_VERSIONS + (PROMPT_VERSION,)
+BATCH_LEGACY_PROMPT_VERSIONS: tuple = COACH_BATCH_LEGACY_PROMPT_VERSIONS
+BATCH_OWNED_PROMPT_VERSIONS: tuple = COACH_BATCH_OWNED_PROMPT_VERSIONS
 
 if COACH_CACHE_PROMPT_VERSION in BATCH_OWNED_PROMPT_VERSIONS:
     raise RuntimeError(
@@ -89,6 +101,7 @@ class RunOptions:
     delay_seconds: float
     dry_run: bool = False
     purge_invalid_years: bool = False
+    cleanup_legacy: bool = False
 
 
 def parse_years(years_arg: str) -> List[int]:
@@ -204,6 +217,26 @@ def build_cleanup_conditions(
             ],
         )
     )
+    # A run killed mid-generation leaves its new key PENDING (a COMPLETED row is
+    # never downgraded thanks to verify-then-replace). PENDING rows older than
+    # STALE_PENDING_HOURS cannot belong to a live run: the weekly job times out
+    # after 90 minutes and shares the coach-cache-operations concurrency group.
+    conditions.append(
+        (
+            "stale_pending",
+            (
+                "year = ANY(%s) AND status = 'PENDING'"
+                " AND updated_at < now() - make_interval(hours => %s)"
+                " AND prompt_version = ANY(%s) AND prompt_version <> %s"
+            ),
+            [
+                options.years,
+                STALE_PENDING_HOURS,
+                list(BATCH_OWNED_PROMPT_VERSIONS),
+                COACH_CACHE_PROMPT_VERSION,
+            ],
+        )
+    )
     if options.purge_invalid_years:
         max_year = datetime.now().year + 1
         conditions.append(
@@ -248,23 +281,36 @@ async def cleanup_cache_rows(
     resolver: TeamCodeResolver,
     dry_run: bool | None = None,
 ) -> Dict[str, Any]:
+    """Plan (and, with --cleanup-legacy and not dry-run, apply) batch cleanup.
+
+    Deletes only happen when ``options.cleanup_legacy`` is set and the run is
+    not a dry-run. Otherwise the same plan is computed read-only and the
+    candidates are reported under ``cleanup_candidate_keys``.
+    """
     if dry_run is None:
         dry_run = options.dry_run
+    delete_enabled = bool(options.cleanup_legacy) and not dry_run
 
     conditions = build_cleanup_conditions(options, resolver)
     target_keys = build_target_batch_keys(options)
 
-    prompt_mismatch_keys: List[str] = []
-    legacy_team_keys: List[str] = []
-    invalid_year_keys: List[str] = []
+    category_keys: Dict[str, List[str]] = {
+        "prompt_mismatch": [],
+        "legacy_team": [],
+        "stale_pending": [],
+        "invalid_year": [],
+    }
     force_rebuild_replace_keys: List[str] = []
+    new_generation_keys: List[str] = []
+    skip_existing_keys: List[str] = []
     invalid_year_rows_total = 0
-    would_delete_keys: List[str] = []
     deleted_keys: List[str] = []
-    deleted_total = 0
 
     async with pool.connection() as conn:
         async with conn.transaction():
+            if not delete_enabled:
+                await conn.execute("SET TRANSACTION READ ONLY")
+
             for category, where_sql, params in conditions:
                 cur = await conn.execute(
                     f"SELECT cache_key FROM coach_analysis_cache"
@@ -272,27 +318,36 @@ async def cleanup_cache_rows(
                     tuple(params),
                 )
                 rows = await cur.fetchall()
-                keys = [r[0] for r in rows]
-                if category == "prompt_mismatch":
-                    prompt_mismatch_keys = keys
-                elif category == "legacy_team":
-                    legacy_team_keys = keys
-                elif category == "invalid_year":
-                    invalid_year_keys = keys
+                category_keys[category] = [r[0] for r in rows]
 
-            would_delete_keys = sorted(
-                set(prompt_mismatch_keys + legacy_team_keys + invalid_year_keys)
+            candidate_keys = sorted(
+                {key for keys in category_keys.values() for key in keys}
             )
 
-            if options.force_rebuild:
-                cur = await conn.execute(
-                    "SELECT cache_key FROM coach_analysis_cache"
-                    " WHERE cache_key = ANY(%s) AND status = 'COMPLETED'"
-                    " ORDER BY cache_key",
-                    (target_keys,),
-                )
-                rows = await cur.fetchall()
-                force_rebuild_replace_keys = [r[0] for r in rows]
+            cur = await conn.execute(
+                "SELECT cache_key, status, response_json IS NOT NULL"
+                " FROM coach_analysis_cache WHERE cache_key = ANY(%s)",
+                (target_keys,),
+            )
+            existing = {r[0]: (r[1], bool(r[2])) for r in await cur.fetchall()}
+            # Simulate the deletion in --dry-run --cleanup-legacy so the plan
+            # matches what the real run would do.
+            removed = set(candidate_keys) if options.cleanup_legacy else set()
+            effective_only_missing = options.only_missing and not options.force_rebuild
+            for key in target_keys:
+                state = None if key in removed else existing.get(key)
+                completed = bool(state) and state[0] == "COMPLETED" and state[1]
+                if effective_only_missing:
+                    if state is None:
+                        new_generation_keys.append(key)
+                    else:
+                        skip_existing_keys.append(key)
+                elif completed and options.force_rebuild:
+                    force_rebuild_replace_keys.append(key)
+                elif completed:
+                    skip_existing_keys.append(key)
+                else:
+                    new_generation_keys.append(key)
 
             max_year = datetime.now().year + 1
             cur = await conn.execute(
@@ -303,7 +358,7 @@ async def cleanup_cache_rows(
             row = await cur.fetchone()
             invalid_year_rows_total = row[0]
 
-            if not dry_run and conditions and would_delete_keys:
+            if delete_enabled and candidate_keys:
                 where_parts: List[str] = []
                 all_params: List[Any] = []
                 for _, where_sql, params in conditions:
@@ -317,21 +372,30 @@ async def cleanup_cache_rows(
                 )
                 rows = await cur.fetchall()
                 deleted_keys = sorted(r[0] for r in rows)
-                deleted_total = len(deleted_keys)
 
+            if not delete_enabled:
+                # Read-only plan: end with ROLLBACK, never COMMIT.
+                raise psycopg.Rollback()
+
+    would_delete_keys = candidate_keys if options.cleanup_legacy else []
     return {
         "dry_run": dry_run,
-        "prompt_mismatch_rows": len(prompt_mismatch_keys),
-        "legacy_team_rows": len(legacy_team_keys),
-        "invalid_year_rows": len(invalid_year_keys),
+        "cleanup_legacy_enabled": bool(options.cleanup_legacy),
+        "prompt_mismatch_rows": len(category_keys["prompt_mismatch"]),
+        "legacy_team_rows": len(category_keys["legacy_team"]),
+        "stale_pending_rows": len(category_keys["stale_pending"]),
+        "invalid_year_rows": len(category_keys["invalid_year"]),
         "invalid_year_purge_enabled": options.purge_invalid_years,
         "invalid_year_rows_total": invalid_year_rows_total,
+        "cleanup_candidate_keys": candidate_keys,
         "force_rebuild_rows": len(force_rebuild_replace_keys),
         "force_rebuild_replace_keys": force_rebuild_replace_keys,
         "force_rebuild_deletes": 0,
+        "new_generation_keys": new_generation_keys,
+        "skip_existing_keys": skip_existing_keys,
         "would_delete_total": len(would_delete_keys),
         "would_delete_keys": would_delete_keys,
-        "deleted_total": deleted_total,
+        "deleted_total": len(deleted_keys),
         "deleted_keys": deleted_keys,
         "protected_prompt_version": COACH_CACHE_PROMPT_VERSION,
     }
@@ -609,31 +673,43 @@ async def generate_and_cache_team(
             result["validator_hard_fail"] = True
         else:
             payload_json = json.dumps(parsed_payload, ensure_ascii=False)
-            async with pool.connection() as conn:
+            try:
+                async with pool.connection() as conn:
+                    if keep_previous:
+                        await conn.execute(
+                            "UPDATE coach_analysis_cache"
+                            " SET status = 'COMPLETED',"
+                            " response_json = %s,"
+                            " prompt_version = %s,"
+                            " model_name = %s,"
+                            " error_message = NULL,"
+                            " updated_at = now()"
+                            " WHERE cache_key = %s",
+                            (payload_json, PROMPT_VERSION, MODEL_NAME, cache_key),
+                        )
+                        result["replaced_previous"] = True
+                    else:
+                        await conn.execute(
+                            "UPDATE coach_analysis_cache"
+                            " SET status = 'COMPLETED',"
+                            " response_json = %s,"
+                            " error_message = NULL,"
+                            " updated_at = now()"
+                            " WHERE cache_key = %s",
+                            (payload_json, cache_key),
+                        )
+                    await conn.commit()
+            except Exception as exc:
+                # A single-statement UPDATE is atomic: on error the previous
+                # row (COMPLETED or PENDING) is left as-is. Isolate per key.
+                logger.exception("Cache write failed for %s", cache_key)
+                result["reason"] = f"cache_write_error:{type(exc).__name__}: {exc}"
+                result["failure_category"] = "cache_write_error"
                 if keep_previous:
-                    await conn.execute(
-                        "UPDATE coach_analysis_cache"
-                        " SET status = 'COMPLETED',"
-                        " response_json = %s,"
-                        " prompt_version = %s,"
-                        " model_name = %s,"
-                        " error_message = NULL,"
-                        " updated_at = now()"
-                        " WHERE cache_key = %s",
-                        (payload_json, PROMPT_VERSION, MODEL_NAME, cache_key),
-                    )
-                    result["replaced_previous"] = True
-                else:
-                    await conn.execute(
-                        "UPDATE coach_analysis_cache"
-                        " SET status = 'COMPLETED',"
-                        " response_json = %s,"
-                        " error_message = NULL,"
-                        " updated_at = now()"
-                        " WHERE cache_key = %s",
-                        (payload_json, cache_key),
-                    )
-                await conn.commit()
+                    result["previous_kept"] = True
+                    result.pop("replaced_previous", None)
+                result["elapsed_seconds"] = (datetime.now() - start).total_seconds()
+                return result
 
             warnings = validate_coach_response(parsed_response)
             warnings.extend(grounding_validation.warnings)
@@ -782,6 +858,7 @@ async def summarize_results(
             "game_type": options.game_type,
             "delay_seconds": options.delay_seconds,
             "dry_run": options.dry_run,
+            "cleanup_legacy": options.cleanup_legacy,
             "purge_invalid_years": options.purge_invalid_years,
         },
         "cleanup": cleanup_result,
@@ -859,6 +936,16 @@ def parse_args() -> RunOptions:
             " [COACH_YEAR_MIN, now.year+1]"
         ),
     )
+    parser.add_argument(
+        "--cleanup-legacy",
+        action="store_true",
+        help=(
+            "Actually DELETE batch-owned cleanup candidates (prompt_mismatch,"
+            " legacy_team, stale_pending, and invalid_year with"
+            " --purge-invalid-years). Without it, cleanup is report-only."
+            " Only the weekly quality workflow passes this flag."
+        ),
+    )
     args = parser.parse_args()
 
     resolver = TeamCodeResolver()
@@ -883,6 +970,7 @@ def parse_args() -> RunOptions:
         delay_seconds=args.delay_seconds,
         dry_run=args.dry_run,
         purge_invalid_years=args.purge_invalid_years,
+        cleanup_legacy=args.cleanup_legacy,
     )
 
 
@@ -898,6 +986,39 @@ def run_baseline_evaluation(report_path: Path, years: List[int], game_type: str)
     ]
     proc = subprocess.run(cmd, check=False)
     return proc.returncode
+
+
+def build_unexpected_error_result(
+    team: str, year: int, options: RunOptions, exc: Exception
+) -> Dict[str, Any]:
+    cache_key, payload = build_coach_cache_key(
+        schema_version=CACHE_SCHEMA_VERSION,
+        prompt_version=PROMPT_VERSION,
+        home_team_code=team,
+        away_team_code=None,
+        year=year,
+        game_type=options.game_type,
+        focus=options.focus,
+        question_override=None,
+    )
+    return {
+        "team": team,
+        "year": year,
+        "cache_key": cache_key,
+        "focus_signature": payload["focus_signature"],
+        "question_signature": payload["question_signature"],
+        "status": "failed",
+        "reason": f"unexpected_error:{type(exc).__name__}: {exc}",
+        "failure_category": "unexpected_error",
+        "cache_hit": False,
+        "json_parse_ok": False,
+        "warnings_count": 0,
+        "critical_over_limit": False,
+        "validator_hard_fail": False,
+        "normalization_applied": False,
+        "normalization_reasons": [],
+        "elapsed_seconds": 0.0,
+    }
 
 
 async def _run_batch(options: RunOptions, pool) -> int:
@@ -919,7 +1040,8 @@ async def _run_batch(options: RunOptions, pool) -> int:
         f"Options: only_missing={options.only_missing},"
         f" force_rebuild={options.force_rebuild},"
         f" dry_run={options.dry_run},"
-        f" purge_invalid_years={options.purge_invalid_years}"
+        f" purge_invalid_years={options.purge_invalid_years},"
+        f" cleanup_legacy={options.cleanup_legacy}"
     )
     print("=" * 72)
 
@@ -939,6 +1061,7 @@ async def _run_batch(options: RunOptions, pool) -> int:
                 "game_type": options.game_type,
                 "delay_seconds": options.delay_seconds,
                 "purge_invalid_years": options.purge_invalid_years,
+                "cleanup_legacy": options.cleanup_legacy,
                 "dry_run": options.dry_run,
             },
             "cleanup": cleanup_result,
@@ -961,16 +1084,20 @@ async def _run_batch(options: RunOptions, pool) -> int:
         for team in options.teams:
             case_index += 1
             print(f"[{case_index}/{total_cases}] {year} {team} processing...")
-            item = await generate_and_cache_team(
-                pool=pool,
-                team_id=team,
-                year=year,
-                game_type=options.game_type,
-                focus=options.focus,
-                skip_completed=(not options.force_rebuild),
-                only_missing=(options.only_missing and not options.force_rebuild),
-                force_rebuild=options.force_rebuild,
-            )
+            try:
+                item = await generate_and_cache_team(
+                    pool=pool,
+                    team_id=team,
+                    year=year,
+                    game_type=options.game_type,
+                    focus=options.focus,
+                    skip_completed=(not options.force_rebuild),
+                    only_missing=(options.only_missing and not options.force_rebuild),
+                    force_rebuild=options.force_rebuild,
+                )
+            except Exception as exc:  # isolate DB/replace errors per key
+                logger.exception("Team %s %s failed with unexpected error", year, team)
+                item = build_unexpected_error_result(team, year, options, exc)
             results.append(item)
 
             status_icon = {
@@ -1024,7 +1151,7 @@ async def async_main(options: RunOptions) -> int:
         await pool.open(wait=True, timeout=10.0)
         return await _run_batch(options, pool)
     finally:
-        await pool.close()
+        await close_connection_pool()
 
 
 def main() -> int:

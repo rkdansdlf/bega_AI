@@ -67,15 +67,40 @@ jobs:
             --quality-report /tmp/coach_warmup_plan.json
 
       - name: Run Coach Cache Warmup
+        id: warmup
         run: |
           python scripts/batch_coach_cache.py \
             --only-missing \
             --quality-report /tmp/coach_warmup_report.json
 
       - name: Warmup Summary
+        if: always()
+        env:
+          WARMUP_OUTCOME: ${{ steps.warmup.outcome }}
         run: |
-          echo "### Coach Cache Warmup (Staging)" >> "${GITHUB_STEP_SUMMARY}"
-          echo "Pre-warming completed for all 10 KBO teams." >> "${GITHUB_STEP_SUMMARY}"
+          python - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json
+          import os
+          from pathlib import Path
+
+          print("### Coach Cache Warmup (Staging)")
+          print(f"Warmup step outcome: `{os.environ.get('WARMUP_OUTCOME') or 'unknown'}`")
+          path = Path("/tmp/coach_warmup_report.json")
+          if not path.exists():
+              print("No warmup report was produced (/tmp/coach_warmup_report.json missing).")
+          else:
+              summary = json.loads(path.read_text(encoding="utf-8")).get("summary", {})
+              print("| total | success | skipped | failed |")
+              print("|---|---|---|---|")
+              print(
+                  f"| {summary.get('cases', '?')} | {summary.get('success', '?')}"
+                  f" | {summary.get('skipped', '?')} | {summary.get('failed', '?')} |"
+              )
+              failures = summary.get("failure_category_counts") or {}
+              if failures:
+                  print("")
+                  print("Failure categories: " + ", ".join(f"{k}={v}" for k, v in failures.items()))
+          PY
 
       - name: Upload warmup artifacts
         if: always()

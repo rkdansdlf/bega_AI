@@ -98,6 +98,8 @@ async def test_cleanup_expired_cache_dry_run_issues_no_delete(
     fake_conn = FakeConnection(select_rows=sample_rows)
     fake_pool = AsyncOnlyFakePool(fake_conn)
     monkeypatch.setattr(cleanup_script, "get_connection_pool", lambda: fake_pool)
+    mock_close = AsyncMock()
+    monkeypatch.setattr(cleanup_script, "close_connection_pool", mock_close)
 
     result = await cleanup_script.cleanup_expired_cache(
         retention_days=7,
@@ -110,7 +112,7 @@ async def test_cleanup_expired_cache_dry_run_issues_no_delete(
     assert result["dry_run"] is True
     assert result["would_delete_keys"] == ["key1", "key2"]
     fake_pool.open.assert_awaited_once_with(wait=True, timeout=10.0)
-    fake_pool.close.assert_awaited_once()
+    mock_close.assert_awaited_once()
 
     queries = [q[0].strip().upper() for q in fake_conn.executed_queries]
     assert len(queries) == 1
@@ -131,6 +133,8 @@ async def test_cleanup_expired_cache_non_dry_run_issues_delete_returning(
     fake_conn = FakeConnection(delete_returning_rows=delete_rows)
     fake_pool = AsyncOnlyFakePool(fake_conn)
     monkeypatch.setattr(cleanup_script, "get_connection_pool", lambda: fake_pool)
+    mock_close = AsyncMock()
+    monkeypatch.setattr(cleanup_script, "close_connection_pool", mock_close)
 
     result = await cleanup_script.cleanup_expired_cache(
         retention_days=14,
@@ -144,14 +148,20 @@ async def test_cleanup_expired_cache_non_dry_run_issues_delete_returning(
     assert result["dry_run"] is False
     assert result["deleted_keys"] == ["key1", "key2", "key3"]
     fake_pool.open.assert_awaited_once_with(wait=True, timeout=10.0)
-    fake_pool.close.assert_awaited_once()
+    mock_close.assert_awaited_once()
     assert fake_conn.committed is True
 
     assert len(fake_conn.executed_queries) == 1
     delete_sql, delete_params = fake_conn.executed_queries[0]
     assert delete_sql.strip().upper().startswith("DELETE")
     assert "RETURNING" in delete_sql.upper()
-    assert delete_params == (14, [2025], ["LG"])
+    assert "PROMPT_VERSION <> ALL(%S)" in delete_sql.upper()
+    assert delete_params == (
+        14,
+        list(cleanup_script.DEFAULT_EXCLUDED_PROMPT_VERSIONS),
+        [2025],
+        ["LG"],
+    )
 
 
 @pytest.mark.asyncio
@@ -176,6 +186,8 @@ def test_cleanup_expired_cache_main_dry_run(
     fake_conn = FakeConnection(select_rows=sample_rows)
     fake_pool = AsyncOnlyFakePool(fake_conn)
     monkeypatch.setattr(cleanup_script, "get_connection_pool", lambda: fake_pool)
+    mock_close = AsyncMock()
+    monkeypatch.setattr(cleanup_script, "close_connection_pool", mock_close)
 
     output_path = tmp_path / "cleanup_report.json"
     monkeypatch.setattr(
@@ -195,7 +207,7 @@ def test_cleanup_expired_cache_main_dry_run(
 
     assert exit_code == 0
     fake_pool.open.assert_awaited_once_with(wait=True, timeout=10.0)
-    fake_pool.close.assert_awaited_once()
+    mock_close.assert_awaited_once()
 
     assert output_path.exists()
     payload = json.loads(output_path.read_text(encoding="utf-8"))
@@ -213,6 +225,8 @@ async def test_cleanup_expired_cache_no_rows_closes_pool(
     fake_conn = FakeConnection(delete_returning_rows=[])
     fake_pool = AsyncOnlyFakePool(fake_conn)
     monkeypatch.setattr(cleanup_script, "get_connection_pool", lambda: fake_pool)
+    mock_close = AsyncMock()
+    monkeypatch.setattr(cleanup_script, "close_connection_pool", mock_close)
 
     result = await cleanup_script.cleanup_expired_cache(
         retention_days=7,
@@ -223,4 +237,70 @@ async def test_cleanup_expired_cache_no_rows_closes_pool(
     assert result["deleted"] == 0
     assert result["would_delete"] == 0
     assert len(fake_conn.executed_queries) == 1
-    fake_pool.close.assert_awaited_once()
+    mock_close.assert_awaited_once()
+
+
+def test_build_where_clause_with_and_without_exclusions() -> None:
+    sql, params = cleanup_script.build_where_clause(
+        retention_days=7,
+        years=[2025],
+        teams=["LG"],
+        exclude_prompt_versions=["v3_prompt", "v4_dual"],
+    )
+    assert "prompt_version <> ALL(%s)" in sql
+    assert params == [7, ["v3_prompt", "v4_dual"], [2025], ["LG"]]
+
+    sql_no_ex, params_no_ex = cleanup_script.build_where_clause(
+        retention_days=7,
+        years=[2025],
+        teams=["LG"],
+        exclude_prompt_versions=[],
+    )
+    assert "prompt_version <> ALL(%s)" not in sql_no_ex
+    assert params_no_ex == [7, [2025], ["LG"]]
+
+
+def test_parse_prompt_versions_csv() -> None:
+    assert cleanup_script.parse_prompt_versions_csv(None) is None
+    assert cleanup_script.parse_prompt_versions_csv("") == []
+    assert cleanup_script.parse_prompt_versions_csv("  ") == []
+    assert cleanup_script.parse_prompt_versions_csv("v1, v2, v1") == ["v1", "v2"]
+
+
+def test_cleanup_expired_cache_cli_exclude_prompt_versions_empty_disables_exclusion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_conn = FakeConnection(select_rows=[])
+    fake_pool = AsyncOnlyFakePool(fake_conn)
+    monkeypatch.setattr(cleanup_script, "get_connection_pool", lambda: fake_pool)
+    mock_close = AsyncMock()
+    monkeypatch.setattr(cleanup_script, "close_connection_pool", mock_close)
+
+    output_path = tmp_path / "cleanup_report_no_ex.json"
+    monkeypatch.setattr(
+        cleanup_script.sys,
+        "argv",
+        [
+            "cleanup_expired_cache.py",
+            "--dry-run",
+            "--years",
+            "2025",
+            "--exclude-prompt-versions",
+            "",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    exit_code = cleanup_script.main()
+    assert exit_code == 0
+    mock_close.assert_awaited_once()
+
+    queries = [q[0].strip().upper() for q in fake_conn.executed_queries]
+    assert len(queries) == 1
+    assert "PROMPT_VERSION <> ALL" not in queries[0]
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["excluded_prompt_versions"] == []
+    assert payload["result"]["scope"]["excluded_prompt_versions"] == []

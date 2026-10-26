@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+import psycopg
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "batch_coach_cache.py"
 SPEC = importlib.util.spec_from_file_location(
@@ -35,10 +36,12 @@ class FakeConnection:
         self,
         *,
         select_key_batches: list[list[str]] | None = None,
+        target_existing_rows: list[tuple[str, str, bool]] | None = None,
         count_results: list[int] | None = None,
         delete_returning_keys: list[str] | None = None,
     ) -> None:
         self._key_batches = list(select_key_batches or [])
+        self._target_existing_rows = target_existing_rows
         self._counts = list(count_results or [])
         self._delete_returning_keys = delete_returning_keys or []
         self._key_idx = 0
@@ -49,6 +52,10 @@ class FakeConnection:
     async def execute(self, sql: str, params: tuple = ()) -> FakeCursor:
         self.executed_queries.append((sql, params))
         clean_sql = " ".join(sql.strip().split()).upper()
+        if clean_sql.startswith("SET TRANSACTION READ ONLY"):
+            return FakeCursor()
+        if clean_sql.startswith("SELECT STATUS, RESPONSE_JSON"):
+            return FakeCursor(rows=[])
         if clean_sql.startswith("SELECT COUNT(*)"):
             count = (
                 self._counts[self._count_idx]
@@ -60,6 +67,10 @@ class FakeConnection:
                 # (batch-owned count, all-versions count)
                 return FakeCursor(rows=[(count, count)])
             return FakeCursor(rows=[(count,)])
+        if clean_sql.startswith("SELECT CACHE_KEY, STATUS, RESPONSE_JSON"):
+            if self._target_existing_rows is not None:
+                return FakeCursor(rows=self._target_existing_rows)
+            return FakeCursor(rows=[])
         if clean_sql.startswith("SELECT CACHE_KEY"):
             keys = (
                 self._key_batches[self._key_idx]
@@ -73,6 +84,8 @@ class FakeConnection:
                 rows=[(k,) for k in self._delete_returning_keys],
                 rowcount=len(self._delete_returning_keys),
             )
+        if clean_sql.startswith("INSERT") or clean_sql.startswith("UPDATE"):
+            return FakeCursor(rowcount=1)
         return FakeCursor()
 
     async def commit(self) -> None:
@@ -80,7 +93,10 @@ class FakeConnection:
 
     @contextlib.asynccontextmanager
     async def transaction(self):
-        yield
+        try:
+            yield
+        except psycopg.Rollback:
+            pass
 
 
 class AsyncOnlyFakePool:
@@ -107,6 +123,7 @@ async def test_cleanup_cache_rows_with_async_pool() -> None:
         select_key_batches=[
             ["k_mismatch_1"],
             ["k_legacy_1", "k_legacy_2"],
+            [],
         ],
         count_results=[5],
         delete_returning_keys=["k_legacy_1", "k_legacy_2", "k_mismatch_1"],
@@ -124,12 +141,15 @@ async def test_cleanup_cache_rows_with_async_pool() -> None:
         baseline=False,
         game_type="REGULAR",
         delay_seconds=0.0,
+        cleanup_legacy=True,
     )
 
     result = await batch_script.cleanup_cache_rows(pool, options, resolver)
 
     assert result["prompt_mismatch_rows"] == 1
     assert result["legacy_team_rows"] == 2
+    assert result["stale_pending_rows"] == 0
+    assert result["cleanup_legacy_enabled"] is True
     assert result["invalid_year_rows"] == 0
     assert result["invalid_year_purge_enabled"] is False
     assert result["invalid_year_rows_total"] == 5
@@ -154,18 +174,6 @@ async def test_cleanup_cache_rows_with_async_pool() -> None:
 
 @pytest.mark.asyncio
 async def test_cleanup_cache_rows_force_rebuild_with_async_pool() -> None:
-    fake_conn = FakeConnection(
-        select_key_batches=[
-            ["k_mismatch_1"],
-            ["k_legacy_1"],
-            ["k_target_completed"],
-        ],
-        count_results=[2],
-        delete_returning_keys=["k_legacy_1", "k_mismatch_1"],
-    )
-    pool = AsyncOnlyFakePool(fake_conn)
-    resolver = batch_script.TeamCodeResolver()
-
     options = batch_script.RunOptions(
         years=[2025],
         teams=["LG"],
@@ -176,12 +184,26 @@ async def test_cleanup_cache_rows_force_rebuild_with_async_pool() -> None:
         baseline=False,
         game_type="REGULAR",
         delay_seconds=0.0,
+        cleanup_legacy=True,
     )
+    target_keys = batch_script.build_target_batch_keys(options)
+    fake_conn = FakeConnection(
+        select_key_batches=[
+            ["k_mismatch_1"],
+            ["k_legacy_1"],
+            [],
+        ],
+        target_existing_rows=[(target_keys[0], "COMPLETED", True)],
+        count_results=[2],
+        delete_returning_keys=["k_legacy_1", "k_mismatch_1"],
+    )
+    pool = AsyncOnlyFakePool(fake_conn)
+    resolver = batch_script.TeamCodeResolver()
 
     result = await batch_script.cleanup_cache_rows(pool, options, resolver)
 
     assert result["force_rebuild_rows"] == 1
-    assert result["force_rebuild_replace_keys"] == ["k_target_completed"]
+    assert result["force_rebuild_replace_keys"] == [target_keys[0]]
     assert result["force_rebuild_deletes"] == 0
     assert result["deleted_total"] == 2
     assert result["invalid_year_rows_total"] == 2
@@ -234,7 +256,7 @@ async def test_async_main_opens_and_closes_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_conn = FakeConnection(
-        select_key_batches=[[], []],
+        select_key_batches=[[], [], []],
         count_results=[0],
     )
     pool = AsyncOnlyFakePool(fake_conn)
@@ -244,6 +266,8 @@ async def test_async_main_opens_and_closes_pool(
 
     monkeypatch.setattr(batch_script, "get_connection_pool", lambda: pool)
     monkeypatch.setattr(batch_script, "generate_and_cache_team", _fake_generate)
+    mock_close_pool = AsyncMock()
+    monkeypatch.setattr(batch_script, "close_connection_pool", mock_close_pool)
 
     options = batch_script.RunOptions(
         years=[2025],
@@ -261,7 +285,7 @@ async def test_async_main_opens_and_closes_pool(
 
     assert exit_code == 0
     pool.open.assert_awaited_once_with(wait=True, timeout=10.0)
-    pool.close.assert_awaited_once()
+    mock_close_pool.assert_awaited_once()
 
 
 class _NotFoundQueryTool:
