@@ -18,7 +18,7 @@ FORMAT_STEP = LINT_JOB[
 
 
 def test_ci_uses_pinned_black_and_full_comparison_history() -> None:
-    assert "black==26.5.1" in DEV_REQUIREMENTS
+    assert "black==26.10.1" in DEV_REQUIREMENTS
     assert "fetch-depth: 0" in LINT_JOB
     assert "pip install -r requirements-dev" in LINT_JOB
     assert "pip install flake8 black" not in LINT_JOB
@@ -44,5 +44,6 @@ def test_ci_formats_only_nul_safe_changed_python_paths() -> None:
 
 def test_runtime_dependencies_allow_patched_setuptools() -> None:
     assert "torch==2.13.0" in RUNTIME_REQUIREMENT_LINES
-    assert "setuptools==83.0.0" in RUNTIME_REQUIREMENT_LINES
+    assert "setuptools>=84.1.0" in RUNTIME_REQUIREMENT_LINES
+    assert "setuptools==83.0.0" not in RUNTIME_REQUIREMENT_LINES
     assert "torch==2.12.0" not in RUNTIME_REQUIREMENT_LINES
