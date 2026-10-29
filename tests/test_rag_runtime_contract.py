@@ -160,11 +160,24 @@ def test_local_profile_rejects_remote_endpoint_without_leaking_credentials() -> 
     assert "super-secret" not in str(raised.value)
 
 
-def test_production_profile_requires_oracle_without_opening_a_connection() -> None:
+def test_production_profile_accepts_postgres_backend() -> None:
     settings = _settings(
         app_env="production",
         rag_profile="production",
         rag_backend="postgres",
+        ai_rag_db_url="postgresql://user:secret@prod-db.example:5432/rag",
+    )
+
+    selection = resolve_rag_selection(settings)
+
+    assert selection.backend is RagBackend.POSTGRES
+
+
+def test_production_profile_still_rejects_fake_backend() -> None:
+    settings = _settings(
+        app_env="production",
+        rag_profile="production",
+        rag_backend="fake",
         ai_rag_db_url="postgresql://user:secret@prod-db.example:5432/rag",
     )
 
