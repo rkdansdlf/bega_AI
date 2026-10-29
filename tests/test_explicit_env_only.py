@@ -14,8 +14,7 @@ from app.config import explicit_env_only_enabled, get_settings
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # chat_stream 을 import 하면서 dotenv.load_dotenv 호출 여부를 관찰한다.
-_PROBE = textwrap.dedent(
-    """
+_PROBE = textwrap.dedent("""
     import dotenv
 
     calls = []
@@ -24,8 +23,7 @@ _PROBE = textwrap.dedent(
     import app.routers.chat_stream  # noqa: F401
 
     print("LOAD_DOTENV_CALLS=%d" % len(calls))
-    """
-)
+    """)
 
 
 def _probe(explicit_env_only: str | None) -> int:
@@ -45,7 +43,9 @@ def _probe(explicit_env_only: str | None) -> int:
     )
     assert result.returncode == 0, result.stderr[-2000:]
     line = next(
-        line for line in result.stdout.splitlines() if line.startswith("LOAD_DOTENV_CALLS=")
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("LOAD_DOTENV_CALLS=")
     )
     return int(line.split("=", 1)[1])
 
@@ -74,14 +74,21 @@ def test_chat_stream_import_still_loads_dotenv_by_default():
 
 
 def test_explicit_postgres_url_wins_when_env_file_is_not_read(monkeypatch, tmp_path):
-    (tmp_path / ".env").write_text("OCI_DB_URL=postgresql://leaked:pw@remote:5432/leaked\n")
+    (tmp_path / ".env").write_text(
+        "OCI_DB_URL=postgresql://leaked:pw@remote:5432/leaked\n"
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("OCI_DB_URL", raising=False)
     monkeypatch.setenv("BEGA_EXPLICIT_ENV_ONLY", "true")
-    monkeypatch.setenv("POSTGRES_DB_URL", "postgresql://explicit:pw@localhost:5432/explicit")
+    monkeypatch.setenv(
+        "POSTGRES_DB_URL", "postgresql://explicit:pw@localhost:5432/explicit"
+    )
     get_settings.cache_clear()
     try:
-        assert get_settings().database_url == "postgresql://explicit:pw@localhost:5432/explicit"
+        assert (
+            get_settings().database_url
+            == "postgresql://explicit:pw@localhost:5432/explicit"
+        )
     finally:
         get_settings.cache_clear()
 

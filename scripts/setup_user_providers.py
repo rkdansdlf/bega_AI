@@ -11,7 +11,9 @@ from app.config import explicit_env_only_enabled  # noqa: E402
 
 if not explicit_env_only_enabled():
     load_dotenv(
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"
+        )
     )
 
 POSTGRES_DB_URL = os.getenv("POSTGRES_DB_URL")
