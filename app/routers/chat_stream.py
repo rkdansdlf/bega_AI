@@ -37,7 +37,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from ..config import get_settings
+from ..config import explicit_env_only_enabled, get_settings
 from ..contracts.stream_requests import ChatStreamRequest
 from ..deps import (
     get_agent,
@@ -111,7 +111,9 @@ def _record_cache_by_intent(intent: str, result: str) -> None:
 
 
 logger = logging.getLogger(__name__)
-load_dotenv()
+# BEGA_EXPLICIT_ENV_ONLY 이면 .env 를 프로세스 환경에 주입하지 않는다(OCI_DB_URL 등이 새어 들어온다).
+if not explicit_env_only_enabled():
+    load_dotenv()
 router = APIRouter(prefix="/ai/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 8  # user/assistant 메시지 합산 기준

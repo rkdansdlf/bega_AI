@@ -32,7 +32,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 
-load_dotenv()
+from app.config import explicit_env_only_enabled
+
+if not explicit_env_only_enabled():
+    load_dotenv()
 
 
 # ── Prometheus 메트릭 이름 ──────────────────────────────────────────────────

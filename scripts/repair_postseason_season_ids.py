@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -92,6 +93,12 @@ def parse_args() -> argparse.Namespace:
 
 def load_environment() -> None:
     root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from app.config import explicit_env_only_enabled
+
+    if explicit_env_only_enabled():
+        return
     load_dotenv(root / ".env.prod")
     load_dotenv(root / ".env")
 

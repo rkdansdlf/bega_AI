@@ -19,7 +19,10 @@ sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv
 
-load_dotenv()
+from app.config import explicit_env_only_enabled
+
+if not explicit_env_only_enabled():
+    load_dotenv()
 
 SearchFn = Callable[[Any, Sequence[float], int], List[Dict[str, Any]]]
 

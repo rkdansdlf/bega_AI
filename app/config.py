@@ -1115,6 +1115,15 @@ class Settings(BaseSettings):
         return [item.strip().lower() for item in raw_value.split(",") if item.strip()]
 
 
+def explicit_env_only_enabled() -> bool:
+    """True면 `.env` 파일을 읽지 않고 프로세스 환경변수만 사용한다.
+
+    `.env`를 환경에 주입하는 모든 경로(`load_dotenv()` 포함)는 이 값을 따라야 한다.
+    """
+    value = (os.getenv("BEGA_EXPLICIT_ENV_ONLY") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """설정 객체를 반환합니다.
@@ -1122,7 +1131,6 @@ def get_settings() -> Settings:
     `lru_cache`를 사용하여 설정 객체를 한 번만 생성하고 캐시하여,
     애플리케이션 전체에서 동일한 설정 인스턴스를 사용하도록 보장합니다.
     """
-    explicit_env_only = (os.getenv("BEGA_EXPLICIT_ENV_ONLY") or "").strip().lower()
-    if explicit_env_only in {"1", "true", "yes", "on"}:
+    if explicit_env_only_enabled():
         return Settings(_env_file=None)
     return Settings()
