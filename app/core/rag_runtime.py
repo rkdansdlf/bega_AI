@@ -132,7 +132,8 @@ _LOCAL_RAG_HOSTS = {
 _PROFILE_BACKENDS = {
     RagProfile.LOCAL_ORACLE: {RagBackend.ORACLE},
     RagProfile.LOCAL_POSTGRES: {RagBackend.POSTGRES},
-    RagProfile.PRODUCTION: {RagBackend.ORACLE},
+    # Production may serve RAG from Oracle (legacy) or PostgreSQL/pgvector (target).
+    RagProfile.PRODUCTION: {RagBackend.ORACLE, RagBackend.POSTGRES},
     # A test may use a fake or an explicitly isolated local database.
     RagProfile.TEST: {RagBackend.FAKE, RagBackend.ORACLE, RagBackend.POSTGRES},
 }
