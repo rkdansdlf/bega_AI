@@ -1,10 +1,20 @@
 import os
 import argparse
+import sys
 from dotenv import load_dotenv
 
-load_dotenv(
-    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
-)
+_BEGA_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BEGA_AI_ROOT not in sys.path:
+    sys.path.insert(0, _BEGA_AI_ROOT)
+
+from app.config import explicit_env_only_enabled  # noqa: E402
+
+if not explicit_env_only_enabled():
+    load_dotenv(
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"
+        )
+    )
 
 POSTGRES_DB_URL = os.getenv("POSTGRES_DB_URL")
 LEGACY_SOURCE_DB_URL = os.getenv("SUPABASE_DB_URL")
