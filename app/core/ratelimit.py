@@ -12,17 +12,71 @@ TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT = os.getenv(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 
+# 추적하는 서로 다른 키의 상한. 키가 클라이언트 제어 값(예: 위조된 X-Forwarded-For)이면
+# 키 종류가 무한히 늘 수 있으므로 메모리를 묶어 두기 위한 안전장치다.
+DEFAULT_MAX_TRACKED_KEYS = 10_000
+# 상한을 넘은 새 키가 함께 쓰는 공유 버킷. 키를 계속 바꿔도 제한을 피할 수 없다.
+OVERFLOW_KEY = "__rate_limit_overflow__"
+# 상한 도달 시 긴급 정리를 시도하는 최소 간격(초). 폭주 중 요청마다 O(n) 순회를 막는다.
+EMERGENCY_SWEEP_MIN_INTERVAL_SECONDS = 1.0
+
+
 class InMemoryRateLimiter:
     """
     InMemoryRateLimiter는 API 서버의 과부하를 방지하기 위한 인메모리 속도 제한(Rate Limiter) 장치입니다.
     지정된 시간(window_seconds) 내에 특정 키(예: 클라이언트 IP)에 대한 요청 수를 제한합니다.
+
+    메모리 보호:
+    - 윈도우 안에 더 이상 요청이 없는 만료 키는 주기적으로 제거합니다.
+    - 서로 다른 키가 max_keys 를 넘으면 새 키는 공유 overflow 버킷으로 합쳐져 같은
+      제한을 받습니다(키를 바꿔 제한을 피하거나 메모리를 늘리는 것을 막음).
     """
 
-    def __init__(self, max_requests: int, window_seconds: int) -> None:
+    def __init__(
+        self,
+        max_requests: int,
+        window_seconds: int,
+        max_keys: int = DEFAULT_MAX_TRACKED_KEYS,
+    ) -> None:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
+        self.max_keys = max_keys
         self._hits: DefaultDict[str, Deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
+        self._next_sweep_at = 0.0
+        self._last_emergency_sweep_at = 0.0
+
+    @property
+    def tracked_keys(self) -> int:
+        """현재 추적 중인 서로 다른 키의 수."""
+        return len(self._hits)
+
+    def _sweep_expired(self, now: float) -> None:
+        """윈도우 안에 요청이 없는 키(가장 최근 요청도 만료)를 제거한다."""
+        expired = [
+            key
+            for key, bucket in self._hits.items()
+            if not bucket or now - bucket[-1] > self.window_seconds
+        ]
+        for key in expired:
+            del self._hits[key]
+
+    def _resolve_key(self, key: str, now: float) -> str:
+        """정리와 키 수 상한을 적용해 실제로 사용할 키를 돌려준다."""
+        if now >= self._next_sweep_at:
+            self._sweep_expired(now)
+            self._next_sweep_at = now + self.window_seconds
+
+        if key in self._hits or len(self._hits) < self.max_keys:
+            return key
+
+        if now - self._last_emergency_sweep_at >= EMERGENCY_SWEEP_MIN_INTERVAL_SECONDS:
+            self._sweep_expired(now)
+            self._last_emergency_sweep_at = now
+            if len(self._hits) < self.max_keys:
+                return key
+
+        return OVERFLOW_KEY
 
     async def check(self, key: str) -> None:
         """
@@ -31,6 +85,7 @@ class InMemoryRateLimiter:
         """
         now = time.time()
         async with self._lock:
+            key = self._resolve_key(key, now)
             bucket = self._hits[key]
             while bucket and now - bucket[0] > self.window_seconds:
                 bucket.popleft()

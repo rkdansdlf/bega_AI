@@ -89,4 +89,5 @@ test_rag_search.py
 !/tests/test_ingest_run_store.py
 !/tests/test_ingest_results.py
 !/tests/test_ingest_worker.py
+!/tests/test_ratelimit.py
 /.worktrees
