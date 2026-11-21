@@ -217,6 +217,102 @@ def test_validate_internal_token_security_noop_when_app_env_unset(monkeypatch):
     assert settings.resolved_ai_internal_token == LOCAL_DEV_AI_INTERNAL_TOKEN
 
 
+def test_validate_internal_token_security_warns_when_app_env_unset(monkeypatch, caplog):
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "")
+    monkeypatch.setenv("CORS_ORIGINS", "http://localhost:5176")
+
+    settings = Settings()
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="app.config"):
+        settings.validate_internal_token_security()
+
+    assert "APP_ENV is not set" in caplog.text
+    assert "local development" in caplog.text
+
+
+@pytest.mark.parametrize("app_env", ["production", "local"])
+def test_validate_internal_token_security_does_not_warn_when_app_env_explicit(
+    monkeypatch, caplog, app_env
+):
+    monkeypatch.setenv("APP_ENV", app_env)
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "a-strong-prod-token")
+    monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
+
+    settings = Settings()
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="app.config"):
+        settings.validate_internal_token_security()
+
+    assert "APP_ENV is not set" not in caplog.text
+
+
+def test_validate_internal_token_security_raises_when_inferred_prod_token_missing(
+    monkeypatch,
+):
+    # APP_ENV 를 빠뜨려도, 로컬이 아닌 CORS origin 이면 운영으로 추정해 가드가 작동한다.
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "")
+    monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
+
+    settings = Settings()
+
+    assert settings.is_production_environment is True
+    with pytest.raises(RuntimeError, match="AI_INTERNAL_TOKEN must be configured"):
+        settings.validate_internal_token_security()
+
+
+def test_validate_internal_token_security_raises_when_inferred_prod_uses_local_default(
+    monkeypatch,
+):
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", LOCAL_DEV_AI_INTERNAL_TOKEN)
+    monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
+
+    settings = Settings()
+
+    with pytest.raises(RuntimeError, match="must not be set to the local-dev default"):
+        settings.validate_internal_token_security()
+
+
+def test_validate_internal_token_security_raises_for_unrecognized_app_env_value(
+    monkeypatch,
+):
+    # 오타("prd")는 명시 값으로 인정되지 않고 추정 경로를 타므로 가드를 피하지 못한다.
+    monkeypatch.setenv("APP_ENV", "prd")
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", LOCAL_DEV_AI_INTERNAL_TOKEN)
+    monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
+
+    settings = Settings()
+
+    with pytest.raises(RuntimeError, match="must not be set to the local-dev default"):
+        settings.validate_internal_token_security()
+
+
+def test_validate_internal_token_security_passes_for_inferred_prod_with_strong_token(
+    monkeypatch,
+):
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "a-strong-prod-token")
+    monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
+
+    Settings().validate_internal_token_security()
+
+
+def test_validate_internal_token_security_allows_explicit_local_env_with_public_origin(
+    monkeypatch,
+):
+    # APP_ENV 를 local 로 명시한 것은 운영자의 의도적 선택이므로 가드 대상이 아니다.
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "")
+    monkeypatch.setenv("CORS_ORIGINS", "https://staging.begabaseball.xyz")
+
+    settings = Settings()
+
+    settings.validate_internal_token_security()
+    assert settings.is_production_environment is False
+
+
 def test_settings_warns_when_openrouter_llm_and_openai_embeddings_are_mixed(
     monkeypatch, caplog
 ):
