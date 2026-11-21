@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from fastapi import HTTPException
+from starlette.datastructures import Headers
 
 from app.core import ratelimit
 from app.core.ratelimit import OVERFLOW_KEY, InMemoryRateLimiter, _extract_client_key
@@ -153,17 +154,81 @@ class _Client:
 
 
 class _Request:
-    def __init__(self, headers=None, client=_Client):
-        self.headers = headers or {}
+    """starlette 의 실제 Headers 를 쓰는 최소 요청. 여러 XFF 줄도 표현할 수 있다."""
+
+    def __init__(self, *xff_lines: str, client=_Client):
+        self.headers = Headers(
+            raw=[(b"x-forwarded-for", line.encode()) for line in xff_lines]
+        )
         self.client = client() if client else None
 
 
 def test_default_ignores_forwarded_for_header():
     # 기본값에서는 클라이언트가 보낸 X-Forwarded-For 로 키를 바꿀 수 없어야 한다.
-    request = _Request({"x-forwarded-for": "1.2.3.4"})
+    request = _Request("1.2.3.4")
 
     assert _extract_client_key(request) == "10.0.0.7"
 
 
 def test_client_key_falls_back_to_unknown_without_peer():
     assert _extract_client_key(_Request(client=None)) == "unknown"
+
+
+def _trusted(request, count=1) -> str:
+    return _extract_client_key(
+        request, trust_x_forwarded_for=True, trusted_proxy_count=count
+    )
+
+
+def test_trusted_xff_uses_the_entry_appended_by_the_proxy_not_the_spoofed_one():
+    # 클라이언트가 "6.6.6.6" 을 보내고, 프록시가 실제 연결 주소를 오른쪽에 덧붙인 경우.
+    request = _Request("6.6.6.6, 203.0.113.9")
+
+    assert _trusted(request) == "203.0.113.9"
+
+
+def test_rotating_a_spoofed_xff_does_not_change_the_key():
+    # 위조 값을 바꿔도 프록시가 덧붙인 값이 같으면 같은 키(같은 버킷)다.
+    keys = {_trusted(_Request(f"6.6.6.{index}, 203.0.113.9")) for index in range(50)}
+
+    assert keys == {"203.0.113.9"}
+
+
+def test_trusted_proxy_count_selects_the_nth_entry_from_the_right():
+    # client -> proxy1 -> proxy2 -> app : XFF = "spoof, client, proxy1"
+    request = _Request("6.6.6.6, 203.0.113.9, 198.51.100.2")
+
+    assert _trusted(request, count=2) == "203.0.113.9"
+
+
+def test_single_value_xff_from_an_overwriting_proxy_still_works():
+    assert _trusted(_Request("203.0.113.9")) == "203.0.113.9"
+
+
+def test_multiple_xff_header_lines_are_treated_as_one_chain():
+    request = _Request("6.6.6.6", "203.0.113.9")
+
+    assert _trusted(request) == "203.0.113.9"
+
+
+def test_trusted_xff_falls_back_to_peer_when_chain_is_shorter_than_expected():
+    assert _trusted(_Request("203.0.113.9"), count=2) == "10.0.0.7"
+    assert _trusted(_Request()) == "10.0.0.7"
+
+
+def test_trusted_xff_falls_back_to_peer_for_non_ip_values():
+    # 임의 문자열이 키가 되어 메모리를 낭비하거나 버킷을 위조하지 못하게 한다.
+    assert _trusted(_Request("6.6.6.6, not-an-ip")) == "10.0.0.7"
+    assert _trusted(_Request("x" * 5000)) == "10.0.0.7"
+
+
+def test_trusted_xff_normalizes_ipv6():
+    assert _trusted(_Request("2001:DB8:0:0:0:0:0:1")) == "2001:db8::1"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [(None, 1), ("", 1), ("1", 1), ("2", 2), (" 3 ", 3), ("0", 1), ("-4", 1), ("abc", 1)],
+)
+def test_trusted_proxy_count_parsing(raw, expected):
+    assert ratelimit._parse_trusted_proxy_count(raw) == expected
