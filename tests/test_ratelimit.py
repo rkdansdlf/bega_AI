@@ -228,7 +228,16 @@ def test_trusted_xff_normalizes_ipv6():
 
 @pytest.mark.parametrize(
     "raw, expected",
-    [(None, 1), ("", 1), ("1", 1), ("2", 2), (" 3 ", 3), ("0", 1), ("-4", 1), ("abc", 1)],
+    [
+        (None, 1),
+        ("", 1),
+        ("1", 1),
+        ("2", 2),
+        (" 3 ", 3),
+        ("0", 1),
+        ("-4", 1),
+        ("abc", 1),
+    ],
 )
 def test_trusted_proxy_count_parsing(raw, expected):
     assert ratelimit._parse_trusted_proxy_count(raw) == expected

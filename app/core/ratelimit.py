@@ -122,7 +122,9 @@ VISION_RATE_LIMITER = InMemoryRateLimiter(max_requests=15, window_seconds=60)
 DEBUG_RATE_LIMITER = InMemoryRateLimiter(max_requests=30, window_seconds=60)
 
 
-def _client_ip_from_forwarded_for(request: Request, trusted_proxy_count: int) -> str | None:
+def _client_ip_from_forwarded_for(
+    request: Request, trusted_proxy_count: int
+) -> str | None:
     """X-Forwarded-For 에서 신뢰 프록시가 덧붙인 클라이언트 IP 를 고른다.
 
     프록시는 자신이 본 연결 주소를 XFF 의 오른쪽 끝에 덧붙이므로, 오른쪽에서

@@ -2,7 +2,6 @@ import pytest
 
 from app.config import LOCAL_DEV_AI_INTERNAL_TOKEN, Settings
 
-
 GEMMA_VISION_MODEL = "google/gemma-4-31b-it:free"
 MISTRAL_VISION_FALLBACK_MODEL = "mistralai/mistral-small-3.2-24b-instruct"
 
@@ -131,7 +130,9 @@ def test_validate_internal_token_security_raises_when_prod_token_missing(monkeyp
         settings.validate_internal_token_security()
 
 
-def test_validate_internal_token_security_raises_when_prod_uses_local_default(monkeypatch):
+def test_validate_internal_token_security_raises_when_prod_uses_local_default(
+    monkeypatch,
+):
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("AI_INTERNAL_TOKEN", LOCAL_DEV_AI_INTERNAL_TOKEN)
     monkeypatch.setenv("CORS_ORIGINS", "https://www.begabaseball.xyz")
