@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import time
 import os
 from collections import defaultdict, deque
@@ -12,17 +13,84 @@ TRUST_X_FORWARDED_FOR_FOR_RATE_LIMIT = os.getenv(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_trusted_proxy_count(raw: str | None) -> int:
+    """AI_TRUSTED_PROXY_COUNT 를 1 이상의 정수로 읽는다(잘못된 값은 1)."""
+    try:
+        return max(1, int((raw or "").strip()))
+    except ValueError:
+        return 1
+
+
+# X-Forwarded-For 를 신뢰할 때, 요청 경로에서 값을 덧붙이는 신뢰 프록시의 수.
+# 클라이언트 IP 는 XFF 의 오른쪽에서 N번째 값이다.
+TRUSTED_PROXY_COUNT = _parse_trusted_proxy_count(os.getenv("AI_TRUSTED_PROXY_COUNT"))
+
+
+# 추적하는 서로 다른 키의 상한. 키가 클라이언트 제어 값(예: 위조된 X-Forwarded-For)이면
+# 키 종류가 무한히 늘 수 있으므로 메모리를 묶어 두기 위한 안전장치다.
+DEFAULT_MAX_TRACKED_KEYS = 10_000
+# 상한을 넘은 새 키가 함께 쓰는 공유 버킷. 키를 계속 바꿔도 제한을 피할 수 없다.
+OVERFLOW_KEY = "__rate_limit_overflow__"
+# 상한 도달 시 긴급 정리를 시도하는 최소 간격(초). 폭주 중 요청마다 O(n) 순회를 막는다.
+EMERGENCY_SWEEP_MIN_INTERVAL_SECONDS = 1.0
+
+
 class InMemoryRateLimiter:
     """
     InMemoryRateLimiter는 API 서버의 과부하를 방지하기 위한 인메모리 속도 제한(Rate Limiter) 장치입니다.
     지정된 시간(window_seconds) 내에 특정 키(예: 클라이언트 IP)에 대한 요청 수를 제한합니다.
+
+    메모리 보호:
+    - 윈도우 안에 더 이상 요청이 없는 만료 키는 주기적으로 제거합니다.
+    - 서로 다른 키가 max_keys 를 넘으면 새 키는 공유 overflow 버킷으로 합쳐져 같은
+      제한을 받습니다(키를 바꿔 제한을 피하거나 메모리를 늘리는 것을 막음).
     """
 
-    def __init__(self, max_requests: int, window_seconds: int) -> None:
+    def __init__(
+        self,
+        max_requests: int,
+        window_seconds: int,
+        max_keys: int = DEFAULT_MAX_TRACKED_KEYS,
+    ) -> None:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
+        self.max_keys = max_keys
         self._hits: DefaultDict[str, Deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
+        self._next_sweep_at = 0.0
+        self._last_emergency_sweep_at = 0.0
+
+    @property
+    def tracked_keys(self) -> int:
+        """현재 추적 중인 서로 다른 키의 수."""
+        return len(self._hits)
+
+    def _sweep_expired(self, now: float) -> None:
+        """윈도우 안에 요청이 없는 키(가장 최근 요청도 만료)를 제거한다."""
+        expired = [
+            key
+            for key, bucket in self._hits.items()
+            if not bucket or now - bucket[-1] > self.window_seconds
+        ]
+        for key in expired:
+            del self._hits[key]
+
+    def _resolve_key(self, key: str, now: float) -> str:
+        """정리와 키 수 상한을 적용해 실제로 사용할 키를 돌려준다."""
+        if now >= self._next_sweep_at:
+            self._sweep_expired(now)
+            self._next_sweep_at = now + self.window_seconds
+
+        if key in self._hits or len(self._hits) < self.max_keys:
+            return key
+
+        if now - self._last_emergency_sweep_at >= EMERGENCY_SWEEP_MIN_INTERVAL_SECONDS:
+            self._sweep_expired(now)
+            self._last_emergency_sweep_at = now
+            if len(self._hits) < self.max_keys:
+                return key
+
+        return OVERFLOW_KEY
 
     async def check(self, key: str) -> None:
         """
@@ -31,6 +99,7 @@ class InMemoryRateLimiter:
         """
         now = time.time()
         async with self._lock:
+            key = self._resolve_key(key, now)
             bucket = self._hits[key]
             while bucket and now - bucket[0] > self.window_seconds:
                 bucket.popleft()
@@ -53,19 +122,51 @@ VISION_RATE_LIMITER = InMemoryRateLimiter(max_requests=15, window_seconds=60)
 DEBUG_RATE_LIMITER = InMemoryRateLimiter(max_requests=30, window_seconds=60)
 
 
-def _extract_client_key(request: Request, trust_x_forwarded_for: bool = False) -> str:
+def _client_ip_from_forwarded_for(
+    request: Request, trusted_proxy_count: int
+) -> str | None:
+    """X-Forwarded-For 에서 신뢰 프록시가 덧붙인 클라이언트 IP 를 고른다.
+
+    프록시는 자신이 본 연결 주소를 XFF 의 오른쪽 끝에 덧붙이므로, 오른쪽에서
+    trusted_proxy_count 번째 값만 신뢰할 수 있다. 그보다 왼쪽 값은 클라이언트가
+    임의로 보낼 수 있어(위조) 사용하지 않는다.
+
+    다음 경우에는 None 을 돌려주어 호출자가 연결 주소로 되돌아가게 한다.
+    - 헤더가 없거나, 값이 신뢰 프록시 수보다 적어 예상한 프록시 체인이 아닌 경우
+    - 고른 값이 올바른 IP 주소가 아닌 경우(키가 임의 문자열이 되는 것을 막음)
+    """
+    values = request.headers.getlist("x-forwarded-for")
+    entries = [
+        part.strip() for value in values for part in value.split(",") if part.strip()
+    ]
+    if len(entries) < trusted_proxy_count:
+        return None
+    try:
+        return str(ipaddress.ip_address(entries[-trusted_proxy_count]))
+    except ValueError:
+        return None
+
+
+def _extract_client_key(
+    request: Request,
+    trust_x_forwarded_for: bool = False,
+    trusted_proxy_count: int = 1,
+) -> str:
     """
     클라이언트 식별자 추출.
 
-    운영 환경에서 직접 접근이 아닌 로드밸런서를 거칠 경우에는
-    trust_x_forwarded_for=True로 설정하여 X-Forwarded-For 첫 번째 IP를 사용합니다.
+    기본값에서는 연결 주소(peer)를 사용하며 X-Forwarded-For 는 무시합니다.
+    운영 환경에서 직접 접근이 아닌 프록시/로드밸런서를 거칠 경우에는
+    trust_x_forwarded_for=True 로 설정하고 trusted_proxy_count(신뢰 프록시 수)를
+    맞추면, XFF 를 오른쪽에서 trusted_proxy_count 번째 값으로 읽습니다.
+
+    주의: 이 설정은 AI 서비스에 프록시를 통해서만 접근할 수 있다는 네트워크 구성을
+    전제로 합니다. 프록시를 거치지 않는 직접 접속자의 XFF 는 검증하지 않습니다.
     """
     if trust_x_forwarded_for:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            forwarded = xff.split(",")[0].strip()
-            if forwarded:
-                return forwarded
+        forwarded = _client_ip_from_forwarded_for(request, trusted_proxy_count)
+        if forwarded:
+            return forwarded
 
     if request.client and request.client.host:
         return request.client.host
@@ -74,11 +175,17 @@ def _extract_client_key(request: Request, trust_x_forwarded_for: bool = False) -
 
 
 def _dependency_factory(
-    limiter: InMemoryRateLimiter, *, trust_x_forwarded_for: bool = False, name: str
+    limiter: InMemoryRateLimiter,
+    *,
+    trust_x_forwarded_for: bool = False,
+    trusted_proxy_count: int = TRUSTED_PROXY_COUNT,
+    name: str,
 ):
     async def _dependency(request: Request) -> None:
         client_key = _extract_client_key(
-            request, trust_x_forwarded_for=trust_x_forwarded_for
+            request,
+            trust_x_forwarded_for=trust_x_forwarded_for,
+            trusted_proxy_count=trusted_proxy_count,
         )
         try:
             await limiter.check(client_key)

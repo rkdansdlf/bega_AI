@@ -28,6 +28,38 @@ def _normalize_content_type(content_type: Optional[str]) -> str:
     return (content_type or "").split(";", 1)[0].strip().lower()
 
 
+def _detect_image_type(data: bytes) -> Optional[str]:
+    """바이트 시그니처로 JPEG/PNG/WebP 여부를 판별한다(디코딩하지 않는다).
+
+    업로드의 Content-Type 헤더는 클라이언트(백엔드는 파일 확장자)가 정하는 값이라
+    실제 내용과 무관할 수 있다. 이 서비스는 이미지를 직접 파싱하지 않고 외부 모델에
+    그대로 넘기므로, 신뢰할 수 없는 입력을 파싱하는 공격면을 늘리지 않도록 헤더 구조만
+    확인한다. 어느 형식도 아니면 None.
+    """
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and data[12:16] == b"IHDR":
+        return "image/png"
+    if (
+        data[:4] == b"RIFF"
+        and data[8:12] == b"WEBP"
+        and data[12:16] in (b"VP8 ", b"VP8L", b"VP8X")
+    ):
+        return "image/webp"
+    return None
+
+
+def _describe_upstream_error(exc: BaseException) -> str:
+    """로그용 요약. 예외 종류와 HTTP 상태만 남긴다.
+
+    외부 제공자의 응답 본문이나 모델 출력(OCR 결과 등)은 예외 메시지에 섞여 들어올 수
+    있으므로(예: pydantic ValidationError 의 input_value) 로그에 남기지 않는다.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__} status={exc.response.status_code}"
+    return type(exc).__name__
+
+
 def _build_data_url(contents: bytes, content_type: str) -> str:
     base64_image = base64.b64encode(contents).decode("utf-8")
     return f"data:{content_type};base64,{base64_image}"
@@ -167,7 +199,7 @@ async def _request_openrouter_vision_json(
                 "OpenRouter vision model failed; trying fallback: model=%s next_model=%s error=%s",
                 model_id,
                 candidates[index + 1],
-                exc,
+                _describe_upstream_error(exc),
             )
 
     raise last_error or RuntimeError("All OpenRouter vision models failed")
@@ -201,7 +233,19 @@ async def _read_ticket_image_with_limit(
             raise HTTPException(status_code=400, detail="빈 파일입니다.")
 
         spool.seek(0)
-        return spool.read(), content_type or "application/octet-stream"
+        contents = spool.read()
+
+    if allowed_content_types is None:
+        return contents, content_type or "application/octet-stream"
+
+    # 헤더가 허용 형식이어도 실제 바이트가 이미지가 아니면 외부 모델로 보내지 않는다.
+    # 이후 모델 호출에는 선언된 값이 아니라 판별된 형식을 쓴다.
+    detected_type = _detect_image_type(contents)
+    if detected_type is None or detected_type not in allowed_content_types:
+        raise HTTPException(
+            status_code=415, detail="지원되지 않는 이미지 파일 타입입니다."
+        )
+    return contents, detected_type
 
 
 class TicketInfo(BaseModel):
@@ -326,10 +370,16 @@ async def analyze_ticket_image(
         )
         raise
     except httpx.HTTPStatusError as e:
-        logger.error("OpenRouter API error: %s", e.response.text)
+        logger.error("OpenRouter API error: %s", _describe_upstream_error(e))
         raise HTTPException(
             status_code=500, detail=f"OpenRouter API error: {e.response.status_code}"
         )
+    except (json.JSONDecodeError, ValidationError) as e:
+        logger.error(
+            "Vision model returned an unusable response: %s",
+            _describe_upstream_error(e),
+        )
+        raise HTTPException(status_code=500, detail="Failed to analyze ticket image")
     except Exception:
         logger.exception("Error processing ticket image")
         raise HTTPException(status_code=500, detail="Failed to analyze ticket image")
@@ -401,9 +451,17 @@ async def classify_seat_view_image(
         )
         raise
     except httpx.HTTPStatusError as e:
-        logger.error("OpenRouter API error: %s", e.response.text)
+        logger.error("OpenRouter API error: %s", _describe_upstream_error(e))
         raise HTTPException(
             status_code=500, detail=f"OpenRouter API error: {e.response.status_code}"
+        )
+    except (json.JSONDecodeError, ValidationError) as e:
+        logger.error(
+            "Vision model returned an unusable response: %s",
+            _describe_upstream_error(e),
+        )
+        raise HTTPException(
+            status_code=500, detail="Failed to classify seat-view image"
         )
     except Exception:
         logger.exception("Error classifying seat-view image")

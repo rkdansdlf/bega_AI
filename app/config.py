@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     debug: bool = False
     # 배포 환경 명시 신호. prod 배포에서 APP_ENV=production 으로 설정하면
     # 로컬 전용 내부 토큰 폴백이 비활성화되고 기동 시 토큰 검증 가드가 작동한다.
-    # 미설정(빈 값)이면 CORS origin 휴리스틱으로 로컬 여부를 추론한다(기존 동작 유지).
+    # 미설정(빈 값)이면 CORS origin 휴리스틱으로 로컬 여부를 추론한다. 운영으로 추정되는
+    # 경우(로컬이 아닌 origin 포함)에도 기동 시 토큰 검증 가드가 동일하게 작동하고,
+    # 미설정 자체는 기동 시 경고로 남는다.
     app_env: str = Field("", validation_alias="APP_ENV")
     # CORS 설정(자격 증명 쿠키 사용 시 '* '는 허용되지 않음)
     # 로컬 개발 기준 기본값은 Vite/개발 서버에서 사용되는 대표 도메인으로 제한
@@ -946,26 +948,40 @@ class Settings(BaseSettings):
         return None
 
     def validate_internal_token_security(self) -> None:
-        """운영 배포(APP_ENV=production)에서 내부 토큰 설정이 안전한지 기동 시 검증한다.
+        """운영 배포에서 내부 토큰 설정이 안전한지 기동 시 검증한다.
+
+        "운영 배포"의 기준은 ``is_production_environment`` 와 동일하다. 즉
+        - ``APP_ENV=production|prod`` 로 명시된 경우, 또는
+        - ``APP_ENV`` 가 비어 있고 CORS origin 중 로컬이 아닌 것이 있어 운영으로
+          추정되는 경우(APP_ENV 를 빠뜨려도 가드가 사라지지 않도록 하기 위함).
 
         - 토큰 미설정: 공개 폴백으로 빠질 위험을 막기 위해 기동을 거부한다.
         - 토큰이 공개된 로컬 기본값과 동일: 명백한 오설정이므로 기동을 거부한다.
 
-        로컬/개발/테스트 및 미설정 환경에서는 편의 폴백을 유지하기 위해 통과시킨다.
+        ``APP_ENV`` 가 local/dev/test 등으로 명시되었거나, ``APP_ENV`` 미설정이면서
+        모든 CORS origin 이 로컬인 경우에는 로컬 개발 편의 폴백을 유지하기 위해
+        통과시킨다. 후자(미설정)는 환경이 불명확하다는 경고를 남긴다.
         """
-        env = (self.app_env or "").strip().lower()
-        if env not in {"prod", "production"}:
+        app_env_unset = not (self.app_env or "").strip()
+        if app_env_unset:
+            logger.warning(
+                "APP_ENV is not set; treating this deployment as %s based on "
+                "CORS_ORIGINS. Set APP_ENV=production (or local) explicitly.",
+                "production" if self.is_production_environment else "local development",
+            )
+        if not self.is_production_environment:
             return
         configured = (self.ai_internal_token or "").strip()
         if not configured:
             raise RuntimeError(
-                "AI_INTERNAL_TOKEN must be configured when APP_ENV=production; "
+                "AI_INTERNAL_TOKEN must be configured in a production environment "
+                "(APP_ENV=production, or APP_ENV unset with non-local CORS_ORIGINS); "
                 "the local-dev fallback token is disabled in production."
             )
         if configured == LOCAL_DEV_AI_INTERNAL_TOKEN:
             raise RuntimeError(
                 "AI_INTERNAL_TOKEN must not be set to the local-dev default value "
-                "when APP_ENV=production."
+                "in a production environment."
             )
 
     @property
